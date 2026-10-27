@@ -1,47 +1,48 @@
-# itlwm
+# AirportItlwm-Tahoe
 
-**An Intel Wi-Fi Adapter Kernel Extension for macOS, based on the OpenBSD Project.**
+Intel AX201 的 macOS Tahoe 原生 Wi-Fi 驱动，基于 OpenIntelWireless/itlwm。
 
-## Documentation
+## 适用范围
 
-We highly recommend exploring our documentation before using this Kernel Extension:
+- 本次发布：2.4.0 / Test059。
+- 实测系统：macOS 26.7.2，build 25G332，x86_64。
+- 实测网卡：AX201，PCI 8086:7AF0，子设备 8086:0074。本包只匹配这组设备。
+- 使用系统 Wi-Fi 菜单，可扫描、连接和使用私有地址。支持已实现的开放网络及 WPA2-PSK；WPA3-only、企业认证暂不支持。
 
-- [Intro](https://OpenIntelWireless.github.io/itlwm)
-- [Compatibility](https://openintelwireless.github.io/itlwm/Compat)
-- [FAQ](https://openintelwireless.github.io/itlwm/FAQ)
+## 依赖
 
-## Download
+通过 OpenCore 注入。Wi-Fi 无需额外 kext、HelliPort 或 OCLP，不修改系统卷；保留系统自带 IO80211Family 和 IOSkywalkFamily，不为本驱动添加 Kernel → Block。
 
-[![Download from https://github.com/OpenIntelWireless/itlwm/releases](https://img.shields.io/github/v/release/OpenIntelWireless/itlwm?label=Download)](https://github.com/OpenIntelWireless/itlwm/releases)
+蓝牙独立安装 OpenIntelWireless 的 IntelBluetoothFirmware 和适用于当前系统的 BlueToolFixup，本包不含蓝牙驱动。
 
-## Questions and Issues
+## 安装
 
-Check out our [FAQ Page](https://openintelwireless.github.io/itlwm/FAQ) for more info.
+1. 解压 `AirportItlwm-Tahoe.zip`，把 `AirportItlwm.kext` 放到 `EFI/OC/Kexts/`。
+2. 禁用同一网卡的其他 AirportItlwm / itlwm 条目。
+3. 在 `config.plist → Kernel → Add` 添加以下条目，保存后重启。
 
-If you have other questions or feedback, feel free to [![Join the chat at https://gitter.im/OpenIntelWireless/itlwm](https://badges.gitter.im/OpenIntelWireless/itlwm.svg)](https://gitter.im/OpenIntelWireless/itlwm?utm_source=badge&utm_medium=badge&utm_campaign=pr-badge&utm_content=badge).
+| 字段 | 值 |
+| --- | --- |
+| BundlePath | AirportItlwm.kext |
+| ExecutablePath | Contents/MacOS/AirportItlwm |
+| PlistPath | Contents/Info.plist |
+| Enabled | true |
+| Arch | x86_64 |
+| MinKernel | 25.6.0 |
+| MaxKernel | 25.6.0 |
 
-We only accept bug reports in GitHub Issues, before opening an issue, you're recommended to reconfirm it with us on [Gitter](https://gitter.im/OpenIntelWireless/itlwm); once it's confirmed, please use the provided issue template.
+这些版本字段不能代替系统 build 检查。此版本使用私有系统接口，其他系统版本或网卡尚未验证。
 
-## Credits
+## 当前状态
 
-- [Acidanthera](https://github.com/acidanthera) for [MacKernelSDK](https://github.com/acidanthera/MacKernelSDK)
-- [Apple](https://www.apple.com) for [macOS](https://www.apple.com/macos)
-- [AppleIntelWiFi](https://github.com/AppleIntelWiFi) for [Black80211-Catalina](https://github.com/AppleIntelWiFi/Black80211-Catalina)
-- [ErrorErrorError](https://github.com/ErrorErrorError) for UserClient bug fixes
-- [Intel](https://www.intel.com) for [Wireless Adapter Firmwares](https://www.intel.com/content/www/us/en/support/articles/000005511/network-and-io/wireless.html) and [iwlwifi](https://wireless.wiki.kernel.org/en/users/drivers/iwlwifi)
-- [Linux](https://www.kernel.org) for [iwlwifi](https://wireless.wiki.kernel.org/en/users/drivers/iwlwifi)
-- [mercurysquad](https://github.com/mercurysquad) for [Voodoo80211](https://github.com/mercurysquad/Voodoo80211)
-- [OpenBSD](https://openbsd.org) for [net80211, iwn, iwm, and iwx](https://github.com/openbsd/src)
-- [pigworlds](https://github.com/OpenIntelWireless/itlwm/commits?author=pigworlds) for DVM devices support, MIRA bug fixes, and Tx aggregation for MVM Gen 1 devices
-- [rpeshkov](https://github.com/rpeshkov) for [black80211](https://github.com/rpeshkov/black80211)
-- [usr-sse2](https://github.com/usr-sse2) for implementing the usage of Apple RSN Supplicant and bug fixes
-- [zxystd](https://github.com/zxystd) for developing [itlwm](https://github.com/OpenIntelWireless/itlwm)
+普通 Wi-Fi 已可连接。本次启动确认 Test059 已加载、私有地址正常；发布复查中捕获到一次发送超时，驱动复位后自动恢复。长期稳定、睡眠恢复和即时热点仍在验证。
 
-## Acknowledgements
+AirDrop 和接力不作为此版本支持功能。AWDL 仍在开发，包内不含手动无线诊断工具。
 
-- [@penghubingzhou](https://github.com/startpenghubingzhou)
-- [@Bat.bat](https://github.com/williambj1)
-- [@iStarForever](https://github.com/XStar-Dev)
-- [@stevezhengshiqi](https://github.com/stevezhengshiqi)
-- [@DogAndPot](https://github.com/DogAndPot) for providing resources and help for system configuration
-- [@Daliansky](https://github.com/Daliansky) for providing Wi-Fi cards
+## 下载与源码
+
+在本仓库 Releases 下载 `AirportItlwm-Tahoe.zip`。它与本次实机使用的 Test059 驱动一致，保留原有构建标识。
+
+对应源码另附 `AirportItlwm-Tahoe-Source.zip`；校验值见 `SHA256SUMS.txt`。
+
+基于 [OpenIntelWireless/itlwm](https://github.com/OpenIntelWireless/itlwm)，遵循 GPL-2.0；Intel 固件许可见 `iwlwifi-firmware-license`。上游代码和固件保留各自版权及许可。
