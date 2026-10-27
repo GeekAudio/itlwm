@@ -49,6 +49,22 @@ public:
 private:
     IO80211SkywalkInterface *interface;
     bool isAttach;
+#ifdef AIRPORT_TAHOE
+    struct NativeBSDContext;
+    bool acquireNativeBSDContext(NativeBSDContext &context);
+    bool acquireNativeBSDIfnet(NativeBSDContext &context);
+    void releaseNativeBSDContext(NativeBSDContext &context);
+    void quarantineNativeBSD(NativeBSDContext &context, IOReturn result);
+    static IOReturn nativeBSDAction(OSObject *target, void *context,
+                                    void *, void *, void *);
+    bool nativePrepared {false};
+    uint32_t nativeBSDOperation {0};
+    uint32_t nativeBSDQuarantined {0};
+    IO80211SkywalkInterface *quarantineInterface {nullptr};
+    IO80211Controller *quarantineController {nullptr};
+    IO80211WorkQueue *quarantineQueue {nullptr};
+    ifnet_t quarantineIfnet {nullptr};
+#endif
 };
 
 #endif /* AirportItlwmEthernetInterface_hpp */

@@ -136,10 +136,178 @@
 #include <libkern/OSKextLib.h>
 #include <libkern/c++/OSMetaClass.h>
 #include <IOKit/IOFilterInterruptEventSource.h>
+#include <IOKit/IOLocks.h>
 
 #include <HAL/ItlHalService.hpp>
 #include <HAL/ItlDriverInfo.hpp>
 #include <HAL/ItlDriverController.hpp>
+
+#ifdef AIRPORT_TAHOE
+#include "../../native/intel_p2p_rx_router.hpp"
+#include "../../native/awdl_data_frame.hpp"
+#include "../../native/awdl_peer_observer.hpp"
+#include "../../native/awdl_peer_runtime_table.hpp"
+#include "../../native/p2p_hal_probe.hpp"
+#include "../../native/intel_roc_event_state.hpp"
+#include "../../native/iwx_reset_trace.hpp"
+#include "ItlIwxP2PTx.hpp"
+#include "ItlIwxP2PAction.hpp"
+#endif
+
+/* A command-local value snapshot. Never retains ic pointers or user storage. */
+struct itl_iwx_scan_policy {
+    uint8_t ssid[32];
+    uint8_t ssid_len;
+    bool active;
+    bool requested;
+    uint8_t channels[32];
+    bool restricted;
+    uint32_t generation;
+    uint8_t source_addr[6];
+};
+
+#ifdef AIRPORT_TAHOE
+// Numeric-only RX stage evidence for one active native P2P probe generation.
+// Action parsing and data-candidate classification read bounded headers only;
+// the data counters mean AWDL-BSSID candidates, not decoded/delivered packets.
+// No frame, address, TLV value, or user data is stored.
+struct TahoeAwdlRxStageCounters {
+    enum FrameKind : uint8_t {
+        kNotAwdl = 0,
+        kPsf = 1,
+        kMif = 2
+    };
+    enum Stage : uint8_t {
+        kEarly = 0,
+        kAfterDecrypt = 1,
+        kDecryptRejected = 2,
+        kAfterDuplicate = 3,
+        kDuplicateRejected = 4,
+        kTap = 5,
+        kStageCount = 6
+    };
+    enum { kKindCount = 2 };
+    enum DataStage : uint8_t {
+        kDataEarlyCandidate = 0,
+        kDataAfterDecryptCandidate = 1,
+        kDataDecryptRejected = 2,
+        kDataAfterDuplicateCandidate = 3,
+        kDataDuplicateRejected = 4,
+        kDataTapCandidate = 5,
+        kDataTapRejected = 6,
+        kDataStageCount = 7
+    };
+
+    struct Snapshot {
+        uint32_t ownerGeneration;
+        uint32_t active;
+        uint32_t counts[kStageCount][kKindCount];
+        uint32_t dataCounts[kDataStageCount];
+    };
+
+    static FrameKind classify(const uint8_t *frame, size_t length)
+    {
+        // Safe only after the MPDU descriptor and its declared length passed
+        // validation. Retain independent bounds checks for every byte read.
+        if (!frame || length < 2)
+            return kNotAwdl;
+        const uint16_t fc = uint16_t(frame[0]) |
+                            (uint16_t(frame[1]) << 8);
+        const uint8_t version = uint8_t(fc & 0x3u);
+        const uint8_t type = uint8_t((fc >> 2) & 0x3u);
+        const uint8_t subtype = uint8_t((fc >> 4) & 0xfu);
+        if (version != 0 || type != 0 || subtype != 13 ||
+            (fc & 0x0300u) != 0 || (fc & 0x4000u) != 0)
+            return kNotAwdl;
+
+        const size_t macHeaderLength = 24u + ((fc & 0x8000u) ? 4u : 0u);
+        if (length < macHeaderLength + 8u)
+            return kNotAwdl;
+        const uint8_t *body = frame + macHeaderLength;
+        if (body[0] != 127 || body[1] != 0x00 || body[2] != 0x17 ||
+            body[3] != 0xf2 || body[4] != 8 || body[5] != 0x10 ||
+            body[7] != 0)
+            return kNotAwdl;
+        if (body[6] == 0)
+            return kPsf;
+        if (body[6] == 3)
+            return kMif;
+        return kNotAwdl;
+    }
+
+    void beginOwner(uint32_t generation)
+    {
+        if (!generation)
+            return;
+        const uint32_t owner = __atomic_load_n(&ownerGeneration_, __ATOMIC_ACQUIRE);
+        const uint32_t active = __atomic_load_n(&active_, __ATOMIC_ACQUIRE);
+        if (owner == generation && active)
+            return;
+
+        // Callers synchronize this transition on the main workloop gate.
+        __atomic_store_n(&active_, 0u, __ATOMIC_RELEASE);
+        __atomic_store_n(&ownerGeneration_, 0u, __ATOMIC_RELEASE);
+        for (unsigned stage = 0; stage < kStageCount; ++stage)
+            for (unsigned kind = 0; kind < kKindCount; ++kind)
+                __atomic_store_n(&counts_[stage][kind], 0u, __ATOMIC_RELAXED);
+        for (unsigned stage = 0; stage < kDataStageCount; ++stage)
+            __atomic_store_n(&dataCounts_[stage], 0u, __ATOMIC_RELAXED);
+        __atomic_store_n(&ownerGeneration_, generation, __ATOMIC_RELEASE);
+        __atomic_store_n(&active_, 1u, __ATOMIC_RELEASE);
+    }
+
+    void endOwner(uint32_t generation)
+    {
+        if (generation &&
+            __atomic_load_n(&ownerGeneration_, __ATOMIC_ACQUIRE) == generation)
+            __atomic_store_n(&active_, 0u, __ATOMIC_RELEASE);
+    }
+
+    bool record(uint32_t generation, FrameKind kind, Stage stage)
+    {
+        if (!generation || (kind != kPsf && kind != kMif) ||
+            stage >= kStageCount ||
+            !__atomic_load_n(&active_, __ATOMIC_ACQUIRE) ||
+            __atomic_load_n(&ownerGeneration_, __ATOMIC_ACQUIRE) != generation)
+            return false;
+        __atomic_fetch_add(&counts_[stage][unsigned(kind) - 1u], 1u,
+                           __ATOMIC_RELAXED);
+        return true;
+    }
+
+    bool recordData(uint32_t generation, DataStage stage)
+    {
+        if (!generation || stage >= kDataStageCount ||
+            !__atomic_load_n(&active_, __ATOMIC_ACQUIRE) ||
+            __atomic_load_n(&ownerGeneration_, __ATOMIC_ACQUIRE) != generation)
+            return false;
+        __atomic_fetch_add(&dataCounts_[stage], 1u, __ATOMIC_RELAXED);
+        return true;
+    }
+
+    Snapshot snapshot() const
+    {
+        Snapshot result{};
+        result.ownerGeneration =
+            __atomic_load_n(&ownerGeneration_, __ATOMIC_ACQUIRE);
+        result.active = __atomic_load_n(&active_, __ATOMIC_ACQUIRE);
+        for (unsigned stage = 0; stage < kStageCount; ++stage)
+            for (unsigned kind = 0; kind < kKindCount; ++kind)
+                result.counts[stage][kind] =
+                    __atomic_load_n(&counts_[stage][kind], __ATOMIC_RELAXED);
+        for (unsigned stage = 0; stage < kDataStageCount; ++stage)
+            result.dataCounts[stage] =
+                __atomic_load_n(&dataCounts_[stage], __ATOMIC_RELAXED);
+        return result;
+    }
+
+private:
+    uint32_t ownerGeneration_ {0};
+    uint32_t active_ {0};
+    uint32_t counts_[kStageCount][kKindCount] {};
+    uint32_t dataCounts_[kDataStageCount] {};
+};
+#endif
 
 class ItlIwx : public ItlHalService, ItlDriverInfo, ItlDriverController {
     OSDeclareDefaultStructors(ItlIwx)
@@ -184,6 +352,150 @@ public:
     virtual IOReturn setMulticastList(IOEthernetAddress *addr, int count) override;
     
     void releaseAll();
+#ifdef AIRPORT_TAHOE
+    /* Serializes synchronous per-device firmware work against power stop. */
+    IORecursiveLock *nativeLifecycleLock_ {nullptr};
+    uint32_t nativeLifecycleDepth_ {0};
+    uint32_t nativeLifecycleDeferredTasks_ {0};
+    uint32_t nativeLifecycleTearingDown_ {0};
+    uint64_t nativeLifecycleStopRejectFingerprint_ {0};
+    IwxResetTrace::Trace nativeResetTrace_ {};
+    uint32_t nativeResetTracePublishedSequence_ {UINT32_MAX};
+    uint32_t nativeResetTracePublishedTriggerSequence_ {UINT32_MAX};
+    uint32_t nativeResetTracePublishedTriggerRevision_ {UINT32_MAX};
+    uint32_t nativeResetTracePublishVersion_ {0};
+    bool nativeResetTracePublishedOnce_ {false};
+    bool tahoeTryLifecycleFence();
+    void tahoeReleaseLifecycleFence();
+    void tahoeDeferLifecycleTasks(uint32_t);
+    void tahoeFlushLifecycleTasks();
+    void tahoeClearStopBlockState();
+    void tahoeRecordInitTaskTrigger(IwxResetTrace::InitTaskTrigger);
+    void tahoeRecordReset(IwxResetTrace::ResetReason, struct iwx_softc *);
+    void tahoePublishResetTrace(IOEthernetController *);
+
+    void nativeP2pTick() override;
+    bool nativeP2pBusy() override;
+    IOReturn nativeP2pArmProbe() override;
+    bool nativeP2pCommandAllowed() const;
+    void tahoeP2pInitializeTask();
+    int tahoeP2pStopBeforeReset(struct iwx_softc *);
+    void tahoeP2pResetDrained(struct iwx_softc *, uint32_t drainedGeneration);
+    static void tahoeP2pProbeTask(void *);
+    static NativeP2PProbe::BlockedReason tahoeP2pRevalidate(
+        void *, uint32_t, uint32_t);
+    static int tahoeP2pConfigure(void *);
+    static int tahoeP2pAdd(void *);
+    static int tahoeP2pRemove(void *);
+    static bool tahoeP2pPublishLease(void *, bool);
+    static IOReturn tahoeP2pAdmitAction(OSObject *, void *, void *, void *, void *);
+    static IOReturn tahoeP2pValidateAction(OSObject *, void *, void *, void *, void *);
+    static IOReturn tahoeP2pCancelAction(OSObject *, void *, void *, void *, void *);
+    static IOReturn tahoeP2pLeaseAction(OSObject *, void *, void *, void *, void *);
+    static IOReturn tahoeP2pFinishAction(OSObject *, void *, void *, void *, void *);
+    static IOReturn tahoeP2pResetAction(OSObject *, void *, void *, void *, void *);
+    static IOReturn tahoeRetireStoppedQueuesAction(
+        OSObject *, void *, void *, void *, void *);
+    void tahoeRetireStoppedQueuesAfterSoftStop(struct iwx_softc *, int);
+    void tahoeP2pTapTimeEvent(struct iwx_softc *, const uint8_t *, size_t);
+    void tahoeP2pTapAction(struct iwx_softc *, const uint8_t *, size_t, bool,
+                           uint16_t, uint32_t, bool);
+    void tahoeP2pRxDrain();
+    static IOReturn tahoeP2pRxDrainAction(OSObject *, void *, void *, void *, void *);
+    void tahoeP2pPublishRxStageCounters(IOEthernetController *);
+    void tahoeP2pPublishProbeState();
+    void tahoeP2pObserveGp2(uint32_t, uint32_t, uint32_t, uint32_t);
+    static int tahoeP2pExerciseRoc(void *);
+    static bool tahoeP2pArmRoc(void *, uint32_t, uint32_t, uint32_t);
+    static IOReturn tahoeP2pRocEventAction(OSObject *, void *, void *, void *, void *);
+    void tahoeP2pTapSessionEvent(struct iwx_softc *, const uint8_t *, size_t);
+    void tahoeP2pPublishRocState();
+
+    IntelROCEvent::SessionTracker nativeP2pRocEvents_;
+    bool tahoeP2pOnMainGate() {
+        IOWorkLoop *loop = getMainWorkLoop();
+        return loop && loop->inGate();
+    }
+    IOCommandGate *tahoeP2pCommandGate() { return getMainCommandGate(); }
+    IOEthernetController *tahoeP2pController() { return getController(); }
+    bool nativeP2pResourcesRetained();
+    IOSimpleLock *nativeP2pTxLock_ {nullptr};
+    IntelP2PTx::StationRegistry nativeP2pStationRegistry_;
+    TahoeP2PStationLease nativeP2pStation_ {};
+    TahoeP2PTxQueueLease nativeP2pTxQueue_ {};
+    TahoeP2PActionTxContext nativeP2pActionTx_;
+    uint32_t nativeP2pRocStage_ {0};
+    uint32_t nativeP2pRocResult_ {0};
+    uint32_t nativeP2pRocGeneration_ {0};
+    uint32_t nativeP2pRocConfiguration_ {0};
+    uint32_t nativeP2pRocChannel_ {0};
+    uint32_t nativeP2pRocDurationMs_ {0};
+    uint32_t nativeP2pRocStartSeen_ {0};
+    uint32_t nativeP2pRocEndSeen_ {0};
+    uint32_t nativeP2pRocStartStatus_ {0};
+    uint32_t nativeP2pRocEndStatus_ {0};
+    uint32_t nativeP2pRocCommandResult_ {0};
+    uint32_t nativeP2pRocObserved_ {0};
+    uint32_t nativeP2pRocCleanupAllowed_ {0};
+    uint32_t nativeP2pRocUnknown_ {0};
+    uint32_t nativeP2pRocPublishedStage_ {0xffffffff};
+
+    NativeP2PProbe::Controller nativeP2pProbe_;
+    struct task tahoe_p2p_probe_task_;
+    uint32_t tahoe_p2p_probe_task_initialized_ {0};
+    uint32_t nativeP2pProbeQueued_ {0};
+    uint32_t nativeP2pManualArmRequested_ {0};
+    uint32_t nativeP2pCancelRequested_ {0};
+    uint32_t nativeP2pProbeBusy_ {0};
+    void *nativeP2pProbeOwner_ {nullptr};
+    uint32_t nativeP2pNswqPaused_ {0};
+    uint32_t nativeP2pProbeGeneration_ {0};
+    uint64_t nativeP2pStopRejectFingerprint_ {0};
+    uint64_t nativeStateQueueStopRejectFingerprint_ {0};
+    bool nativeP2pProbePublishedOnce_ {false};
+    NativeP2PProbe::Snapshot nativeP2pProbePublished_{};
+
+    IntelP2PRx::Router tahoe_p2p_rx_router_;
+    IntelP2PRx::LeaseSnapshot tahoe_p2p_rx_lease_{};
+    IntelP2PRx::Counters tahoe_p2p_rx_published_{};
+    bool tahoe_p2p_rx_published_once_ {false};
+    TahoeAwdlRxStageCounters tahoe_awdl_rx_stage_counters_{};
+    TahoeAwdlRxStageCounters::Snapshot tahoe_awdl_rx_stage_published_{};
+    bool tahoe_awdl_rx_stage_published_once_ {false};
+    IntelAwdlPeer::Observer tahoe_awdl_peer_observer_;
+    IntelAwdlPeerRuntime::Table tahoe_awdl_peer_runtime_;
+    uint64_t tahoe_awdl_runtime_published_[176] {};
+    uint32_t tahoe_awdl_runtime_last_result_ {UINT32_MAX};
+    bool tahoe_awdl_runtime_published_once_ {false};
+    void tahoeP2pPublishPeerRuntime();
+    IntelAwdlPeer::Snapshot tahoe_awdl_peer_published_{};
+    uint32_t tahoe_awdl_peer_accepted_frames_ {0};
+    uint32_t tahoe_awdl_peer_rejected_records_ {0};
+    uint32_t tahoe_awdl_peer_last_result_ {UINT32_MAX}; // No observation yet.
+    bool tahoe_awdl_peer_dirty_ {true};
+
+    /* Synchronous, nonblocking event notification; receiver owns its drain. */
+    void tahoeDriverEvent(int code);
+    IOSimpleLock *tahoe_scan_lock_ = nullptr;
+    uint32_t tahoe_scan_phase_ = ITL_TAHOE_SCAN_STOPPED;
+    uint32_t tahoe_scan_serial_ = 0;
+    uint32_t tahoe_scan_generation_ = 0;
+    bool tahoe_scan_online_ = false;
+    bool tahoe_scan_starting_ = false;
+    bool tahoe_scan_terminal_pending_ = false;
+    bool tahoe_scan_terminal_processing_ = false;
+    uint32_t tahoe_scan_terminal_status_ = 0;
+    int tahoe_newstate_generation_ = -1;
+    struct task tahoe_scan_abort_task_;
+    static uint32_t tahoeScanState(struct ieee80211com *);
+    static int tahoeScanCancel(struct ieee80211com *);
+    static void tahoeScanAbortTask(void *);
+    void tahoeScanOnline(bool);
+    void tahoeScanResetComplete(); // Only after firmware stop and RX ring reset.
+    static IOReturn tahoeScanResetAction(OSObject *, void *, void *, void *, void *);
+    int tahoeCommitScanStart(struct iwx_softc *, uint32_t);
+    static IOReturn tahoeScanTerminalAction(OSObject *, void *, void *, void *, void *);
+#endif
     void joinSSID(const char *ssid, const char *pwd);
     
     //utils
@@ -259,12 +571,12 @@ public:
     void    iwx_clear_persistence_bit(struct iwx_softc *);
     void    iwx_apm_config(struct iwx_softc *);
     int    iwx_apm_init(struct iwx_softc *);
-    void    iwx_apm_stop(struct iwx_softc *);
+    int     iwx_apm_stop(struct iwx_softc *);
     int    iwx_allow_mcast(struct iwx_softc *);
     void    iwx_init_msix_hw(struct iwx_softc *);
     void    iwx_conf_msix_hw(struct iwx_softc *, int);
     int    iwx_start_hw(struct iwx_softc *);
-    void    iwx_stop_device(struct iwx_softc *);
+    int     iwx_stop_device(struct iwx_softc *);
     void    iwx_nic_config(struct iwx_softc *);
     int    iwx_nic_rx_init(struct iwx_softc *);
     int    iwx_nic_init(struct iwx_softc *);
@@ -333,7 +645,12 @@ public:
     int    iwx_ccmp_decap(struct iwx_softc *, mbuf_t,
                           struct ieee80211_node *, struct ieee80211_rxinfo *);
     void    iwx_rx_frame(struct iwx_softc *, mbuf_t, int, uint32_t, int, int,
-           uint32_t, struct ieee80211_rxinfo *, struct mbuf_list *);
+           uint32_t, struct ieee80211_rxinfo *, struct mbuf_list *
+#ifdef AIRPORT_TAHOE
+           , uint32_t rxStageOwnerGeneration = 0,
+           uint8_t rxStageKind = TahoeAwdlRxStageCounters::kNotAwdl
+#endif
+           );
     void iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
                         size_t maxlen, struct mbuf_list *ml);
     void    iwx_rx_tx_cmd_single(struct iwx_softc *, struct iwx_rx_packet *,
@@ -386,17 +703,21 @@ public:
     int    iwx_rm_sta_cmd(struct iwx_softc *, struct iwx_node *);
     int    iwx_rm_sta(struct iwx_softc *, struct iwx_node *);
     uint8_t iwx_umac_scan_fill_channels(struct iwx_softc *sc,
-                                struct iwx_scan_channel_cfg_umac *chan, int n_ssids, int bgscan);
-    int iwx_fill_probe_req_v1(struct iwx_softc *sc, struct iwx_scan_probe_req_v1 *preq1);
-    int    iwx_fill_probe_req(struct iwx_softc *, struct iwx_scan_probe_req *);
+                                struct iwx_scan_channel_cfg_umac *chan, int n_ssids, int bgscan,
+                                const struct itl_iwx_scan_policy *scan);
+    int iwx_fill_probe_req_v1(struct iwx_softc *sc, struct iwx_scan_probe_req_v1 *preq1, const uint8_t *);
+    int    iwx_fill_probe_req(struct iwx_softc *, struct iwx_scan_probe_req *, const uint8_t *);
     int    iwx_config_umac_scan(struct iwx_softc *);
     int    iwx_config_legacy_umac_scan(struct iwx_softc *);
     int iwx_umac_scan_size(struct iwx_softc *sc);
     struct iwx_scan_umac_chan_param *iwx_get_scan_req_umac_chan_param(struct iwx_softc *sc, struct iwx_scan_req_umac *req);
     void *iwx_get_scan_req_umac_data(struct iwx_softc *sc, struct iwx_scan_req_umac *req);
-    int    iwx_umac_scan(struct iwx_softc *, int);
-    int    iwx_umac_scan_v12(struct iwx_softc *, int);
-    int    iwx_umac_scan_v14(struct iwx_softc *, int);
+    int    iwx_umac_scan(struct iwx_softc *, int, uint32_t *);
+    int    iwx_capture_scan_policy(struct iwx_softc *, int, struct itl_iwx_scan_policy *);
+    int    iwx_send_scan_cmd(struct iwx_softc *, struct iwx_host_cmd *,
+                            const struct itl_iwx_scan_policy *, uint32_t *);
+    int    iwx_umac_scan_v12(struct iwx_softc *, int, const struct itl_iwx_scan_policy *, uint32_t *);
+    int    iwx_umac_scan_v14(struct iwx_softc *, int, const struct itl_iwx_scan_policy *, uint32_t *);
     void    iwx_mcc_update(struct iwx_softc *, struct iwx_mcc_chub_notif *);
     uint8_t    iwx_ridx2rate(struct ieee80211_rateset *, int);
     int    iwx_rval2ridx(int);
@@ -404,6 +725,28 @@ public:
     void    iwx_ack_rates(struct iwx_softc *, struct iwx_node *, int *, int *);
     void    iwx_mac_ctxt_cmd_common(struct iwx_softc *, struct iwx_node *,
             struct iwx_mac_ctx_cmd *, uint32_t);
+#ifdef AIRPORT_TAHOE
+    using TahoeP2pRocArmTracker = bool (*)(void *, uint32_t, uint32_t,
+                                            uint32_t);
+    int iwx_p2p_mac_context_configure(struct iwx_softc *, uint8_t, uint8_t,
+                                      uint8_t, const uint8_t[6]);
+    int iwx_p2p_mac_context_apply(struct iwx_softc *, uint32_t);
+    int iwx_p2p_mac_context_add(struct iwx_softc *);
+    int iwx_p2p_mac_context_modify(struct iwx_softc *);
+    int iwx_p2p_mac_context_remove(struct iwx_softc *);
+    int iwx_p2p_phy_lease(struct iwx_softc *, uint8_t *);
+    int iwx_p2p_phy_release(struct iwx_softc *);
+    int iwx_p2p_binding_add(struct iwx_softc *);
+    int iwx_p2p_binding_remove(struct iwx_softc *);
+    int iwx_p2p_context_reset_after_fw_reset(struct iwx_softc *, uint32_t);
+    int tahoeP2pRocPrepare(struct iwx_softc *, struct ieee80211_channel *,
+                           uint32_t, uint32_t);
+    int tahoeP2pRocSubmit(struct iwx_softc *, uint32_t, uint32_t, uint32_t,
+                          TahoeP2pRocArmTracker, void *);
+    int tahoeP2pRocCleanup(struct iwx_softc *, uint32_t, uint32_t, bool);
+    // Abort only a fully prepared lease whose session was never submitted.
+    int tahoeP2pRocAbortPrepared(struct iwx_softc *, uint32_t, uint32_t, bool);
+#endif
     void    iwx_mac_ctxt_cmd_fill_sta(struct iwx_softc *, struct iwx_node *,
             struct iwx_mac_data_sta *, int);
     int    iwx_mac_ctxt_cmd(struct iwx_softc *, struct iwx_node *, uint32_t, int);
@@ -435,7 +778,7 @@ public:
     int    iwx_media_change(struct _ifnet *);
     static void    iwx_newstate_task(void *);
     static int    iwx_newstate(struct ieee80211com *, enum ieee80211_state, int);
-    void    iwx_endscan(struct iwx_softc *);
+    void    iwx_endscan(struct iwx_softc *, uint32_t = 0, uint32_t = 1);
     void    iwx_fill_sf_command(struct iwx_softc *, struct iwx_sf_cfg_cmd *,
             struct ieee80211_node *);
     int    iwx_sf_config(struct iwx_softc *, int);
@@ -446,7 +789,8 @@ public:
     int    iwx_init_hw(struct iwx_softc *);
     int    iwx_init(struct _ifnet *);
     static void    iwx_start(struct _ifnet *);
-    void    iwx_stop(struct _ifnet *);
+    int     iwx_stop(struct _ifnet *,
+                     IwxResetTrace::ResetReason = IwxResetTrace::ResetReason::kUnknown);
     static void    iwx_watchdog(struct _ifnet *);
     static int    iwx_ioctl(struct _ifnet *, u_long, caddr_t);
     const char *iwx_desc_lookup(uint32_t);

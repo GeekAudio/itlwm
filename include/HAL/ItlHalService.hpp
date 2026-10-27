@@ -47,6 +47,11 @@ public:
     virtual ItlDriverInfo *getDriverInfo() = 0;
     
     virtual ItlDriverController *getDriverController() = 0;
+
+    /* Optional Tahoe native P2P probe hooks; other HALs remain inert. */
+    virtual void nativeP2pTick() {}
+    virtual bool nativeP2pBusy() { return false; }
+    virtual IOReturn nativeP2pArmProbe() { return kIOReturnUnsupported; }
     
     virtual void free() override;
 

@@ -22,6 +22,7 @@
 
 #include <sys/_task.h>
 #include <sys/proc.h>
+#include <sys/errno.h>
 
 #include <IOKit/IOLib.h>
 #include <IOKit/IOCommandGate.h>
@@ -42,6 +43,8 @@ struct taskq {
 
     IORecursiveLock *tq_mtx;
     struct task_list     tq_worklist;
+    unsigned int         tq_active;
+    int                  tq_paused;
 };
 
 static const char taskq_sys_name[] = "systq";
@@ -65,11 +68,14 @@ taskq_next_work(struct taskq *tq, struct task *work)
     //    IOLog("itlwm: taskq %s lock\n", __FUNCTION__);
     IORecursiveLockLock(tq->tq_mtx);
     
-    while ((next = TAILQ_FIRST(&tq->tq_worklist)) == NULL) {
+    for (;;) {
+        next = TAILQ_FIRST(&tq->tq_worklist);
         if (tq->tq_state != TQ_S_RUNNING) {
             IORecursiveLockUnlock(tq->tq_mtx);
             return (0);
         }
+        if (!tq->tq_paused && next != NULL)
+            break;
         IORecursiveLockSleep(tq->tq_mtx, tq, THREAD_INTERRUPTIBLE);
     }
 
@@ -77,6 +83,8 @@ taskq_next_work(struct taskq *tq, struct task *work)
     CLR(next->t_flags, TASK_ONQUEUE);
 
     *work = *next; /* copy to caller to avoid races */
+    /* Count active before releasing the same lock used by try_pause(). */
+    tq->tq_active++;
 
     next = TAILQ_FIRST(&tq->tq_worklist);
     IORecursiveLockUnlock(tq->tq_mtx);
@@ -86,6 +94,17 @@ taskq_next_work(struct taskq *tq, struct task *work)
         IORecursiveLockWakeup(tq->tq_mtx, tq, true);
 
     return (1);
+}
+
+static void
+taskq_work_done(struct taskq *tq)
+{
+    IORecursiveLockLock(tq->tq_mtx);
+    if (tq->tq_active > 0)
+        tq->tq_active--;
+    if (tq->tq_active == 0)
+        IORecursiveLockWakeup(tq->tq_mtx, tq, true);
+    IORecursiveLockUnlock(tq->tq_mtx);
 }
 
 void
@@ -106,6 +125,7 @@ taskq_thread(void *xtq)
 //        WITNESS_LOCK(&tq->tq_lock_object, 0);
 //        IOLog("itlwm: taskq worker thread=%lld work=%s\n", thread_tid(current_thread()), work.name);
         (*work.t_func)(work.t_arg);
+        taskq_work_done(tq);
 //        IOLog("itlwm: taskq worker thread=%lld work=%s done", thread_tid(current_thread()), work.name);
 //        WITNESS_UNLOCK(&tq->tq_lock_object, 0);
 //        sched_pause(yield);
@@ -211,6 +231,8 @@ taskq_create(const char *name, unsigned int nthreads, int ipl,
     tq->tq_state = TQ_S_CREATED;
     tq->tq_running = 0;
     tq->tq_waiting = 0;
+    tq->tq_active = 0;
+    tq->tq_paused = 0;
     tq->tq_nthreads = nthreads;
     tq->tq_name = name;
     tq->tq_flags = flags;
@@ -282,6 +304,15 @@ task_add(struct taskq *tq, struct task *w)
         return (0);
 
     IORecursiveLockLock(tq->tq_mtx);
+    if (tq->tq_state == TQ_S_DESTROYED) {
+        IORecursiveLockUnlock(tq->tq_mtx);
+        return (0);
+    }
+    /* A paused queue accepts no new work until its owner resumes it. */
+    if (tq->tq_paused) {
+        IORecursiveLockUnlock(tq->tq_mtx);
+        return (0);
+    }
     if (ISSET(w->t_flags, TASK_ONQUEUE)) {
 //        IOLog("itlwm: taskq task_add %s is already on queue thread: %lld\n", w->name, thread_tid(current_thread()));
         IORecursiveLockUnlock(tq->tq_mtx);
@@ -299,6 +330,96 @@ task_add(struct taskq *tq, struct task *w)
         IORecursiveLockWakeup(tq->tq_mtx, tq, true);
 
     return (rv);
+}
+
+int
+taskq_try_pause_with_diagnostics(struct taskq *tq,
+                                 struct taskq_pause_diagnostics *diagnostics)
+{
+    if (diagnostics != NULL) {
+        diagnostics->reason = TASKQ_PAUSE_DIAG_NONE;
+        diagnostics->active = 0;
+    }
+    if (tq == NULL || tq->tq_mtx == NULL) {
+        if (diagnostics != NULL)
+            diagnostics->reason = TASKQ_PAUSE_DIAG_INVALID;
+        return (ENXIO);
+    }
+
+    /* Stop is called from gate-sensitive paths; never wait for the mutex. */
+    if (!IORecursiveLockTryLock(tq->tq_mtx)) {
+        if (diagnostics != NULL) {
+            diagnostics->reason = TASKQ_PAUSE_DIAG_LOCK_BUSY;
+            diagnostics->active = UINT32_MAX;
+        }
+        return (EBUSY);
+    }
+    const unsigned int active = tq->tq_active;
+    if (tq->tq_state == TQ_S_DESTROYED) {
+        if (diagnostics != NULL) {
+            diagnostics->reason = TASKQ_PAUSE_DIAG_DESTROYED;
+            diagnostics->active = active;
+        }
+        IORecursiveLockUnlock(tq->tq_mtx);
+        return (ENXIO);
+    }
+    if (tq->tq_paused) {
+        if (diagnostics != NULL) {
+            diagnostics->reason = TASKQ_PAUSE_DIAG_PAUSED;
+            diagnostics->active = active;
+        }
+        IORecursiveLockUnlock(tq->tq_mtx);
+        return (EBUSY);
+    }
+    if (active != 0) {
+        if (diagnostics != NULL) {
+            diagnostics->reason = TASKQ_PAUSE_DIAG_ACTIVE;
+            diagnostics->active = active;
+        }
+        IORecursiveLockUnlock(tq->tq_mtx);
+        return (EBUSY);
+    }
+    tq->tq_paused = 1;
+    IORecursiveLockUnlock(tq->tq_mtx);
+    return (0);
+}
+
+int
+taskq_try_pause(struct taskq *tq)
+{
+    return (taskq_try_pause_with_diagnostics(tq, NULL));
+}
+
+void
+taskq_resume(struct taskq *tq)
+{
+    if (tq == NULL || tq->tq_mtx == NULL)
+        return;
+    IORecursiveLockLock(tq->tq_mtx);
+    tq->tq_paused = 0;
+    IORecursiveLockWakeup(tq->tq_mtx, tq, true);
+    IORecursiveLockUnlock(tq->tq_mtx);
+}
+
+int
+taskq_enter_unpaused(struct taskq *tq)
+{
+    if (tq == NULL || tq->tq_mtx == NULL)
+        return (ENXIO);
+    IORecursiveLockLock(tq->tq_mtx);
+    if (tq->tq_state == TQ_S_DESTROYED || tq->tq_paused) {
+        int error = tq->tq_state == TQ_S_DESTROYED ? ENXIO : EBUSY;
+        IORecursiveLockUnlock(tq->tq_mtx);
+        return (error);
+    }
+    return (0); /* The caller owns tq_mtx until taskq_leave(). */
+}
+
+void
+taskq_leave(struct taskq *tq)
+{
+    if (tq != NULL && tq->tq_mtx != NULL)
+        IORecursiveLockUnlock(tq->tq_mtx);
 }
 
 int

@@ -1706,6 +1706,22 @@ ieee80211_recv_probe_resp(struct ieee80211com *ic, mbuf_t m,
     tstamp  = frm; frm += 8;
     bintval = LE_READ_2(frm); frm += 2;
     capinfo = LE_READ_2(frm); frm += 2;
+
+#ifdef AIRPORT_TAHOE
+    /* Validate the entire IE span before parsing or borrowing RX pointers. */
+    {
+        const uint8_t *ie = frm;
+        while (ie < efrm) {
+            if ((size_t)(efrm - ie) < 2 ||
+                (size_t)ie[1] > (size_t)(efrm - ie) - 2 ||
+                (ie[0] == IEEE80211_ELEMID_EXTENSION && ie[1] == 0)) {
+                ic->ic_stats.is_rx_elem_toosmall++;
+                return;
+            }
+            ie += 2 + ie[1];
+        }
+    }
+#endif
     
     ssid = rates = xrates = edcaie = wmmie = rsnie = wpaie = csa = vhtcap = vhtopmode = hecap = heopmode = NULL;
     htcaps = htop = NULL;
@@ -2024,7 +2040,11 @@ ieee80211_recv_probe_resp(struct ieee80211com *ic, mbuf_t m,
         (ic->ic_flags & IEEE80211_F_BGSCAN)) {
         struct ieee80211_rsnparams rsn, wpa;
         
+#ifdef AIRPORT_TAHOE
+        uint32_t tlv_len = (uint32_t)(efrm - ((const uint8_t *)&wh[1] + 12));
+#else
         uint32_t tlv_len = (mtod(m, u_int8_t *) + mbuf_len(m)) - (u_int8_t *)&wh[1] + 1 - 8 - 2 - 2;
+#endif
         ieee80211_save_ie_tlv(((u_int8_t *)&wh[1]) + 8 + 2 + 2, &ni->ni_rsnie_tlv, &ni->ni_rsnie_tlv_len, tlv_len);
         ni->ni_rsnprotos = IEEE80211_PROTO_NONE;
         ni->ni_supported_rsnprotos = IEEE80211_PROTO_NONE;
@@ -2120,6 +2140,20 @@ ieee80211_recv_probe_resp(struct ieee80211com *ic, mbuf_t m,
     ni->ni_erp = erp;
     /* NB: must be after ni_chan is setup */
     ieee80211_setup_rates(ic, ni, rates, xrates, IEEE80211_F_DOSORT);
+#ifdef AIRPORT_TAHOE
+    /* Only fully bounded RX IEs reach the adapter. The original parser can
+     * stop on a malformed trailing IE; that must not become a scan result. */
+    if (ic->ic_event_handler && frm == efrm &&
+        mbuf_len(m) <= UINT32_MAX) {
+        struct itl_tahoe_beacon_event event;
+        event.node = ni;
+        event.frame = (const uint8_t *)wh;
+        event.frame_length = (uint32_t)mbuf_len(m);
+        event.ies = (const uint8_t *)&wh[1] + 12;
+        event.ie_length = (uint32_t)(efrm - event.ies);
+        (*ic->ic_event_handler)(ic, ITL_TAHOE_EVT_BEACON, &event);
+    }
+#endif
 #ifndef IEEE80211_STA_ONLY
     if (ic->ic_opmode == IEEE80211_M_IBSS && is_new && isprobe) {
         /*
@@ -2664,13 +2698,20 @@ ieee80211_recv_assoc_resp(struct ieee80211com *ic, mbuf_t m,
     status =  LE_READ_2(frm); frm += 2;
 
     ic->ic_assoc_status = status;
+#ifndef AIRPORT_TAHOE
     if (status == IEEE80211_STATUS_SUCCESS) {
         if (ic->ic_event_handler) {
             (*ic->ic_event_handler)(ic, IEEE80211_EVT_STA_ASSOC_DONE, NULL);
         }
     }
+#endif
     
     if (status != IEEE80211_STATUS_SUCCESS) {
+#ifdef AIRPORT_TAHOE
+        /* An actual AP rejection, never an invented completion status. */
+        if (ic->ic_event_handler)
+            (*ic->ic_event_handler)(ic, IEEE80211_EVT_STA_ASSOC_DONE, NULL);
+#endif
         if (ifp->if_flags & IFF_DEBUG)
             XYLog("%s: %sassociation failed (status %d)"
                   " for %s\n", ifp->if_xname,

@@ -440,6 +440,18 @@ struct ieee80211_node {
 
 	int			ni_txmcs;	/* current MCS used for TX */
 	int			ni_vht_ss;	/* VHT # spatial streams */
+#ifdef AIRPORT_TAHOE
+	uint32_t		ni_tx_rate_sequence;	/* serializes the actual TX rate snapshot */
+	uint64_t		ni_tx_rate_sample;	/* valid + source + firmware version + normalized flags */
+	uint32_t		ni_tx_rate_flags_raw;	/* raw flags from the same actual TX snapshot */
+	uint32_t		ni_tx_rate_sample_generation;	/* generation attached to this sample */
+	uint32_t		ni_tx_rate_generation;	/* current association generation */
+	uint32_t		ni_tx_rate_update_count;
+	uint32_t		ni_tx_rate_single_count;
+	uint32_t		ni_tx_rate_aggregate_count;
+	uint64_t		ni_tx_rate_tlc_sample;	/* TLC initial-rate baseline; never used as current TX */
+	uint32_t		ni_tx_rate_tlc_flags_raw;
+#endif
     
     uint8_t     ni_rx_nss;
 
@@ -649,6 +661,9 @@ void ieee80211_node_lateattach(struct _ifnet *);
 void ieee80211_node_detach(struct _ifnet *);
 
 void ieee80211_begin_scan(struct _ifnet *);
+#ifdef AIRPORT_TAHOE
+int ieee80211_begin_scan_direct(struct _ifnet *);
+#endif
 void ieee80211_next_scan(struct _ifnet *);
 void ieee80211_end_scan(struct _ifnet *);
 void ieee80211_reset_scan(struct _ifnet *);

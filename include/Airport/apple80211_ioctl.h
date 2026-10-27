@@ -430,7 +430,19 @@ struct apple80211_bssid_data
     struct ether_addr    bssid;
 };
 
-#if __IO80211_TARGET >= __MAC_14_0
+#if defined(AIRPORT_TAHOE)
+// 25G241 uses a 0x1c-byte kernel object. Its GET12 user-client adapter
+// removes version and returns 21 capability bytes to IO80211.framework.
+struct apple80211_capability_data
+{
+    u_int32_t   version;
+    u_int8_t    capabilities[21];
+};
+#if defined(__cplusplus)
+static_assert(sizeof(apple80211_capability_data) == 0x1c,
+              "25G241 native card capability ABI");
+#endif
+#elif __IO80211_TARGET >= __MAC_14_0
 struct apple80211_capability_data
 {
     u_int32_t    version;

@@ -24,6 +24,7 @@
 
 #include <sys/queue.h>
 #include <sys/_buf.h>
+#include <stdint.h>
 
 #include <IOKit/IOLocks.h>
 
@@ -54,6 +55,30 @@ void         taskq_destroy(struct taskq *);
 void         taskq_barrier(struct taskq *);
 
 void         taskq_del_barrier(struct taskq *, struct task *);
+
+/* Nonblocking pause helpers for a queue with one or more workers. */
+enum taskq_pause_diag_reason {
+    TASKQ_PAUSE_DIAG_NONE = 0,
+    TASKQ_PAUSE_DIAG_INVALID = 1,
+    TASKQ_PAUSE_DIAG_LOCK_BUSY = 2,
+    TASKQ_PAUSE_DIAG_DESTROYED = 3,
+    TASKQ_PAUSE_DIAG_PAUSED = 4,
+    TASKQ_PAUSE_DIAG_ACTIVE = 5
+};
+
+/* active is UINT32_MAX when lock acquisition failed and cannot be read safely. */
+struct taskq_pause_diagnostics {
+    uint32_t reason;
+    uint32_t active;
+};
+
+int          taskq_try_pause(struct taskq *);
+int          taskq_try_pause_with_diagnostics(
+    struct taskq *, struct taskq_pause_diagnostics *);
+void         taskq_resume(struct taskq *);
+/* Acquire the queue mutex only when the queue is not paused; leave it held. */
+int          taskq_enter_unpaused(struct taskq *);
+void         taskq_leave(struct taskq *);
 
 void         task_set(struct task *, void (*)(void *), void *, const char *);
 int         task_add(struct taskq *, struct task *);

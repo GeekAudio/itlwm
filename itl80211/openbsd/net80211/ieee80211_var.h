@@ -439,6 +439,26 @@ struct ieee80211com {
     /* The channel width has changed (20<->2040) */
     void            (*ic_update_chw)(struct ieee80211com *);
     void            (*ic_event_handler)(struct ieee80211com *, int, void *);
+#ifdef AIRPORT_TAHOE
+    /* Serialized by the HAL command gate. A zero channel mask means all
+     * legal channels; these fields never change the association SSID. */
+    bool            ic_tahoe_join_requested;
+    bool            ic_tahoe_scan_requested;
+    bool            ic_tahoe_scan_passive;
+    /* Per-request probe source only; never the associated station address. */
+    bool            ic_tahoe_scan_private_random_requested;
+    uint8_t         ic_tahoe_scan_source_addr[6];
+    uint8_t         ic_tahoe_scan_channels[32];
+    uint8_t         ic_tahoe_scan_ssid[32];
+    uint8_t         ic_tahoe_scan_ssid_len;
+    uint32_t        ic_tahoe_scan_generation;
+    uint32_t        ic_tahoe_init_stage;
+    int32_t         ic_tahoe_init_error;
+    uint32_t        ic_tahoe_scan_reset_count;
+    /* Query is lock-bounded; cancel only queues actual HAL work, never sleeps. */
+    uint32_t        (*ic_tahoe_scan_state)(struct ieee80211com *);
+    int             (*ic_tahoe_scan_cancel)(struct ieee80211com *);
+#endif
 	CTimeout*		ic_bgscan_timeout;
 	uint32_t		ic_bgscan_fail;
 	u_int8_t		ic_myaddr[IEEE80211_ADDR_LEN];
@@ -662,6 +682,36 @@ struct ieee80211_ess {
 #define IEEE80211_EVT_STA_DEAUTH                2
 #define IEEE80211_EVT_COUNTRY_CODE_UPDATE       3
 #define IEEE80211_EVT_SCAN_DONE                 4
+
+#ifdef AIRPORT_TAHOE
+#define ITL_TAHOE_EVT_BEACON                    5
+#define ITL_TAHOE_EVT_DRIVER_READY              6
+#define ITL_TAHOE_EVT_DRIVER_STOPPED            7
+#define ITL_TAHOE_EVT_RESET_BEGIN               8
+#define ITL_TAHOE_EVT_SCAN_RESET_DRAINED        11
+
+/* All pointers are synchronous borrows from the RX stack/mbuf. The callback
+ * must copy bounded data before returning and must not retain any pointer. */
+struct itl_tahoe_beacon_event {
+    const struct ieee80211_node *node;
+    const uint8_t *frame;
+    uint32_t frame_length;
+    const uint8_t *ies;
+    uint32_t ie_length;
+};
+/* generation 0 means un-attributed, never the current native request by guess. */
+#define ITL_TAHOE_SCAN_IDLE       0
+#define ITL_TAHOE_SCAN_ACTIVE     1
+#define ITL_TAHOE_SCAN_DRAINING   2
+#define ITL_TAHOE_SCAN_RESET_WAIT 3
+#define ITL_TAHOE_SCAN_STOPPED    4
+struct itl_tahoe_scan_event {
+    uint32_t generation;
+    uint32_t firmware_status; /* 1=completed, 2=aborted; never an errno */
+};
+void ieee80211_end_scan_with_generation(struct _ifnet *, uint32_t, uint32_t, int);
+
+#endif
 
 void	ieee80211_ifattach(struct _ifnet *, IOEthernetController *controller);
 void	ieee80211_ifdetach(struct _ifnet *);

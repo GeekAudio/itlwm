@@ -847,10 +847,44 @@ ieee80211_node_raise_inact(void *arg, struct ieee80211_node *ni)
 }
 
 /*
- * Begin an active scan.
+ * Select the next eligible channel. The direct-start path leaves dispatch to
+ * its caller so the HAL can synchronously start firmware and return its error.
  */
-void
-ieee80211_begin_scan(struct _ifnet *ifp)
+static int
+ieee80211_next_scan_internal(struct _ifnet *ifp, int dispatch)
+{
+    struct ieee80211com *ic = (struct ieee80211com *)ifp;
+    struct ieee80211_channel *chan;
+
+    chan = ic->ic_bss->ni_chan;
+    for (;;) {
+        if (++chan > &ic->ic_channels[IEEE80211_CHAN_MAX])
+            chan = &ic->ic_channels[0];
+        if (isset(ic->ic_chan_scan, ieee80211_chan2ieee(ic, chan))) {
+            /* Ignore passive-only channels during an active scan. */
+            if ((ic->ic_flags & IEEE80211_F_ASCAN) == 0 ||
+                (chan->ic_flags & IEEE80211_CHAN_PASSIVE) == 0)
+                break;
+        }
+        if (chan == ic->ic_bss->ni_chan) {
+            if (dispatch)
+                ieee80211_end_scan(ifp);
+            return 0;
+        }
+    }
+    clrbit(ic->ic_chan_scan, ieee80211_chan2ieee(ic, chan));
+    DPRINTF(("chan %d->%d\n",
+             ieee80211_chan2ieee(ic, ic->ic_bss->ni_chan),
+             ieee80211_chan2ieee(ic, chan)));
+    ic->ic_bss->ni_chan = chan;
+    if (dispatch)
+        ieee80211_new_state(ic, IEEE80211_S_SCAN, -1);
+    return 1;
+}
+
+/* Prepare net80211's active scan state and select a valid starting channel. */
+static int
+ieee80211_begin_scan_internal(struct _ifnet *ifp, int dispatch)
 {
     XYLog("%s\n", __FUNCTION__);
     struct ieee80211com *ic = (struct ieee80211com *)ifp;
@@ -892,8 +926,30 @@ ieee80211_begin_scan(struct _ifnet *ifp)
     ic->ic_scan_count = 0;
     
     /* Scan the next channel. */
-    ieee80211_next_scan(ifp);
+    return ieee80211_next_scan_internal(ifp, dispatch);
 }
+
+/*
+ * Begin an active scan through the ordinary asynchronous state transition.
+ */
+void
+ieee80211_begin_scan(struct _ifnet *ifp)
+{
+    (void)ieee80211_begin_scan_internal(ifp, 1);
+}
+
+#ifdef AIRPORT_TAHOE
+/*
+ * Tahoe's initial HAL scan is started synchronously by iwx_init(). Keep the
+ * same net80211 preparation/channel selection but do not queue newstate_task.
+ * No eligible channel is an admission error, not a synthetic scan completion.
+ */
+int
+ieee80211_begin_scan_direct(struct _ifnet *ifp)
+{
+    return ieee80211_begin_scan_internal(ifp, 0) ? 0 : EINVAL;
+}
+#endif
 
 /*
  * Switch to the next channel marked for scanning.
@@ -901,33 +957,7 @@ ieee80211_begin_scan(struct _ifnet *ifp)
 void
 ieee80211_next_scan(struct _ifnet *ifp)
 {
-    struct ieee80211com *ic = (struct ieee80211com *)ifp;
-    struct ieee80211_channel *chan;
-    
-    chan = ic->ic_bss->ni_chan;
-    for (;;) {
-        if (++chan > &ic->ic_channels[IEEE80211_CHAN_MAX])
-            chan = &ic->ic_channels[0];
-        if (isset(ic->ic_chan_scan, ieee80211_chan2ieee(ic, chan))) {
-            /*
-             * Ignore channels marked passive-only
-             * during an active scan.
-             */
-            if ((ic->ic_flags & IEEE80211_F_ASCAN) == 0 ||
-                (chan->ic_flags & IEEE80211_CHAN_PASSIVE) == 0)
-                break;
-        }
-        if (chan == ic->ic_bss->ni_chan) {
-            ieee80211_end_scan(ifp);
-            return;
-        }
-    }
-    clrbit(ic->ic_chan_scan, ieee80211_chan2ieee(ic, chan));
-    DPRINTF(("chan %d->%d\n",
-             ieee80211_chan2ieee(ic, ic->ic_bss->ni_chan),
-             ieee80211_chan2ieee(ic, chan)));
-    ic->ic_bss->ni_chan = chan;
-    ieee80211_new_state(ic, IEEE80211_S_SCAN, -1);
+    (void)ieee80211_next_scan_internal(ifp, 1);
 }
 
 #ifndef IEEE80211_STA_ONLY
@@ -1392,8 +1422,20 @@ ieee80211_node_choose_bss(struct ieee80211com *ic, int bgscan,
 /*
  * Complete a scan of potential channels.
  */
+#ifdef AIRPORT_TAHOE
 void
 ieee80211_end_scan(struct _ifnet *ifp)
+{
+    ieee80211_end_scan_with_generation(ifp, 0, 1, 1);
+}
+
+void
+ieee80211_end_scan_with_generation(struct _ifnet *ifp, uint32_t generation,
+                                    uint32_t firmware_status, int allow_selection)
+#else
+void
+ieee80211_end_scan(struct _ifnet *ifp)
+#endif
 {
     struct ieee80211com *ic = (struct ieee80211com *)ifp;
     struct ieee80211_node *ni, *selbs = NULL, *curbs = NULL;
@@ -1404,7 +1446,14 @@ ieee80211_end_scan(struct _ifnet *ifp)
                 (ic->ic_flags & IEEE80211_F_DISABLE_BG_AUTO_CONNECT) == 0;
     
     if (ic->ic_event_handler)
+#ifdef AIRPORT_TAHOE
+    {
+        struct itl_tahoe_scan_event event = { generation, firmware_status };
+        (*ic->ic_event_handler)(ic, IEEE80211_EVT_SCAN_DONE, &event);
+    }
+#else
         (*ic->ic_event_handler)(ic, IEEE80211_EVT_SCAN_DONE, NULL);
+#endif
     
     if (ifp->if_flags & IFF_DEBUG)
         XYLog("%s: end %s scan\n", ifp->if_xname,
@@ -1418,6 +1467,16 @@ ieee80211_end_scan(struct _ifnet *ifp)
     if (ic->ic_opmode == IEEE80211_M_STA)
         ieee80211_clean_inactive_nodes(ic, IEEE80211_INACT_SCAN);
     
+#ifdef AIRPORT_TAHOE
+    /* Native control owns BSS selection. A completed scan is a cache update,
+     * never permission to associate with an arbitrary discovered network. */
+    if (!allow_selection || firmware_status != 1 || !ic->ic_tahoe_join_requested) {
+        ic->ic_flags &= ~(IEEE80211_F_BGSCAN |
+                          IEEE80211_F_DISABLE_BG_AUTO_CONNECT);
+        return;
+    }
+#endif
+
     ni = RB_MIN(ieee80211_tree, &ic->ic_tree);
     
 #ifndef IEEE80211_STA_ONLY

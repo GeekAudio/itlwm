@@ -43,6 +43,6 @@ AirDrop 和接力不作为此版本支持功能。AWDL 仍在开发，包内不�
 
 在本仓库 Releases 下载 `AirportItlwm-Tahoe.zip`。它与本次实机使用的 Test059 驱动一致，保留原有构建标识。
 
-对应源码另附 `AirportItlwm-Tahoe-Source.zip`；校验值见 `SHA256SUMS.txt`。
+对应源码提交在本仓库 Git；构建步骤见 [AirportItlwm-Tahoe-README.md](AirportItlwm-Tahoe-README.md)。Release 仅提供二进制压缩包，校验值列在发布说明。
 
 基于 [OpenIntelWireless/itlwm](https://github.com/OpenIntelWireless/itlwm)，遵循 GPL-2.0；Intel 固件许可见 `iwlwifi-firmware-license`。上游代码和固件保留各自版权及许可。

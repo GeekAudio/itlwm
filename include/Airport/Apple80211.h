@@ -11,6 +11,9 @@
 
 #include "apple_private_spi.h"
 #include "debug.h"
+#if defined(AIRPORT_TAHOE)
+#include "../Tahoe/Apple80211.h"
+#else
 #include "IO80211WorkLoop.h"
 #ifdef IO80211FAMILY_V2
 #include "IO80211WorkQueue.h"
@@ -26,5 +29,6 @@
 #include "IO80211VirtualInterface.h"
 #include "IO80211P2PInterface.h"
 #endif /* IO80211FAMILY_V2 */
+#endif /* AIRPORT_TAHOE */
 
 #endif /* Apple80211_h */

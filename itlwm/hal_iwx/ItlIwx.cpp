@@ -107,6 +107,10 @@
  */
 
 #include "ItlIwx.hpp"
+#include "../../native/iwx_stop_retirement.hpp"
+#ifdef AIRPORT_TAHOE
+#include "IwxTxRate.hpp"
+#endif
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <FwData.h>
@@ -120,6 +124,44 @@
 #include <sys/_task.h>
 #include <sys/pcireg.h>
 #include <net80211/ieee80211_priv.h>
+
+#ifdef AIRPORT_TAHOE
+static_assert(__atomic_always_lock_free(sizeof(uint64_t), nullptr),
+              "Tahoe TX rate snapshot must use a lock-free 64-bit access");
+static_assert(IwxTxRate::kFormatMask == IWX_RATE_MCS_MOD_TYPE_MSK,
+              "TX rate helper format mask must match Intel firmware flags");
+static_assert(IwxTxRate::kV1HtMask == IWX_RATE_MCS_HT_MSK_V1 &&
+              IwxTxRate::kV1CckMask == IWX_RATE_MCS_CCK_MSK_V1 &&
+              IwxTxRate::kV1VhtMask == IWX_RATE_MCS_VHT_MSK_V1 &&
+              IwxTxRate::kV1HeMask == IWX_RATE_MCS_HE_MSK_V1 &&
+              IwxTxRate::kV1McsMask == IWX_RATE_VHT_MCS_RATE_CODE_MSK &&
+              IwxTxRate::kV1HtNssMask == IWX_RATE_HT_MCS_NSS_MSK_V1,
+              "TX rate helper V1 format masks must match Intel firmware flags");
+static_assert(IwxTxRate::kMcsMask == IWX_RATE_MCS_CODE_MSK,
+              "TX rate helper MCS mask must match Intel firmware flags");
+static_assert(IwxTxRate::kNssMask == IWX_RATE_VHT_MCS_NSS_MSK,
+              "TX rate helper NSS mask must match Intel firmware flags");
+static_assert(IwxTxRate::kWidthMask == IWX_RATE_MCS_CHAN_WIDTH_MSK,
+              "TX rate helper bandwidth mask must match Intel firmware flags");
+static_assert(IwxTxRate::kSgiMask == IWX_RATE_MCS_SGI_MSK &&
+              IwxTxRate::kHeGiLtfMask == IWX_RATE_MCS_HE_GI_LTF_MSK,
+              "TX rate helper GI masks must match Intel firmware flags");
+static_assert(IwxTxRate::kHeTypeMask == IWX_RATE_MCS_HE_TYPE_MSK,
+              "TX rate helper HE type mask must match Intel firmware flags");
+static_assert(IwxTxRate::kDuplicateMask == IWX_RATE_MCS_DUP_MSK &&
+              IwxTxRate::kHeDcmMask == IWX_RATE_HE_DUAL_CARRIER_MODE_MSK &&
+              IwxTxRate::kHe106ToneMask == IWX_RATE_MCS_HE_106T_MSK &&
+              IwxTxRate::kStbcMask == IWX_RATE_MCS_STBC_MSK,
+              "TX rate helper optional-field masks must match Intel firmware flags");
+static_assert(IwxTxRate::kV3NssMask == (1u << 5),
+              "V3 TX rate NSS marker must match Intel firmware API");
+static_assert(offsetof(struct iwx_tx_resp, initial_rate) == 4,
+              "TX response completion rate offset must match its wire vector");
+static_assert(offsetof(struct iwx_compressed_ba_notif, tx_rate) == 24,
+              "BA completion rate offset must match its wire vector");
+static void iwx_store_current_tx_rate(struct iwx_softc *, struct ieee80211_node *,
+                                      uint32_t, uint32_t, IwxTxRate::Source);
+#endif
 
 #define super ItlHalService
 OSDefineMetaClassAndStructors(ItlIwx, ItlHalService)
@@ -139,8 +181,334 @@ int iwx_debug = 1;
 #define DPRINTFN(n, x)    do { ; } while (0)
 #endif
 
+#ifdef AIRPORT_TAHOE
+enum : uint32_t {
+    kTahoeLifecycleInitTask = 1u << 0,
+    kTahoeLifecycleBaTask = 1u << 1,
+    kTahoeLifecycleMacTask = 1u << 2,
+    kTahoeLifecycleChanTask = 1u << 3,
+    kTahoeLifecycleScanAbortTask = 1u << 4
+};
+
+/*
+ * All acquisition is try-only: power actions may hold the main command gate
+ * while a command worker sleeps.  A callback that loses the race records one
+ * coalesced retry; the second try closes the unlock-before-publish lost-wakeup
+ * window.  Acquiring only for this handoff never runs the callback body.
+ */
+class TahoeLifecycleGuard {
+public:
+    explicit TahoeLifecycleGuard(ItlIwx *owner, uint32_t retryTask = 0)
+        : owner_(owner)
+    {
+        if (!owner_)
+            return;
+        if (owner_->tahoeTryLifecycleFence()) {
+            locked_ = true;
+            runWork_ = true;
+            return;
+        }
+        if (retryTask != 0) {
+#ifdef AIRPORT_TAHOE
+            if (retryTask & kTahoeLifecycleInitTask)
+                owner_->tahoeRecordInitTaskTrigger(
+                    IwxResetTrace::InitTaskTrigger::kLifecycleFenceRetry);
+#endif
+            owner_->tahoeDeferLifecycleTasks(retryTask);
+            if (owner_->tahoeTryLifecycleFence())
+                locked_ = true;
+        }
+    }
+
+    TahoeLifecycleGuard(ItlIwx *owner, bool acquire)
+        : owner_(owner), runWork_(!acquire)
+    {
+        if (acquire && owner_ && owner_->tahoeTryLifecycleFence()) {
+            locked_ = true;
+            runWork_ = true;
+        }
+    }
+
+    ~TahoeLifecycleGuard()
+    {
+        if (locked_)
+            owner_->tahoeReleaseLifecycleFence();
+    }
+
+    explicit operator bool() const { return runWork_; }
+
+private:
+    TahoeLifecycleGuard(const TahoeLifecycleGuard &) = delete;
+    TahoeLifecycleGuard &operator=(const TahoeLifecycleGuard &) = delete;
+
+    ItlIwx *owner_ {nullptr};
+    bool locked_ {false};
+    bool runWork_ {false};
+};
+
+bool ItlIwx::tahoeTryLifecycleFence()
+{
+    if (__atomic_load_n(&nativeLifecycleTearingDown_, __ATOMIC_ACQUIRE) != 0)
+        return false;
+    IORecursiveLock *lock = nativeLifecycleLock_;
+    if (!lock || !IORecursiveLockTryLock(lock))
+        return false;
+    ++nativeLifecycleDepth_;
+    return true;
+}
+
+void ItlIwx::tahoeReleaseLifecycleFence()
+{
+    IORecursiveLock *lock = nativeLifecycleLock_;
+    if (!lock || nativeLifecycleDepth_ == 0)
+        return;
+    const bool outermost = (--nativeLifecycleDepth_ == 0);
+    IORecursiveLockUnlock(lock);
+    if (outermost)
+        tahoeFlushLifecycleTasks();
+}
+
+void ItlIwx::tahoeDeferLifecycleTasks(uint32_t taskBits)
+{
+    if (!nativeLifecycleLock_ || taskBits == 0 ||
+        __atomic_load_n(&nativeLifecycleTearingDown_, __ATOMIC_ACQUIRE) != 0)
+        return;
+    __atomic_fetch_or(&nativeLifecycleDeferredTasks_, taskBits,
+                      __ATOMIC_ACQ_REL);
+}
+
+void ItlIwx::tahoeFlushLifecycleTasks()
+{
+    if (__atomic_load_n(&nativeLifecycleTearingDown_, __ATOMIC_ACQUIRE) != 0) {
+        __atomic_store_n(&nativeLifecycleDeferredTasks_, 0u, __ATOMIC_RELEASE);
+        return;
+    }
+    const uint32_t pending = __atomic_exchange_n(
+        &nativeLifecycleDeferredTasks_, 0u, __ATOMIC_ACQ_REL);
+    if (pending == 0 ||
+        __atomic_load_n(&nativeLifecycleTearingDown_, __ATOMIC_ACQUIRE) != 0)
+        return;
+
+    /*
+     * Queue each kind once after the fence is actually free.  Every callback
+     * rechecks policy after acquiring it, so a late replay after Off is a
+     * harmless no-op.  task_add coalesces work that is already queued.
+     */
+    if (pending & kTahoeLifecycleInitTask)
+        task_add(systq, &com.init_task);
+    if (pending & kTahoeLifecycleBaTask)
+        task_add(systq, &com.ba_task);
+    if (pending & kTahoeLifecycleMacTask)
+        task_add(systq, &com.mac_ctxt_task);
+    if (pending & kTahoeLifecycleChanTask)
+        task_add(systq, &com.chan_ctxt_task);
+    if (pending & kTahoeLifecycleScanAbortTask)
+        task_add(systq, &tahoe_scan_abort_task_);
+}
+
+void ItlIwx::tahoeClearStopBlockState()
+{
+    if (IOEthernetController *controller = getController()) {
+        controller->setProperty("NativeP2PStopBlockStage", uint64_t(0), 32);
+        controller->setProperty("NativeP2PStopBlockError", uint64_t(0), 32);
+        controller->setProperty("NativeP2PStopLifecycleFenceBusy", uint64_t(0), 32);
+    }
+    __atomic_store_n(&nativeLifecycleStopRejectFingerprint_, uint64_t(0),
+                     __ATOMIC_RELEASE);
+}
+#endif
+
+#ifdef AIRPORT_TAHOE
+bool ItlIwx::nativeP2pResourcesRetained()
+{
+    // The worker's release publication makes its final lease state visible.
+    // Read the TX queue only while holding its existing short spinlock.
+    enum : uint32_t {
+        kStopBlockedByProbeWorker = 1u << 0,
+        kStopBlockedByTxQueue = 1u << 1,
+        kStopBlockedByStation = 1u << 2,
+        kStopBlockedByP2pMac = 1u << 3,
+        kStopBlockedByBinding = 1u << 4,
+        kStopBlockedByPhy = 1u << 5
+    };
+
+    const bool workerBusy = nativeP2pBusy();
+    uint32_t reason = workerBusy ? kStopBlockedByProbeWorker : 0;
+    uint32_t queueState = UINT32_MAX, queueId = UINT32_MAX;
+    uint32_t queueGeneration = UINT32_MAX;
+    uint32_t stationState = UINT32_MAX, stationId = UINT32_MAX;
+    uint32_t stationGeneration = UINT32_MAX;
+    uint32_t macState = UINT32_MAX, bindingState = UINT32_MAX;
+    uint32_t phyLeased = UINT32_MAX, firmwareGeneration = UINT32_MAX;
+    uint32_t queuePending = UINT32_MAX;
+
+    if (!workerBusy) {
+        TahoeP2PResourceState localQueueState;
+        uint16_t localQueueId;
+        uint32_t localQueueGeneration;
+        bool localQueuePending;
+        if (nativeP2pTxLock_) {
+            IOInterruptState irq = IOSimpleLockLockDisableInterrupt(
+                nativeP2pTxLock_);
+            localQueueState = nativeP2pTxQueue_.state;
+            localQueueId = nativeP2pTxQueue_.queueId;
+            localQueueGeneration = nativeP2pTxQueue_.generation;
+            localQueuePending = nativeP2pTxQueue_.pendingRing != nullptr ||
+                nativeP2pTxQueue_.submissionBusy;
+            IOSimpleLockUnlockEnableInterrupt(nativeP2pTxLock_, irq);
+        } else {
+            // Before lock allocation or during serialized teardown, no P2P
+            // queue worker can be concurrently changing this lease.
+            localQueueState = nativeP2pTxQueue_.state;
+            localQueueId = nativeP2pTxQueue_.queueId;
+            localQueueGeneration = nativeP2pTxQueue_.generation;
+            localQueuePending = nativeP2pTxQueue_.pendingRing != nullptr ||
+                nativeP2pTxQueue_.submissionBusy;
+        }
+
+        queueState = static_cast<uint32_t>(localQueueState);
+        queueId = localQueueState == TahoeP2PResourceState::kAbsent ?
+            UINT32_MAX : uint32_t(localQueueId);
+        queueGeneration = localQueueGeneration;
+        queuePending = localQueuePending ? 1u : 0u;
+        stationState = static_cast<uint32_t>(nativeP2pStation_.state);
+        stationId = nativeP2pStation_.state == TahoeP2PResourceState::kAbsent ?
+            UINT32_MAX : uint32_t(nativeP2pStation_.stationId);
+        stationGeneration = nativeP2pStation_.generation;
+        macState = com.sc_p2p.mac_state;
+        bindingState = com.sc_p2p.binding_state;
+        phyLeased = com.sc_p2p.phy_leased ? 1u : 0u;
+        firmwareGeneration = com.sc_p2p.fw_generation;
+
+        if (localQueueState != TahoeP2PResourceState::kAbsent ||
+            localQueuePending)
+            reason |= kStopBlockedByTxQueue;
+        if (nativeP2pStation_.state != TahoeP2PResourceState::kAbsent)
+            reason |= kStopBlockedByStation;
+        if (com.sc_p2p.mac_state != IWX_P2P_RESOURCE_ABSENT)
+            reason |= kStopBlockedByP2pMac;
+        if (com.sc_p2p.binding_state != IWX_P2P_RESOURCE_ABSENT)
+            reason |= kStopBlockedByBinding;
+        if (com.sc_p2p.phy_leased)
+            reason |= kStopBlockedByPhy;
+    }
+
+    const bool retained = reason != 0;
+    const uint32_t generation = static_cast<uint32_t>(com.sc_generation);
+    uint64_t fingerprint = 14695981039346656037ull;
+    auto mix = [&fingerprint](uint32_t value) {
+        fingerprint ^= value;
+        fingerprint *= 1099511628211ull;
+    };
+    mix(1u); // stop rejection stage: P2P retained/busy
+    mix(generation);
+    mix(reason);
+    mix(queueState);
+    mix(queueId);
+    mix(queueGeneration);
+    mix(queuePending);
+    mix(stationState);
+    mix(stationId);
+    mix(stationGeneration);
+    mix(macState);
+    mix(bindingState);
+    mix(phyLeased);
+    mix(firmwareGeneration);
+    const uint64_t previous = retained ? __atomic_exchange_n(
+        &nativeP2pStopRejectFingerprint_, fingerprint, __ATOMIC_ACQ_REL) : 0;
+
+    if (retained && previous != fingerprint) {
+        if (IOEthernetController *controller = getController()) {
+            controller->setProperty("NativeP2PStopBlockStage", 1u, 32);
+            controller->setProperty("NativeP2PStopBlockError",
+                                    uint32_t(EBUSY), 32);
+            controller->setProperty("NativeP2PLastStopRejectStage", 1u, 32);
+            controller->setProperty("NativeP2PLastStopRejectError",
+                                    uint32_t(EBUSY), 32);
+            controller->setProperty("NativeP2PLastStopRejectGeneration",
+                                    generation, 32);
+            controller->setProperty("NativeP2PStopBlockReason", reason, 32);
+            controller->setProperty("NativeP2PStopBlockScGeneration",
+                                    generation, 32);
+            controller->setProperty("NativeP2PStopQueueState",
+                                    queueState, 32);
+            controller->setProperty("NativeP2PStopQueueId", queueId, 32);
+            controller->setProperty("NativeP2PStopQueueGeneration",
+                                    queueGeneration, 32);
+            controller->setProperty("NativeP2PStopQueuePending",
+                                    queuePending, 32);
+            controller->setProperty("NativeP2PStopStationState",
+                                    stationState, 32);
+            controller->setProperty("NativeP2PStopStationId", stationId, 32);
+            controller->setProperty("NativeP2PStopStationGeneration",
+                                    stationGeneration, 32);
+            controller->setProperty("NativeP2PStopMacState", macState, 32);
+            controller->setProperty("NativeP2PStopBindingState",
+                                    bindingState, 32);
+            controller->setProperty("NativeP2PStopPhyLeased", phyLeased, 32);
+            controller->setProperty("NativeP2PStopFirmwareGeneration",
+                                    firmwareGeneration, 32);
+        }
+        IOLog("AirportItlwm[Tahoe] stop blocked by P2P generation=%u reason=0x%x queue=%u/%u pending=%u station=%u/%u mac=%u binding=%u phy=%u fwgen=%u\n",
+            generation, reason, queueState, queueId, queuePending,
+            stationState, stationId, macState, bindingState, phyLeased,
+            firmwareGeneration);
+    }
+    return retained;
+}
+
+void ItlIwx::tahoeDriverEvent(int code)
+{
+    struct ieee80211com *ic = &com.sc_ic;
+    if (ic->ic_event_handler)
+        (*ic->ic_event_handler)(ic, code, NULL);
+}
+
+void ItlIwx::tahoeRecordInitTaskTrigger(
+    IwxResetTrace::InitTaskTrigger trigger)
+{
+    nativeResetTrace_.recordInitTaskTrigger(trigger);
+}
+
+void ItlIwx::tahoeRecordReset(IwxResetTrace::ResetReason reason,
+                              struct iwx_softc *sc)
+{
+    if (!sc)
+        return;
+    struct ieee80211com *ic = &sc->sc_ic;
+    struct _ifnet *ifp = &ic->ic_if;
+    nativeResetTrace_.recordReset(reason,
+        static_cast<uint32_t>(sc->sc_generation),
+        static_cast<uint32_t>(sc->sc_flags),
+        static_cast<uint32_t>(ifp->if_flags),
+        static_cast<uint32_t>(ic->ic_state),
+        ic->ic_tahoe_init_stage,
+        static_cast<uint32_t>(ic->ic_tahoe_init_error));
+}
+#endif
+
 bool ItlIwx::attach(IOPCIDevice *device)
 {
+#ifdef AIRPORT_TAHOE
+    nativeLifecycleLock_ = IORecursiveLockAlloc();
+    if (!nativeLifecycleLock_)
+        return false;
+    tahoe_scan_lock_ = IOSimpleLockAlloc();
+    if (!tahoe_scan_lock_) {
+        IORecursiveLockFree(nativeLifecycleLock_);
+        nativeLifecycleLock_ = nullptr;
+        return false;
+    }
+    nativeP2pTxLock_ = IOSimpleLockAlloc();
+    if (!nativeP2pTxLock_) {
+        IOSimpleLockFree(tahoe_scan_lock_);
+        tahoe_scan_lock_ = nullptr;
+        IORecursiveLockFree(nativeLifecycleLock_);
+        nativeLifecycleLock_ = nullptr;
+        return false;
+    }
+    nativeP2pTxQueue_.stateLock = nativeP2pTxLock_;
+#endif
     pci.pa_tag = device;
     pci.workloop = getMainWorkLoop();
     if (!iwx_attach(&com, &pci)) {
@@ -148,6 +516,13 @@ bool ItlIwx::attach(IOPCIDevice *device)
         releaseAll();
         return false;
     }
+#ifdef AIRPORT_TAHOE
+    static const char abort_name[sizeof(tahoe_scan_abort_task_.name)] = "tahoe-scan-abort";
+    task_set(&tahoe_scan_abort_task_, tahoeScanAbortTask, this, abort_name);
+    tahoeP2pInitializeTask();
+    com.sc_ic.ic_tahoe_scan_state = tahoeScanState;
+    com.sc_ic.ic_tahoe_scan_cancel = tahoeScanCancel;
+#endif
     return true;
 }
 
@@ -157,6 +532,32 @@ detach(IOPCIDevice *device)
     struct _ifnet *ifp = &com.sc_ic.ic_ac.ac_if;
     struct iwx_softc *sc = &com;
     
+#ifdef AIRPORT_TAHOE
+    __atomic_store_n(&nativeLifecycleTearingDown_, 1u, __ATOMIC_RELEASE);
+    tahoeScanOnline(false);
+    tahoeDriverEvent(ITL_TAHOE_EVT_DRIVER_STOPPED);
+#endif
+#ifdef AIRPORT_TAHOE
+    if (nativeP2pTxQueue_.retainedRing) {
+        // Teardown must not race a sleeping P2P command or state task.
+        // If the zero-wait fences cannot be acquired, pin this DMA owner.
+        const bool lifecycleLocked = nativeLifecycleLock_ &&
+            IORecursiveLockTryLock(nativeLifecycleLock_);
+        const bool softwareIdle = lifecycleLocked && !nativeP2pBusy() &&
+            !nativeP2pResourcesRetained();
+        taskq_pause_diagnostics pause {};
+        const bool stateQueuePaused = softwareIdle &&
+            taskq_try_pause_with_diagnostics(sc->sc_nswq, &pause) == 0;
+        const int stopError = stateQueuePaused ? iwx_stop_device(sc) : EBUSY;
+        if (lifecycleLocked)
+            IORecursiveLockUnlock(nativeLifecycleLock_);
+        if (stopError != 0 || nativeP2pTxQueue_.retainedRing) {
+            XYLog("retained P2P DMA could not be retired during detach; preserving device resources\n");
+            retain(); // Keep the only DMA owner reachable until a safe restart.
+            return;
+        }
+    }
+#endif
     for (int txq_i = 0; txq_i < nitems(sc->txq); txq_i++)
         iwx_free_tx_ring(sc, &sc->txq[txq_i]);
     iwx_free_rx_ring(sc, &sc->rxq);
@@ -194,6 +595,21 @@ releaseAll()
 void ItlIwx::free()
 {
     XYLog("%s\n", __FUNCTION__);
+#ifdef AIRPORT_TAHOE
+    if (nativeLifecycleLock_) {
+        IORecursiveLockFree(nativeLifecycleLock_);
+        nativeLifecycleLock_ = nullptr;
+    }
+    if (nativeP2pTxLock_) {
+        IOSimpleLockFree(nativeP2pTxLock_);
+        nativeP2pTxLock_ = nullptr;
+        nativeP2pTxQueue_.stateLock = nullptr;
+    }
+    if (tahoe_scan_lock_) {
+        IOSimpleLockFree(tahoe_scan_lock_);
+        tahoe_scan_lock_ = nullptr;
+    }
+#endif
     super::free();
 }
 
@@ -213,13 +629,29 @@ IOReturn ItlIwx::enable(IONetworkInterface *netif)
 {
     XYLog("%s\n", __PRETTY_FUNCTION__);
     struct _ifnet *ifp = &com.sc_ic.ic_ac.ac_if;
+#ifdef AIRPORT_TAHOE
+    TahoeLifecycleGuard lifecycle(this);
+    if (!lifecycle)
+        return kIOReturnBusy;
+#endif
     if (ifp->if_flags & IFF_UP) {
         XYLog("%s already in activating state\n", __FUNCTION__);
         return kIOReturnSuccess;
     }
     ifp->if_flags |= IFF_UP;
+#ifdef AIRPORT_TAHOE
+    int error = iwx_activate(&com, DVACT_RESUME);
+    if (!error)
+        error = iwx_activate(&com, DVACT_WAKEUP);
+    if (error) {
+        ifp->if_flags &= ~IFF_UP;
+        tahoeDriverEvent(ITL_TAHOE_EVT_DRIVER_STOPPED);
+        return kIOReturnError;
+    }
+#else
     iwx_activate(&com, DVACT_RESUME);
     iwx_activate(&com, DVACT_WAKEUP);
+#endif
     return kIOReturnSuccess;
 }
 
@@ -227,12 +659,69 @@ IOReturn ItlIwx::disable(IONetworkInterface *netif)
 {
     XYLog("%s\n", __FUNCTION__);
     struct _ifnet *ifp = &com.sc_ic.ic_ac.ac_if;
+#ifdef AIRPORT_TAHOE
+    TahoeLifecycleGuard lifecycle(this);
+    if (!lifecycle) {
+        if (__atomic_load_n(&nativeLifecycleTearingDown_, __ATOMIC_ACQUIRE) == 0) {
+            uint64_t fingerprint = 14695981039346656037ull;
+            auto mix = [&fingerprint](uint32_t value) {
+                fingerprint ^= value;
+                fingerprint *= 1099511628211ull;
+            };
+            mix(3u); // stop rejection stage: per-device lifecycle fence busy
+            mix(static_cast<uint32_t>(com.sc_generation));
+            mix(static_cast<uint32_t>(com.sc_flags));
+            mix(static_cast<uint32_t>(com.sc_ic.ic_if.if_flags));
+            const uint64_t previous = __atomic_exchange_n(
+                &nativeLifecycleStopRejectFingerprint_, fingerprint,
+                __ATOMIC_ACQ_REL);
+            if (previous != fingerprint) {
+                if (IOEthernetController *controller = getController()) {
+                    controller->setProperty("NativeP2PStopBlockStage", 3u, 32);
+                    controller->setProperty("NativeP2PStopBlockError",
+                                            uint32_t(EBUSY), 32);
+                    controller->setProperty("NativeP2PStopLifecycleFenceBusy",
+                                            1u, 32);
+                    controller->setProperty("NativeP2PLastStopRejectStage",
+                                            3u, 32);
+                    controller->setProperty("NativeP2PLastStopRejectError",
+                                            uint32_t(EBUSY), 32);
+                    controller->setProperty("NativeP2PLastStopRejectGeneration",
+                        static_cast<uint32_t>(com.sc_generation), 32);
+                }
+                IOLog("AirportItlwm[Tahoe] stop deferred generation=%d error=%d reason=lifecycle-fence flags=0x%x\n",
+                    com.sc_generation, EBUSY, com.sc_flags);
+            }
+        }
+        return kIOReturnBusy;
+    }
+    if (IOEthernetController *controller = getController())
+        controller->setProperty("NativeP2PStopLifecycleFenceBusy", uint64_t(0), 32);
+    __atomic_store_n(&nativeLifecycleStopRejectFingerprint_, uint64_t(0),
+                     __ATOMIC_RELEASE);
+    if (!(ifp->if_flags & (IFF_UP | IFF_RUNNING))) {
+        task_del(systq, &com.init_task);
+        tahoeClearStopBlockState();
+        return kIOReturnSuccess;
+    }
+#else
     if (!(ifp->if_flags & IFF_UP)) {
         XYLog("%s already in diactivating state\n", __FUNCTION__);
         return kIOReturnSuccess;
     }
     ifp->if_flags &= ~IFF_UP;
+#endif
+#ifdef AIRPORT_TAHOE
+    const int error = iwx_activate(&com, DVACT_QUIESCE);
+    if (error) {
+        return error == EBUSY ? kIOReturnBusy : kIOReturnError;
+    }
+    task_del(systq, &com.init_task);
+    ifp->if_flags &= ~IFF_UP;
+    tahoeClearStopBlockState();
+#else
     iwx_activate(&com, DVACT_QUIESCE);
+#endif
     return kIOReturnSuccess;
 }
 
@@ -2567,6 +3056,15 @@ iwx_alloc_tx_ring(struct iwx_softc *sc, struct iwx_tx_ring *ring, int qid)
     bus_size_t size;
     int i, err;
 
+#ifdef AIRPORT_TAHOE
+    // This helper is for a fresh host-side ring only. Never infer positive
+    // placeholder proof from a zeroed or previously used ring.
+    if (ring->nativeUnsubmittedPlaceholder || ring->ring_count != 0 || ring->desc != NULL ||
+        ring->cmd != NULL || ring->desc_dma.vaddr != NULL ||
+        ring->cmd_dma.vaddr != NULL || ring->bc_tbl.vaddr != NULL)
+        return EBUSY;
+#endif
+
     /* 0:CMD 2:MGMT */
     if (qid > IWX_QID_MGMT) {
         ring->qid = IWX_INVALID_QUEUE;
@@ -2642,6 +3140,13 @@ iwx_alloc_tx_ring(struct iwx_softc *sc, struct iwx_tx_ring *ring, int qid)
         }
     }
     KASSERT(paddr == ring->cmd_dma.paddr + size, "paddr == ring->cmd_dma.paddr + size");
+#ifdef AIRPORT_TAHOE
+    // This is the only statically allocated queue eligible for later takeover.
+    // Set positive proof only after descriptor, command, byte-count and every
+    // per-slot DMA map has been allocated successfully.
+    if (qid == IWX_DQA_P2P_DEVICE_QUEUE)
+        ring->nativeUnsubmittedPlaceholder = 1;
+#endif
     return 0;
     
 fail:    iwx_free_tx_ring(sc, ring);
@@ -2686,6 +3191,11 @@ void ItlIwx::
 iwx_free_tx_ring(struct iwx_softc *sc, struct iwx_tx_ring *ring)
 {
     int i;
+
+#ifdef AIRPORT_TAHOE
+    // Freeing a ring permanently removes any prior positive proof.
+    ring->nativeUnsubmittedPlaceholder = 0;
+#endif
     
     iwx_dma_contig_free(&ring->desc_dma);
     iwx_dma_contig_free(&ring->cmd_dma);
@@ -2706,6 +3216,8 @@ iwx_free_tx_ring(struct iwx_softc *sc, struct iwx_tx_ring *ring)
             data->map = NULL;
         }
     }
+    ring->desc = NULL;
+    ring->cmd = NULL;
     ring->qid = IWX_INVALID_QUEUE;
     ring->hi_mark = 0;
     ring->low_mark = 0;
@@ -2988,7 +3500,7 @@ out:
     return err;
 }
 
-void ItlIwx::
+int ItlIwx::
 iwx_apm_stop(struct iwx_softc *sc)
 {
     IWX_SETBITS(sc, IWX_CSR_DBG_LINK_PWR_MGMT_REG,
@@ -3004,10 +3516,15 @@ iwx_apm_stop(struct iwx_softc *sc)
     /* stop device's busmaster DMA activity */
     IWX_SETBITS(sc, IWX_CSR_RESET, IWX_CSR_RESET_REG_FLAG_STOP_MASTER);
     
-    if (!iwx_poll_bit(sc, IWX_CSR_RESET,
-                      IWX_CSR_RESET_REG_FLAG_MASTER_DISABLED,
-                      IWX_CSR_RESET_REG_FLAG_MASTER_DISABLED, 100))
-        XYLog("%s: timeout waiting for master\n", DEVNAME(sc));
+    const NativeIwxStop::MasterDisabledPoll masterResult =
+        NativeIwxStop::waitForMasterDisabled(
+            [sc]() { return IWX_READ(sc, IWX_CSR_RESET); },
+            [](uint32_t us) { DELAY(us); },
+            IWX_CSR_RESET_REG_FLAG_MASTER_DISABLED, 100);
+    if (masterResult == NativeIwxStop::MasterDisabledPoll::kTimeout)
+        XYLog("%s: timeout waiting for master-disabled proof\n", DEVNAME(sc));
+    else if (masterResult == NativeIwxStop::MasterDisabledPoll::kInvalidRead)
+        XYLog("%s: invalid all-ones read while checking master stop\n", DEVNAME(sc));
     
     /*
      * Clear "initialization complete" bit to move adapter from
@@ -3015,6 +3532,11 @@ iwx_apm_stop(struct iwx_softc *sc)
      */
     IWX_CLRBITS(sc, IWX_CSR_GP_CNTRL,
                 IWX_CSR_GP_CNTRL_REG_FLAG_INIT_DONE);
+
+    if (masterResult == NativeIwxStop::MasterDisabledPoll::kDisabled)
+        return 0;
+    return masterResult == NativeIwxStop::MasterDisabledPoll::kInvalidRead ?
+        EIO : ETIMEDOUT;
 }
 
 void ItlIwx::
@@ -3165,8 +3687,105 @@ iwx_start_hw(struct iwx_softc *sc)
     return 0;
 }
 
+#ifdef AIRPORT_TAHOE
+IOReturn ItlIwx::tahoeRetireStoppedQueuesAction(
+    OSObject *, void *ownerArg, void *scArg, void *retiredArg,
+    void *scratchAliasClearedArg)
+{
+    auto *owner = static_cast<ItlIwx *>(ownerArg);
+    auto *sc = static_cast<struct iwx_softc *>(scArg);
+    auto *retiredOut = static_cast<size_t *>(retiredArg);
+    auto *scratchAliasClearedOut = static_cast<uint32_t *>(scratchAliasClearedArg);
+    if (!owner || !sc || sc != &owner->com || !retiredOut ||
+        !scratchAliasClearedOut || !owner->tahoeP2pOnMainGate())
+        return kIOReturnBadArgument;
 
-void ItlIwx::
+    *retiredOut = 0;
+    *scratchAliasClearedOut = 0;
+    if ((sc->sc_ic.ic_if.if_flags & IFF_RUNNING) != 0 ||
+        sc->sc_ic.ic_state != IEEE80211_S_INIT) {
+        *scratchAliasClearedOut = 4u; // Soft state has not committed stop.
+        return kIOReturnNotReady;
+    }
+    // Recheck after acquiring the main gate. A new P2P owner appearing since
+    // the pre-reset snapshot keeps every dynamic queue allocated.
+    if (owner->nativeP2pResourcesRetained()) {
+        *scratchAliasClearedOut = 2u; // Callback ran; P2P lease still exists.
+        return kIOReturnBusy;
+    }
+
+    size_t scratchAliasCount = 0;
+    for (size_t qid = IWX_QID_MGMT + 1; qid < nitems(sc->txq); ++qid) {
+        if (NativeIwxStop::isInstalledRingAlias(
+                sc->sc_tvqm_ring, sc->txq[qid]))
+            ++scratchAliasCount;
+    }
+    *retiredOut = NativeIwxStop::retireDynamicRingsAfterStop(
+        sc->txq, nitems(sc->txq), IWX_QID_MGMT + 1,
+        &sc->sc_tvqm_ring, true, true, true, true, false,
+        [owner, sc](struct iwx_tx_ring *ring) {
+            owner->iwx_free_tx_ring(sc, ring);
+        },
+        [](struct iwx_tx_ring *scratch) {
+            memset(scratch, 0, sizeof(*scratch));
+            scratch->qid = IWX_INVALID_QUEUE;
+        });
+    *scratchAliasClearedOut =
+        uint32_t(scratchAliasCount == 1 && *retiredOut > 0);
+    return kIOReturnSuccess;
+}
+
+void ItlIwx::tahoeRetireStoppedQueuesAfterSoftStop(
+    struct iwx_softc *sc, int masterDisableError)
+{
+    size_t retiredDynamicQueues = 0;
+    uint32_t retireActionFlags = 0;
+    uint32_t scratchAliasCleared = 0;
+    uint32_t skipReason = 0;
+
+    if (masterDisableError != 0) {
+        skipReason = masterDisableError == ETIMEDOUT ? 1u : 2u;
+    } else {
+        IOReturn retireResult = kIOReturnNotReady;
+        if (tahoeP2pOnMainGate()) {
+            retireResult = tahoeRetireStoppedQueuesAction(
+                this, this, sc, &retiredDynamicQueues, &retireActionFlags);
+        } else if (IOCommandGate *gate = tahoeP2pCommandGate()) {
+            // Do not wait while holding the lifecycle fence: a power action
+            // can hold the gate while waiting for that fence. Busy means keep
+            // the old host rings and retry during a later stopped lifecycle.
+            retireResult = gate->attemptAction(tahoeRetireStoppedQueuesAction,
+                this, sc, &retiredDynamicQueues, &retireActionFlags);
+        }
+        if (retireResult != kIOReturnSuccess) {
+            if (retireActionFlags & 2u)
+                skipReason = 3u; // P2P lease still owns the queue resources.
+            else if (retireActionFlags & 4u)
+                skipReason = 5u; // IFF_RUNNING/state not yet committed stopped.
+            else
+                skipReason = 4u; // Main workloop gate unavailable or busy.
+        } else {
+            scratchAliasCleared = retireActionFlags & 1u;
+        }
+    }
+
+    if (IOEthernetController *controller = getController()) {
+        controller->setProperty("NativeStopMasterDisabledProof",
+                                uint32_t(masterDisableError == 0), 32);
+        controller->setProperty("NativeStopMasterDisableError",
+                                uint32_t(masterDisableError), 32);
+        controller->setProperty("NativeStopDynamicQueuesRetired",
+                                static_cast<uint32_t>(retiredDynamicQueues), 32);
+        controller->setProperty("NativeStopDynamicQueueSkipReason",
+                                skipReason, 32);
+        controller->setProperty("NativeStopTvqmScratchAliasCleared",
+                                scratchAliasCleared, 32);
+    }
+}
+#endif
+
+
+int ItlIwx::
 iwx_stop_device(struct iwx_softc *sc)
 {
     XYLog("%s\n", __FUNCTION__);
@@ -3189,12 +3808,23 @@ iwx_stop_device(struct iwx_softc *sc)
     sc->sc_nic_locks = 0;
     
     /* Stop the device, and put it in low power state */
-    iwx_apm_stop(sc);
+    const int masterDisableError = iwx_apm_stop(sc);
     
     /* Reset the on-board processor. */
     IWX_SETBITS(sc, IWX_CSR_RESET, IWX_CSR_RESET_REG_FLAG_SW_RESET);
     DELAY(5000);
-    
+#ifdef AIRPORT_TAHOE
+    // Displaced rings are deliberately outside sc->txq, so the earlier
+    // software reset loop cannot touch their DMA. Retire them only after
+    // the hardware master-disable acknowledgement and processor reset.
+    const int retainedReleaseError =
+        iwx_tahoe_p2p_tvqm_release_retained_after_master_disabled(
+            this, sc, masterDisableError == 0, true);
+    if (getController())
+        getController()->setProperty("NativeP2PRetainedStopReleaseResult",
+            uint32_t(retainedReleaseError), 32);
+#endif
+
     /*
      * Upon stop, the IVAR table gets erased, so msi-x won't
      * work. This causes a bug in RF-KILL flows, since the interrupt
@@ -3222,6 +3852,18 @@ iwx_stop_device(struct iwx_softc *sc)
     iwx_dma_contig_free(&sc->prph_scratch_dma);
     iwx_dma_contig_free(&sc->iml_dma);
     iwx_dma_contig_free(&sc->pnvm_dram);
+#ifdef AIRPORT_TAHOE
+    // The firmware is halted, RX DMA is disabled and the old RX ring has
+    // been reset. Serialize with the notification consumer before retiring
+    // the old scan lease; merely receiving READY cannot prove this drain.
+    tahoeScanResetComplete();
+    if (masterDisableError == 0 && retainedReleaseError == 0) {
+        iwx_tahoe_p2p_action_tx_firmware_drained(
+            &nativeP2pActionTx_, uint32_t(sc->sc_generation), true);
+        tahoeP2pResetDrained(sc, uint32_t(sc->sc_generation));
+    }
+#endif
+    return masterDisableError;
 }
 
 void ItlIwx::
@@ -3329,6 +3971,11 @@ iwx_enable_txq(struct iwx_softc *sc, int sta_id, int qid, int tid,
     cmd.cb_size = htole32(IWX_TFD_QUEUE_CB_SIZE(num_slots));
     cmd.byte_cnt_addr = htole64(ring->bc_tbl.paddr);
     cmd.tfdq_addr = htole64(ring->desc_dma.paddr);
+#ifdef AIRPORT_TAHOE
+    // Clear proof before submission: even a timed-out command may have
+    // published this ring to firmware. A software generation is not a drain.
+    ring->nativeUnsubmittedPlaceholder = 0;
+#endif
     
     hcmd.data[0] = &cmd;
     hcmd.len[0] = sizeof(cmd);
@@ -3400,6 +4047,12 @@ iwx_tvqm_alloc_txq(struct iwx_softc *sc, int tid, int ssn)
 int ItlIwx::
 iwx_tvqm_enable_txq(struct iwx_softc *sc, int tid, int ssn, uint32_t size)
 {
+#ifdef AIRPORT_TAHOE
+    // The one-shot P2P worker owns firmware queue allocation while active.
+    // Unknown outcomes keep that lease after the worker has returned.
+    if (nativeP2pBusy() || iwx_tahoe_p2p_tvqm_may_exist(&nativeP2pTxQueue_))
+        return -EBUSY;
+#endif
     int err = -1;
     int i = 0;
     bus_addr_t paddr;
@@ -3422,6 +4075,10 @@ iwx_tvqm_enable_txq(struct iwx_softc *sc, int tid, int ssn, uint32_t size)
     
     memset(ring, 0, sizeof(*ring));
     iwx_tx_ring_init(sc, ring, size);
+#ifdef AIRPORT_TAHOE
+    // Dynamically allocated STA rings never inherit attach-placeholder proof.
+    ring->nativeUnsubmittedPlaceholder = 0;
+#endif
     /* Allocate TX descriptors (256-byte aligned). */
     err = iwx_dma_contig_alloc(sc->sc_dmat, &ring->desc_dma, ring->ring_count * sizeof (struct iwx_tfh_tfd), 256);
     if (err) {
@@ -3501,6 +4158,14 @@ iwx_tvqm_enable_txq(struct iwx_softc *sc, int tid, int ssn, uint32_t size)
         err = -EIO;
         goto fail;
     }
+#ifdef AIRPORT_TAHOE
+    if (iwx_tahoe_p2p_tvqm_queue_owned(&nativeP2pTxQueue_, fwqid)) {
+        // Firmware has seen these DMA addresses. Preserve both rings rather
+        // than freeing either allocation on an impossible queue collision.
+        XYLog("STA TVQM queue %d collides with retained P2P lease\n", fwqid);
+        return -EBUSY;
+    }
+#endif
     ring->cur = wr_idx;
     ring->qid = fwqid;
     iwx_reset_tx_ring(sc, &sc->txq[fwqid]);
@@ -4254,9 +4919,18 @@ iwx_mac_ctxt_task(void *arg)
     struct ieee80211com *ic = &sc->sc_ic;
     ItlIwx *that = container_of(sc, ItlIwx, com);
     struct iwx_node *in = (struct iwx_node *)ic->ic_bss;
+#ifdef AIRPORT_TAHOE
+    TahoeLifecycleGuard lifecycle(that, kTahoeLifecycleMacTask);
+    if (!lifecycle)
+        return;
+#endif
     int err, s = splnet();
     
     if (sc->sc_flags & IWX_FLAG_SHUTDOWN ||
+#ifdef AIRPORT_TAHOE
+        (ic->ic_if.if_flags & (IFF_UP | IFF_RUNNING)) !=
+            (IFF_UP | IFF_RUNNING) ||
+#endif
         ic->ic_state != IEEE80211_S_RUN ||
         in->in_phyctxt == NULL) {
         //        refcnt_rele_wake(&sc->task_refs);
@@ -4282,16 +4956,25 @@ iwx_chan_ctxt_task(void *arg)
     struct ieee80211com *ic = &sc->sc_ic;
     ItlIwx *that = container_of(sc, ItlIwx, com);
     struct iwx_node *in = (struct iwx_node *)ic->ic_bss;
-    int chains = that->iwx_mimo_enabled(sc) ? 2 : 1;
+#ifdef AIRPORT_TAHOE
+    TahoeLifecycleGuard lifecycle(that, kTahoeLifecycleChanTask);
+    if (!lifecycle)
+        return;
+#endif
     int err, s = splnet();
     
     if (sc->sc_flags & IWX_FLAG_SHUTDOWN ||
+#ifdef AIRPORT_TAHOE
+        (ic->ic_if.if_flags & (IFF_UP | IFF_RUNNING)) !=
+            (IFF_UP | IFF_RUNNING) ||
+#endif
         ic->ic_state != IEEE80211_S_RUN ||
         in->in_phyctxt == NULL) {
         //        refcnt_rele_wake(&sc->task_refs);
         splx(s);
         return;
     }
+    int chains = that->iwx_mimo_enabled(sc) ? 2 : 1;
     
     err = that->iwx_phy_ctxt_update(sc, in->in_phyctxt,
                                     in->in_phyctxt->channel, chains, chains, 0);
@@ -4376,6 +5059,11 @@ iwx_ba_task(void *arg)
     struct ieee80211com *ic = &sc->sc_ic;
     ItlIwx *that = container_of(sc, ItlIwx, com);
     struct ieee80211_node *ni = ic->ic_bss;
+#ifdef AIRPORT_TAHOE
+    TahoeLifecycleGuard lifecycle(that, kTahoeLifecycleBaTask);
+    if (!lifecycle)
+        return;
+#endif
     struct ieee80211_tx_ba *ba;
     struct iwx_tx_ring *ring;
     int s = splnet();
@@ -4383,7 +5071,12 @@ iwx_ba_task(void *arg)
     int qid = 0;
     int tid;
     
-    if (sc->sc_flags & IWX_FLAG_SHUTDOWN) {
+    if (sc->sc_flags & IWX_FLAG_SHUTDOWN
+#ifdef AIRPORT_TAHOE
+        || (ic->ic_if.if_flags & (IFF_UP | IFF_RUNNING)) !=
+            (IFF_UP | IFF_RUNNING)
+#endif
+        ) {
         //        refcnt_rele_wake(&sc->task_refs);
         splx(s);
         return;
@@ -5145,7 +5838,11 @@ void ItlIwx::
 iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
              uint32_t rx_pkt_status, int is_shortpre, int rate_n_flags,
              uint32_t device_timestamp, struct ieee80211_rxinfo *rxi,
-             struct mbuf_list *ml)
+             struct mbuf_list *ml
+#ifdef AIRPORT_TAHOE
+             , uint32_t rxStageOwnerGeneration, uint8_t rxStageKind
+#endif
+             )
 {
     struct ieee80211com *ic = &sc->sc_ic;
     struct ieee80211_frame *wh;
@@ -5156,6 +5853,10 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
         chanidx = ieee80211_chan2ieee(ic, ic->ic_ibss_chan);
     
     wh = mtod(m, struct ieee80211_frame *);
+#ifdef AIRPORT_TAHOE
+    const bool p2pFrameWasProtected =
+        (wh->i_fc[1] & IEEE80211_FC1_PROTECTED) != 0;
+#endif
     ni = ieee80211_find_rxnode(ic, wh);
     if ((rxi->rxi_flags & IEEE80211_RXI_HWDEC) &&
         iwx_ccmp_decap(sc, m, ni, rxi) != 0) {
@@ -5213,6 +5914,25 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
         bpf_mtap_hdr(sc->sc_drvbpf, tap, sc->sc_rxtap_len,
                      m, BPF_DIRECTION_IN);
     }
+#endif
+#ifdef AIRPORT_TAHOE
+    // Bounded observation only. The original STA input retains ownership and
+    // still runs for every packet, including all rejected sidecar records.
+    if (rxStageOwnerGeneration &&
+        (rxStageKind == TahoeAwdlRxStageCounters::kPsf ||
+         rxStageKind == TahoeAwdlRxStageCounters::kMif))
+        tahoe_awdl_rx_stage_counters_.record(
+            rxStageOwnerGeneration,
+            static_cast<TahoeAwdlRxStageCounters::FrameKind>(rxStageKind),
+            TahoeAwdlRxStageCounters::kTap);
+    if (rxStageOwnerGeneration && NativeAwdlData::isAwdlDataCandidate(
+            mtod(m, const uint8_t *), mbuf_len(m)))
+        tahoe_awdl_rx_stage_counters_.recordData(
+            rxStageOwnerGeneration,
+            TahoeAwdlRxStageCounters::kDataTapCandidate);
+    tahoeP2pTapAction(sc, mtod(m, const uint8_t *), mbuf_len(m),
+                      p2pFrameWasProtected, uint16_t(chanidx),
+                      device_timestamp, true);
 #endif
     ieee80211_inputm(IC2IFP(ic), m, ni, rxi, ml);
     ieee80211_release_node(ic, ni);
@@ -5619,6 +6339,11 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
     uint8_t chanidx;
     uint16_t phy_info;
     size_t desc_size;
+#ifdef AIRPORT_TAHOE
+    uint32_t rxStageOwnerGeneration = 0;
+    uint8_t rxStageKind = TahoeAwdlRxStageCounters::kNotAwdl;
+    bool rxStageAwdlDataCandidate = false;
+#endif
     
     desc = (struct iwx_rx_mpdu_desc *)pktdata;
     if (sc->sc_device_family >= IWX_DEVICE_FAMILY_AX210)
@@ -5689,6 +6414,40 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
         memmove((uint8_t*)mbuf_data(m) + 2, mbuf_data(m), hdrlen);
         mbuf_adj(m, 2);
     }
+
+#ifdef AIRPORT_TAHOE
+    // Only inspect the action prefix after CRC/overrun, MPDU length, and
+    // padding have been checked. Lease/context reads are serialized by the
+    // main workloop gate; RX code outside that gate contributes no stage data.
+    if (tahoeP2pOnMainGate()) {
+        const auto &lease = tahoe_p2p_rx_lease_;
+        if (lease.active && lease.contextGeneration != 0 &&
+            lease.contextGeneration == lease.currentContextGeneration &&
+            lease.powerGeneration == lease.currentPowerGeneration &&
+            lease.stationGeneration == lease.currentStationGeneration) {
+            rxStageOwnerGeneration = lease.contextGeneration;
+            tahoe_awdl_rx_stage_counters_.beginOwner(rxStageOwnerGeneration);
+        }
+    }
+    if (rxStageOwnerGeneration) {
+        const uint8_t *rxBytes = mtod(m, const uint8_t *);
+        const size_t rxLength = mbuf_len(m);
+        rxStageKind = static_cast<uint8_t>(
+            TahoeAwdlRxStageCounters::classify(rxBytes, rxLength));
+        if (rxStageKind == TahoeAwdlRxStageCounters::kPsf ||
+            rxStageKind == TahoeAwdlRxStageCounters::kMif)
+            tahoe_awdl_rx_stage_counters_.record(
+                rxStageOwnerGeneration,
+                static_cast<TahoeAwdlRxStageCounters::FrameKind>(rxStageKind),
+                TahoeAwdlRxStageCounters::kEarly);
+        rxStageAwdlDataCandidate =
+            NativeAwdlData::isAwdlDataCandidate(rxBytes, rxLength);
+        if (rxStageAwdlDataCandidate)
+            tahoe_awdl_rx_stage_counters_.recordData(
+                rxStageOwnerGeneration,
+                TahoeAwdlRxStageCounters::kDataEarlyCandidate);
+    }
+#endif
     
     memset(&rxi, 0, sizeof(rxi));
     
@@ -5730,14 +6489,68 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
      * verified as part of the CCMP nonce.
      */
     if (iwx_rx_hwdecrypt(sc, m, le16toh(desc->status), &rxi)) {
+#ifdef AIRPORT_TAHOE
+        if (rxStageOwnerGeneration &&
+            (rxStageKind == TahoeAwdlRxStageCounters::kPsf ||
+             rxStageKind == TahoeAwdlRxStageCounters::kMif))
+            tahoe_awdl_rx_stage_counters_.record(
+                rxStageOwnerGeneration,
+                static_cast<TahoeAwdlRxStageCounters::FrameKind>(rxStageKind),
+                TahoeAwdlRxStageCounters::kDecryptRejected);
+        if (rxStageOwnerGeneration && rxStageAwdlDataCandidate)
+            tahoe_awdl_rx_stage_counters_.recordData(
+                rxStageOwnerGeneration,
+                TahoeAwdlRxStageCounters::kDataDecryptRejected);
+#endif
         mbuf_freem(m);
         return;
     }
+
+#ifdef AIRPORT_TAHOE
+    if (rxStageOwnerGeneration &&
+        (rxStageKind == TahoeAwdlRxStageCounters::kPsf ||
+         rxStageKind == TahoeAwdlRxStageCounters::kMif))
+        tahoe_awdl_rx_stage_counters_.record(
+            rxStageOwnerGeneration,
+            static_cast<TahoeAwdlRxStageCounters::FrameKind>(rxStageKind),
+            TahoeAwdlRxStageCounters::kAfterDecrypt);
+    if (rxStageOwnerGeneration && rxStageAwdlDataCandidate)
+        tahoe_awdl_rx_stage_counters_.recordData(
+            rxStageOwnerGeneration,
+            TahoeAwdlRxStageCounters::kDataAfterDecryptCandidate);
+#endif
     
     if (iwx_detect_duplicate(sc, m, desc, &rxi)) {
+#ifdef AIRPORT_TAHOE
+        if (rxStageOwnerGeneration &&
+            (rxStageKind == TahoeAwdlRxStageCounters::kPsf ||
+             rxStageKind == TahoeAwdlRxStageCounters::kMif))
+            tahoe_awdl_rx_stage_counters_.record(
+                rxStageOwnerGeneration,
+                static_cast<TahoeAwdlRxStageCounters::FrameKind>(rxStageKind),
+                TahoeAwdlRxStageCounters::kDuplicateRejected);
+        if (rxStageOwnerGeneration && rxStageAwdlDataCandidate)
+            tahoe_awdl_rx_stage_counters_.recordData(
+                rxStageOwnerGeneration,
+                TahoeAwdlRxStageCounters::kDataDuplicateRejected);
+#endif
         mbuf_freem(m);
         return;
     }
+
+#ifdef AIRPORT_TAHOE
+    if (rxStageOwnerGeneration &&
+        (rxStageKind == TahoeAwdlRxStageCounters::kPsf ||
+         rxStageKind == TahoeAwdlRxStageCounters::kMif))
+        tahoe_awdl_rx_stage_counters_.record(
+            rxStageOwnerGeneration,
+            static_cast<TahoeAwdlRxStageCounters::FrameKind>(rxStageKind),
+            TahoeAwdlRxStageCounters::kAfterDuplicate);
+    if (rxStageOwnerGeneration && rxStageAwdlDataCandidate)
+        tahoe_awdl_rx_stage_counters_.recordData(
+            rxStageOwnerGeneration,
+            TahoeAwdlRxStageCounters::kDataAfterDuplicateCandidate);
+#endif
     
     rssi = iwx_rxmq_get_signal_strength(sc, desc);
     rssi = (0 - IWX_MIN_DBM) + rssi;    /* normalize */
@@ -5749,12 +6562,12 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
     if (sc->sc_device_family >= IWX_DEVICE_FAMILY_AX210) {
         rate_n_flags = le32toh(desc->v3.rate_n_flags);
         chanidx = desc->v3.channel;
-        device_timestamp = desc->v3.gp2_on_air_rise;
+        device_timestamp = le32toh(desc->v3.gp2_on_air_rise);
         rxi.rxi_tstamp = (uint32_t)le64toh(desc->v3.tsf_on_air_rise);
     } else {
         rate_n_flags = le32toh(desc->v1.rate_n_flags);
         chanidx = desc->v1.channel;
-        device_timestamp = desc->v1.gp2_on_air_rise;
+        device_timestamp = le32toh(desc->v1.gp2_on_air_rise);
         rxi.rxi_tstamp = (uint32_t)le64toh(desc->v1.tsf_on_air_rise);
     }
     rxi.rxi_chan = chanidx;
@@ -5766,7 +6579,11 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
     
     iwx_rx_frame(sc, m, chanidx, le16toh(desc->status),
                  (phy_info & IWX_RX_MPDU_PHY_SHORT_PREAMBLE),
-                 rate_n_flags, device_timestamp, &rxi, ml);
+                 rate_n_flags, device_timestamp, &rxi, ml
+#ifdef AIRPORT_TAHOE
+                 , rxStageOwnerGeneration, rxStageKind
+#endif
+                 );
 }
 
 void ItlIwx::
@@ -5782,6 +6599,26 @@ iwx_rx_tx_cmd_single(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
     KASSERT(tx_resp->frame_count == 1, "tx_resp->frame_count == 1");
     
     txfail = (status != IWX_TX_STATUS_SUCCESS);
+#ifdef AIRPORT_TAHOE
+    const uint32_t generation = __atomic_load_n(
+        &sc->sc_tx_rate_generation, __ATOMIC_ACQUIRE);
+    uint32_t rawRate = 0;
+    const bool hasRate = IwxTxRate::readLittleEndianU32(
+        reinterpret_cast<const uint8_t *>(pkt->data),
+        iwx_rx_packet_payload_len(pkt),
+        offsetof(struct iwx_tx_resp, initial_rate), &rawRate);
+    const bool currentContext = txd != nullptr && txd->in != nullptr &&
+        ic->ic_bss == &txd->in->in_ni;
+    if (hasRate && IwxTxRate::acceptsSingleTxCompletion(
+            !txfail, txd != nullptr && txd->type == IEEE80211_FC0_TYPE_DATA,
+            ic->ic_opmode == IEEE80211_M_STA,
+            ic->ic_state == IEEE80211_S_RUN, currentContext,
+            txd != nullptr && txd->rate_generation == generation)) {
+        iwx_store_current_tx_rate(sc, &txd->in->in_ni, generation,
+                                  rawRate,
+                                  IwxTxRate::SourceTxSingle);
+    }
+#endif
     
     if (txfail) {
         XYLog("%s %d OUTPUT_ERROR type=%d status=%d\n", __FUNCTION__, __LINE__, txd->type, status);
@@ -5848,11 +6685,29 @@ void ItlIwx::
 iwx_rx_tx_ba_notif(struct iwx_softc *sc, struct iwx_rx_packet *pkt, struct iwx_rx_data *data)
 {
     struct ieee80211com *ic = &sc->sc_ic;
+    const size_t payloadLength = iwx_rx_packet_payload_len(pkt);
+    if (payloadLength < offsetof(struct iwx_compressed_ba_notif, tfd))
+        return;
     struct iwx_compressed_ba_notif *ba_res = (struct iwx_compressed_ba_notif *)pkt->data;
     uint8_t tid;
     uint8_t qid;
     int i;
     struct iwx_tx_ring *ring;
+    const uint16_t tfdCount = le16toh(ba_res->tfd_cnt);
+    const size_t requiredLength = offsetof(struct iwx_compressed_ba_notif, tfd) +
+        static_cast<size_t>(tfdCount) * sizeof(struct iwx_compressed_ba_tfd);
+    if (requiredLength > payloadLength)
+        return;
+
+#ifdef AIRPORT_TAHOE
+    if (ic->ic_opmode == IEEE80211_M_STA && ba_res->sta_id != IWX_STATION_ID) {
+        for (uint16_t entry = 0; entry < tfdCount; ++entry)
+            (void)iwx_tahoe_p2p_action_reject_ba_queue(
+                &nativeP2pTxQueue_, &nativeP2pActionTx_,
+                le16toh(ba_res->tfd[entry].q_num));
+        return;
+    }
+#endif
 
     sc->sc_tx_timer = 0;
 
@@ -5872,14 +6727,88 @@ iwx_rx_tx_ba_notif(struct iwx_softc *sc, struct iwx_rx_packet *pkt, struct iwx_r
     if (!le16toh(ba_res->tfd_cnt))
         return;
 
+#ifdef AIRPORT_TAHOE
+    const uint32_t rateGeneration = __atomic_load_n(
+        &sc->sc_tx_rate_generation, __ATOMIC_ACQUIRE);
+    uint32_t rawRate = 0;
+    const bool hasRate = IwxTxRate::readLittleEndianU32(
+        reinterpret_cast<const uint8_t *>(pkt->data), payloadLength,
+        offsetof(struct iwx_compressed_ba_notif, tx_rate), &rawRate);
+    bool currentQueue = false;
+    if (ic->ic_opmode == IEEE80211_M_STA && ic->ic_bss != nullptr &&
+        ba_res->sta_id == IWX_STATION_ID &&
+        le16toh(ba_res->txed) > 0 && le32toh(ba_res->wireless_time) > 0) {
+        /* Match the existing reclaim's [tail, tfd_index) interval. This is
+         * read-only telemetry validation; a bad range drops only the sample,
+         * never changes the established reclaim path below. BA_NOTIF has no
+         * host association-generation cookie, so a very late firmware reply
+         * that aliases a reused descriptor cannot be distinguished absolutely. */
+        for (i = 0; i < tfdCount && !currentQueue; ++i) {
+            struct iwx_compressed_ba_tfd *ba_tfd = &ba_res->tfd[i];
+            const uint16_t queueId = le16toh(ba_tfd->q_num);
+            if (queueId >= nitems(sc->txq) ||
+                iwx_tahoe_p2p_tvqm_queue_owned(&nativeP2pTxQueue_, queueId))
+                continue;
+            ring = &sc->txq[queueId];
+            if (ring->ring_count == 0 || ring->queued < 0 || ring->tail < 0)
+                continue;
+            const uint32_t completedEnd = IWX_AGG_SSN_TO_TXQ_IDX(
+                le16toh(ba_tfd->tfd_index), ring->ring_count);
+            IwxTxRate::CompletedDescriptorRange completedRange{};
+            if (!IwxTxRate::completedDescriptorRange(
+                    ring->ring_count, static_cast<uint32_t>(ring->tail),
+                    static_cast<uint32_t>(ring->queued), completedEnd,
+                    &completedRange))
+                continue;
+            for (uint32_t offset = 0; offset < completedRange.count; ++offset) {
+                const unsigned int idx = (completedRange.first + offset) %
+                    ring->ring_count;
+                struct iwx_tx_data *txd = &ring->data[idx];
+                if (txd->m != nullptr && txd->in != nullptr &&
+                    txd->type == IEEE80211_FC0_TYPE_DATA &&
+                    &txd->in->in_ni == ic->ic_bss &&
+                    txd->rate_generation == rateGeneration) {
+                    currentQueue = true;
+                    break;
+                }
+            }
+        }
+    }
+    const uint32_t baFlags = le32toh(ba_res->flags);
+    const bool aggregateEvent = baFlags == IWX_BA_RESP_TX_AGG ||
+        baFlags == IWX_BA_RESP_TX_AGG_FAIL;
+    if (hasRate && IwxTxRate::acceptsAggregateTxCompletion(
+            aggregateEvent, le16toh(ba_res->txed) > 0,
+            le32toh(ba_res->wireless_time) > 0,
+            ic->ic_opmode == IEEE80211_M_STA,
+            ic->ic_state == IEEE80211_S_RUN, ic->ic_bss != nullptr,
+            currentQueue, rateGeneration != 0)) {
+        iwx_store_current_tx_rate(sc, ic->ic_bss, rateGeneration,
+                                  rawRate,
+                                  IwxTxRate::SourceTxAggregate);
+    }
+#endif
+
     /* Free per TID */
-    for (i = 0; i < le16toh(ba_res->tfd_cnt); i++) {
+    for (i = 0; i < tfdCount; i++) {
         struct iwx_compressed_ba_tfd *ba_tfd = &ba_res->tfd[i];
 
         tid = ba_tfd->tid;
 
-        qid = le16toh(ba_tfd->q_num);
+        const uint16_t queueId = le16toh(ba_tfd->q_num);
+        if (queueId >= nitems(sc->txq))
+            continue;
+#ifdef AIRPORT_TAHOE
+        if (iwx_tahoe_p2p_action_reject_ba_queue(
+                &nativeP2pTxQueue_, &nativeP2pActionTx_, queueId))
+            continue;
+#endif
+        qid = static_cast<uint8_t>(queueId);
         ring = &sc->txq[qid];
+        if (ring->ring_count == 0 ||
+            ring->ring_count > IWX_TFD_QUEUE_SIZE_MAX ||
+            (ring->ring_count & (ring->ring_count - 1)) != 0 || ring->qid != qid)
+            continue;
 
         sc->sc_tx_timer = 0;
 
@@ -5926,16 +6855,63 @@ static const char *iwx_get_agg_tx_status(uint16_t status)
     return "UNKNOWN";
 }
 
+static bool iwx_tx_response_ring(
+    struct iwx_softc *sc, uint16_t queueId, struct iwx_tx_ring **ringOut)
+{
+    if (!sc || !ringOut || queueId >= nitems(sc->txq))
+        return false;
+
+    struct iwx_tx_ring *ring = &sc->txq[queueId];
+    if (ring->qid != queueId || ring->ring_count == 0 ||
+        ring->ring_count > IWX_TFD_QUEUE_SIZE_MAX ||
+        ring->ring_count > nitems(ring->data) ||
+        (ring->ring_count & (ring->ring_count - 1)) != 0)
+        return false;
+
+    *ringOut = ring;
+    return true;
+}
+
+static bool iwx_tx_response_index(
+    const struct iwx_tx_ring *ring, uint32_t ssn, uint16_t *indexOut)
+{
+    if (!ring || !indexOut || ring->ring_count == 0 ||
+        ring->ring_count > IWX_TFD_QUEUE_SIZE_MAX ||
+        ring->ring_count > nitems(ring->data) ||
+        (ring->ring_count & (ring->ring_count - 1)) != 0)
+        return false;
+
+    const uint32_t index = IWX_AGG_SSN_TO_TXQ_IDX(ssn, ring->ring_count);
+    if (index >= ring->ring_count)
+        return false;
+    *indexOut = static_cast<uint16_t>(index);
+    return true;
+}
+
 void ItlIwx::
 iwx_rx_tx_cmd(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
               struct iwx_rx_data *data)
 {
+    const size_t payloadLength = iwx_rx_packet_payload_len(pkt);
+    if (payloadLength < sizeof(uint8_t))
+        return;
     uint32_t ssn;
     int idx;
     int tid;
     struct iwx_tx_resp *tx_resp = (struct iwx_tx_resp *)pkt->data;
-    int qid = tx_resp->tx_queue;
-    struct iwx_tx_ring *ring = &sc->txq[qid];
+    const uint8_t frameCount = tx_resp->frame_count;
+    if (frameCount == 0)
+        return;
+    const size_t requiredLength =
+        offsetof(struct iwx_tx_resp, status) +
+        static_cast<size_t>(frameCount) * sizeof(struct iwx_agg_tx_status) +
+        sizeof(uint32_t); // trailing SCD SSN
+    if (requiredLength > payloadLength)
+        return;
+    const uint16_t queueId = le16toh(tx_resp->tx_queue);
+    struct iwx_tx_ring *ring = nullptr;
+    if (!iwx_tx_response_ring(sc, queueId, &ring))
+        return;
     struct iwx_tx_data *txd;
 
     bus_dmamap_sync(sc->sc_dmat, data->map, 0, IWX_RBUF_SIZE,
@@ -5943,8 +6919,8 @@ iwx_rx_tx_cmd(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
     
     sc->sc_tx_timer = 0;
 
-    if (tx_resp->frame_count > 1) {
-        for (int i = 0; i < tx_resp->frame_count; i++) {
+    if (frameCount > 1) {
+        for (int i = 0; i < frameCount; i++) {
             uint16_t fstatus = le16_to_cpu((&tx_resp->status)[i].status);
 
             XYLog("status %s (0x%04x), try-count (%d) qid (%d) seq (0x%x)\n",
@@ -5952,14 +6928,18 @@ iwx_rx_tx_cmd(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
                          fstatus & IWX_AGG_TX_STATE_STATUS_MSK,
                          (fstatus & IWX_AGG_TX_STATE_TRY_CNT_MSK) >>
                          IWX_AGG_TX_STATE_TRY_CNT_POS,
-                         qid,
+                         queueId,
                          le16_to_cpu((&tx_resp->status)[i].sequence));
         }
     } else {
         tid = tx_resp->ra_tid & 0x0f;
         memcpy(&ssn, &tx_resp->status + tx_resp->frame_count, sizeof(ssn));
         ssn = le32toh(ssn) & 0xfff;
-        idx = IWX_AGG_SSN_TO_TXQ_IDX(ssn, ring->ring_count);
+        uint16_t checkedIndex = 0;
+        if (ring->queued <= 0 ||
+            !iwx_tx_response_index(ring, ssn, &checkedIndex))
+            return;
+        idx = checkedIndex;
         txd = &ring->data[idx];
         iwx_rx_tx_cmd_single(sc, pkt, txd);
         DPRINTFN(3, ("%s tid=%d ssn=%d idx=%d\n", __FUNCTION__, tid, ssn, idx));
@@ -6059,6 +7039,431 @@ iwx_binding_cmd(struct iwx_softc *sc, struct iwx_node *in, uint32_t action)
     
     return err;
 }
+
+#ifdef AIRPORT_TAHOE
+/*
+ * The P2P Device is a separate firmware MAC context. These helpers do not
+ * read or write the infrastructure STA's IWX_FLAG_MAC_ACTIVE or
+ * IWX_FLAG_BINDING_ACTIVE bits.
+ */
+static int
+iwx_p2p_check_fw_contract(ItlIwx *owner, struct iwx_softc *sc)
+{
+    if ((sc->sc_capaflags & IWX_UCODE_TLV_FLAGS_P2P) == 0)
+        return EOPNOTSUPP;
+    /* The tested AX201 fw68 advertises MAC_CONTEXT_CMD v5. */
+    if (owner->iwx_lookup_cmd_ver(sc, IWX_LONG_GROUP,
+                                  IWX_MAC_CONTEXT_CMD) != 5)
+        return EOPNOTSUPP;
+    return 0;
+}
+
+static void
+iwx_p2p_fill_mac_context(const struct iwx_p2p_context *p2p,
+                         uint32_t action, struct iwx_mac_ctx_cmd *cmd)
+{
+    memset(cmd, 0, sizeof(*cmd));
+    cmd->id_and_color = htole32(IWX_FW_CMD_ID_AND_COLOR(p2p->mac_id,
+                                                        p2p->mac_color));
+    cmd->action = htole32(action);
+
+    /* REMOVE uses the common id/action header and zeroed trailing fields. */
+    if (action == IWX_FW_CTXT_ACTION_REMOVE)
+        return;
+
+    cmd->mac_type = htole32(IWX_FW_MAC_TYPE_P2P_DEVICE);
+    cmd->tsf_id = htole32(p2p->tsf_id);
+    memcpy(cmd->node_addr, p2p->mac_address, sizeof(cmd->node_addr));
+    memset(cmd->bssid_addr, 0xff, sizeof(cmd->bssid_addr));
+    /*
+     * With no BSS basic-rate set, Linux's iwl_mvm_ack_rates() keeps all
+     * mandatory rates available for ACKs: CCK 1/2/5.5/11 and OFDM 6/12/24.
+     */
+    cmd->cck_rates = htole32((IWX_RATE_BIT_MSK(11) |
+                              IWX_RATE_BIT_MSK(5) |
+                              IWX_RATE_BIT_MSK(2) |
+                              IWX_RATE_BIT_MSK(1)) >> IWX_FIRST_CCK_RATE);
+    cmd->ofdm_rates = htole32((IWX_RATE_BIT_MSK(24) |
+                               IWX_RATE_BIT_MSK(12) |
+                               IWX_RATE_BIT_MSK(6)) >> IWX_FIRST_OFDM_RATE);
+    uint32_t filterFlags = IWX_MAC_FILTER_IN_PROBE_REQUEST;
+    // Broaden receive delivery only for the dedicated P2P MAC used by Tahoe
+    // AWDL observation. Other P2P MAC contexts retain probe-only filtering.
+    if (p2p->mac_id == 1)
+        filterFlags |= IWX_MAC_FILTER_IN_CONTROL_AND_MGMT |
+                       IWX_MAC_FILTER_ACCEPT_GRP;
+#if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
+    if(p2p->mac_id==1)filterFlags|=IWX_MAC_FILTER_IN_PROMISC;
+#endif
+    cmd->filter_flags = htole32(filterFlags);
+    cmd->p2p_dev.is_disc_extended = htole32(0);
+
+    /*
+     * P2P Device discovery is a non-HT 20 MHz context with no associated
+     * AP/QoS negotiation. Use the existing 11G default EDCA table rather
+     * than inheriting the infrastructure STA's per-AP parameters. Keep
+     * UPDATE_EDCA/TGN clear; these defaults still provide the firmware's
+     * per-AC TX FIFO routing.
+     */
+    static const uint8_t mac_ac_to_ucode_ac[EDCA_NUM_AC] = {
+        IWX_AC_BE, IWX_AC_BK, IWX_AC_VI, IWX_AC_VO
+    };
+    const struct ieee80211_edca_ac_params *edca =
+        ieee80211_edca_table[IEEE80211_MODE_11G];
+    for (unsigned int i = 0; i < EDCA_NUM_AC; ++i) {
+        const struct ieee80211_edca_ac_params *ac = &edca[i];
+        const uint8_t ucode_ac = mac_ac_to_ucode_ac[i];
+        const uint8_t tx_fifo = iwx_ac_to_tx_fifo[i];
+
+        cmd->ac[ucode_ac].cw_min =
+            htole16((1U << ac->ac_ecwmin) - 1U);
+        cmd->ac[ucode_ac].cw_max =
+            htole16((1U << ac->ac_ecwmax) - 1U);
+        cmd->ac[ucode_ac].aifsn = ac->ac_aifsn;
+        cmd->ac[ucode_ac].fifos_mask = (uint8_t)(1U << tx_fifo);
+        cmd->ac[ucode_ac].edca_txop =
+            htole16(ac->ac_txoplimit * 32U);
+    }
+}
+
+int ItlIwx::
+iwx_p2p_mac_context_configure(struct iwx_softc *sc, uint8_t mac_id,
+                              uint8_t mac_color, uint8_t tsf_id,
+                              const uint8_t address[6])
+{
+    if (sc == NULL || address == NULL || sc != &com)
+        return EINVAL;
+    if (!nativeP2pCommandAllowed())
+        return EBUSY;
+    if (sc->sc_p2p.initialized)
+        return sc->sc_p2p.fw_generation == (uint32_t)sc->sc_generation ?
+            EALREADY : EBUSY;
+    if (mac_id == IWX_MAC_INDEX_MIN_DRIVER ||
+        mac_id >= IWX_MAC_INDEX_AUX || tsf_id >= IWX_NUM_TSF_IDS)
+        return EINVAL;
+    uint8_t address_bits = 0;
+    for (unsigned int i = 0; i < 6; ++i)
+        address_bits |= address[i];
+    if (address_bits == 0 || (address[0] & 1))
+        return EINVAL;
+
+    int error = iwx_p2p_check_fw_contract(this, sc);
+    if (error)
+        return error;
+
+    memset(&sc->sc_p2p, 0, sizeof(sc->sc_p2p));
+    sc->sc_p2p.initialized = 1;
+    sc->sc_p2p.mac_state = IWX_P2P_RESOURCE_ABSENT;
+    sc->sc_p2p.binding_state = IWX_P2P_RESOURCE_ABSENT;
+    sc->sc_p2p.mac_id = mac_id;
+    sc->sc_p2p.mac_color = mac_color;
+    sc->sc_p2p.tsf_id = tsf_id;
+    sc->sc_p2p.phy_id = 0xff;
+    sc->sc_p2p.binding_id = 0xff;
+    memcpy(sc->sc_p2p.mac_address, address, sizeof(sc->sc_p2p.mac_address));
+    sc->sc_p2p.fw_generation = (uint32_t)sc->sc_generation;
+    return 0;
+}
+
+int ItlIwx::
+iwx_p2p_mac_context_apply(struct iwx_softc *sc, uint32_t action)
+{
+    if (sc == NULL || sc != &com)
+        return EINVAL;
+    if (!nativeP2pCommandAllowed())
+        return EBUSY;
+    if (!sc->sc_p2p.initialized ||
+        sc->sc_p2p.fw_generation != (uint32_t)sc->sc_generation)
+        return EBUSY;
+
+    const uint8_t state = sc->sc_p2p.mac_state;
+    if (state == IWX_P2P_RESOURCE_UNKNOWN ||
+        sc->sc_p2p.binding_state != IWX_P2P_RESOURCE_ABSENT)
+        return EBUSY;
+    if (action == IWX_FW_CTXT_ACTION_ADD &&
+        state != IWX_P2P_RESOURCE_ABSENT)
+        return EALREADY;
+    if ((action == IWX_FW_CTXT_ACTION_MODIFY ||
+         action == IWX_FW_CTXT_ACTION_REMOVE) &&
+        state != IWX_P2P_RESOURCE_ACTIVE)
+        return EINVAL;
+    if (action != IWX_FW_CTXT_ACTION_ADD &&
+        action != IWX_FW_CTXT_ACTION_MODIFY &&
+        action != IWX_FW_CTXT_ACTION_REMOVE)
+        return EINVAL;
+
+    int error = iwx_p2p_check_fw_contract(this, sc);
+    if (error)
+        return error;
+
+    struct iwx_mac_ctx_cmd cmd;
+    iwx_p2p_fill_mac_context(&sc->sc_p2p, action, &cmd);
+    /*
+     * fw68 advertises no separate MAC_CONTEXT notification. The normal
+     * synchronous command completion is the only available ACK; do not use
+     * iwx_send_cmd_pdu_status() here or claim on-air readiness.
+     */
+    sc->sc_p2p.mac_state = IWX_P2P_RESOURCE_UNKNOWN;
+    sc->sc_p2p.uncertain_kind = IWX_P2P_UNCERTAIN_MAC_CONTEXT;
+    sc->sc_p2p.uncertain_action = (uint8_t)action;
+    error = iwx_send_cmd_pdu(sc, IWX_MAC_CONTEXT_CMD, 0, sizeof(cmd), &cmd);
+    if (error)
+        return error;
+
+    sc->sc_p2p.mac_state = action == IWX_FW_CTXT_ACTION_REMOVE ?
+        IWX_P2P_RESOURCE_ABSENT : IWX_P2P_RESOURCE_ACTIVE;
+    sc->sc_p2p.uncertain_kind = 0;
+    sc->sc_p2p.uncertain_action = 0;
+    return 0;
+}
+
+int ItlIwx::
+iwx_p2p_mac_context_add(struct iwx_softc *sc)
+{
+    return iwx_p2p_mac_context_apply(sc, IWX_FW_CTXT_ACTION_ADD);
+}
+
+int ItlIwx::
+iwx_p2p_mac_context_modify(struct iwx_softc *sc)
+{
+    return iwx_p2p_mac_context_apply(sc, IWX_FW_CTXT_ACTION_MODIFY);
+}
+
+int ItlIwx::
+iwx_p2p_mac_context_remove(struct iwx_softc *sc)
+{
+    return iwx_p2p_mac_context_apply(sc, IWX_FW_CTXT_ACTION_REMOVE);
+}
+
+int ItlIwx::
+iwx_p2p_phy_lease(struct iwx_softc *sc, uint8_t *slot_id)
+{
+    if (sc == NULL || slot_id == NULL || sc != &com)
+        return EINVAL;
+    if (!nativeP2pCommandAllowed())
+        return EBUSY;
+    if (!sc->sc_p2p.initialized ||
+        sc->sc_p2p.fw_generation != (uint32_t)sc->sc_generation ||
+        sc->sc_p2p.mac_state != IWX_P2P_RESOURCE_ACTIVE ||
+        sc->sc_p2p.binding_state != IWX_P2P_RESOURCE_ABSENT)
+        return EBUSY;
+    if (sc->sc_p2p.phy_leased)
+        return EALREADY;
+
+    /* Startup already ADDs PHY contexts 0..2; STA owns 0, reserve 1 then 2. */
+    for (uint8_t i = 1; i < IWX_NUM_PHY_CTX; ++i) {
+        if (sc->sc_phyctxt[i].id != i || sc->sc_phyctxt[i].channel == NULL ||
+            sc->sc_phyctxt[i].color > 0xff)
+            continue;
+        sc->sc_p2p.phy_id = i;
+        sc->sc_p2p.phy_color = (uint8_t)sc->sc_phyctxt[i].color;
+        sc->sc_p2p.binding_id = i;
+        sc->sc_p2p.binding_color = (uint8_t)sc->sc_phyctxt[i].color;
+        sc->sc_p2p.phy_leased = 1;
+        *slot_id = i;
+        return 0;
+    }
+    return ENOSPC;
+}
+
+int ItlIwx::
+iwx_p2p_phy_release(struct iwx_softc *sc)
+{
+    if (sc == NULL || sc != &com)
+        return EINVAL;
+    if (!nativeP2pCommandAllowed())
+        return EBUSY;
+    if (!sc->sc_p2p.initialized ||
+        sc->sc_p2p.fw_generation != (uint32_t)sc->sc_generation)
+        return EBUSY;
+    if (!sc->sc_p2p.phy_leased)
+        return EALREADY;
+    if (sc->sc_p2p.binding_state != IWX_P2P_RESOURCE_ABSENT)
+        return EBUSY;
+
+    sc->sc_p2p.phy_leased = 0;
+    sc->sc_p2p.phy_id = 0xff;
+    sc->sc_p2p.phy_color = 0;
+    sc->sc_p2p.binding_id = 0xff;
+    sc->sc_p2p.binding_color = 0;
+    return 0;
+}
+
+int ItlIwx::
+iwx_p2p_binding_add(struct iwx_softc *sc)
+{
+    if (sc == NULL || sc != &com)
+        return EINVAL;
+    if (!nativeP2pCommandAllowed())
+        return EBUSY;
+    if (!sc->sc_p2p.initialized ||
+        sc->sc_p2p.fw_generation != (uint32_t)sc->sc_generation ||
+        sc->sc_p2p.mac_state != IWX_P2P_RESOURCE_ACTIVE ||
+        !sc->sc_p2p.phy_leased)
+        return EBUSY;
+    if (sc->sc_p2p.binding_state == IWX_P2P_RESOURCE_UNKNOWN)
+        return EBUSY;
+    if (sc->sc_p2p.binding_state != IWX_P2P_RESOURCE_ABSENT)
+        return EALREADY;
+    if (sc->sc_p2p.phy_id >= IWX_NUM_PHY_CTX ||
+        sc->sc_phyctxt[sc->sc_p2p.phy_id].id != sc->sc_p2p.phy_id ||
+        sc->sc_phyctxt[sc->sc_p2p.phy_id].color != sc->sc_p2p.phy_color ||
+        sc->sc_phyctxt[sc->sc_p2p.phy_id].channel == NULL)
+        return EINVAL;
+    if (iwx_p2p_check_fw_contract(this, sc) != 0 ||
+        iwx_lookup_cmd_ver(sc, IWX_LONG_GROUP,
+                           IWX_BINDING_CONTEXT_CMD) != 2 ||
+        iwx_lookup_notif_ver(sc, IWX_LONG_GROUP,
+                             IWX_BINDING_CONTEXT_CMD) != 1)
+        return EOPNOTSUPP;
+
+    if (sc->sc_p2p_roc.phase == IWX_P2P_ROC_BINDING_ADD_UNKNOWN) {
+        sc->sc_p2p_roc.binding_status_valid = 0;
+        sc->sc_p2p_roc.binding_rejected = 0;
+        sc->sc_p2p_roc.binding_raw_status = 0;
+    }
+
+    /* A ROC caller must create its broadcast STA/queue only after this ACK. */
+    struct iwx_binding_cmd cmd;
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.id_and_color = htole32(IWX_FW_CMD_ID_AND_COLOR(
+        sc->sc_p2p.binding_id, sc->sc_p2p.binding_color));
+    cmd.action = htole32(IWX_FW_CTXT_ACTION_ADD);
+    cmd.macs[0] = htole32(IWX_FW_CMD_ID_AND_COLOR(
+        sc->sc_p2p.mac_id, sc->sc_p2p.mac_color));
+    for (unsigned int i = 1; i < IWX_MAX_MACS_IN_BINDING; ++i)
+        cmd.macs[i] = htole32(IWX_FW_CTXT_INVALID);
+    cmd.phy = htole32(IWX_FW_CMD_ID_AND_COLOR(
+        sc->sc_p2p.phy_id, sc->sc_p2p.phy_color));
+    uint16_t commandLength = sizeof(cmd);
+    if (isset(sc->sc_enabled_capa,
+              IWX_UCODE_TLV_CAPA_BINDING_CDB_SUPPORT)) {
+        cmd.lmac_id = htole32(iwx_lmac_id(
+            sc, sc->sc_phyctxt[sc->sc_p2p.phy_id].channel));
+    } else {
+        /* fw ABI v1 has no lmac_id tail field. */
+        commandLength -= sizeof(cmd.lmac_id);
+    }
+
+    uint32_t status = 0;
+    sc->sc_p2p.binding_state = IWX_P2P_RESOURCE_UNKNOWN;
+    sc->sc_p2p.uncertain_kind = IWX_P2P_UNCERTAIN_BINDING;
+    sc->sc_p2p.uncertain_action = IWX_FW_CTXT_ACTION_ADD;
+    int error = iwx_send_cmd_pdu_status(sc, IWX_BINDING_CONTEXT_CMD,
+                                        commandLength, &cmd, &status);
+    if (error == 0 && sc->sc_p2p_roc.phase ==
+            IWX_P2P_ROC_BINDING_ADD_UNKNOWN) {
+        sc->sc_p2p_roc.binding_status_valid = 1;
+        sc->sc_p2p_roc.binding_raw_status = status;
+    }
+    if (error == 0 && status != 0) {
+        error = EIO;
+        if (sc->sc_p2p_roc.phase == IWX_P2P_ROC_BINDING_ADD_UNKNOWN) {
+            /* A decoded nonzero status is a rejection; ADD did not commit. */
+            sc->sc_p2p_roc.binding_rejected = 1;
+            sc->sc_p2p.binding_state = IWX_P2P_RESOURCE_ABSENT;
+            sc->sc_p2p.uncertain_kind = IWX_P2P_UNCERTAIN_NONE;
+            sc->sc_p2p.uncertain_action = 0;
+        }
+    }
+    if (error)
+        return error;
+
+    sc->sc_p2p.binding_state = IWX_P2P_RESOURCE_ACTIVE;
+    sc->sc_p2p.uncertain_kind = 0;
+    sc->sc_p2p.uncertain_action = 0;
+    return 0;
+}
+
+int ItlIwx::
+iwx_p2p_binding_remove(struct iwx_softc *sc)
+{
+    if (sc == NULL || sc != &com)
+        return EINVAL;
+    if (!nativeP2pCommandAllowed())
+        return EBUSY;
+    if (!sc->sc_p2p.initialized ||
+        sc->sc_p2p.fw_generation != (uint32_t)sc->sc_generation ||
+        !sc->sc_p2p.phy_leased ||
+        sc->sc_p2p.mac_state != IWX_P2P_RESOURCE_ACTIVE)
+        return EBUSY;
+    if (sc->sc_p2p.binding_state == IWX_P2P_RESOURCE_UNKNOWN)
+        return EBUSY;
+    if (sc->sc_p2p.binding_state != IWX_P2P_RESOURCE_ACTIVE)
+        return EINVAL;
+    if (sc->sc_p2p.phy_id >= IWX_NUM_PHY_CTX ||
+        sc->sc_phyctxt[sc->sc_p2p.phy_id].id != sc->sc_p2p.phy_id ||
+        sc->sc_phyctxt[sc->sc_p2p.phy_id].color != sc->sc_p2p.phy_color ||
+        sc->sc_phyctxt[sc->sc_p2p.phy_id].channel == NULL)
+        return EINVAL;
+    if (iwx_p2p_check_fw_contract(this, sc) != 0 ||
+        iwx_lookup_cmd_ver(sc, IWX_LONG_GROUP,
+                           IWX_BINDING_CONTEXT_CMD) != 2 ||
+        iwx_lookup_notif_ver(sc, IWX_LONG_GROUP,
+                             IWX_BINDING_CONTEXT_CMD) != 1)
+        return EOPNOTSUPP;
+
+    /* A ROC caller must remove the broadcast STA/queue before this command. */
+    struct iwx_binding_cmd cmd;
+    memset(&cmd, 0, sizeof(cmd));
+    cmd.id_and_color = htole32(IWX_FW_CMD_ID_AND_COLOR(
+        sc->sc_p2p.binding_id, sc->sc_p2p.binding_color));
+    cmd.action = htole32(IWX_FW_CTXT_ACTION_REMOVE);
+    cmd.macs[0] = htole32(IWX_FW_CMD_ID_AND_COLOR(
+        sc->sc_p2p.mac_id, sc->sc_p2p.mac_color));
+    for (unsigned int i = 1; i < IWX_MAX_MACS_IN_BINDING; ++i)
+        cmd.macs[i] = htole32(IWX_FW_CTXT_INVALID);
+    cmd.phy = htole32(IWX_FW_CMD_ID_AND_COLOR(
+        sc->sc_p2p.phy_id, sc->sc_p2p.phy_color));
+    uint16_t commandLength = sizeof(cmd);
+    if (isset(sc->sc_enabled_capa,
+              IWX_UCODE_TLV_CAPA_BINDING_CDB_SUPPORT)) {
+        cmd.lmac_id = htole32(iwx_lmac_id(
+            sc, sc->sc_phyctxt[sc->sc_p2p.phy_id].channel));
+    } else {
+        /* fw ABI v1 has no lmac_id tail field. */
+        commandLength -= sizeof(cmd.lmac_id);
+    }
+
+    uint32_t status = 0;
+    sc->sc_p2p.binding_state = IWX_P2P_RESOURCE_UNKNOWN;
+    sc->sc_p2p.uncertain_kind = IWX_P2P_UNCERTAIN_BINDING;
+    sc->sc_p2p.uncertain_action = IWX_FW_CTXT_ACTION_REMOVE;
+    int error = iwx_send_cmd_pdu_status(sc, IWX_BINDING_CONTEXT_CMD,
+                                        commandLength, &cmd, &status);
+    if (error == 0 && status != 0)
+        error = EIO;
+    if (error)
+        return error;
+
+    sc->sc_p2p.binding_state = IWX_P2P_RESOURCE_ABSENT;
+    sc->sc_p2p.uncertain_kind = 0;
+    sc->sc_p2p.uncertain_action = 0;
+    return 0;
+}
+
+int ItlIwx::
+iwx_p2p_context_reset_after_fw_reset(struct iwx_softc *sc,
+                                     uint32_t drained_generation)
+{
+    if (sc == NULL || sc != &com)
+        return EINVAL;
+    if (drained_generation != (uint32_t)sc->sc_generation)
+        return EBUSY;
+    /* Caller may clear the lease only after firmware halt and RX drain. */
+    if (sc->sc_p2p_roc.phase != IWX_P2P_ROC_IDLE &&
+        sc->sc_p2p_roc.phase != IWX_P2P_ROC_COMPLETE)
+        return EBUSY;
+    if ((sc->sc_p2p.initialized &&
+         sc->sc_p2p.fw_generation == drained_generation) ||
+        (sc->sc_p2p_roc.phase == IWX_P2P_ROC_COMPLETE &&
+         sc->sc_p2p_roc.fw_generation == drained_generation))
+        return EBUSY;
+    memset(&sc->sc_p2p, 0, sizeof(sc->sc_p2p));
+    memset(&sc->sc_p2p_roc, 0, sizeof(sc->sc_p2p_roc));
+    return 0;
+}
+#endif /* AIRPORT_TAHOE */
 
 static uint8_t
 iwx_get_channel_width(struct ieee80211com *ic, struct ieee80211_channel *c)
@@ -6276,6 +7681,13 @@ iwx_phy_ctxt_cmd(struct iwx_softc *sc, struct iwx_phy_ctxt *ctxt,
 int ItlIwx::
 iwx_send_cmd(struct iwx_softc *sc, struct iwx_host_cmd *hcmd)
 {
+#ifdef AIRPORT_TAHOE
+    // The experimental systq worker temporarily owns command submission.
+    // Competing callers fail without touching the ring; IRQ completion stays
+    // runnable because this never waits on a worker-owned lock.
+    if (nativeP2pBusy() && !nativeP2pCommandAllowed())
+        return EBUSY;
+#endif
     struct iwx_tx_ring *ring = &sc->txq[IWX_DQA_CMD_QUEUE];
     struct iwx_tfh_tfd *desc;
     struct iwx_tx_data *txdata;
@@ -6825,6 +8237,10 @@ iwx_tx(struct iwx_softc *sc, mbuf_t m, struct ieee80211_node *ni, int ac)
     data->m = m;
     data->in = in;
     data->type = type;
+#ifdef AIRPORT_TAHOE
+    data->rate_generation = __atomic_load_n(
+        &sc->sc_tx_rate_generation, __ATOMIC_ACQUIRE);
+#endif
 
     DPRINTFN(3, ("sending data: 嘤嘤嘤 tid=%d qid=%d idx=%d queued=%d len=%d nsegs=%d flags=0x%08x rate_n_flags=0x%08x offload_assist=%u\n",
           tid, ring->qid, ring->cur, ring->queued, totlen, nsegs, le32toh(flags),
@@ -6939,13 +8355,21 @@ iwx_flush_sta_tids(struct iwx_softc *sc, int sta_id, uint16_t tids)
         uint16_t qid = le16toh(queue_info->queue_num);
         struct iwx_tx_ring *txq;
         
-        if (qid >= nitems(sc->txq))
+        if (qid >= nitems(sc->txq) || tid >= nitems(sc->sc_tid_data))
             continue;
-
+#ifdef AIRPORT_TAHOE
+        if (iwx_tahoe_p2p_tvqm_queue_owned(&nativeP2pTxQueue_, qid)) {
+            err = EBUSY;
+            continue;
+        }
+#endif
         if (sc->sc_tid_data[tid].qid != qid)
             continue;
         txq = &sc->txq[qid];
-        
+        if (txq->ring_count == 0 ||
+            txq->ring_count > IWX_TFD_QUEUE_SIZE_MAX ||
+            (txq->ring_count & (txq->ring_count - 1)) != 0 || txq->qid != qid)
+            continue;
         iwx_ampdu_txq_advance(sc, txq, IWX_AGG_SSN_TO_TXQ_IDX(read_after, txq->ring_count));
     }
 out:
@@ -7371,13 +8795,257 @@ iwx_rm_sta(struct iwx_softc *sc, struct iwx_node *in)
     return 0;
 }
 
+/* The taskq worker does not hold the HAL gate (splnet is a no-op here).
+ * Copy the entire requested scan policy once under the actual command gate,
+ * then release it before allocating/sending a firmware command. */
+static bool
+itl_iwx_scan_policy_for(const struct ieee80211com *ic, int bgscan,
+                        struct itl_iwx_scan_policy *policy)
+{
+    memset(policy, 0, sizeof(*policy));
+    memcpy(policy->source_addr, ic->ic_myaddr, sizeof(policy->source_addr));
+    const uint8_t *ssid = ic->ic_des_essid;
+    policy->ssid_len = ic->ic_des_esslen;
+    policy->active = ic->ic_des_esslen != 0 && !bgscan;
+#ifdef AIRPORT_TAHOE
+    policy->requested = ic->ic_tahoe_scan_requested;
+    if (policy->requested) {
+        ssid = ic->ic_tahoe_scan_ssid;
+        policy->ssid_len = ic->ic_tahoe_scan_ssid_len;
+        policy->active = !ic->ic_tahoe_scan_passive;
+        policy->generation = ic->ic_tahoe_scan_generation;
+        if (ic->ic_tahoe_scan_private_random_requested) {
+            /* The caller supplies a fresh LAA under the same command gate.
+             * Only the request's probe template uses it; station MAC and
+             * the legacy scan-config default address remain unchanged. */
+            const uint8_t *source = ic->ic_tahoe_scan_source_addr;
+            if ((source[0] & 3) != 2 ||
+                memcmp(source, ic->ic_myaddr, sizeof(policy->source_addr)) == 0)
+                return false;
+            memcpy(policy->source_addr, source, sizeof(policy->source_addr));
+        }
+        memcpy(policy->channels, ic->ic_tahoe_scan_channels,
+               sizeof(policy->channels));
+        for (unsigned i = 0; i < sizeof(policy->channels); ++i)
+            policy->restricted |= policy->channels[i] != 0;
+    }
+#endif
+    if (policy->ssid_len > sizeof(policy->ssid))
+        return false;
+    memcpy(policy->ssid, ssid, policy->ssid_len);
+    return true;
+}
+
+#ifdef AIRPORT_TAHOE
+static IOReturn
+itl_iwx_capture_scan_policy(OSObject *, void *ic_arg, void *policy_arg,
+                            void *bgscan_arg, void *)
+{
+    return itl_iwx_scan_policy_for((const struct ieee80211com *)ic_arg,
+        *(const int *)bgscan_arg, (struct itl_iwx_scan_policy *)policy_arg) ?
+        kIOReturnSuccess : kIOReturnBadArgument;
+}
+#endif
+
+int ItlIwx::
+iwx_capture_scan_policy(struct iwx_softc *sc, int bgscan,
+                        struct itl_iwx_scan_policy *scan)
+{
+#ifdef AIRPORT_TAHOE
+    IOCommandGate *gate = getMainCommandGate();
+    if (!gate)
+        return ENXIO;
+    IOReturn result = gate->runAction(itl_iwx_capture_scan_policy,
+        &sc->sc_ic, scan, &bgscan);
+    return result == kIOReturnSuccess ? 0 : EINVAL;
+#else
+    return itl_iwx_scan_policy_for(&sc->sc_ic, bgscan, scan) ? 0 : EINVAL;
+#endif
+}
+
+#ifdef AIRPORT_TAHOE
+uint32_t ItlIwx::tahoeScanState(struct ieee80211com *ic)
+{
+    struct iwx_softc *sc = (struct iwx_softc *)ic->ic_if.if_softc;
+    ItlIwx *that = container_of(sc, ItlIwx, com);
+    if (!that->tahoe_scan_lock_)
+        return ITL_TAHOE_SCAN_STOPPED;
+    IOInterruptState irq = IOSimpleLockLockDisableInterrupt(that->tahoe_scan_lock_);
+    uint32_t phase = that->tahoe_scan_phase_;
+    IOSimpleLockUnlockEnableInterrupt(that->tahoe_scan_lock_, irq);
+    return phase;
+}
+
+int ItlIwx::tahoeScanCancel(struct ieee80211com *ic)
+{
+    struct iwx_softc *sc = (struct iwx_softc *)ic->ic_if.if_softc;
+    ItlIwx *that = container_of(sc, ItlIwx, com);
+    if (!that->tahoe_scan_lock_)
+        return ENXIO;
+    bool queue = false;
+    IOInterruptState irq = IOSimpleLockLockDisableInterrupt(that->tahoe_scan_lock_);
+    if (that->tahoe_scan_phase_ == ITL_TAHOE_SCAN_ACTIVE) {
+        that->tahoe_scan_phase_ = ITL_TAHOE_SCAN_DRAINING;
+        queue = that->tahoe_scan_online_;
+    }
+    IOSimpleLockUnlockEnableInterrupt(that->tahoe_scan_lock_, irq);
+    if (queue)
+        task_add(systq, &that->tahoe_scan_abort_task_);
+    return 0; /* accepted cancellation, not a firmware acknowledgement */
+}
+
+void ItlIwx::tahoeScanAbortTask(void *arg)
+{
+    ItlIwx *that = (ItlIwx *)arg;
+    struct iwx_softc *sc = &that->com;
+#ifdef AIRPORT_TAHOE
+    TahoeLifecycleGuard lifecycle(that, kTahoeLifecycleScanAbortTask);
+    if (!lifecycle)
+        return;
+#endif
+    if (tahoeScanState(&sc->sc_ic) == ITL_TAHOE_SCAN_DRAINING &&
+        (sc->sc_ic.ic_if.if_flags & (IFF_UP | IFF_RUNNING)) ==
+            (IFF_UP | IFF_RUNNING) &&
+        (sc->sc_flags & IWX_FLAG_SHUTDOWN) == 0)
+        that->iwx_scan_abort(sc);
+}
+
+void ItlIwx::tahoeScanOnline(bool online)
+{
+    if (!tahoe_scan_lock_)
+        return;
+    IOInterruptState irq = IOSimpleLockLockDisableInterrupt(tahoe_scan_lock_);
+    tahoe_scan_online_ = online;
+    if (online) {
+        if (tahoe_scan_phase_ == ITL_TAHOE_SCAN_STOPPED)
+            tahoe_scan_phase_ = ITL_TAHOE_SCAN_IDLE;
+    } else if (tahoe_scan_phase_ == ITL_TAHOE_SCAN_IDLE ||
+               tahoe_scan_phase_ == ITL_TAHOE_SCAN_STOPPED) {
+        tahoe_scan_phase_ = ITL_TAHOE_SCAN_STOPPED;
+    } else {
+        /* READY does not prove stale notification drain. */
+        tahoe_scan_phase_ = ITL_TAHOE_SCAN_RESET_WAIT;
+    }
+    IOSimpleLockUnlockEnableInterrupt(tahoe_scan_lock_, irq);
+}
+
+void ItlIwx::tahoeScanResetComplete()
+{
+    if (getMainCommandGate())
+        getMainCommandGate()->runAction(tahoeScanResetAction, this);
+}
+
+IOReturn ItlIwx::tahoeScanResetAction(OSObject *, void *owner, void *, void *, void *)
+{
+    auto that = static_cast<ItlIwx *>(owner);
+    if (!that || !that->tahoe_scan_lock_) return kIOReturnNotReady;
+    auto ic = &that->com.sc_ic;
+    IOInterruptState irq = IOSimpleLockLockDisableInterrupt(that->tahoe_scan_lock_);
+    const uint32_t generation = that->tahoe_scan_generation_;
+    // Invalidate a command whose sender was still committing its flags.
+    if (that->tahoe_scan_serial_ != UINT32_MAX) ++that->tahoe_scan_serial_;
+    that->tahoe_scan_online_ = false;
+    that->tahoe_scan_phase_ = ITL_TAHOE_SCAN_STOPPED;
+    that->tahoe_scan_generation_ = 0;
+    that->tahoe_scan_starting_ = false;
+    that->tahoe_scan_terminal_pending_ = false;
+    that->tahoe_scan_terminal_processing_ = false;
+    that->tahoe_scan_terminal_status_ = 0;
+    IOSimpleLockUnlockEnableInterrupt(that->tahoe_scan_lock_, irq);
+    ic->ic_tahoe_scan_requested = false;
+    ++ic->ic_tahoe_scan_reset_count;
+    if (ic->ic_event_handler) {
+        // A proven hardware drain, explicitly distinct from firmware COMPLETE.
+        struct itl_tahoe_scan_event event {generation, 0};
+        (*ic->ic_event_handler)(ic, ITL_TAHOE_EVT_SCAN_RESET_DRAINED, &event);
+    }
+    return kIOReturnSuccess;
+}
+
+IOReturn ItlIwx::tahoeScanTerminalAction(OSObject *, void *owner, void *sc_arg,
+                                        void *status_arg, void *)
+{
+    ((ItlIwx *)owner)->iwx_endscan((struct iwx_softc *)sc_arg, 0,
+                                  *(const uint32_t *)status_arg);
+    return kIOReturnSuccess;
+}
+
+int ItlIwx::tahoeCommitScanStart(struct iwx_softc *sc, uint32_t serial)
+{
+    bool pending = false;
+    uint32_t status = 0;
+    int error = 0;
+    IOInterruptState irq = IOSimpleLockLockDisableInterrupt(tahoe_scan_lock_);
+    if (serial != tahoe_scan_serial_ || !tahoe_scan_starting_) {
+        error = ENXIO;
+    } else {
+        tahoe_scan_starting_ = false;
+        pending = tahoe_scan_terminal_pending_;
+        status = tahoe_scan_terminal_status_;
+        if (!tahoe_scan_online_ || tahoe_scan_phase_ == ITL_TAHOE_SCAN_RESET_WAIT)
+            error = ENXIO;
+    }
+    IOSimpleLockUnlockEnableInterrupt(tahoe_scan_lock_, irq);
+    if (pending && getMainCommandGate())
+        getMainCommandGate()->runAction(tahoeScanTerminalAction, this, sc, &status);
+    return error;
+}
+#endif
+
+int ItlIwx::
+iwx_send_scan_cmd(struct iwx_softc *sc, struct iwx_host_cmd *hcmd,
+                    const struct itl_iwx_scan_policy *scan, uint32_t *serial)
+{
+#ifdef AIRPORT_TAHOE
+    if (!tahoe_scan_lock_)
+        return ENXIO;
+    IOInterruptState irq = IOSimpleLockLockDisableInterrupt(tahoe_scan_lock_);
+    if (tahoe_scan_phase_ != ITL_TAHOE_SCAN_IDLE || !tahoe_scan_online_) {
+        IOSimpleLockUnlockEnableInterrupt(tahoe_scan_lock_, irq);
+        return EBUSY;
+    }
+    if (tahoe_scan_serial_ == UINT32_MAX) {
+        IOSimpleLockUnlockEnableInterrupt(tahoe_scan_lock_, irq);
+        return EOVERFLOW;
+    }
+    *serial = ++tahoe_scan_serial_;
+    tahoe_scan_phase_ = ITL_TAHOE_SCAN_ACTIVE;
+    tahoe_scan_starting_ = true;
+    tahoe_scan_terminal_pending_ = false;
+    tahoe_scan_generation_ = scan->requested ? scan->generation : 0;
+    IOSimpleLockUnlockEnableInterrupt(tahoe_scan_lock_, irq);
+#else
+    (void)scan;
+    *serial = 0;
+#endif
+    int error = iwx_send_cmd(sc, hcmd);
+#ifdef AIRPORT_TAHOE
+    if (error) {
+        /* A command error is not proof the firmware emitted no notification. */
+        irq = IOSimpleLockLockDisableInterrupt(tahoe_scan_lock_);
+        if (*serial == tahoe_scan_serial_) {
+            tahoe_scan_phase_ = tahoe_scan_online_ ?
+                ITL_TAHOE_SCAN_DRAINING : ITL_TAHOE_SCAN_RESET_WAIT;
+        }
+        IOSimpleLockUnlockEnableInterrupt(tahoe_scan_lock_, irq);
+        tahoeCommitScanStart(sc, *serial);
+    }
+#endif
+    return error;
+}
+
 uint8_t ItlIwx::
 iwx_umac_scan_fill_channels(struct iwx_softc *sc,
-                            struct iwx_scan_channel_cfg_umac *chan, int n_ssids, int bgscan)
+                            struct iwx_scan_channel_cfg_umac *chan, int n_ssids, int bgscan,
+                            const struct itl_iwx_scan_policy *scan)
 {
     struct ieee80211com *ic = &sc->sc_ic;
     struct ieee80211_channel *c;
     uint8_t nchan;
+#ifndef AIRPORT_TAHOE
+    (void)scan;
+#endif
+
     
     for (nchan = 0, c = &ic->ic_channels[1];
          c <= &ic->ic_channels[IEEE80211_CHAN_MAX] &&
@@ -7389,6 +9057,10 @@ iwx_umac_scan_fill_channels(struct iwx_softc *sc,
             continue;
         
         channel_num = ieee80211_mhz2ieee(c->ic_freq, 0);
+#ifdef AIRPORT_TAHOE
+        if (scan->restricted && !isset(scan->channels, channel_num))
+            continue;
+#endif
         if (isset(sc->sc_ucode_api,
                   IWX_UCODE_TLV_API_SCAN_EXT_CHAN_VER)) {
             chan->v2.channel_num = channel_num;
@@ -7404,7 +9076,11 @@ iwx_umac_scan_fill_channels(struct iwx_softc *sc,
             chan->v1.iter_interval = htole16(0);
         }
         
-        if (n_ssids != 0 && !bgscan)
+        if (n_ssids != 0 && (!bgscan
+#ifdef AIRPORT_TAHOE
+            || (scan->requested && scan->active)
+#endif
+            ))
             chan->flags = htole32(1 << 0); /* select SSID 0 */
         chan++;
         nchan++;
@@ -7414,13 +9090,13 @@ iwx_umac_scan_fill_channels(struct iwx_softc *sc,
 }
 
 int ItlIwx::
-iwx_fill_probe_req_v1(struct iwx_softc *sc, struct iwx_scan_probe_req_v1 *preq1)
+iwx_fill_probe_req_v1(struct iwx_softc *sc, struct iwx_scan_probe_req_v1 *preq1, const uint8_t *source_addr)
 {
     XYLog("%s\n", __FUNCTION__);
     struct iwx_scan_probe_req preq2;
     int err, i;
     
-    err = iwx_fill_probe_req(sc, &preq2);
+    err = iwx_fill_probe_req(sc, &preq2, source_addr);
     if (err)
         return err;
     
@@ -7433,7 +9109,7 @@ iwx_fill_probe_req_v1(struct iwx_softc *sc, struct iwx_scan_probe_req_v1 *preq1)
 }
 
 int ItlIwx::
-iwx_fill_probe_req(struct iwx_softc *sc, struct iwx_scan_probe_req *preq)
+iwx_fill_probe_req(struct iwx_softc *sc, struct iwx_scan_probe_req *preq, const uint8_t *source_addr)
 {
     XYLog("%s\n", __FUNCTION__);
     struct ieee80211com *ic = &sc->sc_ic;
@@ -7457,7 +9133,7 @@ iwx_fill_probe_req(struct iwx_softc *sc, struct iwx_scan_probe_req *preq)
     wh->i_fc[1] = IEEE80211_FC1_DIR_NODS;
 //    IEEE80211_ADDR_COPY(ic->ic_myaddr, LLADDR(ifp->if_sadl));
     IEEE80211_ADDR_COPY(wh->i_addr1, etherbroadcastaddr);
-    IEEE80211_ADDR_COPY(wh->i_addr2, ic->ic_myaddr);
+    IEEE80211_ADDR_COPY(wh->i_addr2, source_addr);
     IEEE80211_ADDR_COPY(wh->i_addr3, etherbroadcastaddr);
     *(uint16_t *)&wh->i_dur[0] = 0;    /* filled by HW */
     *(uint16_t *)&wh->i_seq[0] = 0;    /* filled by HW */
@@ -7740,10 +9416,13 @@ iwx_get_scan_req_umac_data(struct iwx_softc *sc, struct iwx_scan_req_umac *req)
 #define IWX_MVM_6GHZ_PASSIVE_SCAN_MIN_CHANS 4
 
 int ItlIwx::
-iwx_umac_scan(struct iwx_softc *sc, int bgscan)
+iwx_umac_scan(struct iwx_softc *sc, int bgscan, uint32_t *serial)
 {
     XYLog("%s\n", __FUNCTION__);
-    struct ieee80211com *ic = &sc->sc_ic;
+    struct itl_iwx_scan_policy scan;
+    int capture_error = iwx_capture_scan_policy(sc, bgscan, &scan);
+    if (capture_error)
+        return capture_error;
     struct iwx_host_cmd hcmd = {
         .id = iwx_cmd_id(IWX_SCAN_REQ_UMAC, IWX_LONG_GROUP, 0),
         .len = { 0, },
@@ -7761,9 +9440,9 @@ iwx_umac_scan(struct iwx_softc *sc, int bgscan)
     uint8_t scan_ver = iwx_lookup_cmd_ver(sc, IWX_LONG_GROUP, IWX_SCAN_REQ_UMAC);
     
     if (scan_ver == 12)
-        return iwx_umac_scan_v12(sc, bgscan);
+        return iwx_umac_scan_v12(sc, bgscan, &scan, serial);
     else if (scan_ver == 14)
-        return iwx_umac_scan_v14(sc, bgscan);
+        return iwx_umac_scan_v14(sc, bgscan, &scan, serial);
     
     req_len = iwx_umac_scan_size(sc);
     if ((req_len < IWX_SCAN_REQ_UMAC_SIZE_V1 +
@@ -7788,7 +9467,7 @@ iwx_umac_scan(struct iwx_softc *sc, int bgscan)
         if (isset(sc->sc_ucode_api, IWX_UCODE_TLV_API_ADWELL_HB_DEF_N_AP))
             req->v9.adwell_default_hb_n_aps = IWX_SCAN_ADWELL_DEFAULT_HB_N_APS;
         
-        if (ic->ic_des_esslen != 0 && !bgscan)
+        if (scan.active && scan.ssid_len != 0)
             req->v7.adwell_max_budget =
             htole16(IWX_SCAN_ADWELL_MAX_BUDGET_DIRECTED_SCAN);
         else
@@ -7849,7 +9528,13 @@ iwx_umac_scan(struct iwx_softc *sc, int bgscan)
     chanparam = iwx_get_scan_req_umac_chan_param(sc, req);
     chanparam->count = iwx_umac_scan_fill_channels(sc,
                                                    (struct iwx_scan_channel_cfg_umac *)cmd_data,
-                                                   ic->ic_des_esslen != 0, bgscan);
+                                                   scan.active, bgscan, &scan);
+#ifdef AIRPORT_TAHOE
+    if (chanparam->count == 0) {
+        ::free(req);
+        return EINVAL;
+    }
+#endif
     chanparam->flags = 0;
     
     tail_data = (uint8_t*)cmd_data + sizeof(struct iwx_scan_channel_cfg_umac) *
@@ -7865,21 +9550,22 @@ iwx_umac_scan(struct iwx_softc *sc, int bgscan)
         IWX_UMAC_SCAN_GEN_FLAGS2_ALLOW_CHNL_REORDER;
     }
     
-    /* Check if we're doing an active directed scan. */
-    if (ic->ic_des_esslen != 0 && !bgscan) {
+    /* SSID 0 may be empty for an explicitly active broadcast scan. */
+    if (scan.active) {
         if (isset(sc->sc_ucode_api, IWX_UCODE_TLV_API_SCAN_EXT_CHAN_VER)) {
             tail->direct_scan[0].id = IEEE80211_ELEMID_SSID;
-            tail->direct_scan[0].len = ic->ic_des_esslen;
-            memcpy(tail->direct_scan[0].ssid, ic->ic_des_essid,
-                   ic->ic_des_esslen);
+            tail->direct_scan[0].len = scan.ssid_len;
+            memcpy(tail->direct_scan[0].ssid, scan.ssid,
+                   scan.ssid_len);
         } else {
             tailv1->direct_scan[0].id = IEEE80211_ELEMID_SSID;
-            tailv1->direct_scan[0].len = ic->ic_des_esslen;
-            memcpy(tailv1->direct_scan[0].ssid, ic->ic_des_essid,
-                   ic->ic_des_esslen);
+            tailv1->direct_scan[0].len = scan.ssid_len;
+            memcpy(tailv1->direct_scan[0].ssid, scan.ssid,
+                   scan.ssid_len);
         }
-        req->general_flags |=
-        htole32(IWX_UMAC_SCAN_GEN_FLAGS_PRE_CONNECT);
+        if (scan.ssid_len != 0)
+            req->general_flags |=
+                htole32(IWX_UMAC_SCAN_GEN_FLAGS_PRE_CONNECT);
     } else
         req->general_flags |= htole32(IWX_UMAC_SCAN_GEN_FLAGS_PASSIVE);
     
@@ -7897,9 +9583,9 @@ iwx_umac_scan(struct iwx_softc *sc, int bgscan)
     }
     
     if (isset(sc->sc_ucode_api, IWX_UCODE_TLV_API_SCAN_EXT_CHAN_VER))
-        err = iwx_fill_probe_req(sc, &tail->preq);
+        err = iwx_fill_probe_req(sc, &tail->preq, scan.source_addr);
     else
-        err = iwx_fill_probe_req_v1(sc, &tailv1->preq);
+        err = iwx_fill_probe_req_v1(sc, &tailv1->preq, scan.source_addr);
     if (err) {
         ::free(req);
         return err;
@@ -7909,16 +9595,17 @@ iwx_umac_scan(struct iwx_softc *sc, int bgscan)
     tail->schedule[0].interval = 0;
     tail->schedule[0].iter_count = 1;
     
-    err = iwx_send_cmd(sc, &hcmd);
+    err = iwx_send_scan_cmd(sc, &hcmd, &scan, serial);
     ::free(req);
     return err;
 }
 
 int ItlIwx::
-iwx_umac_scan_v12(struct iwx_softc *sc, int bgscan)
+iwx_umac_scan_v12(struct iwx_softc *sc, int bgscan,
+                    const struct itl_iwx_scan_policy *captured_scan, uint32_t *serial)
 {
     XYLog("%s\n", __FUNCTION__);
-    struct ieee80211com *ic = &sc->sc_ic;
+    const struct itl_iwx_scan_policy &scan = *captured_scan;
     int err = 0, async = bgscan;
     struct iwx_scan_req_umac_v12 *req;
     size_t req_len;
@@ -7947,7 +9634,7 @@ iwx_umac_scan_v12(struct iwx_softc *sc, int bgscan)
     
     req->ooc_priority = htole32(IWX_SCAN_PRIORITY_EXT_6);
     
-    if (ic->ic_des_esslen == 0 || bgscan)
+    if (!scan.active)
         gen_flags |= IWX_UMAC_SCAN_GEN_FLAGS_V2_FORCE_PASSIVE;
     
     gen_flags |= IWX_UMAC_SCAN_GEN_FLAGS_V2_PASS_ALL |
@@ -7960,7 +9647,7 @@ iwx_umac_scan_v12(struct iwx_softc *sc, int bgscan)
     general_params->adwell_default_2g = IWX_SCAN_ADWELL_DEFAULT_LB_N_APS;
     general_params->adwell_default_5g = IWX_SCAN_ADWELL_DEFAULT_HB_N_APS;
 
-    if (ic->ic_des_esslen != 0 && !bgscan)
+    if (scan.active && scan.ssid_len != 0)
         general_params->adwell_max_budget =
             cpu_to_le16(IWX_SCAN_ADWELL_MAX_BUDGET_DIRECTED_SCAN);
     else
@@ -7987,16 +9674,18 @@ iwx_umac_scan_v12(struct iwx_softc *sc, int bgscan)
     req->scan_params.periodic_params.schedule[0].interval = 0;
     req->scan_params.periodic_params.schedule[0].iter_count = 1;
     
-    err = iwx_fill_probe_req(sc, &req->scan_params.probe_params.preq);
-    if (err)
+    err = iwx_fill_probe_req(sc, &req->scan_params.probe_params.preq, scan.source_addr);
+    if (err) {
+        ::free(req);
         return err;
+    }
 
-    if (ic->ic_des_esslen != 0 && !bgscan) {
+    if (scan.active) {
         req->scan_params.probe_params.ssid_num = 1;
         req->scan_params.probe_params.direct_scan[0].id = IEEE80211_ELEMID_SSID;
-        req->scan_params.probe_params.direct_scan[0].len = ic->ic_des_esslen;
-        memcpy(req->scan_params.probe_params.direct_scan[0].ssid, ic->ic_des_essid,
-               ic->ic_des_esslen);
+        req->scan_params.probe_params.direct_scan[0].len = scan.ssid_len;
+        memcpy(req->scan_params.probe_params.direct_scan[0].ssid, scan.ssid,
+               scan.ssid_len);
     } else
         req->scan_params.probe_params.ssid_num = 0;
     
@@ -8005,19 +9694,26 @@ iwx_umac_scan_v12(struct iwx_softc *sc, int bgscan)
     cp->flags = IWX_SCAN_CHANNEL_FLAG_ENABLE_CHAN_ORDER;
     cp->count = iwx_umac_scan_fill_channels(sc,
                                             (struct iwx_scan_channel_cfg_umac *)cp->channel_config,
-                                            ic->ic_des_esslen != 0, bgscan);
+                                            scan.active, bgscan, &scan);
+#ifdef AIRPORT_TAHOE
+    if (cp->count == 0) {
+        ::free(req);
+        return EINVAL;
+    }
+#endif
     cp->num_of_aps_override = IWX_SCAN_ADWELL_N_APS_GO_FRIENDLY;
     
-    err = iwx_send_cmd(sc, &hcmd);
+    err = iwx_send_scan_cmd(sc, &hcmd, &scan, serial);
     ::free(req);
     return err;
 }
 
 int ItlIwx::
-iwx_umac_scan_v14(struct iwx_softc *sc, int bgscan)
+iwx_umac_scan_v14(struct iwx_softc *sc, int bgscan,
+                    const struct itl_iwx_scan_policy *captured_scan, uint32_t *serial)
 {
     XYLog("%s\n", __FUNCTION__);
-    struct ieee80211com *ic = &sc->sc_ic;
+    const struct itl_iwx_scan_policy &scan = *captured_scan;
     int err = 0, async = bgscan;
     struct iwx_scan_req_umac_v14 *req;
     size_t req_len;
@@ -8046,7 +9742,7 @@ iwx_umac_scan_v14(struct iwx_softc *sc, int bgscan)
     
     req->ooc_priority = htole32(IWX_SCAN_PRIORITY_EXT_6);
     
-    if (ic->ic_des_esslen == 0 || bgscan)
+    if (!scan.active)
         gen_flags |= IWX_UMAC_SCAN_GEN_FLAGS_V2_FORCE_PASSIVE;
     
     gen_flags |= IWX_UMAC_SCAN_GEN_FLAGS_V2_PASS_ALL |
@@ -8058,7 +9754,7 @@ iwx_umac_scan_v14(struct iwx_softc *sc, int bgscan)
         IWX_SCAN_ADWELL_DEFAULT_N_APS_SOCIAL;
     general_params->adwell_default_2g = IWX_SCAN_ADWELL_DEFAULT_LB_N_APS;
     general_params->adwell_default_5g = IWX_SCAN_ADWELL_DEFAULT_HB_N_APS;
-    if (ic->ic_des_esslen != 0 && !bgscan)
+    if (scan.active && scan.ssid_len != 0)
         general_params->adwell_max_budget =
             cpu_to_le16(IWX_SCAN_ADWELL_MAX_BUDGET_DIRECTED_SCAN);
     else
@@ -8085,14 +9781,16 @@ iwx_umac_scan_v14(struct iwx_softc *sc, int bgscan)
     req->scan_params.periodic_params.schedule[0].interval = 0;
     req->scan_params.periodic_params.schedule[0].iter_count = 1;
     
-    err = iwx_fill_probe_req(sc, &req->scan_params.probe_params.preq);
-    if (err)
+    err = iwx_fill_probe_req(sc, &req->scan_params.probe_params.preq, scan.source_addr);
+    if (err) {
+        ::free(req);
         return err;
-    if (ic->ic_des_esslen != 0 && !bgscan) {
+    }
+    if (scan.active) {
         req->scan_params.probe_params.direct_scan[0].id = IEEE80211_ELEMID_SSID;
-        req->scan_params.probe_params.direct_scan[0].len = ic->ic_des_esslen;
-        memcpy(req->scan_params.probe_params.direct_scan[0].ssid, ic->ic_des_essid,
-               ic->ic_des_esslen);
+        req->scan_params.probe_params.direct_scan[0].len = scan.ssid_len;
+        memcpy(req->scan_params.probe_params.direct_scan[0].ssid, scan.ssid,
+               scan.ssid_len);
     }
     
     cp = &req->scan_params.channel_params;
@@ -8100,11 +9798,17 @@ iwx_umac_scan_v14(struct iwx_softc *sc, int bgscan)
     cp->flags = IWX_SCAN_CHANNEL_FLAG_ENABLE_CHAN_ORDER;
     cp->count = iwx_umac_scan_fill_channels(sc,
                                             (struct iwx_scan_channel_cfg_umac *)cp->channel_config,
-                                            ic->ic_des_esslen != 0, bgscan);
+                                            scan.active, bgscan, &scan);
+#ifdef AIRPORT_TAHOE
+    if (cp->count == 0) {
+        ::free(req);
+        return EINVAL;
+    }
+#endif
     cp->n_aps_override[0] = IWX_SCAN_ADWELL_N_APS_GO_FRIENDLY;
     cp->n_aps_override[1] = IWX_SCAN_ADWELL_N_APS_SOCIAL_CHS;
     
-    err = iwx_send_cmd(sc, &hcmd);
+    err = iwx_send_scan_cmd(sc, &hcmd, &scan, serial);
     ::free(req);
     return err;
 }
@@ -8432,6 +10136,14 @@ iwx_mac_ctxt_cmd(struct iwx_softc *sc, struct iwx_node *in, uint32_t action,
         cmd.filter_flags |= htole32(IWX_MAC_FILTER_IN_BEACON);
     else
         iwx_mac_ctxt_cmd_fill_sta(sc, in, &cmd.sta, assoc);
+
+#ifdef AIRPORT_TAHOE
+    // Native link liveness is driven by actual host RX beacons. Keep the
+    // associated BSS beacon stream visible after DTIM/association completes;
+    // this neither enables promiscuous mode nor manufactures beacon counts.
+    if (ic->ic_opmode == IEEE80211_M_STA)
+        cmd.filter_flags |= htole32(IWX_MAC_FILTER_IN_BEACON);
+#endif
     
     if (ni->ni_flags & IEEE80211_NODE_HE) {
         cmd.filter_flags |= htole32(IWX_MAC_FILTER_IN_11AX);
@@ -8560,6 +10272,17 @@ iwx_scan(struct iwx_softc *sc)
     struct ieee80211com *ic = &sc->sc_ic;
     struct _ifnet *ifp = IC2IFP(ic);
     int err;
+#ifdef AIRPORT_TAHOE
+    const int generation = sc->sc_generation;
+    if (sc->sc_flags & IWX_FLAG_SHUTDOWN)
+        return ENXIO;
+    const uint32_t phase = tahoeScanState(ic);
+    if (phase != ITL_TAHOE_SCAN_IDLE) {
+        IOLog("AirportItlwm[Tahoe] scan rejected generation=%d state=%d flags=0x%x phase=%u error=%d\n",
+            generation, ic->ic_state, sc->sc_flags, phase, EBUSY);
+        return EBUSY;
+    }
+#endif
     
     if (sc->sc_flags & IWX_FLAG_BGSCAN) {
         err = iwx_scan_abort(sc);
@@ -8570,11 +10293,24 @@ iwx_scan(struct iwx_softc *sc)
         }
     }
     
-    err = iwx_umac_scan(sc, 0);
+    uint32_t serial = 0;
+    err = iwx_umac_scan(sc, 0, &serial);
     if (err) {
+#ifdef AIRPORT_TAHOE
+        IOLog("AirportItlwm[Tahoe] scan command failed generation=%d state=%d flags=0x%x phase=%u error=%d\n",
+            generation, ic->ic_state, sc->sc_flags, tahoeScanState(ic), err);
+#endif
         XYLog("%s: could not initiate scan\n", DEVNAME(sc));
         return err;
     }
+#ifdef AIRPORT_TAHOE
+    if (generation != sc->sc_generation ||
+        (sc->sc_flags & IWX_FLAG_SHUTDOWN)) {
+        IOLog("AirportItlwm[Tahoe] scan cancelled generation=%d current=%d flags=0x%x phase=%u\n",
+            generation, sc->sc_generation, sc->sc_flags, tahoeScanState(ic));
+        return ENXIO;
+    }
+#endif
     
     /*
      * The current mode might have been fixed during association.
@@ -8594,8 +10330,15 @@ iwx_scan(struct iwx_softc *sc)
     }
     ic->ic_state = IEEE80211_S_SCAN;
     wakeupOn(&ic->ic_state); /* wake iwx_init() */
-    
+#ifdef AIRPORT_TAHOE
+    err = tahoeCommitScanStart(sc, serial);
+    if (err)
+        IOLog("AirportItlwm[Tahoe] scan commit failed generation=%d state=%d flags=0x%x phase=%u error=%d\n",
+            generation, ic->ic_state, sc->sc_flags, tahoeScanState(ic), err);
+    return err;
+#else
     return 0;
+#endif
 }
 
 int ItlIwx::
@@ -8605,18 +10348,27 @@ iwx_bgscan(struct ieee80211com *ic)
     struct iwx_softc *sc = (struct iwx_softc *)IC2IFP(ic)->if_softc;
     ItlIwx *that = container_of(sc, ItlIwx, com);
     int err;
+#ifdef AIRPORT_TAHOE
+    if (that->tahoeScanState(ic) != ITL_TAHOE_SCAN_IDLE)
+        return EBUSY;
+#endif
     
     if (sc->sc_flags & IWX_FLAG_SCANNING)
         return 0;
     
-    err = that->iwx_umac_scan(sc, 1);
+    uint32_t serial = 0;
+    err = that->iwx_umac_scan(sc, 1, &serial);
     if (err) {
         XYLog("%s: could not initiate scan\n", DEVNAME(sc));
         return err;
     }
     
     sc->sc_flags |= IWX_FLAG_BGSCAN;
+#ifdef AIRPORT_TAHOE
+    return that->tahoeCommitScanStart(sc, serial);
+#else
     return 0;
+#endif
 }
 
 int ItlIwx::
@@ -8635,9 +10387,19 @@ iwx_scan_abort(struct iwx_softc *sc)
     XYLog("%s\n", __FUNCTION__);
     int err;
     
+#ifdef AIRPORT_TAHOE
+    if (tahoe_scan_lock_) {
+        IOInterruptState irq = IOSimpleLockLockDisableInterrupt(tahoe_scan_lock_);
+        if (tahoe_scan_phase_ == ITL_TAHOE_SCAN_ACTIVE)
+            tahoe_scan_phase_ = ITL_TAHOE_SCAN_DRAINING;
+        IOSimpleLockUnlockEnableInterrupt(tahoe_scan_lock_, irq);
+    }
+#endif
     err = iwx_umac_scan_abort(sc);
+#ifndef AIRPORT_TAHOE
     if (err == 0)
         sc->sc_flags &= ~(IWX_FLAG_SCANNING | IWX_FLAG_BGSCAN);
+#endif
     return err;
 }
 
@@ -9027,12 +10789,30 @@ static uint32_t iwx_new_rate_from_v1(uint32_t rate_v1)
         }
         /* if legacy format */
     } else {
+#ifdef AIRPORT_TAHOE
+        int legacy_rate = iwx_hwrate_to_plcp_idx(rate_v1);
+
+        if (legacy_rate < 0 ||
+            legacy_rate > IWX_LAST_NON_HT_RATE)
+            return 0;
+        if (rate_v1 & IWX_RATE_MCS_CCK_MSK_V1) {
+            if (legacy_rate >= IWX_RIDX_OFDM)
+                return 0;
+            rate_v2 |= legacy_rate;
+        } else {
+            if (legacy_rate < IWX_RIDX_OFDM)
+                return 0;
+            rate_v2 |= legacy_rate - IWX_RIDX_OFDM;
+            rate_v2 |= IWX_RATE_MCS_LEGACY_OFDM_MSK;
+        }
+#else
         uint32_t legacy_rate = iwx_hwrate_to_plcp_idx(rate_v1);
-        
+
         WARN_ON(legacy_rate < 0);
         rate_v2 |= legacy_rate;
         if (!(rate_v1 & IWX_RATE_MCS_CCK_MSK_V1))
             rate_v2 |= IWX_RATE_MCS_LEGACY_OFDM_MSK;
+#endif
     }
     
     /* convert flags */
@@ -9056,6 +10836,89 @@ static uint32_t iwx_new_rate_from_v1(uint32_t rate_v1)
     return rate_v2;
 }
 
+#ifdef AIRPORT_TAHOE
+static uint8_t iwx_rate_api_version(struct iwx_softc *sc, uint8_t group,
+                                    uint8_t cmd, bool notification)
+{
+    if (sc->n_cmd_versions <= 0)
+        return 0xff;
+    for (int i = 0; i < sc->n_cmd_versions; ++i) {
+        const struct iwx_fw_cmd_version *entry = &sc->cmd_versions[i];
+        if (entry->group == group && entry->cmd == cmd)
+            return notification ? entry->notif_ver : entry->cmd_ver;
+    }
+    // Like the Linux firmware-version lookup, a missing entry in a loaded
+    // CMD_VERSIONS table means the command's default API version (zero).
+    return 0;
+}
+
+static IwxTxRate::FirmwareRateVersion iwx_firmware_rate_version(struct iwx_softc *sc)
+{
+    const uint8_t version = IwxTxRate::firmwareRateVersion(
+        iwx_rate_api_version(sc, IWX_LONG_GROUP, IWX_TX_CMD, false),
+        iwx_rate_api_version(sc, IWX_DATA_PATH_GROUP,
+                             IWX_TLC_MNG_UPDATE_NOTIF, true),
+        iwx_rate_api_version(sc, IWX_LEGACY_GROUP,
+                             IWX_REPLY_RX_MPDU_CMD, true),
+        iwx_rate_api_version(sc, IWX_LONG_GROUP, IWX_TX_CMD, true),
+        iwx_rate_api_version(sc, IWX_DATA_PATH_GROUP,
+                             IWX_RX_NO_DATA_NOTIF, true));
+    return static_cast<IwxTxRate::FirmwareRateVersion>(version);
+}
+
+static bool iwx_normalize_fw_rate(uint32_t rawRate,
+                                  IwxTxRate::FirmwareRateVersion version,
+                                  uint32_t *normalizedRate)
+{
+    if (version == IwxTxRate::FirmwareRateV1) {
+        const bool hasMcsFormat =
+            (rawRate & (IWX_RATE_MCS_HT_MSK_V1 |
+                        IWX_RATE_MCS_VHT_MSK_V1 |
+                        IWX_RATE_MCS_HE_MSK_V1)) != 0;
+        const int legacyIndex = hasMcsFormat ? IWX_RATE_INVALID :
+            iwx_hwrate_to_plcp_idx(rawRate);
+        if (!IwxTxRate::validV1Rate(
+                rawRate, legacyIndex, IWX_RATE_INVALID, IWX_RIDX_OFDM,
+                IWX_LAST_NON_HT_RATE))
+            return false;
+        *normalizedRate = iwx_new_rate_from_v1(rawRate);
+        return true;
+    }
+    return IwxTxRate::normalizeFirmwareRate(rawRate, version,
+                                            normalizedRate);
+}
+
+static void iwx_store_current_tx_rate(struct iwx_softc *sc,
+                                     struct ieee80211_node *ni,
+                                     uint32_t generation, uint32_t rawRate,
+                                     IwxTxRate::Source source)
+{
+    struct ieee80211com *ic = &sc->sc_ic;
+    if (ni == nullptr || (source != IwxTxRate::SourceTxSingle &&
+                          source != IwxTxRate::SourceTxAggregate) ||
+        ic->ic_opmode != IEEE80211_M_STA ||
+        ic->ic_state != IEEE80211_S_RUN || ic->ic_bss != ni ||
+        generation == 0 ||
+        generation != __atomic_load_n(&sc->sc_tx_rate_generation,
+                                      __ATOMIC_ACQUIRE))
+        return;
+
+    const IwxTxRate::FirmwareRateVersion version =
+        iwx_firmware_rate_version(sc);
+    uint32_t normalizedRate = 0;
+    const bool normalized = iwx_normalize_fw_rate(rawRate, version,
+                                                   &normalizedRate);
+    const uint64_t sample = IwxTxRate::makeCurrentSample(
+        normalized, normalizedRate, source, version);
+    IwxTxRate::storeSnapshot(
+        &ni->ni_tx_rate_sequence, &ni->ni_tx_rate_sample,
+        &ni->ni_tx_rate_flags_raw, &ni->ni_tx_rate_sample_generation,
+        &ni->ni_tx_rate_update_count,
+        &ni->ni_tx_rate_single_count, &ni->ni_tx_rate_aggregate_count,
+        sample, rawRate, source, generation);
+}
+#endif
+
 void ItlIwx::
 iwx_rs_update(struct iwx_softc *sc, struct iwx_tlc_update_notif *notif)
 {
@@ -9063,9 +10926,16 @@ iwx_rs_update(struct iwx_softc *sc, struct iwx_tlc_update_notif *notif)
     struct ieee80211_node *ni = ic->ic_bss;
     struct ieee80211_rateset *rs = &ni->ni_rates;
     uint32_t rate_n_flags;
+#ifdef AIRPORT_TAHOE
+    uint32_t raw_rate_n_flags;
+    bool rate_valid = true;
+    IwxTxRate::FirmwareRateVersion firmware_rate_version;
+#endif
     int i;
     char pretty_rate[100];
+#ifndef AIRPORT_TAHOE
     uint8_t notifver;
+#endif
     uint32_t format;
 
     if (notif->sta_id != IWX_STATION_ID ||
@@ -9073,6 +10943,36 @@ iwx_rs_update(struct iwx_softc *sc, struct iwx_tlc_update_notif *notif)
         return;
 
     rate_n_flags = le32toh(notif->rate);
+#ifdef AIRPORT_TAHOE
+    raw_rate_n_flags = rate_n_flags;
+#endif
+#ifdef AIRPORT_TAHOE
+    firmware_rate_version = iwx_firmware_rate_version(sc);
+    if (firmware_rate_version == IwxTxRate::FirmwareRateV1) {
+        iwx_rs_pretty_print_rate_v1(pretty_rate, sizeof(pretty_rate),
+                                    rate_n_flags);
+        // V1 HT/VHT/HE carry MCS codes; only legacy samples use the PLCP
+        // index lookup, with the CCK marker checked against the rate band.
+        rate_valid = iwx_normalize_fw_rate(raw_rate_n_flags,
+                                           firmware_rate_version,
+                                           &rate_n_flags);
+    } else if (firmware_rate_version == IwxTxRate::FirmwareRateV2 ||
+               firmware_rate_version == IwxTxRate::FirmwareRateV3) {
+        rate_valid = iwx_normalize_fw_rate(raw_rate_n_flags,
+                                           firmware_rate_version,
+                                           &rate_n_flags);
+        if (rate_valid)
+            iwx_rs_pretty_print_rate(pretty_rate, sizeof(pretty_rate),
+                                     rate_n_flags);
+        else
+            strlcpy(pretty_rate, "unrecognized current firmware rate",
+                    sizeof(pretty_rate));
+    } else {
+        rate_valid = false;
+        strlcpy(pretty_rate, "unknown firmware rate version",
+                sizeof(pretty_rate));
+    }
+#else
     notifver = iwx_lookup_notif_ver(sc, IWX_DATA_PATH_GROUP, IWX_TLC_MNG_UPDATE_NOTIF);
     if (notifver < 3 || notifver == IWX_FW_CMD_VER_UNKNOWN) {
         iwx_rs_pretty_print_rate_v1(pretty_rate, sizeof(pretty_rate),
@@ -9082,7 +10982,20 @@ iwx_rs_update(struct iwx_softc *sc, struct iwx_tlc_update_notif *notif)
         iwx_rs_pretty_print_rate(pretty_rate, sizeof(pretty_rate),
                                  rate_n_flags);
     }
+#endif
     XYLog("%s new rate: %s\n", __FUNCTION__, pretty_rate);
+#ifdef AIRPORT_TAHOE
+    // Keep TLC's "current initial rate" as an explicit baseline. Native
+    // getRATE/MCS/NSS only read successful TX completion snapshots.
+    __atomic_store_n(&ni->ni_tx_rate_tlc_flags_raw, raw_rate_n_flags,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&ni->ni_tx_rate_tlc_sample,
+                     IwxTxRate::makeTlcBaselineSample(
+                         rate_valid, rate_n_flags, firmware_rate_version),
+                     __ATOMIC_RELEASE);
+    if (!rate_valid)
+        return;
+#endif
     format = rate_n_flags & IWX_RATE_MCS_MOD_TYPE_MSK;
     if (format == IWX_RATE_MCS_VHT_MSK ||
         format == IWX_RATE_MCS_HE_MSK ||
@@ -9091,6 +11004,12 @@ iwx_rs_update(struct iwx_softc *sc, struct iwx_tlc_update_notif *notif)
     } else if (format == IWX_RATE_MCS_HT_MSK) {
         ni->ni_txmcs = IWX_RATE_HT_MCS_INDEX(rate_n_flags);
     } else {
+#ifdef AIRPORT_TAHOE
+        uint8_t code = rate_n_flags & IWX_RATE_LEGACY_RATE_MSK;
+        uint8_t index = code + (format == IWX_RATE_MCS_LEGACY_OFDM_MSK ?
+                                IWX_RIDX_OFDM : IWX_RATE_1M_INDEX);
+        uint8_t rval = index < nitems(iwx_rates) ? iwx_rates[index].rate : 0;
+#else
         uint8_t plcp = (rate_n_flags & IWX_RATE_LEGACY_RATE_MSK_V1);
         uint8_t rval = 0;
         for (i = IWX_RATE_1M_INDEX; i < nitems(iwx_rates); i++) {
@@ -9099,6 +11018,7 @@ iwx_rs_update(struct iwx_softc *sc, struct iwx_tlc_update_notif *notif)
                 break;
             }
         }
+#endif
         if (rval) {
             uint8_t rv;
             for (i = 0; i < rs->rs_nrates; i++) {
@@ -9611,8 +11531,17 @@ iwx_media_change(struct _ifnet *ifp)
     
     if ((ifp->if_flags & (IFF_UP | IFF_RUNNING)) ==
         (IFF_UP | IFF_RUNNING)) {
-        iwx_stop(ifp);
-        err = iwx_init(ifp);
+#ifdef AIRPORT_TAHOE
+        TahoeLifecycleGuard lifecycle(this);
+        if (!lifecycle)
+            return EBUSY;
+        if ((ifp->if_flags & (IFF_UP | IFF_RUNNING)) !=
+            (IFF_UP | IFF_RUNNING))
+            return 0;
+#endif
+        err = iwx_stop(ifp, IwxResetTrace::ResetReason::kMediaChange);
+        if (err == 0)
+            err = iwx_init(ifp);
     }
     return err;
 }
@@ -9623,11 +11552,28 @@ iwx_newstate_task(void *psc)
     XYLog("%s\n", __FUNCTION__);
     struct iwx_softc *sc = (struct iwx_softc *)psc;
     struct ieee80211com *ic = &sc->sc_ic;
+#ifdef AIRPORT_TAHOE
+    int err = 0, s = splnet();
+    ItlIwx *that = container_of(sc, ItlIwx, com);
+    int queue_error = taskq_enter_unpaused(sc->sc_nswq);
+    if (queue_error) {
+        IOLog("AirportItlwm[Tahoe] newstate snapshot unavailable generation=%d error=%d flags=0x%x\n",
+            sc->sc_generation, queue_error, sc->sc_flags);
+        splx(s);
+        return;
+    }
+    enum ieee80211_state nstate = sc->ns_nstate;
+    enum ieee80211_state ostate = ic->ic_state;
+    int arg = sc->ns_arg;
+    const int generation = that->tahoe_newstate_generation_;
+    taskq_leave(sc->sc_nswq);
+#else
     enum ieee80211_state nstate = sc->ns_nstate;
     enum ieee80211_state ostate = ic->ic_state;
     int arg = sc->ns_arg;
     int err = 0, s = splnet();
     ItlIwx *that = container_of(sc, ItlIwx, com);
+#endif
     
     XYLog("%s sc->sc_flags & IWX_FLAG_SHUTDOWN %s\n", __FUNCTION__, sc->sc_flags & IWX_FLAG_SHUTDOWN ? "true" : "false");
     if (sc->sc_flags & IWX_FLAG_SHUTDOWN) {
@@ -9636,6 +11582,14 @@ iwx_newstate_task(void *psc)
         splx(s);
         return;
     }
+#ifdef AIRPORT_TAHOE
+    if (generation != sc->sc_generation) {
+        IOLog("AirportItlwm[Tahoe] stale newstate task generation=%d current=%d state=%d target=%d flags=0x%x\n",
+            generation, sc->sc_generation, ic->ic_state, nstate, sc->sc_flags);
+        splx(s);
+        return;
+    }
+#endif
     
     if (ostate == IEEE80211_S_SCAN) {
         if (nstate == ostate) {
@@ -9675,6 +11629,14 @@ iwx_newstate_task(void *psc)
             splx(s);
             return;
         }
+#ifdef AIRPORT_TAHOE
+        if (generation != sc->sc_generation) {
+            IOLog("AirportItlwm[Tahoe] newstate task cancelled generation=%d current=%d state=%d target=%d flags=0x%x\n",
+                generation, sc->sc_generation, ic->ic_state, nstate, sc->sc_flags);
+            splx(s);
+            return;
+        }
+#endif
     }
     
     switch (nstate) {
@@ -9709,11 +11671,42 @@ iwx_newstate_task(void *psc)
     }
     
 out:
+#ifdef AIRPORT_TAHOE
+    if (generation != sc->sc_generation ||
+        (sc->sc_flags & IWX_FLAG_SHUTDOWN)) {
+        if (generation != sc->sc_generation)
+            IOLog("AirportItlwm[Tahoe] newstate completion discarded generation=%d current=%d state=%d target=%d error=%d flags=0x%x\n",
+                generation, sc->sc_generation, ic->ic_state, nstate, err, sc->sc_flags);
+        splx(s);
+        return;
+    }
+#endif
     if ((sc->sc_flags & IWX_FLAG_SHUTDOWN) == 0) {
-        if (err)
+        if (err) {
+#ifdef AIRPORT_TAHOE
+            IOLog("AirportItlwm[Tahoe] newstate failed generation=%d state=%d target=%d error=%d phase=%u flags=0x%x\n",
+                generation, ic->ic_state, nstate, err,
+                tahoeScanState(ic), sc->sc_flags);
+            if (err != EBUSY || tahoeScanState(ic) == ITL_TAHOE_SCAN_IDLE) {
+                that->tahoeRecordInitTaskTrigger(
+                    IwxResetTrace::InitTaskTrigger::kNewStateError);
+                task_add(systq, &sc->init_task);
+            }
+#else
             task_add(systq, &sc->init_task);
-        else
+#endif
+        } else {
+#ifdef AIRPORT_TAHOE
+            int state_error = sc->sc_newstate(ic, nstate, arg);
+            if (state_error == 0 && nstate == IEEE80211_S_RUN &&
+                ic->ic_state == IEEE80211_S_RUN &&
+                ic->ic_assoc_status == IEEE80211_STATUS_SUCCESS &&
+                ic->ic_event_handler)
+                (*ic->ic_event_handler)(ic, IEEE80211_EVT_STA_ASSOC_DONE, NULL);
+#else
             sc->sc_newstate(ic, nstate, arg);
+#endif
+        }
     }
     //    refcnt_rele_wake(&sc->task_refs);
     splx(s);
@@ -9726,6 +11719,19 @@ iwx_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
     struct iwx_softc *sc = (struct iwx_softc *)ifp->if_softc;
     ItlIwx *that = container_of(sc, ItlIwx, com);
     struct ieee80211_node *ni = ic->ic_bss;
+#ifdef AIRPORT_TAHOE
+    int s = splnet();
+    int queue_error = taskq_enter_unpaused(sc->sc_nswq);
+    if (queue_error) {
+        splx(s);
+        return queue_error;
+    }
+    if (sc->sc_flags & IWX_FLAG_SHUTDOWN) {
+        taskq_leave(sc->sc_nswq);
+        splx(s);
+        return ENXIO;
+    }
+#endif
     
     /*
      * Prevent attemps to transition towards the same state, unless
@@ -9734,7 +11740,13 @@ iwx_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
      * to support band-steering.
      */
     if (sc->ns_nstate == nstate && nstate != IEEE80211_S_SCAN &&
-        nstate != IEEE80211_S_AUTH)
+        nstate != IEEE80211_S_AUTH) {
+#ifdef AIRPORT_TAHOE
+        taskq_leave(sc->sc_nswq);
+        splx(s);
+#endif
+        return 0;
+    }
     
     if (ic->ic_state == IEEE80211_S_RUN) {
         if (nstate == IEEE80211_S_SCAN) {
@@ -9750,32 +11762,93 @@ iwx_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
         that->iwx_del_task(sc, systq, &sc->chan_ctxt_task);
     }
     
+#ifdef AIRPORT_TAHOE
+    if (nstate != IEEE80211_S_RUN || ic->ic_state != IEEE80211_S_RUN) {
+        uint32_t generation = __atomic_add_fetch(
+            &sc->sc_tx_rate_generation, 1u, __ATOMIC_ACQ_REL);
+        if (generation == 0)
+            generation = __atomic_add_fetch(
+                &sc->sc_tx_rate_generation, 1u, __ATOMIC_ACQ_REL);
+        if (ni != NULL) {
+            /* Publish the active epoch first. Any late old completion that
+             * wins the bounded snapshot lock after clear is still rejected
+             * by the native read side because its sample epoch is stale. */
+            __atomic_store_n(&ni->ni_tx_rate_generation, generation,
+                             __ATOMIC_RELEASE);
+            (void)IwxTxRate::clearSnapshot(
+                &ni->ni_tx_rate_sequence, &ni->ni_tx_rate_sample,
+                &ni->ni_tx_rate_flags_raw,
+                &ni->ni_tx_rate_sample_generation,
+                &ni->ni_tx_rate_update_count,
+                &ni->ni_tx_rate_single_count, &ni->ni_tx_rate_aggregate_count);
+            __atomic_store_n(&ni->ni_tx_rate_tlc_sample, uint64_t{0},
+                             __ATOMIC_RELEASE);
+            __atomic_store_n(&ni->ni_tx_rate_tlc_flags_raw, uint32_t{0},
+                             __ATOMIC_RELAXED);
+        }
+    }
+#endif
     sc->ns_nstate = nstate;
     sc->ns_arg = arg;
+#ifdef AIRPORT_TAHOE
+    that->tahoe_newstate_generation_ = sc->sc_generation;
+#endif
     
     that->iwx_add_task(sc, sc->sc_nswq, &sc->newstate_task);
+#ifdef AIRPORT_TAHOE
+    taskq_leave(sc->sc_nswq);
+    splx(s);
+#endif
     
     return 0;
 }
 
 void ItlIwx::
-iwx_endscan(struct iwx_softc *sc)
+iwx_endscan(struct iwx_softc *sc, uint32_t uid, uint32_t status)
 {
     struct ieee80211com *ic = &sc->sc_ic;
-    
-    struct ieee80211_node *ni, *nextbs;
-    
-//    ni = RB_MIN(ieee80211_tree, &ic->ic_tree);
-//    for (; ni != NULL; ni = nextbs) {
-//        nextbs = RB_NEXT(ieee80211_tree, &ic->ic_tree, ni);
-//        XYLog("%s scan_result ssid=%s, bssid=%s, ni_rsnciphers=%d, ni_rsncipher=%d, ni_rsngroupmgmtcipher=%d, ni_rsngroupcipher=%d, ni_rssi=%d,  ni_capinfo=%d, ni_intval=%d, ni_rsnakms=%d, ni_supported_rsnakms=%d, ni_rsnprotos=%d, ni_supported_rsnprotos=%d, ni_rstamp=%d\n", __FUNCTION__, ni->ni_essid, ether_sprintf(ni->ni_bssid), ni->ni_rsnciphers, ni->ni_rsncipher, ni->ni_rsngroupmgmtcipher, ni->ni_rsngroupcipher, ni->ni_rssi, ni->ni_capinfo, ni->ni_intval, ni->ni_rsnakms, ni->ni_supported_rsnakms, ni->ni_rsnprotos, ni->ni_supported_rsnprotos, ni->ni_rstamp);
-//    }
-    
+#ifdef AIRPORT_TAHOE
+    if (uid != 0 || (status != 1 && status != 2) || !tahoe_scan_lock_)
+        return;
+    IOInterruptState irq = IOSimpleLockLockDisableInterrupt(tahoe_scan_lock_);
+    if (tahoe_scan_terminal_processing_ ||
+        tahoe_scan_phase_ == ITL_TAHOE_SCAN_IDLE ||
+        tahoe_scan_phase_ == ITL_TAHOE_SCAN_STOPPED) {
+        IOSimpleLockUnlockEnableInterrupt(tahoe_scan_lock_, irq);
+        return;
+    }
+    if (tahoe_scan_starting_) {
+        tahoe_scan_terminal_pending_ = true;
+        tahoe_scan_terminal_status_ = status;
+        IOSimpleLockUnlockEnableInterrupt(tahoe_scan_lock_, irq);
+        return;
+    }
+    const uint32_t serial = tahoe_scan_serial_;
+    const uint32_t generation = tahoe_scan_generation_;
+    const bool allow_selection = tahoe_scan_phase_ == ITL_TAHOE_SCAN_ACTIVE;
+    tahoe_scan_terminal_processing_ = true;
+    /* Keep the slot busy while net80211 and the event callback consume it. */
+    tahoe_scan_phase_ = ITL_TAHOE_SCAN_DRAINING;
+    IOSimpleLockUnlockEnableInterrupt(tahoe_scan_lock_, irq);
+    sc->sc_flags &= ~(IWX_FLAG_SCANNING | IWX_FLAG_BGSCAN);
+    ieee80211_end_scan_with_generation(&ic->ic_if, generation, status, allow_selection);
+    irq = IOSimpleLockLockDisableInterrupt(tahoe_scan_lock_);
+    if (serial == tahoe_scan_serial_) {
+        tahoe_scan_generation_ = 0;
+        tahoe_scan_terminal_pending_ = false;
+        tahoe_scan_terminal_processing_ = false;
+        tahoe_scan_phase_ = tahoe_scan_online_ ?
+            ITL_TAHOE_SCAN_IDLE : ITL_TAHOE_SCAN_STOPPED;
+    }
+    IOSimpleLockUnlockEnableInterrupt(tahoe_scan_lock_, irq);
+#else
+    (void)uid;
+    (void)status;
     if ((sc->sc_flags & (IWX_FLAG_SCANNING | IWX_FLAG_BGSCAN)) == 0)
         return;
-    
     sc->sc_flags &= ~(IWX_FLAG_SCANNING | IWX_FLAG_BGSCAN);
     ieee80211_end_scan(&ic->ic_if);
+#endif
 }
 
 /*
@@ -10050,24 +12123,39 @@ iwx_init_hw(struct iwx_softc *sc)
     XYLog("%s\n", __FUNCTION__);
     struct ieee80211com *ic = &sc->sc_ic;
     int err, i;
+#ifdef AIRPORT_TAHOE
+    ic->ic_tahoe_init_stage = 1;
+#endif
     
     err = iwx_preinit(sc);
     if (err)
         return err;
     
+#ifdef AIRPORT_TAHOE
+    ic->ic_tahoe_init_stage = 2;
+#endif
     err = iwx_start_hw(sc);
     if (err) {
         XYLog("%s: could not initialize hardware\n", DEVNAME(sc));
         return err;
     }
     
+#ifdef AIRPORT_TAHOE
+    ic->ic_tahoe_init_stage = 3;
+#endif
     err = iwx_run_init_mvm_ucode(sc, 0);
     if (err)
         return err;
     
+#ifdef AIRPORT_TAHOE
+    ic->ic_tahoe_init_stage = 4;
+#endif
     if (!iwx_nic_lock(sc))
         return EBUSY;
     
+#ifdef AIRPORT_TAHOE
+    ic->ic_tahoe_init_stage = 5;
+#endif
     err = iwx_send_tx_ant_cfg(sc, iwx_fw_valid_tx_ant(sc));
     if (err) {
         XYLog("%s: could not init tx ant config (error %d)\n",
@@ -10086,6 +12174,9 @@ iwx_init_hw(struct iwx_softc *sc)
         }
     }
     
+#ifdef AIRPORT_TAHOE
+    ic->ic_tahoe_init_stage = 6;
+#endif
     err = iwx_send_bt_init_conf(sc);
     if (err) {
         XYLog("%s: could not init bt coex (error %d)\n",
@@ -10093,6 +12184,9 @@ iwx_init_hw(struct iwx_softc *sc)
         return err;
     }
     
+#ifdef AIRPORT_TAHOE
+    ic->ic_tahoe_init_stage = 7;
+#endif
     err = iwx_send_soc_conf(sc);
     if (err)
         return err;
@@ -10104,6 +12198,9 @@ iwx_init_hw(struct iwx_softc *sc)
     }
     
     /* Add auxiliary station for scanning */
+#ifdef AIRPORT_TAHOE
+    ic->ic_tahoe_init_stage = 8;
+#endif
     err = iwx_add_aux_sta(sc);
     if (err) {
         XYLog("%s: could not add aux station (error %d)\n",
@@ -10111,6 +12208,9 @@ iwx_init_hw(struct iwx_softc *sc)
         goto err;
     }
     
+#ifdef AIRPORT_TAHOE
+    ic->ic_tahoe_init_stage = 9;
+#endif
     for (i = 0; i < IWX_NUM_PHY_CTX; i++) {
         /*
          * The channel used here isn't relevant as it's
@@ -10142,6 +12242,9 @@ iwx_init_hw(struct iwx_softc *sc)
             goto err;
     }
     
+#ifdef AIRPORT_TAHOE
+    ic->ic_tahoe_init_stage = 10;
+#endif
     err = iwx_power_update_device(sc);
     if (err) {
         XYLog("%s: could not send power command (error %d)\n",
@@ -10158,6 +12261,9 @@ iwx_init_hw(struct iwx_softc *sc)
         }
     }
     
+#ifdef AIRPORT_TAHOE
+    ic->ic_tahoe_init_stage = 11;
+#endif
     err = iwx_config_umac_scan(sc);
     if (err) {
         XYLog("%s: could not configure scan (error %d)\n",
@@ -10165,6 +12271,9 @@ iwx_init_hw(struct iwx_softc *sc)
         goto err;
     }
     
+#ifdef AIRPORT_TAHOE
+    ic->ic_tahoe_init_stage = 12;
+#endif
     err = iwx_disable_beacon_filter(sc);
     if (err) {
         XYLog("%s: could not disable beacon filter (error %d)\n",
@@ -10212,6 +12321,18 @@ iwx_init(struct _ifnet *ifp)
     int err, generation;
     int i;
 
+#ifdef AIRPORT_TAHOE
+    TahoeLifecycleGuard lifecycle(this);
+    if (!lifecycle)
+        return EBUSY;
+    if ((ifp->if_flags & IFF_UP) == 0)
+        return EBUSY;
+    // A software generation increment is not proof that retained P2P DMA
+    // stopped. Reject every reinitialization entry before changing soft state.
+    if (nativeP2pResourcesRetained())
+        return EBUSY;
+#endif
+
     memset(sc->sc_tid_data, 0, sizeof(sc->sc_tid_data));
     for (i = 0; i < ARRAY_SIZE(sc->sc_tid_data); i++) {
         sc->sc_tid_data[i].qid = IWX_INVALID_QUEUE;
@@ -10224,13 +12345,31 @@ iwx_init(struct _ifnet *ifp)
     //    KASSERT(sc->task_refs.refs == 0);
     //    refcnt_init(&sc->task_refs);
     
+#ifdef AIRPORT_TAHOE
+    ic->ic_tahoe_init_error = 0;
+#endif
     err = iwx_init_hw(sc);
     if (err) {
-        if (generation == sc->sc_generation)
+        if (generation == sc->sc_generation) {
+#ifdef AIRPORT_TAHOE
+            ic->ic_tahoe_init_error = err;
+            IOLog("AirportItlwm[Tahoe] hardware init failed stage=%u error=%d\n",
+                ic->ic_tahoe_init_stage, err);
+            int stop_error = iwx_stop(ifp,
+                IwxResetTrace::ResetReason::kInitHardwareFailureCleanup);
+            if (stop_error)
+                return stop_error;
+            ifp->if_flags &= ~IFF_UP;
+#else
             iwx_stop_device(sc);
+#endif
+        }
         return err;
     }
     
+#ifdef AIRPORT_TAHOE
+    tahoeScanOnline(true);
+#endif
     if (sc->sc_nvm.sku_cap_11n_enable)
         iwx_setup_ht_rates(sc);
     
@@ -10247,26 +12386,54 @@ iwx_init(struct _ifnet *ifp)
     if (ic->ic_opmode == IEEE80211_M_MONITOR) {
         ic->ic_bss->ni_chan = ic->ic_ibss_chan;
         ieee80211_new_state(ic, IEEE80211_S_RUN, -1);
+#ifdef AIRPORT_TAHOE
+        tahoeDriverEvent(ITL_TAHOE_EVT_DRIVER_READY);
+#endif
         return 0;
     }
     
-    ieee80211_begin_scan(ifp);
-    
+#ifdef AIRPORT_TAHOE
+    ic->ic_tahoe_init_stage = 13;
     /*
-     * ieee80211_begin_scan() ends up scheduling iwx_newstate_task().
-     * Wait until the transition to SCAN state has completed.
+     * Keep net80211's scan preparation/channel selection, but start the
+     * initial firmware scan here so init receives the command's real result.
      */
-    do {
+    err = ieee80211_begin_scan_direct(ifp);
+    if (err == 0)
+        err = iwx_scan(sc);
+    if (generation != sc->sc_generation)
+        return ENXIO;
+    if (err == 0 && ic->ic_state != IEEE80211_S_SCAN)
+        err = EIO;
+    if (err) {
+        ic->ic_tahoe_init_error = err;
+        IOLog("AirportItlwm[Tahoe] initial scan failed generation=%d error=%d state=%d flags=0x%x phase=%u\n",
+            generation, err, ic->ic_state, sc->sc_flags, tahoeScanState(ic));
+        int stop_error = iwx_stop(ifp,
+            IwxResetTrace::ResetReason::kInitialScanFailureCleanup);
+        if (stop_error)
+            return stop_error;
+        ifp->if_flags &= ~IFF_UP;
+        return err;
+    }
+    ic->ic_tahoe_init_stage = 14;
+    tahoeDriverEvent(ITL_TAHOE_EVT_DRIVER_READY);
+#else
+    ieee80211_begin_scan(ifp);
+
+    /* Keep the non-Tahoe asynchronous state transition unchanged. */
+    while (ic->ic_state != IEEE80211_S_SCAN) {
         err = tsleep_nsec(&ic->ic_state, PCATCH, "iwxinit",
             SEC_TO_NSEC(1));
         if (generation != sc->sc_generation)
             return ENXIO;
-        if (err) {
-            iwx_stop(ifp);
+        if (err && ic->ic_state != IEEE80211_S_SCAN) {
+            iwx_stop(ifp,
+                IwxResetTrace::ResetReason::kInitialScanWaitInterrupted);
             return err;
         }
-    } while (ic->ic_state != IEEE80211_S_SCAN);
-    
+    }
+#endif
     return 0;
 }
 
@@ -10358,20 +12525,93 @@ iwx_start(struct _ifnet *ifp)
     that->getMainCommandGate()->attemptAction(_iwx_start_task, &that->com.sc_ic.ic_ac.ac_if);
 }
 
-void ItlIwx::
-iwx_stop(struct _ifnet *ifp)
+int ItlIwx::
+iwx_stop(struct _ifnet *ifp, IwxResetTrace::ResetReason reason)
 {
     struct iwx_softc *sc = (struct iwx_softc *)ifp->if_softc;
     struct ieee80211com *ic = &sc->sc_ic;
     struct iwx_node *in = (struct iwx_node *)ic->ic_bss;
-    int i, s = splnet();
+    int i, s;
+
+#ifdef AIRPORT_TAHOE
+    TahoeLifecycleGuard lifecycle(this);
+    if (!lifecycle)
+        return EBUSY;
+    /*
+     * Do not reset firmware while a state task can still be inside a command.
+     * This is a zero-wait lease: active work makes stop fail without changing
+     * flags or touching hardware. Pausing also blocks a new pop until INIT is
+     * committed below.
+     */
+    int p2p_error = tahoeP2pStopBeforeReset(sc);
+    if (p2p_error)
+        return p2p_error;
+    taskq_pause_diagnostics pause_diagnostics {};
+    int pause_error = taskq_try_pause_with_diagnostics(
+        sc->sc_nswq, &pause_diagnostics);
+    if (pause_error) {
+        if (IOEthernetController *controller = getController()) {
+            uint64_t fingerprint = 14695981039346656037ull;
+            auto mix = [&fingerprint](uint32_t value) {
+                fingerprint ^= value;
+                fingerprint *= 1099511628211ull;
+            };
+            mix(2u); // stop rejection stage: net80211 state-task queue busy
+            mix(static_cast<uint32_t>(sc->sc_generation));
+            mix(static_cast<uint32_t>(pause_error));
+            mix(pause_diagnostics.reason);
+            mix(pause_diagnostics.active);
+            mix(static_cast<uint32_t>(ic->ic_state));
+            mix(static_cast<uint32_t>(sc->sc_flags));
+            const uint64_t previous = __atomic_exchange_n(
+                &nativeStateQueueStopRejectFingerprint_, fingerprint,
+                __ATOMIC_ACQ_REL);
+            if (previous != fingerprint) {
+                controller->setProperty("NativeP2PStopBlockStage", 2u, 32);
+                controller->setProperty("NativeP2PStopBlockError",
+                                        uint32_t(pause_error), 32);
+                controller->setProperty("NativeP2PLastStopRejectStage",
+                                        2u, 32);
+                controller->setProperty("NativeP2PLastStopRejectError",
+                                        uint32_t(pause_error), 32);
+                controller->setProperty("NativeP2PLastStopRejectGeneration",
+                    static_cast<uint32_t>(sc->sc_generation), 32);
+                controller->setProperty("NativeP2PStopQueuePauseReason",
+                    pause_diagnostics.reason, 32);
+                controller->setProperty("NativeP2PStopQueueActiveTasks",
+                    pause_diagnostics.active, 32);
+                controller->setProperty("NativeP2PStopStateTaskState",
+                                        uint32_t(ic->ic_state), 32);
+                controller->setProperty("NativeP2PStopDriverFlags",
+                                        uint32_t(sc->sc_flags), 32);
+            }
+        }
+        IOLog("AirportItlwm[Tahoe] stop deferred generation=%d error=%d state=%d flags=0x%x\n",
+            sc->sc_generation, pause_error, ic->ic_state, sc->sc_flags);
+        return pause_error;
+    }
+#endif
+
+    s = splnet();
     
     //    rw_assert_wrlock(&sc->ioctl_rwl);
     
+#ifdef AIRPORT_TAHOE
+    tahoeRecordReset(reason, sc);
+    tahoeDriverEvent(ITL_TAHOE_EVT_RESET_BEGIN);
+    tahoeScanOnline(false);
+#endif
     sc->sc_flags |= IWX_FLAG_SHUTDOWN; /* Disallow new tasks. */
+#ifdef AIRPORT_TAHOE
+    /* Fence running state tasks before the firmware and rings are reset. */
+    sc->sc_generation++;
+#endif
     
     /* Cancel scheduled tasks and let any stale tasks finish up. */
     task_del(systq, &sc->init_task);
+#ifdef AIRPORT_TAHOE
+    task_del(systq, &tahoe_scan_abort_task_);
+#endif
     iwx_del_task(sc, sc->sc_nswq, &sc->newstate_task);
     iwx_del_task(sc, systq, &sc->ba_task);
     iwx_del_task(sc, systq, &sc->mac_ctxt_task);
@@ -10379,11 +12619,17 @@ iwx_stop(struct _ifnet *ifp)
     KASSERT(sc->task_refs.refs >= 1, "sc->task_refs.refs >= 1");
     //    refcnt_finalize(&sc->task_refs, "iwxstop");
     
-    iwx_stop_device(sc);
+#ifdef AIRPORT_TAHOE
+    const int hardwareStopError = iwx_stop_device(sc);
+#else
+    (void)iwx_stop_device(sc);
+#endif
     
     /* Reset soft state. */
-    
+#ifndef AIRPORT_TAHOE
     sc->sc_generation++;
+#endif
+
     for (i = 0; i < nitems(sc->sc_cmd_resp_pkt); i++) {
         ::free(sc->sc_cmd_resp_pkt[i]);
         sc->sc_cmd_resp_pkt[i] = NULL;
@@ -10424,7 +12670,26 @@ iwx_stop(struct _ifnet *ifp)
     
     ifp->if_timer = sc->sc_tx_timer = 0;
     
+#ifdef AIRPORT_TAHOE
+    // The active interface and net80211 state are now stopped. Only at this
+    // point can a queued start callback observe IFF_RUNNING cleared before
+    // the old dynamic host rings are retired.
+    tahoeRetireStoppedQueuesAfterSoftStop(sc, hardwareStopError);
+    tahoeDriverEvent(ITL_TAHOE_EVT_DRIVER_STOPPED);
+#endif
     splx(s);
+#ifdef AIRPORT_TAHOE
+    /* The old queued state was deleted and soft state is INIT before resume. */
+    taskq_resume(sc->sc_nswq);
+    // Keep last-rejection properties for postmortem reads, but let a future
+    // stop attempt with the same state publish a fresh diagnostic if needed.
+    __atomic_store_n(&nativeP2pStopRejectFingerprint_, uint64_t(0),
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&nativeStateQueueStopRejectFingerprint_, uint64_t(0),
+                     __ATOMIC_RELEASE);
+    tahoeClearStopBlockState();
+#endif
+    return 0;
 }
 
 void ItlIwx::
@@ -10454,8 +12719,13 @@ iwx_watchdog(struct _ifnet *ifp)
 
             that->iwx_nic_error(sc);
 #endif
-            if ((sc->sc_flags & IWX_FLAG_SHUTDOWN) == 0)
+            if ((sc->sc_flags & IWX_FLAG_SHUTDOWN) == 0) {
+#ifdef AIRPORT_TAHOE
+                that->tahoeRecordInitTaskTrigger(
+                    IwxResetTrace::InitTaskTrigger::kTxWatchdogTimeout);
+#endif
                 task_add(systq, &sc->init_task);
+            }
             ifp->netStat->outputErrors++;
             return;
         }
@@ -10483,6 +12753,13 @@ iwx_ioctl(struct _ifnet *ifp, u_long cmd, caddr_t data)
     }
     if (err)
         return err;
+#ifdef AIRPORT_TAHOE
+    const bool lockFlagsTransition =
+        cmd == SIOCSIFADDR || cmd == SIOCSIFFLAGS;
+    TahoeLifecycleGuard flagLifecycle(that, lockFlagsTransition);
+    if (!flagLifecycle)
+        return EBUSY;
+#endif
     s = splnet();
     
     switch (cmd) {
@@ -10495,8 +12772,14 @@ iwx_ioctl(struct _ifnet *ifp, u_long cmd, caddr_t data)
                     err = that->iwx_init(ifp);
                 }
             } else {
-                if (ifp->if_flags & IFF_RUNNING)
-                    that->iwx_stop(ifp);
+                if (ifp->if_flags & IFF_RUNNING) {
+                    err = that->iwx_stop(ifp,
+                        IwxResetTrace::ResetReason::kIfFlagsDown);
+#ifdef AIRPORT_TAHOE
+                    if (err && (sc->sc_flags & IWX_FLAG_SHUTDOWN) == 0)
+                        ifp->if_flags |= IFF_UP;
+#endif
+                }
             }
             break;
             
@@ -10508,8 +12791,23 @@ iwx_ioctl(struct _ifnet *ifp, u_long cmd, caddr_t data)
         err = 0;
         if ((ifp->if_flags & (IFF_UP | IFF_RUNNING)) ==
             (IFF_UP | IFF_RUNNING)) {
-            that->iwx_stop(ifp);
-            err = that->iwx_init(ifp);
+#ifdef AIRPORT_TAHOE
+            TahoeLifecycleGuard lifecycle(that);
+            if (!lifecycle)
+                err = EBUSY;
+            else if ((ifp->if_flags & (IFF_UP | IFF_RUNNING)) ==
+                     (IFF_UP | IFF_RUNNING)) {
+                err = that->iwx_stop(ifp,
+                    IwxResetTrace::ResetReason::kIoctlEnetReset);
+                if (err == 0)
+                    err = that->iwx_init(ifp);
+            }
+#else
+            err = that->iwx_stop(ifp,
+                IwxResetTrace::ResetReason::kIoctlEnetReset);
+            if (err == 0)
+                err = that->iwx_init(ifp);
+#endif
         }
     }
     
@@ -10838,7 +13136,7 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
         
         if (!iwx_rx_pkt_valid(pkt))
             break;
-        
+
         /*
          * XXX Intel inside (tm)
          * Any commands in the LONG_GROUP could actually be in the
@@ -10855,7 +13153,13 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
         len = sizeof(pkt->len_n_flags) + iwx_rx_packet_len(pkt);
         if (len < minsz || len > (IWX_RBUF_SIZE - offset))
             break;
-        
+
+#ifdef AIRPORT_TAHOE
+        iwx_tahoe_p2p_action_tx_observe_rx(&nativeP2pActionTx_,
+            pkt->hdr.group_id, pkt->hdr.cmd, pkt->hdr.qid, pkt->hdr.idx,
+            iwx_rx_packet_payload_len(pkt));
+#endif
+
         if (code == IWX_REPLY_RX_MPDU_CMD && ++nmpdu == 1) {
             /* Take mbuf m0 off the RX ring. */
             if (iwx_rx_addbuf(sc, IWX_RBUF_SIZE, sc->rxq.cur)) {
@@ -10906,6 +13210,11 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
                 break;
                 
             case IWX_TX_CMD:
+#ifdef AIRPORT_TAHOE
+                if (iwx_tahoe_p2p_action_tx_response(this, sc,
+                        &nativeP2pTxQueue_, &nativeP2pActionTx_, pkt, data))
+                    break;
+#endif
                 iwx_rx_tx_cmd(sc, pkt, data);
                 break;
                 
@@ -10993,6 +13302,11 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
                        "stopping device\n",
                        DEVNAME(sc), le16toh(notif->temperature));
                 sc->sc_flags |= IWX_FLAG_HW_ERR;
+#ifdef AIRPORT_TAHOE
+                ItlIwx *that = container_of(sc, ItlIwx, com);
+                that->tahoeRecordInitTaskTrigger(
+                    IwxResetTrace::InitTaskTrigger::kCriticalTemperature);
+#endif
                 task_add(systq, &sc->init_task);
                 break;
             }
@@ -11063,14 +13377,18 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
             case IWX_SCAN_COMPLETE_UMAC: {
                 struct iwx_umac_scan_complete *notif;
                 SYNC_RESP_STRUCT(notif, pkt, struct iwx_umac_scan_complete *);
-                iwx_endscan(sc);
+                iwx_endscan(sc, le32toh(notif->uid), notif->status);
                 break;
             }
                 
             case IWX_SCAN_ITERATION_COMPLETE_UMAC: {
                 struct iwx_umac_scan_iter_complete_notif *notif;
                 SYNC_RESP_STRUCT(notif, pkt, struct iwx_umac_scan_iter_complete_notif *);
+#ifdef AIRPORT_TAHOE
+                (void)notif; /* an iteration is not terminal completion */
+#else
                 iwx_endscan(sc);
+#endif
                 break;
             }
                 
@@ -11094,6 +13412,11 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
                 struct iwx_time_event_notif *notif;
                 uint32_t action;
                 SYNC_RESP_STRUCT(notif, pkt, struct iwx_time_event_notif *);
+#ifdef AIRPORT_TAHOE
+                tahoeP2pTapTimeEvent(sc,
+                    reinterpret_cast<const uint8_t *>(pkt->data),
+                    iwx_rx_packet_payload_len(pkt));
+#endif
                 
                 if (sc->sc_time_event_uid != le32toh(notif->unique_id))
                     break;
@@ -11149,7 +13472,20 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
                 
             case IWX_WIDE_ID(IWX_MAC_CONF_GROUP, IWX_SESSION_PROTECTION_NOTIF): {
                 struct iwx_session_prot_notif *notif;
+                if (iwx_rx_packet_payload_len(pkt) != sizeof(*notif))
+                    break;
                 SYNC_RESP_STRUCT(notif, pkt, struct iwx_session_prot_notif *);
+#ifdef AIRPORT_TAHOE
+                tahoeP2pTapSessionEvent(sc,
+                    reinterpret_cast<const uint8_t *>(pkt->data),
+                    iwx_rx_packet_payload_len(pkt));
+                // P2P conf2 has a separate lifecycle. It must never clear the
+                // STA's global session/association flag or report association.
+                if (!IntelROCEvent::isStationSessionNotification(
+                    reinterpret_cast<const uint8_t *>(pkt->data),
+                    iwx_rx_packet_payload_len(pkt), IWX_STATION_ID))
+                    break;
+#endif
                 if (!notif->status) {
                     XYLog("Session protection failure\n");
                     sc->sc_flags &= ~IWX_FLAG_TE_ACTIVE;
@@ -11330,6 +13666,10 @@ iwx_intr(OSObject *object, IOInterruptEventSource* sender, int count)
         handled |= IWX_CSR_INT_BIT_RF_KILL;
         XYLog("%s RF_KILL has been toggled\n", __FUNCTION__);
         that->iwx_check_rfkill(sc);
+#ifdef AIRPORT_TAHOE
+        that->tahoeRecordInitTaskTrigger(
+            IwxResetTrace::InitTaskTrigger::kLegacyRfKill);
+#endif
         task_add(systq, &sc->init_task);
         rv = 1;
         goto out_ena;
@@ -11355,8 +13695,13 @@ iwx_intr(OSObject *object, IOInterruptEventSource* sender, int count)
 #endif
         
         XYLog("%s: fatal firmware error\n", DEVNAME(sc));
-        if ((sc->sc_flags & IWX_FLAG_SHUTDOWN) == 0)
+        if ((sc->sc_flags & IWX_FLAG_SHUTDOWN) == 0) {
+#ifdef AIRPORT_TAHOE
+            that->tahoeRecordInitTaskTrigger(
+                IwxResetTrace::InitTaskTrigger::kLegacyFirmwareSwError);
+#endif
             task_add(systq, &sc->init_task);
+        }
         rv = 1;
         goto out;
         
@@ -11367,6 +13712,10 @@ iwx_intr(OSObject *object, IOInterruptEventSource* sender, int count)
         XYLog("%s: hardware error, stopping device \n", DEVNAME(sc));
         if ((sc->sc_flags & IWX_FLAG_SHUTDOWN) == 0) {
             sc->sc_flags |= IWX_FLAG_HW_ERR;
+#ifdef AIRPORT_TAHOE
+            that->tahoeRecordInitTaskTrigger(
+                IwxResetTrace::InitTaskTrigger::kLegacyHardwareError);
+#endif
             task_add(systq, &sc->init_task);
         }
         rv = 1;
@@ -11467,13 +13816,22 @@ iwx_intr_msix(OSObject *object, IOInterruptEventSource* sender, int count)
 #endif
         
         XYLog("%s: fatal firmware error\n", DEVNAME(sc));
-        if ((sc->sc_flags & IWX_FLAG_SHUTDOWN) == 0)
+        if ((sc->sc_flags & IWX_FLAG_SHUTDOWN) == 0) {
+#ifdef AIRPORT_TAHOE
+            that->tahoeRecordInitTaskTrigger(
+                IwxResetTrace::InitTaskTrigger::kMsixFirmwareSwError);
+#endif
             task_add(systq, &sc->init_task);
+        }
         return 1;
     }
     
     if (inta_hw & IWX_MSIX_HW_INT_CAUSES_REG_RF_KILL) {
         that->iwx_check_rfkill(sc);
+#ifdef AIRPORT_TAHOE
+        that->tahoeRecordInitTaskTrigger(
+            IwxResetTrace::InitTaskTrigger::kMsixRfKill);
+#endif
         task_add(systq, &sc->init_task);
     }
     
@@ -11481,6 +13839,10 @@ iwx_intr_msix(OSObject *object, IOInterruptEventSource* sender, int count)
         XYLog("%s: hardware error, stopping device \n", DEVNAME(sc));
         if ((sc->sc_flags & IWX_FLAG_SHUTDOWN) == 0) {
             sc->sc_flags |= IWX_FLAG_HW_ERR;
+#ifdef AIRPORT_TAHOE
+            that->tahoeRecordInitTaskTrigger(
+                IwxResetTrace::InitTaskTrigger::kMsixHardwareError);
+#endif
             task_add(systq, &sc->init_task);
         }
         return 1;
@@ -12797,6 +15159,11 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
     struct _ifnet *ifp = &ic->ic_if;
     int err;
     int txq_i, i, j;
+
+#ifdef AIRPORT_TAHOE
+    memset(&sc->sc_p2p, 0, sizeof(sc->sc_p2p));
+    memset(&sc->sc_p2p_roc, 0, sizeof(sc->sc_p2p_roc));
+#endif
     
     sc->sc_pct = pa->pa_pc;
     sc->sc_pcitag = pa->pa_tag;
@@ -13170,13 +15537,25 @@ iwx_radiotap_attach(struct iwx_softc *sc)
 void ItlIwx::
 iwx_init_task(void *arg1)
 {
-    XYLog("%s\n", __FUNCTION__);
     struct iwx_softc *sc = (struct iwx_softc *)arg1;
     struct _ifnet *ifp = &sc->sc_ic.ic_if;
     ItlIwx *that = container_of(sc, ItlIwx, com);
+#ifdef AIRPORT_TAHOE
+    TahoeLifecycleGuard lifecycle(that, kTahoeLifecycleInitTask);
+    if (!lifecycle)
+        return;
+#endif
+    XYLog("%s\n", __FUNCTION__);
     int s = splnet();
     int generation = sc->sc_generation;
     int fatal = (sc->sc_flags & (IWX_FLAG_HW_ERR | IWX_FLAG_RFKILL));
+
+#ifdef AIRPORT_TAHOE
+    if ((ifp->if_flags & (IFF_UP | IFF_RUNNING)) == 0) {
+        splx(s);
+        return;
+    }
+#endif
     
     //    rw_enter_write(&sc->ioctl_rwl);
     if (generation != sc->sc_generation) {
@@ -13185,13 +15564,38 @@ iwx_init_task(void *arg1)
         return;
     }
     
-    if (ifp->if_flags & IFF_RUNNING)
-        that->iwx_stop(ifp);
-    else
+    if (ifp->if_flags & IFF_RUNNING) {
+        int stop_error = that->iwx_stop(ifp,
+            IwxResetTrace::ResetReason::kInitTaskRunningRecovery);
+#ifdef AIRPORT_TAHOE
+        if (stop_error) {
+            IOLog("AirportItlwm[Tahoe] recovery stop deferred error=%d state=%d flags=0x%x\n",
+                stop_error, sc->sc_ic.ic_state, sc->sc_flags);
+            splx(s);
+            return;
+        }
+#else
+        (void)stop_error;
+#endif
+    } else {
+#ifdef AIRPORT_TAHOE
+        that->tahoeRecordReset(
+            IwxResetTrace::ResetReason::kInitTaskNotRunningRecovery, sc);
+        that->tahoeDriverEvent(ITL_TAHOE_EVT_RESET_BEGIN);
+#endif
         sc->sc_flags &= ~IWX_FLAG_HW_ERR;
+    }
     
     if (!fatal && (ifp->if_flags & (IFF_UP | IFF_RUNNING)) == IFF_UP)
         that->iwx_init(ifp);
+#ifdef AIRPORT_TAHOE
+    else if (fatal) {
+        // Fatal/RF-kill recovery deliberately did not restart hardware. A
+        // later explicit On may retry; it must not remain permanently Busy.
+        ifp->if_flags &= ~IFF_UP;
+        that->tahoeDriverEvent(ITL_TAHOE_EVT_DRIVER_STOPPED);
+    }
+#endif
     
     //    rw_exit(&sc->ioctl_rwl);
     splx(s);
@@ -13232,7 +15636,8 @@ iwx_activate(struct iwx_softc *sc, int act)
         case DVACT_QUIESCE:
             if (ifp->if_flags & IFF_RUNNING) {
                 //            rw_enter_write(&sc->ioctl_rwl);
-                iwx_stop(ifp);
+                err = iwx_stop(ifp,
+                    IwxResetTrace::ResetReason::kAdapterDisableQuiesce);
                 //            rw_exit(&sc->ioctl_rwl);
             }
             break;
@@ -13244,10 +15649,35 @@ iwx_activate(struct iwx_softc *sc, int act)
             break;
         case DVACT_WAKEUP:
             /* Hardware should be up at this point. */
-            if (iwx_set_hw_ready(sc))
+            {
+#ifdef AIRPORT_TAHOE
+                TahoeLifecycleGuard lifecycle(this);
+                if (!lifecycle) {
+                    err = EBUSY;
+                    break;
+                }
+#endif
+                if (iwx_set_hw_ready(sc)) {
+#ifdef AIRPORT_TAHOE
+                    /* The outermost fence release queues this after unlock. */
+                    tahoeRecordInitTaskTrigger(
+                        IwxResetTrace::InitTaskTrigger::kWakeupDeferred);
+                    tahoeDeferLifecycleTasks(kTahoeLifecycleInitTask);
+#else
                 task_add(systq, &sc->init_task);
+#endif
+                }
+#ifdef AIRPORT_TAHOE
+                else
+                    err = ENXIO;
+#endif
+            }
             break;
     }
     
+#ifdef AIRPORT_TAHOE
+    return err;
+#else
     return 0;
+#endif
 }

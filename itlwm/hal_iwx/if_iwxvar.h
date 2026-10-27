@@ -336,6 +336,9 @@ struct iwx_tx_data {
     int flags;
 #define IWX_TXDATA_FLAG_CMD_IS_NARROW  0x01
     uint8_t type;
+#ifdef AIRPORT_TAHOE
+    uint32_t rate_generation;
+#endif
 };
 
 struct iwx_tx_ring {
@@ -352,6 +355,12 @@ struct iwx_tx_ring {
 	int			queued;
 	int			cur;
 	int			tail;
+#ifdef AIRPORT_TAHOE
+	// Positive proof that this is the fully allocated attach-time P2P device
+	// placeholder and no queue command has submitted its DMA addresses. The
+	// default false value is not evidence of reclaimability.
+	uint8_t		nativeUnsubmittedPlaceholder;
+#endif
 };
 
 #define IWX_RX_MQ_RING_COUNT	512
@@ -426,6 +435,81 @@ struct iwx_phy_ctxt {
 	uint16_t color;
 	uint32_t ref;
 	struct ieee80211_channel *channel;
+};
+
+/*
+ * P2P Device command ownership is separate from the infrastructure STA's
+ * single-MAC/single-binding flags. PHY contexts are pre-created at startup;
+ * a lease here only reserves one of those slots for a later ROC flow.
+ */
+enum iwx_p2p_resource_state {
+	IWX_P2P_RESOURCE_ABSENT = 0,
+	/* The command returned its defined success ACK/status, not on-air proof. */
+	IWX_P2P_RESOURCE_ACTIVE,
+	/* Submission may have reached firmware; retain the lease until drained reset. */
+	IWX_P2P_RESOURCE_UNKNOWN
+};
+
+enum iwx_p2p_uncertain_kind {
+	IWX_P2P_UNCERTAIN_NONE = 0,
+	IWX_P2P_UNCERTAIN_MAC_CONTEXT,
+	IWX_P2P_UNCERTAIN_BINDING
+};
+
+struct iwx_p2p_context {
+	uint8_t initialized;
+	uint8_t mac_state;
+	uint8_t binding_state;
+	uint8_t phy_leased;
+	uint8_t mac_id;
+	uint8_t mac_color;
+	uint8_t tsf_id;
+	uint8_t phy_id;
+	uint8_t phy_color;
+	uint8_t binding_id;
+	uint8_t binding_color;
+	uint8_t uncertain_kind;
+	uint8_t uncertain_action;
+	uint8_t mac_address[6];
+	uint32_t fw_generation;
+};
+
+/*
+ * Tahoe-only ROC transaction state. This tracks real firmware resources;
+ * an ACK is not treated as proof that a time event ran on air.
+ */
+enum iwx_p2p_roc_phase {
+	IWX_P2P_ROC_IDLE = 0,
+	IWX_P2P_ROC_PHY_REMOVE_UNKNOWN,
+	IWX_P2P_ROC_PHY_REMOVED,
+	IWX_P2P_ROC_PHY_ADD_UNKNOWN,
+	IWX_P2P_ROC_PHY_READY,
+	IWX_P2P_ROC_BINDING_ADD_UNKNOWN,
+	IWX_P2P_ROC_PREPARED,
+	IWX_P2P_ROC_SESSION_SUBMIT_UNKNOWN,
+	IWX_P2P_ROC_SESSION_ACKED,
+	IWX_P2P_ROC_END_CONFIRMED,
+	IWX_P2P_ROC_BINDING_REMOVE_UNKNOWN,
+	IWX_P2P_ROC_PHY_RESTORE_REMOVE_UNKNOWN,
+	IWX_P2P_ROC_PHY_RESTORE_ADD_UNKNOWN,
+	IWX_P2P_ROC_COMPLETE,
+	IWX_P2P_ROC_QUARANTINED
+};
+
+struct iwx_p2p_roc_state {
+	uint32_t token;
+	uint32_t fw_generation;
+	int32_t session_submit_result;
+	uint32_t binding_raw_status;
+	uint8_t phase;
+	uint8_t phy_id;
+	uint8_t phy_color;
+	uint8_t session_conf_id;
+	uint8_t session_submit_seen;
+	uint8_t binding_status_valid;
+	uint8_t binding_rejected;
+	struct ieee80211_channel *original_phy_channel;
+	struct ieee80211_channel *roc_channel;
 };
 
 struct iwx_bf_data {
@@ -680,6 +764,8 @@ struct iwx_softc {
 
 	int sc_intmask;
 	int sc_flags;
+	struct iwx_p2p_context sc_p2p;
+	struct iwx_p2p_roc_state sc_p2p_roc;
 
 	uint32_t sc_fh_init_mask;
 	uint32_t sc_hw_init_mask;
@@ -687,6 +773,9 @@ struct iwx_softc {
 	uint32_t sc_hw_mask;
 
 	int sc_generation;
+#ifdef AIRPORT_TAHOE
+	uint32_t sc_tx_rate_generation;
+#endif
 
 //	struct rwlock ioctl_rwl;
 

@@ -10,6 +10,11 @@
 #define AirportItlwmV2_hpp
 
 #include "Apple80211.h"
+#ifdef AIRPORT_TAHOE
+#define ITL_CONTROLLER_OVERRIDE
+#else
+#define ITL_CONTROLLER_OVERRIDE override
+#endif
 
 #include "IOKit/network/IOGatedOutputQueue.h"
 #include <libkern/c++/OSString.h>
@@ -65,113 +70,122 @@ IOReturn get##REQ(OSObject *object, struct DATA_TYPE *data);
 IOReturn set##REQ(OSObject *object, struct DATA_TYPE *data);
     
 public:
-    virtual bool init(OSDictionary *properties) override;
-    virtual void free() override;
-    virtual IOService* probe(IOService* provider, SInt32* score) override;
-    virtual bool start(IOService *provider) override;
-    virtual void stop(IOService *provider) override;
-    virtual IOReturn enable(IO80211SkywalkInterface *netif) override;
-    virtual IOReturn disable(IO80211SkywalkInterface *netif) override;
-    virtual IOReturn setHardwareAddress(const void *addr, UInt32 addrBytes) override;
-    virtual IOReturn getHardwareAddress(IOEthernetAddress* addrP) override;
-    virtual IOReturn getPacketFilters(const OSSymbol *group, UInt32 *filters) const override;
-    virtual IOReturn setPromiscuousMode(IOEnetPromiscuousMode mode) override;
-    virtual IOReturn setMulticastMode(IOEnetMulticastMode mode) override;
-    virtual IOReturn setMulticastList(IOEthernetAddress* addr, UInt32 len) override;
-    virtual UInt32 getFeatures() const override;
-    virtual const OSString * newVendorString() const override;
-    virtual const OSString * newModelString() const override;
-    virtual IOReturn selectMedium(const IONetworkMedium *medium) override;
-    virtual bool createWorkQueue() override;
-    virtual IONetworkInterface * createInterface() override;
-    virtual bool configureInterface(IONetworkInterface *netif) override;
-    virtual UInt32 outputPacket(mbuf_t, void * param) override;
+    virtual bool init(OSDictionary *properties) ITL_CONTROLLER_OVERRIDE;
+#ifdef AIRPORT_TAHOE
+    virtual IOReturn setProperties(OSObject *properties) override;
+#endif
+    virtual void free() ITL_CONTROLLER_OVERRIDE;
+    virtual IOService* probe(IOService* provider, SInt32* score) ITL_CONTROLLER_OVERRIDE;
+    virtual bool start(IOService *provider) ITL_CONTROLLER_OVERRIDE;
+    virtual void stop(IOService *provider) ITL_CONTROLLER_OVERRIDE;
+    virtual IOReturn enable(IO80211SkywalkInterface *netif) ITL_CONTROLLER_OVERRIDE;
+    virtual IOReturn disable(IO80211SkywalkInterface *netif) ITL_CONTROLLER_OVERRIDE;
+    virtual IOReturn setHardwareAddress(const void *addr, UInt32 addrBytes) ITL_CONTROLLER_OVERRIDE;
+    virtual IOReturn getHardwareAddress(IOEthernetAddress* addrP) ITL_CONTROLLER_OVERRIDE;
+    virtual IOReturn getPacketFilters(const OSSymbol *group, UInt32 *filters) const ITL_CONTROLLER_OVERRIDE;
+    virtual IOReturn setPromiscuousMode(IOEnetPromiscuousMode mode) ITL_CONTROLLER_OVERRIDE;
+    virtual IOReturn setMulticastMode(IOEnetMulticastMode mode) ITL_CONTROLLER_OVERRIDE;
+    virtual IOReturn setMulticastList(IOEthernetAddress* addr, UInt32 len) ITL_CONTROLLER_OVERRIDE;
+    virtual UInt32 getFeatures() const ITL_CONTROLLER_OVERRIDE;
+    virtual const OSString * newVendorString() const ITL_CONTROLLER_OVERRIDE;
+    virtual const OSString * newModelString() const ITL_CONTROLLER_OVERRIDE;
+    virtual IOReturn selectMedium(const IONetworkMedium *medium) ITL_CONTROLLER_OVERRIDE;
+    virtual bool createWorkQueue() ITL_CONTROLLER_OVERRIDE;
+    virtual IONetworkInterface * createInterface() ITL_CONTROLLER_OVERRIDE;
+    virtual bool configureInterface(IONetworkInterface *netif) ITL_CONTROLLER_OVERRIDE;
+    virtual UInt32 outputPacket(mbuf_t, void * param) ITL_CONTROLLER_OVERRIDE;
 #ifdef __PRIVATE_SPI__
-    virtual IOReturn outputStart(IONetworkInterface *interface, IOOptionBits options) override;
+    virtual IOReturn outputStart(IONetworkInterface *interface, IOOptionBits options) ITL_CONTROLLER_OVERRIDE;
     virtual IOReturn networkInterfaceNotification(
                         IONetworkInterface * interface,
                         uint32_t              type,
-                        void *                  argument ) override;
+                        void *                  argument ) ITL_CONTROLLER_OVERRIDE;
 #endif
     virtual bool setLinkStatus(
                                UInt32                  status,
                                const IONetworkMedium * activeMedium = 0,
                                UInt64                  speed        = 0,
-                               OSData *                data         = 0) override;
+                               OSData *                data         = 0) ITL_CONTROLLER_OVERRIDE;
     static IOReturn setLinkStateGated(OSObject *target, void *arg0, void *arg1, void *arg2, void *arg3);
     
     static IOReturn tsleepHandler(OSObject* owner, void* arg0 = 0, void* arg1 = 0, void* arg2 = 0, void* arg3 = 0);
     static void eventHandler(struct ieee80211com *, int, void *);
     IOReturn enableAdapter(IONetworkInterface *netif);
-    void disableAdapter(IONetworkInterface *netif);
+    IOReturn disableAdapter(IONetworkInterface *netif);
     bool initCCLogs();
     
+    #ifdef AIRPORT_TAHOE
+    virtual IO80211WorkQueue *getWorkQueue() const;
+    virtual void *getLogger() const;
+    virtual IOCommandGate *getIO80211CommandGate() const;
+#else
     virtual IO80211WorkQueue *getWorkQueue() override;
-    virtual bool requiresExplicitMBufRelease() override {
+#endif
+    virtual bool requiresExplicitMBufRelease() ITL_CONTROLLER_OVERRIDE {
         return false;
     }
-    virtual bool flowIdSupported() override {
+    virtual bool flowIdSupported() ITL_CONTROLLER_OVERRIDE {
         return false;
     }
-    virtual SInt32 monitorModeSetEnabled(bool, UInt) override {
+    virtual SInt32 monitorModeSetEnabled(bool, UInt) ITL_CONTROLLER_OVERRIDE {
         return kIOReturnSuccess;
     }
-    virtual IOReturn requestQueueSizeAndTimeout(unsigned short *queue, unsigned short *timeout) override {
+    virtual IOReturn requestQueueSizeAndTimeout(unsigned short *queue, unsigned short *timeout) ITL_CONTROLLER_OVERRIDE {
         XYLog("%s\n", __FUNCTION__);
         return kIOReturnSuccess;
     }
     
-    virtual bool getLogPipes(CCPipe**, CCPipe**, CCPipe**) override;
+    virtual bool getLogPipes(CCPipe**, CCPipe**, CCPipe**) ITL_CONTROLLER_OVERRIDE;
     
-    virtual void *getFaultReporterFromDriver() override;
+    virtual void *getFaultReporterFromDriver() ITL_CONTROLLER_OVERRIDE;
     
-    virtual SInt32 apple80211_ioctl(IO80211SkywalkInterface *,unsigned long,void *, bool, bool) override;
-    virtual SInt32 apple80211SkywalkRequest(UInt,int,IO80211SkywalkInterface *,void *) override;
-    virtual SInt32 apple80211SkywalkRequest(UInt,int,IO80211SkywalkInterface *,void *,void *) override;
+    virtual SInt32 apple80211_ioctl(IO80211SkywalkInterface *,unsigned long,void *, bool, bool) ITL_CONTROLLER_OVERRIDE;
+    virtual SInt32 apple80211SkywalkRequest(UInt,int,IO80211SkywalkInterface *,void *) ITL_CONTROLLER_OVERRIDE;
+    virtual SInt32 apple80211SkywalkRequest(UInt,int,IO80211SkywalkInterface *,void *,void *) ITL_CONTROLLER_OVERRIDE;
 
     bool createMediumTables(const IONetworkMedium **primary);
     void releaseAll();
     void watchdogAction(IOTimerEventSource *timer);
     
-    virtual SInt32 enableFeature(IO80211FeatureCode, void*) override;
-    virtual bool isCommandProhibited(int command) override {
+    virtual SInt32 enableFeature(IO80211FeatureCode, void*) ITL_CONTROLLER_OVERRIDE;
+    virtual bool isCommandProhibited(int command) ITL_CONTROLLER_OVERRIDE {
 //        if (!ml_at_interrupt_context())
 //            XYLog("%s %s\n", __FUNCTION__, convertApple80211IOCTLToString(command));
         return false;
     };
-    virtual SInt32 handleCardSpecific(IO80211SkywalkInterface *,unsigned long,void *,bool) override {
+    virtual SInt32 handleCardSpecific(IO80211SkywalkInterface *,unsigned long,void *,bool) ITL_CONTROLLER_OVERRIDE {
         XYLog("%s\n", __FUNCTION__);
         return 0;
     };
-    virtual IOReturn getDRIVER_VERSION(IO80211SkywalkInterface *interface,apple80211_version_data *data) override {
+    virtual IOReturn getDRIVER_VERSION(IO80211SkywalkInterface *interface,apple80211_version_data *data) ITL_CONTROLLER_OVERRIDE {
         XYLog("%s\n", __FUNCTION__);
         return getDRIVER_VERSION((OSObject *)interface, data);
     };
-    virtual IOReturn getHARDWARE_VERSION(IO80211SkywalkInterface *interface,apple80211_version_data *data) override {
+    virtual IOReturn getHARDWARE_VERSION(IO80211SkywalkInterface *interface,apple80211_version_data *data) ITL_CONTROLLER_OVERRIDE {
         XYLog("%s\n", __FUNCTION__);
         return getHARDWARE_VERSION((OSObject *)interface, data);
     };
-    virtual IOReturn getCARD_CAPABILITIES(IO80211SkywalkInterface *interface,apple80211_capability_data *data) override {
+    virtual IOReturn getCARD_CAPABILITIES(IO80211SkywalkInterface *interface,apple80211_capability_data *data) ITL_CONTROLLER_OVERRIDE {
 //        XYLog("%s\n", __FUNCTION__);
         return getCARD_CAPABILITIES((OSObject *)interface, data);
     }
-    virtual IOReturn getPOWER(IO80211SkywalkInterface *interface,apple80211_power_data *data) override {
+    virtual IOReturn getPOWER(IO80211SkywalkInterface *interface,apple80211_power_data *data) ITL_CONTROLLER_OVERRIDE {
 //        XYLog("%s\n", __FUNCTION__);
         return getPOWER((OSObject *)interface, data);
     }
-    virtual IOReturn setPOWER(IO80211SkywalkInterface *interface,apple80211_power_data *data) override {
+    virtual IOReturn setPOWER(IO80211SkywalkInterface *interface,apple80211_power_data *data) ITL_CONTROLLER_OVERRIDE {
 //        XYLog("%s\n", __FUNCTION__);
         return setPOWER((OSObject *)interface, data);
     }
-    virtual IOReturn getCOUNTRY_CODE(IO80211SkywalkInterface *interface,apple80211_country_code_data *data) override {
+    virtual IOReturn getCOUNTRY_CODE(IO80211SkywalkInterface *interface,apple80211_country_code_data *data) ITL_CONTROLLER_OVERRIDE {
 //        XYLog("%s\n", __FUNCTION__);
         return getCOUNTRY_CODE((OSObject *)interface, data);
     }
-    virtual IOReturn setCOUNTRY_CODE(IO80211SkywalkInterface *interface,apple80211_country_code_data *data) override {
+    virtual IOReturn setCOUNTRY_CODE(IO80211SkywalkInterface *interface,apple80211_country_code_data *data) ITL_CONTROLLER_OVERRIDE {
 //        XYLog("%s\n", __FUNCTION__);
         return setCOUNTRY_CODE((OSObject *)interface, data);
     }
-    virtual IOReturn setGET_DEBUG_INFO(IO80211SkywalkInterface *interface,apple80211_debug_command *data) override {
+    virtual IOReturn setGET_DEBUG_INFO(IO80211SkywalkInterface *interface,apple80211_debug_command *data) ITL_CONTROLLER_OVERRIDE {
         XYLog("%s\n", __FUNCTION__);
         return kIOReturnSuccess;
     }
@@ -182,10 +196,10 @@ public:
     //-----------------------------------------------------------------------
     // Power management support.
     //-----------------------------------------------------------------------
-    virtual IOReturn registerWithPolicyMaker( IOService * policyMaker ) override;
+    virtual IOReturn registerWithPolicyMaker( IOService * policyMaker ) ITL_CONTROLLER_OVERRIDE;
     virtual IOReturn setPowerState( unsigned long powerStateOrdinal,
-                                    IOService *   policyMaker) override;
-    virtual IOReturn setWakeOnMagicPacket( bool active ) override;
+                                    IOService *   policyMaker) ITL_CONTROLLER_OVERRIDE;
+    virtual IOReturn setWakeOnMagicPacket( bool active ) ITL_CONTROLLER_OVERRIDE;
     void setPowerStateOff(void);
     void setPowerStateOn(void);
     void unregistPM();
@@ -250,6 +264,37 @@ public:
     CCPipe *driverSnapshotsPipe;
     
     CCStream *driverFaultReporter;
+#ifdef AIRPORT_TAHOE
+    bool nativeActivationAttempted {false};
+    // Atomic bit0=requested On, bit1=real READY; updated as one word.
+    uint32_t nativePowerFlags {0};
+    uint32_t nativePowerGetCount {0};
+    uint32_t nativePowerSetCount {0};
+    uint32_t nativePowerLastResult {uint32_t(kIOReturnNotReady)};
+    uint32_t nativePowerLastEvent {0};
+    uint32_t nativePowerReadyCount {0};
+    uint32_t nativePowerStoppedCount {0};
+    uint32_t nativePowerResetCount {0};
+    uint32_t nativePowerEpoch {0}; // Serialized by the native command gate.
+    uint32_t nativePowerOffAttempts {0};
+    uint32_t nativePowerOffRetries {0};
+    uint32_t nativePowerOffResult {uint32_t(kIOReturnNotReady)};
+    bool nativePowerOffPending {false}; // Atomic snapshots; transitions serialized by the native command gate.
+    bool nativePowerRequested() const {
+        return (__atomic_load_n(&nativePowerFlags, __ATOMIC_ACQUIRE) & 1U) != 0;
+    }
+    IOReturn waitForNativePower(uint32_t);
+    IOReturn disableAdapterWithRetry(uint32_t);
+    void wakeNativePowerWaiters();
+    static IOReturn nativePowerAction(OSObject *, void *, void *, void *, void *);
+    void publishNativePowerState();
+    void observeNativePowerEvent(int);
+    CCStream *nativeLogger {nullptr};
+    OSObject *nativeFaultReporter {nullptr};
+    uint32_t nativeCaptureStarted {0};
+    void releaseNativeCapture();
+#endif
 };
 
+#undef ITL_CONTROLLER_OVERRIDE
 #endif /* AirportItlwmV2_hpp */
