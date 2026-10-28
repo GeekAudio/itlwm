@@ -864,6 +864,34 @@ window.TEST_RECORDS = [
     ]
   },
   {
+    "id": "record-test065-boot1793181722",
+    "version": "25G332-Test065",
+    "label": "本轮运行记录",
+    "state": "Wi-Fi两段观察稳定 · 控制帧通过 · QM路径未触发",
+    "tone": "working",
+    "date": "2026-10-28",
+    "summary": "本次启动与Test065加载身份匹配。Wi-Fi在RF前观察120.082秒、RF后观察780.092秒，中间约82秒包含一次诊断，不能称连续15分钟。本boot唯一诊断已用完，不重复。唯一900ms诊断收到6 PSF、1 MIF并准入1 peer；本机PSF1、MIF3获固件成功。QM在取包前被gate关闭，AirDrop未验证。",
+    "evidence": [
+      "两段被动观察分别稳定；reset保持10。启动Legacy FW software error=1、NewState=1和watchdog=0按原值保留，没有新增。",
+      "诊断后64KiB HTTPS完整返回HTTP 200，用时0.892185秒；不是速率测试。",
+      "一次频道6、900ms ROC成功；收到6 PSF、1 MIF并准入1 peer。本机PSF1、MIF3提交并获固件成功。",
+      "已准入peer时DiscoveryStatus=16、Checks=0，discovery profile在取包前关闭。软件队列accepted +2，但Encoded、Submitted和QM发送计数均为0。",
+      "路由器捕获1811条记录：1810条为频道6有效radiotap记录，另1条无效；记录1个本机PSF和2个MIF序列包。未捕获第三个MIF不代表丢包。",
+      "2条有效AWDL Data envelope是查询前约536ms的mDNS响应，目标物理设备未知；Mac RX有30管理帧、0数据帧，source-filter字段不可用。",
+      "4组同帧GP2/TSFT匹配的偏移跨度4µs，只是经验短区间对齐；跨设备映射、Airtime、peer收件与AirDrop均未证。"
+    ],
+    "blockers": [
+      "已准入peer时discovery gate在取包前关闭；QM编码/提交没有发生，不能归因于PHY、固件队列或空口丢包。",
+      "没有本次查询后的peer回包或Mac数据RX；外部PCAP的mDNS响应不能证明目标iPhone收到或回复。",
+      "没有实际AirDrop文件传输；Test066仍是私有提案，尚未构建或部署。"
+    ],
+    "next": [
+      "先离线实现并审查Test066私有overlay，修复已准入peer场景下的discovery取包门槛。",
+      "后续依次验证QM编码/提交/固件完成、外部peer收件及Mac RX，每个阶段分别记录。",
+      "只有双向文件实际收件后，才更新AirDrop通过结论。"
+    ]
+  },
+  {
     "id": "record-test065",
     "version": "25G332-Test065",
     "date": "2026-10-28",
