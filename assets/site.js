@@ -39,6 +39,10 @@
         return { badge: "Test064已启动 · 单次诊断完成", subtitle: "已核对加载身份并完成本启动唯一一次900ms诊断；Wi-Fi与awdl0基线正常，15分钟被动观察仍在进行。当前页面各阶段细项保留上一轮Test063已确认结果；Test064的冻结数据正在复核，随后补齐本轮结论。历史24/40保持。", recordLabel: "本轮运行记录", recordState: "Wi-Fi观察与日志复核中", tone: "working", versionFallback: "25G332-Test064" };
       case "test065_offline_verified_not_deployed":
         return { badge: "Test065离线验证通过 · 尚未部署", subtitle: "全量构建与签名已由候选元数据确认；新增活动manual ROC期间的有界RX入口计数、两个数值descriptor见证和闭窗完整快照发布。当前仍运行Test064，历史24/40保持；Test065无实机结果。", recordLabel: "离线验证候选", recordState: "尚未部署", tone: "working", versionFallback: "25G332-Test065" };
+      case "test066_panic_quarantined":
+        return { badge: "Test066 诊断崩溃，已停测", subtitle: "已确认MIF嵌套发布耗尽内核栈，正在验证Test067修复；当前不再触发诊断。", recordLabel: "Test067候选", recordState: "离线修复中", tone: "working", versionFallback: "25G332-Test067" };
+      case "test067_deployed_waiting_reboot":
+        return { badge: "Test067 已部署，等待重启", subtitle: "已合并栈占用修复并保留备份；当前仍运行Test066。实机稳定、数据回包和AirDrop等待验证。", recordLabel: "Test067候选", recordState: "等待重启", tone: "working", versionFallback: "25G332-Test067" };
       case "test066_deployed_waiting_reboot":
         return { badge: "Test066 已部署，等待重启", subtitle: "已合并对端绑定、当前MIF时隙与pacing修复。当前仍运行Test065；下一启动再验证QM发送和原生RX，AirDrop尚未完成。", recordLabel: "已部署候选", recordState: "等待重启", tone: "working", versionFallback: "25G332-Test066" };
       case "test065_deployed_waiting_reboot":

@@ -1,27 +1,49 @@
 window.TEST_RECORDS = [
   {
-    "id": "record-test066",
-    "version": "25G332-Test066",
+    "id": "record-test067",
+    "version": "25G332-Test067",
     "label": "已部署 · 待重启",
-    "state": "合并验证通过 · 实机验证待完成",
+    "state": "栈修复通过离线验证 · 实机待测",
     "tone": "working",
     "date": "2026-10-28",
-    "summary": "已部署内置EFI。当前仍运行Test065；Test066需要下次启动验证，不将离线通过算成AirDrop成功。",
+    "summary": "Test067已写入内置EFI，整份EFI已备份；当前仍运行Test066，修复效果等待重启验证。",
     "evidence": [
-      "修复已准入peer后查询分支提前退出；PSF/MIF在同一runtime entry内核对频道表和master/sync身份，并锁定incarnation、revision及epoch。",
-      "MIF当前时隙、受限pacing和真实strict-FIFO QM队列共用一次发送预算；时窗或身份变化即停止。",
-      "真实PSF/MIF样本经生产解析器和绑定/时序逻辑离线验证；原实际完成时刻过窗，条件性提前完成用例通过，不等于真实空口发送。",
-      "合并host测试、独立只读复核和Debug内核构建通过；原驱动依赖、config与其他kext保持，整份EFI已备份。",
-      "Test065两段有界Wi-Fi观察稳定，但19:09后续复查新增1次TX watchdog并已恢复；Test066未宣称解决长期稳定性。"
+      "worker Run使用有构造/析构的独占堆内存，OOM阻止自动RF重试并保留软件resident初始化。",
+      "深层MIF/数据路径只做主gate有界收包，日志发布保留在浅层；原同peer/epoch/FIFO/时窗保护保持。",
+      "实际Debug构建、严格签名、对象寿命/接收发布用例及独立二进制栈预算复核通过。",
+      "worker完整栈帧2400→272字节；已解析MIF直接链16208→10088字节，数据选包11538、提交7864字节分别计算；不含系统/间接调用完整内部栈，不是严格上界。",
+      "只替换Intel kext，config和原依赖保留；整份EFI备份已核对。"
     ],
     "blockers": [
-      "Test066尚未启动；真实QM编码/固件提交、对端收到及Mac数据RX尚待验证。",
-      "持续时隙调度、mDNS应答闭环和双向AirDrop文件传输尚未完成。",
-      "普通Wi-Fi发送超时的队列原因仍待定位，不能把自动恢复视为已修复。"
+      "Test067尚未启动，不能宣称panic或Wi-Fi长期稳定性已实机修复。",
+      "原生回包与双向AirDrop仍未验证。"
     ],
     "next": [
-      "重启后先确认Test066加载身份及Wi-Fi稳定性。",
-      "手机准备好后执行本次启动唯一一次900ms路由器＋Mac同步诊断，依次核对QM提交、对端回包与Mac RX。"
+      "重启后先做加载身份和Wi-Fi基线检查。",
+      "手机重新准备好后，执行新启动唯一一次900ms同步诊断。"
+    ]
+  },
+  {
+    "id": "record-test066",
+    "version": "25G332-Test066",
+    "label": "本轮运行记录",
+    "state": "MIF准备触发内核栈耗尽 · 已停测",
+    "tone": "working",
+    "date": "2026-10-28",
+    "summary": "RF前120秒Wi-Fi与64KiB联网预检通过；唯一同步诊断后kernel panic，末状态与PCAP不完整，AirDrop未验证。",
+    "evidence": [
+      "加载UUID匹配，私有地址Stage5/Result0；awdl0 phase13和链路本地IPv6通过。",
+      "120.078秒/113次被动采样，reset5→5，无新增固件或watchdog错误；64KiB HTTPS200/0.876445秒。",
+      "同步工具放行browse/arm；panic栈为MIF准备→RxDrain→PeerRuntime日志发布→栈探测。二进制与panic UUID匹配。",
+      "采集被崩溃中断；缺末状态和0字节PCAP不说明没有发送或没有回包。路由器临时monitor已清理，AP/UCI保持。"
+    ],
+    "blockers": [
+      "AWDL控制路径内核栈耗尽；Test066不再触发诊断。",
+      "没有完整无线数据发送、对端回包或AirDrop文件收件证据。"
+    ],
+    "next": [
+      "Test067移出worker大栈对象，分离有界收包与慢速发布；实际栈帧复核后部署。",
+      "保留整份EFI备份与单次诊断限制，新版本重启后再实测。"
     ]
   },
   {
