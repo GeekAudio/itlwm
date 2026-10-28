@@ -892,10 +892,10 @@ window.TEST_RECORDS = [
     "id": "record-test065-boot1793181722",
     "version": "25G332-Test065",
     "label": "本轮运行记录",
-    "state": "Wi-Fi两段观察稳定 · 控制帧通过 · QM路径未触发",
+    "state": "当前连通 · 后续新增发送超时 · QM未触发",
     "tone": "working",
     "date": "2026-10-28",
-    "summary": "本次启动与Test065加载身份匹配。Wi-Fi在RF前观察120.082秒、RF后观察780.092秒，中间约82秒包含一次诊断，不能称连续15分钟。本boot唯一诊断已用完，不重复。唯一900ms诊断收到6 PSF、1 MIF并准入1 peer；本机PSF1、MIF3获固件成功。QM在取包前被gate关闭，AirDrop未验证。",
+    "summary": "本次启动与Test065加载身份匹配。Wi-Fi在RF前观察120.082秒、RF后观察780.092秒，中间约82秒包含一次诊断，不能称连续15分钟。本boot唯一诊断已用完，不重复。唯一900ms诊断收到6 PSF、1 MIF并准入1 peer；本机PSF1、MIF3获固件成功。QM在取包前被gate关闭，AirDrop未验证。 后续19:09单点复查新增1次TX watchdog并已恢复；两个有界观察段的稳定不能外推至整段开发期间。",
     "evidence": [
       "两段被动观察分别稳定；reset保持10。启动Legacy FW software error=1、NewState=1和watchdog=0按原值保留，没有新增。",
       "诊断后64KiB HTTPS完整返回HTTP 200，用时0.892185秒；不是速率测试。",
