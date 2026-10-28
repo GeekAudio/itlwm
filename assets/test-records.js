@@ -1,5 +1,30 @@
 window.TEST_RECORDS = [
   {
+    "id": "record-test066",
+    "version": "25G332-Test066",
+    "label": "已部署 · 待重启",
+    "state": "合并验证通过 · 实机验证待完成",
+    "tone": "working",
+    "date": "2026-10-28",
+    "summary": "已部署内置EFI。当前仍运行Test065；Test066需要下次启动验证，不将离线通过算成AirDrop成功。",
+    "evidence": [
+      "修复已准入peer后查询分支提前退出；PSF/MIF在同一runtime entry内核对频道表和master/sync身份，并锁定incarnation、revision及epoch。",
+      "MIF当前时隙、受限pacing和真实strict-FIFO QM队列共用一次发送预算；时窗或身份变化即停止。",
+      "真实PSF/MIF样本经生产解析器和绑定/时序逻辑离线验证；原实际完成时刻过窗，条件性提前完成用例通过，不等于真实空口发送。",
+      "合并host测试、独立只读复核和Debug内核构建通过；原驱动依赖、config与其他kext保持，整份EFI已备份。",
+      "Test065两段有界Wi-Fi观察稳定，但19:09后续复查新增1次TX watchdog并已恢复；Test066未宣称解决长期稳定性。"
+    ],
+    "blockers": [
+      "Test066尚未启动；真实QM编码/固件提交、对端收到及Mac数据RX尚待验证。",
+      "持续时隙调度、mDNS应答闭环和双向AirDrop文件传输尚未完成。",
+      "普通Wi-Fi发送超时的队列原因仍待定位，不能把自动恢复视为已修复。"
+    ],
+    "next": [
+      "重启后先确认Test066加载身份及Wi-Fi稳定性。",
+      "手机准备好后执行本次启动唯一一次900ms路由器＋Mac同步诊断，依次核对QM提交、对端回包与Mac RX。"
+    ]
+  },
+  {
     "id": "record-test032",
     "version": "25G241-Test032",
     "label": "历史验证",
