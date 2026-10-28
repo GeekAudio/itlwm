@@ -41,6 +41,8 @@
         return { badge: "Test065离线验证通过 · 尚未部署", subtitle: "全量构建与签名已由候选元数据确认；新增活动manual ROC期间的有界RX入口计数、两个数值descriptor见证和闭窗完整快照发布。当前仍运行Test064，历史24/40保持；Test065无实机结果。", recordLabel: "离线验证候选", recordState: "尚未部署", tone: "working", versionFallback: "25G332-Test065" };
       case "test066_panic_quarantined":
         return { badge: "Test066 诊断崩溃，已停测", subtitle: "已确认MIF嵌套发布耗尽内核栈，正在验证Test067修复；当前不再触发诊断。", recordLabel: "Test067候选", recordState: "离线修复中", tone: "working", versionFallback: "25G332-Test067" };
+      case "test068_runtime_binding_blocked":
+        return { badge: "Test068 本轮实测已记录", subtitle: "MIF受限重发和本轮接纳通过；数据查询仍卡在准入与绑定。Wi-Fi前后分段稳定，AirDrop未实现。Test069离线准备，尚未部署，当前无需重启。", recordLabel: "本轮运行记录", recordState: "QM准入待修", tone: "working", versionFallback: "25G332-Test068" };
       case "test068_deployed_waiting_reboot":
         return { badge: "Test068 已部署，等待重启", subtitle: "当前仍运行Test067。MIF等待修正已合并验证并保留备份；重发、数据回包和AirDrop等待新启动实测。", recordLabel: "已部署候选", recordState: "等待重启", tone: "working", versionFallback: "25G332-Test068" };
       case "test067_runtime_no_peer_mif":
