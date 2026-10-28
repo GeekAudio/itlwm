@@ -137,6 +137,93 @@
     target.append(layout);
   }
 
+  const timelineStatusLabels = {
+    done: "已完成",
+    current: "进行中",
+    pending: "待验收"
+  };
+
+  function formatTimelineTime(value) {
+    if (!value) return null;
+    const dateOnly = String(value).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (dateOnly) return `${dateOnly[1]}/${dateOnly[2]}/${dateOnly[3]}`;
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return null;
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Shanghai",
+      year: "numeric",
+      month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", hourCycle: "h23"
+    }).formatToParts(date);
+    const valueFor = type => parts.find(part => part.type === type)?.value;
+    return `${valueFor("year")}/${valueFor("month")}/${valueFor("day")} ${valueFor("hour")}:${valueFor("minute")}`;
+  }
+
+  function renderTimeline() {
+    const target = $("#development-timeline");
+    if (!target) return;
+    target.replaceChildren();
+
+    const timeline = data?.timeline;
+    if (!timeline || timeline.scope !== "project" || !Array.isArray(timeline.steps) || !timeline.steps.length) {
+      target.hidden = true;
+      return;
+    }
+
+    target.hidden = false;
+    const heading = node("div", "timeline-heading");
+    const headingCopy = node("div");
+    headingCopy.append(node("div", "section-kicker", "PROJECT DEVELOPMENT"));
+    headingCopy.append(node("h2", "", timeline.title || "开发总时间线"));
+    headingCopy.append(node("p", "timeline-intro", timeline.summary || "记录关键开发阶段与首次进展，当前验收结果见本轮实测。"));
+    const meta = node("div", "timeline-head-meta");
+    meta.append(node("span", "timeline-scope", "项目全程"));
+    meta.append(node("span", "timeline-timezone", "北京时间"));
+    if (timeline.candidate) meta.append(node("span", "timeline-candidate", `数据快照 ${timeline.candidate}`));
+    heading.append(headingCopy, meta);
+    target.append(heading);
+
+    const list = node("ol", "timeline-list");
+    for (const [index, step] of timeline.steps.entries()) {
+      if (!step || !Object.prototype.hasOwnProperty.call(timelineStatusLabels, step.status)) continue;
+      const item = node("li", `timeline-step is-${step.status}`);
+      const marker = node("span", "timeline-marker", step.status === "done" ? "✓" : String(index + 1));
+      marker.setAttribute("aria-hidden", "true");
+      const body = node("div", "timeline-entry");
+      const top = node("div", "timeline-entry-top");
+      top.append(node("h3", "timeline-label", step.label || "步骤待补充"));
+      const entryMeta = node("div", "timeline-event-meta");
+      if (step.candidate) entryMeta.append(node("span", "timeline-version", step.candidate));
+      const stateLabel = step.stateLabel || timelineStatusLabels[step.status];
+      entryMeta.append(node("span", "timeline-state", stateLabel));
+      top.append(entryMeta);
+      body.append(top);
+
+      if (step.time && step.status !== "pending") {
+        const formatted = formatTimelineTime(step.time);
+        if (formatted) {
+          const time = node("time", "timeline-time", formatted);
+          time.dateTime = step.time;
+          body.append(time);
+        }
+      } else if (step.status === "done" && !step.time) {
+        body.append(node("span", "timeline-time timeline-time-unknown", "日期未记录"));
+      }
+
+      if (step.detail) body.append(node("p", "timeline-detail", step.detail));
+      const href = stageHref(step.stage);
+      if (href) {
+        const link = node("a", "timeline-stage-link", "查看相关里程碑 ↗");
+        link.href = href;
+        body.append(link);
+      }
+
+      item.append(marker, body);
+      list.append(item);
+    }
+    target.append(list);
+  }
+
   function chip(label, tone = "pending") {
     return node("span", `status-chip tone-${tone}`, label || "待更新");
   }
@@ -599,6 +686,7 @@
 
   renderHeader();
   renderWorkflow();
+  renderTimeline();
   renderProgress();
   renderMilestones();
   installMilestoneControls();
