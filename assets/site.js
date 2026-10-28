@@ -42,7 +42,7 @@
       case "test065_deployed_waiting_reboot":
         return { badge: "Test065已部署 · 待重启验收", subtitle: "整份EFI备份及卸载重挂核对已由Test065部署报告确认；只更新AirportItlwm.kext，config和其它bundle保持。当前仍运行Test064。重启后先验Wi-Fi和awdl0，再检查manual ROC内RX入口计数及闭窗快照；Test065尚无实机结果。", recordLabel: "已部署候选", recordState: "待重启运行验收", tone: "pending", versionFallback: "25G332-Test065" };
       case "test064_runtime_diagnostic_complete":
-        return { badge: "Test064 本轮实测已记录", subtitle: "Wi-Fi与awdl0连续15分钟稳定，诊断前后HTTPS正常。单条原生QM查询到达固件并报告成功，但收到5个PSF、没有MIF准入或数据回包；AirDrop仍未通。估算时钟与空口覆盖未获证明。本启动诊断已用完，没有新EFI部署或重启要求。", recordLabel: "本轮运行记录", recordState: "对端回包待定位", tone: "working", versionFallback: "原生数据回包入口与队列角色复核" };
+        return { badge: "Test064 本轮实测已记录", subtitle: "Wi-Fi与awdl0连续15分钟稳定，诊断前后HTTPS正常。单条原生QM查询到达固件并报告成功，但收到5个PSF、没有MIF准入或数据回包；AirDrop仍未通。估算时钟与空口覆盖未获证明。以上为Test064实测；Test065已部署，待重启验收。", recordLabel: "本轮运行记录", recordState: "对端回包待定位", tone: "working", versionFallback: "原生数据回包入口与队列角色复核" };
       case "test063_runtime_diagnostic_complete":
         return { badge: "Test063 本轮实测已记录", subtitle: "已收到并接纳MIF，原生awdl0两条QM查询完成固件发送；数据回包与AirDrop尚未通过。Wi-Fi恢复后15分钟观察稳定，诊断前后联网正常；启动早期固件错误和即时热点失败仍待定位。本启动唯一诊断已使用，没有新部署。", recordLabel: "本轮运行记录", recordState: "回包与即时热点待突破", tone: "working", versionFallback: "后续开发：数据回包与即时热点" };
       case "test063_deployed_waiting_reboot":

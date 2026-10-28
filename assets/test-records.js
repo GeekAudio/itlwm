@@ -842,7 +842,7 @@ window.TEST_RECORDS = [
     "label": "Test064本轮实测已记录",
     "state": "Wi-Fi稳定 · 单条QM本地发送成功 · 等待对端回包",
     "tone": "working",
-    "summary": "Wi-Fi与awdl0连续15分钟稳定，诊断前后HTTPS正常。单条原生QM查询在估算提交区间内进入固件并报告成功；收到5个PSF、0个MIF，没有数据RX或Bonjour回应。Finder本轮可见手机，但未测试双向文件收件；手机端是否能看到Mac未知。历史24/40保持。本轮没有改EFI或要求重启。",
+    "summary": "Wi-Fi与awdl0连续15分钟稳定，诊断前后HTTPS正常。单条原生QM查询在估算提交区间内进入固件并报告成功；收到5个PSF、0个MIF，没有数据RX或Bonjour回应。Finder本轮可见手机，但未测试双向文件收件；手机端是否能看到Mac未知。历史24/40保持。Test064当时没有更新EFI，也没有下一轮重启要求。",
     "evidence": [
       "加载Test064身份正确；私有地址与awdl0 IPv6预检通过。Wi-Fi连续900.094秒、826次采样无变化，reset 10→10、观察期错误增量0；64KiB HTTPS前后HTTP 200。",
       "900ms诊断中的本机PSF和2次MIF burst共3项均获本地固件成功，随后资源清理完成；收到5个PSF、0个MIF、无对端准入。",
