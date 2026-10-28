@@ -867,29 +867,33 @@ window.TEST_RECORDS = [
     "id": "record-test065",
     "version": "25G332-Test065",
     "date": "2026-10-28",
-    "label": "Test065当前启动验证中",
-    "state": "Wi-Fi基线与RX诊断预检中",
+    "label": "Test065本轮实测已记录",
+    "state": "恢复后Wi-Fi观察稳定 · 对端MIF准入 · 本地QM发送完成 · 数据回包未通",
     "tone": "working",
-    "summary": "本次启动boot1793174561已确认Test065加载且UUID匹配。Wi-Fi基线观察和本启动唯一RX诊断预检正在进行，尚未开展无线空口测试。启动累计reset 15、watchdog 2、FW error 0；系统目前已恢复，监测仍在运行，不能据此判定稳定通过。阶段证据和40项当前结果仍引用Test064上一轮，等待本轮最终汇总；历史24/40保持。",
+    "summary": "Test065 boot1793174561已正确加载。Wi-Fi恢复后观察900.091秒、823次采样稳定，reset 15→15，前后64KiB HTTPS HTTP 200；启动早期仍有2次原因未明的TX watchdog超时。唯一900ms诊断收到7个PSF、1个MIF并准入1个对端；本机PSF/MIF各1次及单条QM固件发送成功。RX入口37个管理帧、0个数据帧，没有对端数据回包。Finder本轮可见iPhone，但未实测文件收件；AirDrop未证明。历史24/40保持。",
     "evidence": [
-      "新增有界RX入口计数：CRC前过滤、RX overrun、实际通知长度和DMA容量分开记录。",
-      "最多2个数值descriptor见证，不记录地址；只在活动manual ROC采集，闭窗后完整发布快照。",
-      "保留单QM实验与原有peer/包类/地址过滤；记录真实station/TID证据，不凭假设更改P2P管理队列与STA数据角色。",
-      "闭窗后校验快照代次和版本；unknown DNS callback不当作零回调，软件队列accepted不当作无线发送。",
-      "完整EFI备份、目标kext替换、config与其它bundle保留、卸载重挂核对和部署脚本报告均以Test065部署元数据为准。",
-      "Test064本轮已证明的Wi-Fi稳定性和本地单QM发送仍作为历史本轮记录；不推断Test065实机行为。",
-      "本次启动boot1793174561已加载Test065，Mach-O UUID匹配；Wi-Fi基线与唯一RX诊断仍在预检中，尚未进行无线空口测试。",
-      "启动累计reset 15、watchdog 2、FW error 0；系统目前已恢复，监测仍在运行，不构成稳定性通过证据。"
+      "Test065加载身份与构建匹配；私有地址检查通过，en1与awdl0 IPv6保持可用。恢复后900.091秒/823次采样，reset 15→15，观察期无新增watchdog或固件错误；启动早期2次自发TX watchdog超时的原因未知。",
+      "恢复后诊断前后绑定en1的64KiB HTTPS均HTTP 200（1.031秒/0.949秒）；不是网速测试。用户确认观察前未睡眠、切换Wi-Fi或试热点。",
+      "唯一900ms信道6 manual ROC中收到7个PSF、1个MIF并准入1个对端；本机PSF/MIF各1次本地固件成功。窗口结束后固件资源已清理。",
+      "QM提交调用在估算范围内，GP2与主机采样区间相容；时钟映射、漂移界和实际空口时刻未证明。",
+      "闭窗RX入口快照有效：37个完整管理帧入口，0个数据帧；状态/CRC/overrun/长度/容量错误均0，过滤匹配字段不可用。不能据此推断对端未发或更早固件丢包。",
+      "一条原生QM mDNS查询Encoded/Submitted/Completed/Succeeded均为1；软件队列accepted=2只表示入队，不是两次无线发送。",
+      "DNS-SD browse在约1.045/2.089/3.133秒三个进度点callback均为0，helper以-9退出；20秒窗口和teardown未完成，callback总数未知。",
+      "本轮Finder可见iPhone；没有实际文件传送，也未确认iPhone端能否看到Mac。没有对端数据回包、native ifnet输入或AirDrop收件证明。",
+      "普通AWDL软件队列在受限单次ROC条件下新增6次过期；这是软件包因有限调度窗口未发送，不是Wi-Fi或RF失败。即时热点、开关与睡眠恢复本轮未测。",
+      "本轮未修改EFI、未部署新候选，不需要重启。历史24/40保持；无Test066候选已准备的结论。"
     ],
     "blockers": [
-      "Wi-Fi基线观察和本启动唯一RX诊断预检仍在进行；目前没有Test065无线空口、RX回包或AirDrop结果。",
-      "启动故障核心已交另一会话复核，结论待回。",
-      "Test065本轮结果尚未汇总；阶段证据与40项当前结果暂保留为Test064上一轮。"
+      "启动早期两次TX watchdog超时没有对应提交/完成因果；需追踪普通TX的MAC_CONTEXT提交、完成通知和队列回收。",
+      "对端MIF准入已恢复，但RX入口只收到管理帧，0数据帧；实际RX API/mac_context及更早DMA/firmware路径仍待证。",
+      "没有对端数据回包或Bonjour应答，AirDrop实际文件传送未测；设备可见和本地固件成功均不等于收件。",
+      "时钟映射/空口覆盖、browse完整回调窗口、双向AirDrop、即时热点和睡眠恢复均未完成。"
     ],
     "next": [
-      "完成Wi-Fi被动基线观察，并保留启动计数的恢复状态。",
-      "基线完成后执行本启动唯一有界RX诊断，确认真实运行结果。",
-      "待最终aggregate后再更新各阶段和40项结果，不从恢复状态推断稳定通过。"
+      "开发重点：补实际RX API/mac_context入口证据，确认数据帧可进入native RX链路。",
+      "开发重点：记录实际MAC_CONTEXT提交见证、station/TID，并追踪普通TX从提交到完成/超时的同一事务。",
+      "保持Wi-Fi基线，不重复本启动已完成的唯一RF诊断；无新候选部署或重启要求。",
+      "待数据RX与Bonjour应答有证据后，再分别进行双向AirDrop实际文件收件测试。"
     ]
   }
 ];
