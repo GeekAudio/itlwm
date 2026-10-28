@@ -44,7 +44,7 @@
       case "test065_booted_preflight_running":
         return { badge: "Test065已启动 · 基线与RX诊断预检中", subtitle: "本次启动已确认Test065加载且UUID匹配；Wi-Fi基线观察和本启动唯一RX诊断预检正在进行，尚未开展无线空口测试。启动累计reset 15、watchdog 2、FW error 0，目前状态已恢复；监测仍在运行，不能据此判定稳定通过。阶段证据和40项当前结果仍引用Test064上一轮，等待本轮最终汇总；历史24/40保持。", recordLabel: "本轮运行验证", recordState: "基线观察与诊断预检中", tone: "working", versionFallback: "25G332-Test065" };
       case "test065_runtime_diagnostic_complete":
-        return { badge: "Test065 本轮实测已记录", subtitle: "恢复后Wi-Fi与awdl0 IPv6观察900秒稳定，前后联网正常；启动早期仍有2次原因未明的TX超时。单次诊断收到7个PSF、1个MIF并准入1个对端，本机PSF/MIF及单条QM本地固件发送成功；RX入口只见管理帧、没有数据回包。Finder可见iPhone，但没有实际文件传输。AirDrop未证明；本轮没有新EFI或重启要求。", recordLabel: "本轮运行记录", recordState: "TX超时与数据回包待突破", tone: "working", versionFallback: "下一步：RX API/mac_context与TX超时来源" };
+        return { badge: "Test065实测已记录 · 路由器接收预检完成", subtitle: "AX3000T在频道6/2437MHz捕获379条记录：368个管理帧、9个带payload的数据/QoS帧和2个Null帧；11个数据类记录均为foreign BSS。379条均有TSFT但没有FCS。预检未再次arm本机QM，未见own QM不能说明未发射。临时monitor已清理，AP/UCI保持。当前启动的唯一900ms诊断已经用完，不能在本启动重复；同步采集工具已合并并独立复核；当前启动的唯一诊断已用完，下一步需重启沿用Test065，在新启动仅执行一次900ms同步诊断。本次重启只为取得未使用窗口，不代表部署新驱动，EFI不变。", recordLabel: "本轮运行记录", recordState: "工具已复核 · 需新启动", tone: "working", versionFallback: "新启动同步捕获：own QM、peer回包、Mac RX" };
       case "test064_runtime_diagnostic_complete":
         return { badge: "Test064 本轮实测已记录", subtitle: "Wi-Fi与awdl0连续15分钟稳定，诊断前后HTTPS正常。单条原生QM查询到达固件并报告成功，但收到5个PSF、没有MIF准入或数据回包；AirDrop仍未通。估算时钟与空口覆盖未获证明。以上为Test064实测；Test065已部署，待重启验收。", recordLabel: "本轮运行记录", recordState: "对端回包待定位", tone: "working", versionFallback: "原生数据回包入口与队列角色复核" };
       case "test063_runtime_diagnostic_complete":

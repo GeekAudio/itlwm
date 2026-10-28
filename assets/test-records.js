@@ -870,7 +870,7 @@ window.TEST_RECORDS = [
     "label": "Test065本轮实测已记录",
     "state": "恢复后Wi-Fi观察稳定 · 对端MIF准入 · 本地QM发送完成 · 数据回包未通",
     "tone": "working",
-    "summary": "Test065 boot1793174561已正确加载。Wi-Fi恢复后观察900.091秒、823次采样稳定，reset 15→15，前后64KiB HTTPS HTTP 200；启动早期仍有2次原因未明的TX watchdog超时。唯一900ms诊断收到7个PSF、1个MIF并准入1个对端；本机PSF/MIF各1次及单条QM固件发送成功。RX入口37个管理帧、0个数据帧，没有对端数据回包。Finder本轮可见iPhone，但未实测文件收件；AirDrop未证明。历史24/40保持。",
+    "summary": "Test065 boot1793174561已正确加载。Wi-Fi恢复后观察900.091秒、823次采样稳定，reset 15→15，前后64KiB HTTPS HTTP 200；启动早期仍有2次原因未明的TX watchdog超时。唯一900ms诊断收到7个PSF、1个MIF并准入1个对端；本机PSF/MIF各1次及单条QM固件发送成功。RX入口37个管理帧、0个数据帧，没有对端数据回包。Finder本轮可见iPhone，但未实测文件收件；AirDrop未证明。历史24/40保持。 真实路由器只完成接收能力预检；未同步本机QM诊断，own QM未见不代表没有发射。",
     "evidence": [
       "Test065加载身份与构建匹配；私有地址检查通过，en1与awdl0 IPv6保持可用。恢复后900.091秒/823次采样，reset 15→15，观察期无新增watchdog或固件错误；启动早期2次自发TX watchdog超时的原因未知。",
       "恢复后诊断前后绑定en1的64KiB HTTPS均HTTP 200（1.031秒/0.949秒）；不是网速测试。用户确认观察前未睡眠、切换Wi-Fi或试热点。",
@@ -881,19 +881,24 @@ window.TEST_RECORDS = [
       "DNS-SD browse在约1.045/2.089/3.133秒三个进度点callback均为0，helper以-9退出；20秒窗口和teardown未完成，callback总数未知。",
       "本轮Finder可见iPhone；没有实际文件传送，也未确认iPhone端能否看到Mac。没有对端数据回包、native ifnet输入或AirDrop收件证明。",
       "普通AWDL软件队列在受限单次ROC条件下新增6次过期；这是软件包因有限调度窗口未发送，不是Wi-Fi或RF失败。即时热点、开关与睡眠恢复本轮未测。",
-      "本轮未修改EFI、未部署新候选，不需要重启。历史24/40保持；无Test066候选已准备的结论。"
+      "本轮未修改EFI、未部署新候选，不需要重启。历史24/40保持；无Test066候选已准备的结论。",
+      "独立路由器预检：频道6/2437MHz共379条记录，368个管理帧、9个带payload的数据/QoS帧和2个Null帧；11个数据类记录均来自foreign BSS。全部有radiotap TSFT；抓包没有FCS，无法检查FCS。",
+      "临时monitor已删除；AP/UCI配置保持，未升级固件或切频道。tcpdump/libpcap仅临时驻留RAM；原始pcap和地址、SSID、管理IP、凭据不会发布。"
     ],
     "blockers": [
       "启动早期两次TX watchdog超时没有对应提交/完成因果；需追踪普通TX的MAC_CONTEXT提交、完成通知和队列回收。",
       "对端MIF准入已恢复，但RX入口只收到管理帧，0数据帧；实际RX API/mac_context及更早DMA/firmware路径仍待证。",
       "没有对端数据回包或Bonjour应答，AirDrop实际文件传送未测；设备可见和本地固件成功均不等于收件。",
-      "时钟映射/空口覆盖、browse完整回调窗口、双向AirDrop、即时热点和睡眠恢复均未完成。"
+      "时钟映射/空口覆盖、browse完整回调窗口、双向AirDrop、即时热点和睡眠恢复均未完成。",
+      "本次为接收能力预检，没有重新arm本机QM；own QM与peer return均未观察，不能从“未见”推出未发射或未回包。"
     ],
     "next": [
       "开发重点：补实际RX API/mac_context入口证据，确认数据帧可进入native RX链路。",
       "开发重点：记录实际MAC_CONTEXT提交见证、station/TID，并追踪普通TX从提交到完成/超时的同一事务。",
-      "保持Wi-Fi基线，不重复本启动已完成的唯一RF诊断；无新候选部署或重启要求。",
-      "待数据RX与Bonjour应答有证据后，再分别进行双向AirDrop实际文件收件测试。"
+      "待数据RX与Bonjour应答有证据后，再分别进行双向AirDrop实际文件收件测试。",
+      "分开判定本机QM空口发送、peer实际回包和Mac RX API/mac_context入口；router TSFT与Mac GP2不可直接相减。",
+      "捕获不到不等于本机未发；本地固件TX成功也不等于手机收到。此次外部预检未新增历史验收，历史24/40和本轮20/5/9/6保持。",
+      "下一轮保持Test065且不改EFI；同步抓取和逐包脱敏关联工具已合并并经独立复核，当前启动唯一诊断已用完，下一步需重启沿用同一Test065，在新启动执行一次900ms同步诊断并同步路由器接收。本次重启只为取得未使用窗口，不代表部署新驱动。"
     ]
   }
 ];
