@@ -41,6 +41,8 @@
         return { badge: "Test065离线验证通过 · 尚未部署", subtitle: "全量构建与签名已由候选元数据确认；新增活动manual ROC期间的有界RX入口计数、两个数值descriptor见证和闭窗完整快照发布。当前仍运行Test064，历史24/40保持；Test065无实机结果。", recordLabel: "离线验证候选", recordState: "尚未部署", tone: "working", versionFallback: "25G332-Test065" };
       case "test066_panic_quarantined":
         return { badge: "Test066 诊断崩溃，已停测", subtitle: "已确认MIF嵌套发布耗尽内核栈，正在验证Test067修复；当前不再触发诊断。", recordLabel: "Test067候选", recordState: "离线修复中", tone: "working", versionFallback: "25G332-Test067" };
+      case "test067_runtime_no_peer_mif":
+        return { badge: "Test067 本轮实测已记录", subtitle: "本轮Wi-Fi三个分开观察窗口稳定；本机PSF/MIF仅有固件完成状态，外部抓包未能归因本机发送或peer收件。收到7个PSF、0个MIF，DataGate未放行，QM未编码/提交，数据RX为0。没有新候选部署，无需重启。", recordLabel: "本轮运行记录", recordState: "等待对端MIF与数据回包", tone: "working", versionFallback: "继续推进MIF接收、QM门槛与数据RX" };
       case "test067_deployed_waiting_reboot":
         return { badge: "Test067 已部署，等待重启", subtitle: "已合并栈占用修复并保留备份；当前仍运行Test066。实机稳定、数据回包和AirDrop等待验证。", recordLabel: "Test067候选", recordState: "等待重启", tone: "working", versionFallback: "25G332-Test067" };
       case "test066_deployed_waiting_reboot":
@@ -142,14 +144,14 @@
     const currentRecord = sourceRecords.find(record => record.version === data?.runningCandidate);
     const current = node("article", "version-card current");
     const currentTop = node("div", "version-card-top");
-    currentTop.append(node("span", "", data?.comparisonBaseline ? "Intel最近运行候选" : "当前运行候选"), node("span", `version-chip status-chip tone-${statusTone(currentRecord?.state)}`, currentRecord?.state || "待核验运行状态"));
+    currentTop.append(node("span", "", data?.comparisonBaseline ? "Intel当前运行候选" : "当前运行候选"), node("span", `version-chip status-chip tone-${statusTone(currentRecord?.state)}`, currentRecord?.state || "待核验运行状态"));
     current.append(currentTop);
     current.append(node("h2", "version-id", data?.runningCandidate || "版本待补充"));
     current.append(node("p", "version-subtitle", currentRecord?.summary || "运行状态、实测证据与待验收问题见版本记录。"));
 
     const next = node("article", "version-card next");
     const nextTop = node("div", "version-card-top");
-    nextTop.append(node("span", "", ["test062_runtime_diagnostic_complete", "test063_runtime_diagnostic_complete", "test064_runtime_diagnostic_complete", "test065_runtime_diagnostic_complete", "test065_boot1793181722_runtime_diagnostic_complete"].includes(data?.deploymentState) ? "下一开发重点" : (["test062_deployed_waiting_reboot", "test063_deployed_waiting_reboot", "test064_deployed_waiting_reboot", "test065_deployed_waiting_reboot", "test066_deployed_waiting_reboot"].includes(data?.deploymentState)) ? "Intel已部署候选" : ["test062_offline_validated_not_deployed", "test063_offline_verified_not_deployed", "test064_offline_verified_not_deployed", "test065_offline_verified_not_deployed"].includes(data?.deploymentState) ? "Intel离线验证候选" : ["test061_booted_preflight_checked", "test065_booted_preflight_running"].includes(data?.deploymentState) ? "本轮验证" : data?.comparisonBaseline || data?.deploymentState === "built_waiting_broadcom_baseline" ? "Intel待切回候选" : "下一候选版本"), node("span", "version-chip", presentation.recordState));
+    nextTop.append(node("span", "", ["test062_runtime_diagnostic_complete", "test063_runtime_diagnostic_complete", "test064_runtime_diagnostic_complete", "test065_runtime_diagnostic_complete", "test065_boot1793181722_runtime_diagnostic_complete", "test067_runtime_no_peer_mif"].includes(data?.deploymentState) ? "下一开发重点" : (["test062_deployed_waiting_reboot", "test063_deployed_waiting_reboot", "test064_deployed_waiting_reboot", "test065_deployed_waiting_reboot", "test066_deployed_waiting_reboot"].includes(data?.deploymentState)) ? "Intel已部署候选" : ["test062_offline_validated_not_deployed", "test063_offline_verified_not_deployed", "test064_offline_verified_not_deployed", "test065_offline_verified_not_deployed"].includes(data?.deploymentState) ? "Intel离线验证候选" : ["test061_booted_preflight_checked", "test065_booted_preflight_running"].includes(data?.deploymentState) ? "本轮验证" : data?.comparisonBaseline || data?.deploymentState === "built_waiting_broadcom_baseline" ? "Intel待切回候选" : "下一候选版本"), node("span", "version-chip", presentation.recordState));
     next.append(nextTop);
     next.append(node("h2", "version-id", data?.nextCandidate || presentation.versionFallback || "版本待补充"));
     next.append(node("p", "version-subtitle", presentation.subtitle));
@@ -387,7 +389,9 @@
     if (!found) return candidatePlaceholder(version, role);
     const record = { ...found };
     if (role === "current") {
-      record.label = "当前运行候选";
+      record.label = data?.deploymentState === "test067_runtime_no_peer_mif"
+        ? "本轮运行记录"
+        : "当前运行候选";
       record.tone = record.tone || statusTone(record.state);
     } else {
       const state = nextRecordState();
