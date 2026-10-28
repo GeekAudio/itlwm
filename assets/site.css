@@ -327,3 +327,438 @@ h1, h2, h3, p { margin-top: 0; }
 .checkpoint-evidence { font-size: 11px; color: var(--text-soft); margin: 5px 0 5px 20px; }
 .checkpoint-current { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; font-size: 11px; line-height: 1.6; margin-left: 20px; }
 @media (max-width: 640px) { .progress-overview { padding: 15px; } .stage-proof { margin-left: 44px; margin-right: 12px; } .proof-row { padding: 8px; } }
+
+/* Current implementation route: separate this live evidence from the historical checklist. */
+#workflow-overview {
+  scroll-margin-top: 18px;
+  margin: 0 0 24px;
+}
+.workflow-heading {
+  display: flex;
+  min-width: 0;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 10px 18px;
+  margin: 0 0 11px;
+}
+.workflow-heading h2 {
+  margin: 3px 0 0;
+  font-size: 20px;
+  font-weight: 620;
+  letter-spacing: -.03em;
+}
+.workflow-heading .section-kicker,
+.workflow-heading .workflow-label {
+  margin: 0;
+  color: var(--green);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: .08em;
+}
+.workflow-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px 12px;
+  color: var(--text-soft);
+  font-size: 10px;
+}
+.workflow-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+.workflow-legend-item::before {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  content: "";
+  border: 1px solid var(--line-strong);
+  border-radius: 2px;
+  background: var(--surface-raised);
+}
+.workflow-legend-item.is-verified::before { border-color: var(--green); background: var(--green-soft); }
+.workflow-legend-item.is-blocked::before { border-color: var(--amber); background: var(--amber-soft); }
+.workflow-legend-item.is-partial::before { border-color: var(--blue); background: var(--blue-soft); }
+.workflow-layout {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1.08fr) minmax(300px, .92fr);
+  align-items: start;
+  gap: 13px;
+}
+.workflow-route {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.workflow-route::before {
+  position: absolute;
+  top: 24px;
+  bottom: 24px;
+  left: 17px;
+  width: 1px;
+  content: "";
+  background: var(--line-strong);
+}
+.flow-step { position: relative; min-width: 0; }
+.flow-link {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 35px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--surface);
+  transition: border-color .15s ease, background-color .15s ease;
+}
+.flow-link:hover { border-color: var(--line-strong); background: var(--surface-raised); color: var(--text); }
+.flow-link:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.flow-marker {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  width: 31px;
+  height: 31px;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  background: var(--page);
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+.flow-copy { min-width: 0; }
+.flow-copy h3 {
+  margin: 0 0 2px;
+  font-size: 14px;
+  font-weight: 620;
+  line-height: 1.35;
+}
+.flow-copy p,
+.flow-copy .flow-detail {
+  margin: 0;
+  color: var(--text-soft);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.flow-state {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 4px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-raised);
+  color: var(--text-soft);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+.flow-step.is-verified .flow-marker,
+.flow-step.is-verified .flow-state { border-color: var(--green); background: var(--green-soft); color: var(--green); }
+.flow-step.is-blocked .flow-link { border-color: color-mix(in srgb, var(--amber) 55%, var(--line)); background: var(--amber-soft); }
+.flow-step.is-blocked .flow-marker,
+.flow-step.is-blocked .flow-state { border-color: var(--amber); background: var(--amber-soft); color: var(--amber); }
+.flow-step.is-blocked .flow-marker { border-radius: 8px; }
+.flow-step.is-blocked .flow-state::before {
+  width: 7px;
+  height: 7px;
+  content: "";
+  border: 1px solid currentColor;
+  border-radius: 2px;
+}
+.flow-step.is-partial .flow-marker,
+.flow-step.is-partial .flow-state { border-color: var(--blue); background: var(--blue-soft); color: var(--blue); }
+.flow-step.is-waiting .flow-marker { color: var(--text-faint); }
+.workflow-focus {
+  min-width: 0;
+  padding: 15px 16px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 13px;
+  background: var(--surface);
+}
+.workflow-focus:has(.focus-next) { box-shadow: var(--shadow); }
+.focus-kicker {
+  margin: 0 0 5px;
+  color: var(--amber);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .08em;
+}
+.workflow-focus h2 {
+  margin: 0 0 7px;
+  font-size: 17px;
+  font-weight: 650;
+  line-height: 1.35;
+  letter-spacing: -.02em;
+}
+.focus-summary {
+  margin: 0;
+  color: var(--text-soft);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.focus-next {
+  margin: 11px 0 0;
+  padding: 9px 11px;
+  border-left: 3px solid var(--amber);
+  border-radius: 0 8px 8px 0;
+  background: var(--amber-soft);
+}
+.focus-next strong { display: block; margin-bottom: 3px; color: var(--amber); font-size: 11px; font-weight: 680; }
+.focus-next p { margin: 0; color: var(--text); font-size: 12px; line-height: 1.5; }
+.flow-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  margin: 11px 0 10px;
+}
+.flow-facts > div {
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-raised);
+}
+.flow-facts dt { margin: 0 0 3px; color: var(--text-faint); font-size: 10px; line-height: 1.35; }
+.flow-facts dd { margin: 0; color: var(--text); font-size: 13px; font-weight: 650; line-height: 1.35; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.focus-evidence-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--blue);
+  font-size: 11px;
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--blue) 45%, transparent);
+  text-underline-offset: 3px;
+}
+.focus-evidence-link:hover { color: var(--green); }
+.stage-brief {
+  margin: 0 0 11px;
+  padding: 11px 13px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--surface-raised);
+}
+.stage-brief h2, .stage-brief h3 { margin: 0 0 4px; font-size: 14px; font-weight: 620; }
+.stage-brief p { margin: 0; color: var(--text-soft); font-size: 12px; line-height: 1.55; }
+.record-history-group details,
+.historical-record details,
+details.record-history-group,
+details.historical-record {
+  margin-top: 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.record-history-group > summary,
+.historical-record > summary,
+.record-history-group details > summary,
+.historical-record details > summary {
+  padding: 9px 11px;
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  list-style-position: inside;
+}
+.record-history-group[open] > summary,
+.historical-record[open] > summary,
+.record-history-group details[open] > summary,
+.historical-record details[open] > summary { border-bottom: 1px solid var(--line); }
+.record-history-group > :not(summary),
+.historical-record > :not(summary),
+.record-history-group details > :not(summary),
+.historical-record details > :not(summary) { padding-right: 11px; padding-left: 11px; }
+
+@media (max-width: 900px) {
+  .workflow-layout { grid-template-columns: minmax(0, 1fr); }
+  .workflow-focus { order: 0; }
+}
+@media (max-width: 560px) {
+  .workflow-heading { align-items: flex-start; flex-direction: column; gap: 7px; }
+  .workflow-heading h2 { font-size: 18px; }
+  .workflow-legend { justify-content: flex-start; gap: 5px 10px; }
+  .workflow-layout { gap: 9px; }
+  .workflow-route { gap: 5px; }
+  .workflow-route::before { left: 15px; }
+  .flow-link { grid-template-columns: 31px minmax(0, 1fr); gap: 8px; padding: 8px; }
+  .flow-marker { width: 28px; height: 28px; font-size: 10px; }
+  .flow-copy h3 { font-size: 14px; }
+  .flow-copy p, .flow-copy .flow-detail { font-size: 11px; }
+  .flow-state { grid-column: 2; justify-self: start; margin-top: -2px; font-size: 9px; }
+  .workflow-focus { padding: 13px; }
+  .workflow-focus h2 { font-size: 16px; }
+  .focus-summary { font-size: 12px; }
+  .flow-facts { gap: 6px; }
+  .flow-facts > div { padding: 7px; }
+  .flow-facts dt { font-size: 9px; }
+  .flow-facts dd { font-size: 12px; }
+  .stage-brief { padding: 10px; }
+  .record-history-group > summary,
+  .historical-record > summary,
+  .record-history-group details > summary,
+  .historical-record details > summary { padding: 8px 9px; }
+  .primary-nav {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 4px;
+    overflow-x: auto;
+    padding: 1px 0 4px;
+    scrollbar-width: none;
+  }
+  .primary-nav::-webkit-scrollbar { display: none; }
+  .primary-nav a { flex: 0 0 auto; justify-content: flex-start; padding: 7px 8px; }
+  .side-divider, .side-divider + .nav-label, .stage-nav { display: none; }
+  .sidebar { padding-bottom: 8px; }
+  .brand { padding-bottom: 8px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .flow-link { transition: none; }
+}
+
+/* A condition awaiting confirmation is distinct from a hard workflow blocker. */
+.workflow-route > ol { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.summary-copy .stage-brief { flex-basis: 100%; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; }
+.summary-copy .stage-brief p { color: var(--text-soft); font-size: 12px; line-height: 1.5; }
+.flow-step.is-attention .flow-link {
+  border-left: 3px solid var(--amber);
+  background: var(--surface);
+}
+.flow-step.is-attention .flow-marker {
+  border-color: var(--amber);
+  background: var(--surface);
+  color: var(--amber);
+}
+.flow-step.is-attention .flow-state {
+  border: 1px dashed var(--amber);
+  background: var(--surface);
+  color: var(--amber);
+}
+.flow-step.is-attention .flow-state::before {
+  width: 7px;
+  height: 7px;
+  content: "";
+  border: 1px solid currentColor;
+  border-radius: 50%;
+}
+.workflow-legend > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-soft);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.focus-alert {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--amber) 42%, var(--line));
+  border-radius: 10px;
+  background: var(--amber-soft);
+}
+.focus-alert h3,
+.focus-alert .focus-alert-title,
+.focus-alert > strong {
+  margin: 0;
+  color: var(--amber);
+  font-size: 13px;
+  font-weight: 680;
+  line-height: 1.4;
+}
+.focus-alert p {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.focus-alert a {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  margin-top: 1px;
+  color: var(--amber);
+  font-size: 11px;
+  font-weight: 650;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.focus-alert a:hover { color: var(--text); }
+
+/* Keep the title and version cards compact so the live workflow stays above the fold. */
+.hero {
+  min-height: 100px;
+  gap: 18px;
+  padding: 13px 4px 11px;
+}
+.hero h1 { margin: 5px 0 4px; font-size: clamp(24px, 3vw, 32px); }
+.hero-copy > p { font-size: 14px; }
+.hero-meta { margin-top: 8px; }
+.hero-emblem { display: none; }
+.version-section { margin: 0 0 16px; }
+.version-grid { gap: 9px; }
+.version-card { min-height: 0; padding: 12px 14px; border-radius: 12px; box-shadow: none; }
+.version-id { margin: 8px 0 3px; font-size: 13px; }
+.version-subtitle { font-size: 11px; line-height: 1.5; }
+.workflow-focus .focus-summary { font-size: 14px; }
+.workflow-focus .focus-next p { font-size: 13px; }
+.flow-copy h3 { font-size: 15px; }
+.flow-copy p, .flow-copy .flow-detail { font-size: 13px; }
+.flow-state { font-size: 11px; }
+.section-heading p { font-size: 12px; }
+.summary-copy strong { font-size: 14px; }
+.detail-row dd { font-size: 12px; }
+.record-summary { font-size: 12px; }
+.record-block li { font-size: 11px; }
+.acceptance-copy span { font-size: 11px; }
+
+/* Current verification totals stay compact and must not imply AirDrop success probability. */
+.progress-overview.secondary-progress {
+  margin: 0 0 16px;
+  padding: 11px 14px;
+  border-radius: 12px;
+  box-shadow: none;
+}
+.secondary-progress .progress-heading { gap: 9px; margin: 2px 0 5px; }
+.secondary-progress .progress-value { font-size: 18px; }
+.secondary-progress .progress-track { height: 6px; }
+.secondary-progress .progress-count { margin-top: 5px; font-size: 10px; }
+.secondary-progress .progress-explanation { margin: 7px 0; font-size: 11px; line-height: 1.5; }
+.secondary-progress .current-result-counts,
+.secondary-progress .stage-statuses { gap: 5px; }
+.secondary-progress .current-result-label { font-size: 10px; }
+
+@media (max-width: 560px) {
+  .hero { min-height: 80px; padding: 10px 2px 8px; }
+  .hero h1 { margin: 4px 0 3px; font-size: 25px; }
+  .hero-copy > p { font-size: 12px; }
+  .hero-meta { margin-top: 6px; }
+  .version-card { padding: 10px 11px; }
+  .version-id { margin-top: 7px; font-size: 13px; }
+  .workflow-focus .focus-summary { font-size: 13px; }
+  .flow-copy h3 { font-size: 14px; }
+  .flow-copy p, .flow-copy .flow-detail { font-size: 12px; }
+  .focus-alert { padding: 9px 10px; }
+  .focus-alert p { font-size: 12px; }
+  .secondary-progress .progress-heading { align-items: baseline; }
+  .secondary-progress .progress-value { font-size: 16px; }
+}

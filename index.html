@@ -21,11 +21,10 @@
 
       <div class="nav-label">项目</div>
       <nav class="primary-nav" aria-label="主要导航">
-        <a href="#overview"><span class="nav-glyph" aria-hidden="true">01</span><span>项目总览</span></a>
+        <a href="#overview"><span class="nav-glyph" aria-hidden="true">01</span><span>当前流程</span></a>
         <a href="#milestones"><span class="nav-glyph" aria-hidden="true">02</span><span>验收里程碑</span></a>
-        <a href="#test-records"><span class="nav-glyph" aria-hidden="true">03</span><span>版本与测试</span></a>
-        <a href="#references"><span class="nav-glyph" aria-hidden="true">04</span><span>参考实现</span></a>
-        <a href="#acceptance"><span class="nav-glyph" aria-hidden="true">05</span><span>待验收事项</span></a>
+        <a href="#test-records"><span class="nav-glyph" aria-hidden="true">03</span><span>本轮记录</span></a>
+        <a href="#acceptance"><span class="nav-glyph" aria-hidden="true">04</span><span>下一步</span></a>
       </nav>
 
       <div class="side-divider"></div>
@@ -47,35 +46,38 @@
     <main class="main-content">
       <div class="topbar">
         <div class="breadcrumb"><span>项目工作区</span><span class="breadcrumb-sep">/</span><strong>IntelWirelessNative</strong></div>
-        <div class="snapshot-label"><span class="snapshot-dot" aria-hidden="true"></span>本地状态快照</div>
+        <div class="snapshot-label"><span class="snapshot-dot" aria-hidden="true"></span>实测快照</div>
       </div>
 
       <header class="hero" id="overview">
         <div class="hero-copy">
-          <div class="eyebrow"><span class="eyebrow-line"></span>无线驱动 · 项目进度</div>
-          <h1>Intel 原生无线</h1>
-          <p>从原生连接到双向 AirDrop 的实测路径</p>
+          <div class="eyebrow"><span class="eyebrow-line"></span>从连接到文件传输</div>
+          <h1>Intel 原生无线进度</h1>
+          <p>当前卡点、下一步与实测证据</p>
           <div class="hero-meta">
+            <span id="current-version">当前版本读取中</span>
+            <span class="meta-separator" aria-hidden="true">·</span>
             <span>数据更新 <time id="updated-at">读取中</time></span>
             <span class="meta-separator" aria-hidden="true">·</span>
             <span id="deployment-label">候选状态读取中</span>
           </div>
         </div>
-        <div class="hero-emblem" aria-hidden="true"><span>IW</span><i></i><i></i><i></i></div>
       </header>
+
+      <section id="workflow-overview" class="workflow-overview" aria-label="当前数据通路与卡点"></section>
+
+      <section id="progress-overview" class="progress-overview secondary-progress" aria-label="当前版本实测验证进度"></section>
 
       <section class="version-section" aria-label="当前版本与下一候选">
         <div id="version-cards" class="version-grid"></div>
       </section>
 
-      <section id="progress-overview" class="progress-overview" aria-label="验收进度与百分比"></section>
-
       <section class="content-section" id="milestones">
         <div class="section-heading">
           <div>
             <div class="section-kicker">VALIDATION MAP</div>
-            <h2>验收里程碑</h2>
-            <p>历史已验证、本轮结果、仍未完成分开显示。没测到不等于回归；从未通过的能力不记为完成，也不叫回退。</p>
+            <h2>八阶段验收详情</h2>
+            <p>逐项查看当前版本的验证结果、证据和验收条件。部分通过与未覆盖单独列出。</p>
           </div>
           <span class="section-count">08 阶段</span>
         </div>
@@ -83,7 +85,7 @@
           <div class="filter-group" role="group" aria-label="按验收状态筛选">
             <button class="stage-filter is-selected" type="button" data-stage-filter="all" aria-pressed="true">全部</button>
             <button class="stage-filter" type="button" data-stage-filter="pending" aria-pressed="false">待解决</button>
-            <button class="stage-filter" type="button" data-stage-filter="regressed" aria-pressed="false">本轮回归</button>
+            <button class="stage-filter" type="button" data-stage-filter="regressed" aria-pressed="false">本轮未通过</button>
             <button class="stage-filter" type="button" data-stage-filter="verified" aria-pressed="false">已有实测</button>
           </div>
           <div class="disclosure-group" role="group" aria-label="展开或收起里程碑详情">
@@ -99,22 +101,12 @@
         <div class="section-heading">
           <div>
             <div class="section-kicker">BUILD & RUNTIME</div>
-            <h2>版本与测试记录</h2>
-            <p>按版本查看运行证据与未关闭问题；锚点可直接跳到对应记录。</p>
+            <h2>本轮验证记录</h2>
+            <p>当前版本的实机结果与待解决问题。</p>
           </div>
         </div>
         <nav class="record-jump" id="record-jump" aria-label="测试版本快速跳转"></nav>
         <div id="record-list" class="record-list"></div>
-      </section>
-
-      <section class="content-section" id="references">
-        <div class="section-heading"><div><div class="section-kicker">IMPLEMENTATION REFERENCES</div><h2>参考实现</h2><p>提取协议与驱动思路，分别核对硬件条件和实际传输证据。</p></div></div>
-        <div class="reference-grid">
-          <article class="reference-card"><span class="reference-label">MT7922 · 共存路线</span><h3><a href="https://github.com/jedbillyb/airdrop-mt7921/blob/main/daemon/README.md" target="_blank" rel="noreferrer">airdrop-mt7921 ↗</a></h3><p>P2P-GO 保持频道，主动监听模式处理硬件 ACK。优先研究频道与确认机制；Intel 需要对应的固件实现，共存仍有延迟和停顿。</p><a class="reference-secondary" href="https://github.com/Spydomain/Mochi" target="_blank" rel="noreferrer">Mochi 的 MT7922 实测与封装</a></article>
-          <article class="reference-card"><span class="reference-label">Intel · 独占验证</span><h3><a href="https://github.com/t4t5/owly#supported-hardware" target="_blank" rel="noreferrer">Owly ↗</a></h3><p>AX201 有双向传输记录，但采用独占无线网卡方式。协议和频道 6 可参考，不能作为 Wi-Fi 与 AWDL 共存已完成的证据。</p></article>
-          <article class="reference-card"><span class="reference-label">Windows · Realtek</span><h3><a href="https://github.com/raph559/winawdl/blob/main/DESIGN-NOTES.md" target="_blank" rel="noreferrer">winawdl ↗</a></h3><p>参考硬件 ACK、时隙调度、单调时钟和 MIF 尾部兼容。采用专用 Realtek 网卡；寄存器和驱动接口不能直接移植到 Intel。</p></article>
-          <article class="reference-card"><span class="reference-label">协议与接口</span><h3><a href="https://github.com/seemoo-lab/owl" target="_blank" rel="noreferrer">OWL ↗</a></h3><p>主机单调时钟可用于受限 PSF 实验。另核对 IPv6 地址来源、接口绑定和 mDNS；这些仍需接入 macOS 原生 awdl0。</p><a class="reference-secondary" href="https://github.com/Foglio24/linux-airdrop" target="_blank" rel="noreferrer">linux-airdrop 的接口与频道经验</a></article>
-        </div>
       </section>
 
       <section class="content-section acceptance-section" id="acceptance">
@@ -130,7 +122,7 @@
 
       <footer class="page-footer">
         <span>IntelWirelessNative</span>
-        <span>百分比按固定验收清单计数，不代表工时或剩余测试轮数。</span>
+        <span>百分比只统计当前版本已实测通过项，部分通过不计完成。</span>
       </footer>
     </main>
   </div>
