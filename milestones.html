@@ -1914,6 +1914,18 @@ window.TEST_RECORDS = [
   }
 
   function candidatePlaceholder(version, role) {
+    if (role === "next" && referenceRuntime) {
+      const state = nextRecordState();
+      const workflow = currentWorkflow();
+      return {
+        id: "record-broadcom-reference", version, label: state.label,
+        state: state.state, tone: state.tone, date: "本次博通实测",
+        summary: state.subtitle,
+        evidence: [workflow?.summary || "本次对照详情见流程摘要。", "博通结果不计入Intel的40项验收。"],
+        blockers: ["即时热点加入失败尚未在本次复现，间歇稳定性未通过。", workflow?.alert?.detail || "异常仍在定位。"],
+        next: [workflow?.nextAction || "继续对照日志。"]
+      };
+    }
     if (role === "next") {
       const state = nextRecordState();
       return {
@@ -1948,7 +1960,7 @@ window.TEST_RECORDS = [
     if (!found) return candidatePlaceholder(version, role);
     const record = { ...found };
     if (role === "current") {
-      record.label = "本轮运行记录";
+      record.label = referenceRuntime ? (data?.currentRecordRole || "最近Intel实测") : "本轮运行记录";
       record.tone = record.tone || statusTone(record.state);
     } else {
       const state = nextRecordState();
