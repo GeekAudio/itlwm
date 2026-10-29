@@ -432,13 +432,13 @@
     "developer-tools/continuity/tests/test_observe_continuity_window.py": "fc41200a8c4221de7396c4a8e93dc128dbe5d4872cefcb3154343d25d14c790f",
     "developer-tools/continuity/tools/observe_continuity_window.py": "24aaa6dc89c8ecff0f009850cf36d74b20fb6be483db46853040cb74d12d4007",
     "developer-tools/progress-site/README.md": "bc45538986622364e2891a85a6e93e297967229d5305032cd91e187287ad04b2",
-    "developer-tools/progress-site/SOURCE-MANIFEST.json": "b4512876d1d35c0a1604dcffde312cf53d06227071d03f6cb1cb4d2a583f4c18",
+    "developer-tools/progress-site/SOURCE-MANIFEST.json": "391ad9afc87c9812f49c3b6c5b1761f894ddfc920bc6ca8161cdfcd0cfa2912b",
     "developer-tools/progress-site/dist/assets/site.css": "4348ea93c013b95d6d00aa729ddb230a630830b4220c9e6bfa1db19c59de6a99",
     "developer-tools/progress-site/dist/assets/site.js": "db2af24f6b933e1eabc9f4ec0eebd90920ea21249ae164012f2b477759bb5a90",
-    "developer-tools/progress-site/dist/assets/test-records.js": "bfdfce76dc8efd94822208de09a395e95811742310e50f4c1921db3dbffaf5f1",
-    "developer-tools/progress-site/dist/data.js": "76444e0334db3489b57a416a35b685cb0f6152d420653db34a6e9b3c304e4105",
+    "developer-tools/progress-site/dist/assets/test-records.js": "385c803d764ee3bb0a9fe55f00d11989fd4f7b8af795c661b4c54a8cd2618687",
+    "developer-tools/progress-site/dist/data.js": "6b7abe499bfe1423f906c0b9acce985804b99314039dbd7eb9e9a921713a7ee0",
     "developer-tools/progress-site/dist/index.html": "38276cf10b5e8539721e2bc321d5f6093fd7e30997791cb5a2d0f71ec966057f",
-    "developer-tools/progress-site/dist/milestones.html": "f082b6ef9c93bdd7704a9d61217c0bf92eee97cf8389668f908256505b14946b",
+    "developer-tools/progress-site/dist/milestones.html": "345c904a3c2c314f53586e4e06a91371e55d714971b0784ec2de1344045ecb71",
     "developer-tools/progress-site/tools/publish_github_pages.py": "7c05efb77487e503bacbb8056906822ea04569085bddc968699dd2bd7b3c6359",
     "developer-tools/progress-site/tools/refresh_data.py": "b00856ca206585daba1883e08fb6ecc4738dada058635c559dd6b62ac9f9feef",
     "developer-tools/rx-stimulus/README.md": "b889968fe61dd6967053e6582bd3a701dd507de4a1ec9d4ec1f80618a040e8ce",
@@ -1162,6 +1162,22 @@
     "candidate": "25G332-Test082",
     "development_observation_seconds": 600.003,
     "window_passed": true,
-    "scope": "No watchdog/reset/stop growth in this bounded passive development window; no long-term or Test083 proof."
+    "scope": "A 600.003-second window was clean. A later Test082 watchdog/recovery was observed; long-term stability is not passed.",
+    "later_watchdog_count_delta": 1,
+    "later_reset_count": [
+      5,
+      10
+    ],
+    "later_stopped_count": [
+      2,
+      5
+    ]
+  },
+  "deployment_validation": {
+    "candidate": "25G332-Test083",
+    "state": "waiting_for_native_administrator_authorization",
+    "installed": false,
+    "reboot_ready": false,
+    "automatic_reboot": false
   }
 }

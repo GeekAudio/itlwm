@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "f082b6ef9c93bdd7704a9d61217c0bf92eee97cf8389668f908256505b14946b"
+      "sha256": "345c904a3c2c314f53586e4e06a91371e55d714971b0784ec2de1344045ecb71"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "76444e0334db3489b57a416a35b685cb0f6152d420653db34a6e9b3c304e4105"
+      "sha256": "6b7abe499bfe1423f906c0b9acce985804b99314039dbd7eb9e9a921713a7ee0"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -30,7 +30,7 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "bfdfce76dc8efd94822208de09a395e95811742310e50f4c1921db3dbffaf5f1"
+      "sha256": "385c803d764ee3bb0a9fe55f00d11989fd4f7b8af795c661b4c54a8cd2618687"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-30T06:48:59.858477+08:00",
-  "runtime_scope": "Test082 runtime:300-second Wi-Fi window and interface-bound HTTPS passed;149 remains PASSIVE under the current conservative policy;no RF attempt,native peer data return or AirDrop file success."
+  "updated_at": "2026-10-30T07:38:10.257272+08:00",
+  "runtime_scope": "Test082 remains the running measured candidate. Later passive inspection found one watchdog and recovery after clean bounded windows. Test083 offline validation passed; native administrator authorization for deployment is pending. No Test083 boot,149 receive,native peer data or AirDrop success proof."
 }
