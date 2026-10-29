@@ -201,15 +201,19 @@ int main() {
   assert(std::memcmp(m->node_addr,addr,6)==0);
   for(unsigned i=0;i<6;i++)assert(m->bssid_addr[i]==0xff);
   assert(m->cck_rates==0x0f&&m->ofdm_rates==0x15);
-  const uint32_t expectedRxFilters=IWX_MAC_FILTER_IN_PROBE_REQUEST |
+  uint32_t expectedRxFilters=IWX_MAC_FILTER_IN_PROBE_REQUEST |
       IWX_MAC_FILTER_IN_CONTROL_AND_MGMT | IWX_MAC_FILTER_ACCEPT_GRP;
+#if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
+  expectedRxFilters |= IWX_MAC_FILTER_IN_PROMISC;
+#endif
   assert(m->filter_flags==expectedRxFilters);
-  assert(!(m->filter_flags&IWX_MAC_FILTER_IN_PROMISC));
-  for(uint8_t macId=2;macId<=3;++macId) {
+  const uint8_t otherMacIds[]={0,2,3};
+  for(uint8_t macId : otherMacIds) {
    iwx_p2p_context other{};other.mac_id=macId;other.mac_color=2;other.tsf_id=1;
    iwx_mac_ctx_cmd otherCmd{};
    iwx_p2p_fill_mac_context(&other,IWX_FW_CTXT_ACTION_ADD,&otherCmd);
    assert(otherCmd.filter_flags==IWX_MAC_FILTER_IN_PROBE_REQUEST);
+   assert(!(otherCmd.filter_flags&IWX_MAC_FILTER_IN_PROMISC));
   }
   assert(m->p2p_dev.is_disc_extended==0);
   // The former zero-only P2P fill left every AC without a TX FIFO mapping.
@@ -298,12 +302,17 @@ int main() {
 
 with tempfile.TemporaryDirectory(prefix="itlwm-p2p-hal-") as directory:
     cpp = Path(directory) / "p2p_hal_test.cpp"
-    exe = Path(directory) / "p2p_hal_test"
     cpp.write_text(shim + "\n" + production_definitions + "\n" +
                    "\n".join(extract(marker) for marker in markers) + body)
-    subprocess.run([
-        "xcrun", "clang++", "-std=c++14", "-O1", "-fsanitize=address,undefined",
-        "-fno-omit-frame-pointer", str(cpp), "-o", str(exe)
-    ], check=True)
-    subprocess.run([str(exe)], check=True)
-    print("PASS: isolated P2P HAL command ABI and fault paths")
+    profiles = (
+        ("default", ()),
+        ("resident", ("-DITL_NATIVE_AWDL_RESIDENT_25G332=1",)),
+    )
+    for name, defines in profiles:
+        exe = Path(directory) / f"p2p_hal_test_{name}"
+        subprocess.run([
+            "xcrun", "clang++", "-std=c++14", "-O1", "-fsanitize=address,undefined",
+            "-fno-omit-frame-pointer", *defines, str(cpp), "-o", str(exe)
+        ], check=True)
+        subprocess.run([str(exe)], check=True)
+    print("PASS: isolated P2P HAL command ABI and default/resident RX filters")
