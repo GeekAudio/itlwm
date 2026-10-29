@@ -5,7 +5,7 @@ Intel AX201 的 macOS Tahoe 原生 Wi-Fi 驱动，基于 OpenIntelWireless/itlwm
 ## Release 与开发状态
 
 - **GitHub Release：2.4.0 / Test059。** Release 只包含 `AirportItlwm-Tahoe.zip` 二进制包；下方的安装说明和设备范围针对这个版本。
-- **开发源码：Test078。** 截至 2026-10-29，Test078 已离线构建并写入本机 EFI，尚待重启首次验证。它没有 Test078 实机运行、AWDL 对端回包或 AirDrop 文件传输结果；不代表 AirDrop 已支持，也不属于现有 Release 压缩包。
+- **开发源码：Test078。** 截至 2026-10-29，已在本机启动，Wi-Fi 在诊断前后各约 124 秒保持连接，awdl0 正常运行。AWDL 仍停在控制帧引导阶段，没有数据回包或 AirDrop 文件传输结果；不属于现有 Release 压缩包。详见[本轮接收路径分析](developer-tools/RX-DATA-PATH.md)。
 
 ## Test059 Release 适用范围
 

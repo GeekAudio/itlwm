@@ -8,9 +8,11 @@ interface lifecycle.
 
 The current development candidate, Test078, targets x86_64 macOS Tahoe 26.7.2
 (build 25G332) and the AX201 device match documented in the main README. It has
-been built and deployed to one machine's EFI and is awaiting its first boot.
-There is no Test078 runtime result, confirmed AWDL peer data return, or AirDrop
-file-transfer result. Do not present this candidate as AirDrop support.
+booted on one machine. Wi-Fi remained associated during two approximately
+124-second observation windows around the diagnostic; native `awdl0` stayed
+running. The AWDL run selected a control-only MIF bootstrap and did not submit
+a data query. There is no confirmed peer data return or AirDrop file transfer.
+See [the RX review](../developer-tools/RX-DATA-PATH.md) for the current boundary.
 
 Some early WCL ABI investigation used macOS build 25G241. That is an analysis
 reference, not a claim that all private interfaces are validated across Tahoe
