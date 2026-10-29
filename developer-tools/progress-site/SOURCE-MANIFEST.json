@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "43aff6048c1c3466f99fc1c26be583c1afc0045cae26f44077175d28cd14bb29"
+      "sha256": "362d0792341522623c99ce751603130030dbe3f2060ff9a498eeb5d67f5776a8"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "d4838dccc38667c0cbe94451de97e003d9e4010ac3464228834c3d5370d6c4b9"
+      "sha256": "92639693aa7d0290b1fe99c91bd4d609f49e8e697920bda14a4c032862d74cf2"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
