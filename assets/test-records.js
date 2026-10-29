@@ -1,28 +1,27 @@
 window.TEST_RECORDS = [
   {
-    "id": "record-test073",
-    "version": "25G332-Test073",
+    "id": "record-test074",
+    "version": "25G332-Test074",
     "label": "本轮验证记录",
-    "state": "Wi-Fi短测稳定；原生awdl0常驻未通过",
-    "tone": "warning",
+    "state": "awdl0挂接与IPv6点快照通过；Wi-Fi稳定性待测",
+    "tone": "working",
     "date": "2026-10-29",
-    "summary": "Test073加载身份已核对。en1在125.196秒观察期间保持关联并有IPv4，reset保持5，watchdog、固件和硬件错误计数没有新增。HTTP 200使用en0默认路由，不能作为Wi-Fi公网验收。 生命周期记录见到一次注册、启动、BSD出现和停止释放；本次最终awdl0不存在，DataAttached=0、Closing=1、LinkReady=0，后续NotReady，常驻与IPv6未建立。本轮未运行RF、browse或boot claim；数据发送trace仅为完整空预检，没有发送或AirDrop证明。",
+    "summary": "本次启动已核对Test074身份；en1单次快照显示已关联并有IPv4，awdl0已挂接、UP/RUNNING并有IPv6链路本地地址。本轮仅为只读点快照，Wi-Fi稳定性、公网请求、空口、对端回包和AirDrop均未测试。前一次Test074启动的54.285秒断链及后续watchdog/reset变化只记入开发时间线，不计入本轮结果。",
     "evidence": [
-      "Test073加载身份已核对；en1在125.196秒观察期间保持关联并有IPv4。",
-      "reset保持5；watchdog、固件和硬件错误计数没有新增。",
-      "HTTP 200经en0默认路由返回，不计为Wi-Fi专属公网请求。",
-      "生命周期flags见到临时注册、启动、BSD出现、停止和释放；常驻阶段NotReady。",
-      "当前awdl0未枚举，DataAttached=0、Closing=1、LinkReady=0。",
-      "本轮未运行RF、browse或boot claim；完整空DataTx预检不是发送证据。"
+      "已核对Test074加载身份；系统当前识别en1无线接口，接口处于活动状态。",
+      "单次快照显示en1已关联并有IPv4；未做120秒稳定性观察，也未验证经Wi-Fi的公网请求。",
+      "当前原生awdl0已挂接并处于UP/RUNNING；挂接地址校验和最终就绪记录通过。",
+      "当前awdl0自动处于RUNNING并有可用IPv6链路本地地址。",
+      "本轮没有执行120秒观察、RF、browse、boot claim或AirDrop测试。"
     ],
     "blockers": [
-      "当前没有常驻awdl0或其IPv6链路本地地址。",
-      "本轮没有AWDL对端数据回包、Bonjour应答或AirDrop文件收件证据。",
-      "默认系统HTTPS请求走en0，尚未证明Wi-Fi接口自身的公网连通性。"
+      "单次关联/IP快照不能证明Wi-Fi持续稳定或经Wi-Fi公网可达。",
+      "本轮没有AWDL空口收发、对端回包、Bonjour或AirDrop文件收件证明。",
+      "本轮没有执行对象停止、最终释放或睡眠恢复测试。"
     ],
     "next": [
-      "重启进入Test074，先核对数据桥挂接阶段和原始结果、awdl0常驻及Wi-Fi基线；前置条件通过后，再执行新启动唯一一次AWDL收发诊断。",
-      "本轮通过率只含Test073实测，不计Test074离线或部署结果。"
+      "重启进入Test075后先做Wi-Fi稳定性观察，再确认awdl0挂接和自动IPv6；通过前置条件后再安排一次AWDL收发诊断。",
+      "私有Wi-Fi地址、开关和睡眠恢复仍需分别验收。"
     ]
   }
 ];
