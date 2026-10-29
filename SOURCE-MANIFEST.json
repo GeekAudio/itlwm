@@ -348,7 +348,7 @@
   "source_sha256": {
     ".github/ISSUE_TEMPLATE/Bug.md": "fdb12581f696b04dcbfd6c467c4fd6389eedb7b5129bf35ef79fe6b94895cd64",
     ".github/workflows/main.yml": "d8d22614b77cada57981f6fd9c2fcfe6e3aae602605a81868c2bb837ab389ba6",
-    ".gitignore": "6a43898275beda8167fca3a02df9dad146a358d9a5d17e5d56b78cc07c0e2d48",
+    ".gitignore": "81651aa830906cc37d93edc3d26163a9f7bbed060715b2203f1d1713cd655aaa",
     "AirportItlwm-Tahoe-README.md": "623d41f3e40aeaad9ae7406d64b1a89d87fa2736890e31613245cab3029a888a",
     "AirportItlwm/AirportAWDL.cpp": "49ff2f1cf8eacb451337417ed4ba70d55913bcfe1b42b609b984c7e22a81213c",
     "AirportItlwm/AirportItlwm-Monterey-Info.plist": "17059e95003950f7cd0a83ab8327d4773b30899351c66d41870265b2593651db",
@@ -992,7 +992,11 @@
     "developer-tools/test079/tools/run_openwrt_capture_batch.py": "74289f30cad9654da1f52eea76380d2291839ed31ebf74dda96fac01c55bbb67",
     "developer-tools/test079/tools/test_openwrt_capture_once.py": "b0784c533c06f3d6db0a930631a8f8a611fbb2f08cd20c58e5a5e135ca931bda",
     "developer-tools/test079/tools/test_run_test079_router_observation_once.py": "c7ee2543ffb54381b0e001007b6cf594b974d58761ce071168463f7e93d63413",
-    "developer-tools/test079/tools/run_test079_router_observation_once.py": "0ff325114d13deeff435c501021fc4a64f328b9a1f6cdd478cb00547c1bfa907"
+    "developer-tools/test079/tools/run_test079_router_observation_once.py": "0ff325114d13deeff435c501021fc4a64f328b9a1f6cdd478cb00547c1bfa907",
+    "developer-tools/continuity/SOURCE-MANIFEST.json": "96fa6220d543c1f65b723c301950baab6628139e6d190ed90a2c4a9fb7067d3b",
+    "developer-tools/continuity/README.md": "8a4b13e84c8777ca25496fae1ac64cf09b082e38a0909e318b91704288f63394",
+    "developer-tools/continuity/tools/observe_continuity_window.py": "35956154172b9577403c77b6f7a7328019a3e12cff5ba5a180a2740d93bc03ff",
+    "developer-tools/continuity/tests/test_observe_continuity_window.py": "0c4cde9f96b8c91b7337fd64a5fd6c3a15b9f43f1e7072fee66b295f6574e91e"
   },
   "artifact": {
     "mach_o_uuid": "D1AC3C2D-52C1-36CB-B040-4B90BD6C87BF",

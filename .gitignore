@@ -14,3 +14,6 @@ native/evidence/
 /developer-tools/**/research/
 /developer-tools/**/evidence/
 __pycache__/
+
+# Private continuity observations
+developer-tools/continuity/research/

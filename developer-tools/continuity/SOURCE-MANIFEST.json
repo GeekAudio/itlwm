@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "scope": "passive host observation source only",
+  "files": [
+    {
+      "source_relative_path": "IntelWirelessNative/tools/observe_continuity_window.py",
+      "snapshot_path": "tools/observe_continuity_window.py",
+      "sha256": "35956154172b9577403c77b6f7a7328019a3e12cff5ba5a180a2740d93bc03ff"
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/tests/test_observe_continuity_window.py",
+      "snapshot_path": "tests/test_observe_continuity_window.py",
+      "sha256": "0c4cde9f96b8c91b7337fd64a5fd6c3a15b9f43f1e7072fee66b295f6574e91e"
+    }
+  ],
+  "mock_tests_passed": 6,
+  "live_capture_executed": false,
+  "updated_at": "2026-10-29T19:07:27+08:00",
+  "excluded": [
+    "raw logs",
+    "Bluetooth snapshots",
+    "network identities",
+    "EFI configurations",
+    "credentials"
+  ]
+}
