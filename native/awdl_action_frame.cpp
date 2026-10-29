@@ -6,9 +6,8 @@
 namespace NativeAwdl {
 namespace {
 
-constexpr size_t kMacHeaderLength = 24;
-constexpr size_t kHtControlLength = 4;
-constexpr size_t kAwdlActionHeaderLength = 16;
+constexpr size_t kMacHeaderLength = kActionMacHeaderLength;
+constexpr size_t kHtControlLength = kActionHtControlLength;
 constexpr uint8_t kMaximumTlvs = 128;
 
 constexpr uint32_t kRequiredPsfTypes[] = {4, 5, 18, 24, 6, 7, 12, 21};

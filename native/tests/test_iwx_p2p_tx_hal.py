@@ -7,6 +7,8 @@ import tempfile
 root = Path(__file__).resolve().parents[2]
 source = (root / "itlwm/hal_iwx/ItlIwxP2PTx.cpp").read_text()
 driver_source = (root / "itlwm/hal_iwx/ItlIwx.cpp").read_text()
+action_source = (root / "itlwm/hal_iwx/ItlIwxP2PAction.cpp").read_text()
+probe_source = (root / "itlwm/hal_iwx/ItlIwxP2PProbe.cpp").read_text()
 
 
 def extract_driver_function(marker):
@@ -44,6 +46,94 @@ def extract_function(marker):
     return source[start:end]
 
 
+def extract_action_function(marker):
+    start = action_source.index(marker)
+    opening = action_source.index("{", start)
+    end, depth = opening + 1, 1
+    while depth:
+        depth += (action_source[end] == "{") - (action_source[end] == "}")
+        end += 1
+    return action_source[start:end]
+
+
+def extract_action_helper_function(marker):
+    return extract_action_function(marker)
+
+
+def extract_probe_function(marker):
+    start = probe_source.index(marker)
+    opening = probe_source.index("{", start)
+    end, depth = opening + 1, 1
+    while depth:
+        depth += (probe_source[end] == "{") - (probe_source[end] == "}")
+        end += 1
+    return probe_source[start:end]
+
+
+tx_submit = extract_action_function("int iwx_tahoe_p2p_action_tx_submit(")
+tx_response = extract_action_function(
+    "bool iwx_tahoe_p2p_action_tx_response(")
+doorbell_evidence = extract_action_function(
+    "static bool recordP2PTxEvidenceDoorbell(")
+assert tx_submit.index("iwx_tahoe_p2p_tvqm_mark_doorbell(") < \
+       tx_submit.index("recordP2PTxEvidenceDoorbell(") < \
+       tx_submit.index("IWX_WRITE(sc, IWX_HBUS_TARG_WRPTR") < \
+       tx_submit.index("markP2PTxEvidenceDoorbellIssued(context)")
+assert tx_submit.index("prepareP2PTxEvidenceTicket(") < \
+       tx_submit.index("iwx_tahoe_p2p_tvqm_mark_doorbell(")
+ticket_created = doorbell_evidence.index("ledger.beginTicket(")
+submission_lower = doorbell_evidence.index(
+    "p2pTxEvidenceLowerBoundUs()", ticket_created)
+assert ticket_created < submission_lower < \
+       doorbell_evidence.index("ledger.recordSubmission(")
+assert "return nanoseconds / 1000ULL;" in action_source
+assert "nanoseconds % 1000ULL != 0 ? 1ULL : 0ULL" in action_source
+assert tx_submit.index("IWX_WRITE(sc, IWX_HBUS_TARG_WRPTR") < \
+       tx_submit.index("iwx_tahoe_p2p_tvqm_finish_tx_submit(queueLease)") < \
+       tx_submit.index("markP2PTxEvidenceUnknown(context,")
+assert tx_response.index("p2pTxEvidenceUpperBoundUs()") < \
+       tx_response.index("pendingP2PTxEvidenceMatchesTicket(")
+assert tx_response.index("IWX_TX_RES_GET_RA(responseRaTid)") < \
+       tx_response.index("IWX_TX_RES_GET_TID(responseRaTid)") < \
+       tx_response.index("context->completion.complete(") < \
+       tx_response.index("iwx_tahoe_p2p_tvqm_tx_completed_locked(") < \
+       tx_response.index("clearActionDescriptor(&ring->desc[index])") < \
+       tx_response.index("recordP2PTxEvidenceCompletion(context,")
+assert "if (matchingEvidenceTicket)\n        recordP2PTxEvidenceCompletion(" in tx_response
+assert "ITL_NATIVE_AWDL_TX_EVIDENCE_25G332" in action_source
+assert "#else\n    action->result = iwx_tahoe_p2p_action_tx_submit(" in probe_source
+assert "evidenceMetadataPointer" in probe_source
+assert "0, 0, 0, bootstrapSubmitFencePointer" in probe_source
+
+evidence_publisher = extract_probe_function(
+    "static void publishNativeP2PTxTimeEvidenceOnMainGate(")
+evidence_request = extract_probe_function(
+    "static void requestNativeP2PTxTimeEvidencePublish(")
+evidence_record_field = extract_probe_function(
+    "static bool setNativeP2PTxTimeEvidenceRecordField(")
+assert "!owner->tahoeP2pOnMainGate()" in evidence_publisher
+assert "ledger.snapshotTicket(index, &ticket)" in evidence_publisher
+assert "NativeP2PTxTimeEvidenceSchemaVersion" in evidence_publisher
+assert "NativeP2PTxTimeEvidenceSnapshotVersionBegin" in evidence_publisher
+assert "NativeP2PTxTimeEvidenceSnapshotVersionEnd" in evidence_publisher
+assert "NativeP2PTxTimeEvidenceDiagnosticGeneration" in evidence_publisher
+assert "NativeP2PTxTimeEvidenceDroppedCount" in evidence_publisher
+assert evidence_publisher.index("writingVersion, 64") < \
+       evidence_publisher.index("NativeP2PTxTimeEvidenceSchemaVersion") < \
+       evidence_publisher.index("NativeP2PTxTimeEvidenceSnapshotVersionEnd")
+assert evidence_publisher.rindex(
+    "NativeP2PTxTimeEvidenceSnapshotVersionBegin") > \
+       evidence_publisher.index("NativeP2PTxTimeEvidenceSnapshotVersionEnd")
+assert "ScheduleRevision" not in evidence_publisher
+assert "PeerToken" not in evidence_publisher
+assert "NativeP2PTxTimeEvidenceRecord%u%s" in evidence_record_field
+assert "StatusFlags" in evidence_publisher
+assert "IOCommandGate *gate = owner->tahoeP2pCommandGate();" in evidence_request
+assert "gate->runAction(publishNativeP2PTxTimeEvidenceAction, owner)" in \
+       evidence_request
+assert "requestNativeP2PTxTimeEvidencePublish(this);" in probe_source
+
+
 helper_start = source.index("namespace {\n\nstatic constexpr uint8_t kDataPathScdQueueConfig")
 helper_end = source.index("} // namespace", helper_start) + len("} // namespace")
 helpers = source[helper_start:helper_end]
@@ -67,6 +157,10 @@ markers = [
     "int iwx_tahoe_p2p_tvqm_confirm_drained(",
 ]
 actual = "\n".join([helpers] + [extract_function(marker) for marker in markers])
+actual += "\n" + extract_action_helper_function(
+    "static uint64_t p2pTxEvidenceLowerBoundUsFromNanoseconds(")
+actual += "\n" + extract_action_helper_function(
+    "static uint64_t p2pTxEvidenceUpperBoundUsFromNanoseconds(")
 
 shim = r"""
 #include <cassert>
@@ -81,6 +175,7 @@ shim = r"""
 
 #define AIRPORT_TAHOE 1
 #include "itlwm/hal_iwx/ItlIwxP2PTx.hpp"
+#include "iwx_dma_info_lifecycle.hpp"
 
 static unsigned gLiveIoObjects = 0;
 static unsigned gDmaCalls = 0;
@@ -619,6 +714,14 @@ static void completeOneTx(ItlIwx &owner, TahoeP2PTxQueueLease &queue) {
 
 body = r"""
 int main() {
+    assert(p2pTxEvidenceLowerBoundUsFromNanoseconds(1234) == 1);
+    assert(p2pTxEvidenceUpperBoundUsFromNanoseconds(1234) == 2);
+    assert(p2pTxEvidenceLowerBoundUsFromNanoseconds(1200) == 1);
+    assert(p2pTxEvidenceUpperBoundUsFromNanoseconds(1200) == 2);
+    assert(p2pTxEvidenceLowerBoundUsFromNanoseconds(1000) == 1);
+    assert(p2pTxEvidenceUpperBoundUsFromNanoseconds(1000) == 1);
+    assert(p2pTxEvidenceLowerBoundUsFromNanoseconds(999) == 0);
+    assert(p2pTxEvidenceUpperBoundUsFromNanoseconds(999) == 1);
     static_assert(sizeof(iwx_tx_queue_cfg_rsp) == 8, "TVQM response ABI");
     static_assert(sizeof(iwx_tx_queue_cfg_cmd) == 24,
                   "legacy LONG_GROUP/SCD_QUEUE_CFG v2 ABI");

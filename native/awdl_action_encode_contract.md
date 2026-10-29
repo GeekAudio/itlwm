@@ -35,9 +35,19 @@ The election TLVs are serialized from one caller-provided election snapshot.
 Version 1 and version 2 fields share the same master, distance, and metric
 values; a distance above 255 is rejected because TLV 5 cannot represent it.
 Reserved fields and service parameters are emitted as zero. The HT TLV requires
-explicit capability, A-MPDU, and one-to-four-byte MCS mask inputs. The Data Path
-State TLV has flags `0`; no AWDL address or functioning data path is claimed.
-The Version TLV requires an explicit version and macOS device class `1`.
+explicit capability, A-MPDU, and one-to-four-byte MCS mask inputs. Data Path
+State has two exact profiles. Aggregate-zero `advertiseAwdlAddress=false`
+preserves the legacy two-byte `00 00` value. When the caller sets it true, the
+serializer emits flags `0x0004` followed by the same six bytes used in 802.11
+Addr2; it has no second MAC input. The encoder only serializes the caller's
+profile. It does not verify interface identity or claim that the AWDL data path
+is ready. Production callers may set the flag only after the HAL verifies the
+native interface identity for the same generation.
+
+The maximum PSF is 237 bytes: the legacy four-byte MCS profile remains 231
+bytes and the address form adds exactly six bytes. Smaller MCS masks retain
+their prior legacy frame lengths. The Version TLV requires an explicit version
+and macOS device class `1`.
 
 ## Bounded PSF probe: available inputs and remaining work
 
@@ -46,13 +56,10 @@ but not enough to publish a truthful working `awdl0` or AirDrop data path.
 
 Available or source-backed for a limited probe:
 
-- The Intel P2P role has a firmware MAC in `sc_p2p.mac_address`, and the P2P
-  action TX path already uses that address. It is a candidate source address
-  for a radio-only experiment. It is **not** established as the address of a
-  native AWDL interface. The independent spec requires the advertised 802.11
-  source to equal the AWDL interface MAC and remain stable while visible, so
-  this P2P address cannot be presented as a conforming AirDrop identity until
-  a native AWDL interface owns it.
+- The P2P action path has a firmware MAC, but the encoder does not infer that it
+  is a native AWDL identity. The optional address field is enabled only when
+  the HAL supplies a same-generation identity check; the serializer then uses
+  exactly `sourceAddress` for Addr2 and the advertised AWDL address.
 - Host monotonic microseconds are already sampled in the P2P RX path. The OWL
   precedent above makes the same clock a bounded, low-confidence PSF timestamp
   experiment; it does not make firmware GP2 or TSF mapping a prerequisite for
@@ -75,11 +82,10 @@ Available or source-backed for a limited probe:
   counter 0. This is a source-backed starting election snapshot, not a
   replacement for maintaining counters and adopting a peer election when
   peers appear.
-- The action source is a broadcast management frame and the encoder's type 12
-  Data Path State currently has flags `0`, which advertises no optional data
-  path fields. That is appropriate for a control-frame-only experiment; it
-  also deliberately does not claim an AWDL IPv6/data path and cannot make
-  AirDrop transfers work.
+- The action source is a broadcast management frame. Type 12 either keeps the
+  legacy flags-zero value or announces only the verified address field with
+  flags `0x0004`. Address advertisement is not proof of an AWDL IPv6/data path
+  and cannot by itself make AirDrop transfers work.
 - AWDL 1.0, macOS device class 1, the action sequence field, and the 802.11
   sequence counter have clear wire representations. The sequence counter
   still needs a live owner and must advance per transmitted frame.
@@ -107,8 +113,8 @@ must supply values from the corresponding runtime component:
   alignment. The 900 ms ROC alone supplies none of those values.
 - HT capability and RX MCS values bridged from the actual radio/driver
   capability set.
-- Data Path State address fields and a functioning AWDL data path. These stay
-  unannounced until a native AWDL interface and data path exist.
+- A functioning AWDL data path. The optional address field is an identity
+  advertisement only; it does not prove packet delivery or data readiness.
 
 Tests use synthetic values only to verify byte layout, boundary rejection, and
 parser compatibility. Passing an encoder test does not prove a valid schedule,
@@ -126,9 +132,10 @@ clang++ -std=c++14 -Wall -Wextra -Werror -fsanitize=address,undefined \
 /private/tmp/awdl-action-encode-test
 ```
 
-The tests compare field-level golden bytes and fixed TLV offsets against the
-wire tables, then also pass the result through the existing parser. This keeps
-the parser as an interoperability check, not the serializer's only oracle.
+The tests compare fixed raw golden bytes, field-level values, and TLV offsets
+against the wire tables, then also pass both Data Path profiles through the
+existing parser. This keeps the parser as an interoperability check, not the
+serializer's only oracle.
 
 ## References
 

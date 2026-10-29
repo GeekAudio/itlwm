@@ -108,8 +108,11 @@
 
 #include "ItlIwx.hpp"
 #include "../../native/iwx_stop_retirement.hpp"
+#include "../../native/iwx_dma_info_lifecycle.hpp"
+#include "../../native/iwx_tx_ring_capacity.hpp"
 #ifdef AIRPORT_TAHOE
 #include "IwxTxRate.hpp"
+#include <kern/clock.h>
 #endif
 #include <linux/types.h>
 #include <linux/kernel.h>
@@ -119,6 +122,7 @@
 #include <IOKit/IOInterruptController.h>
 #include <IOKit/IOCommandGate.h>
 #include <IOKit/network/IONetworkMedium.h>
+#include <libkern/c++/OSData.h>
 #include <net/ethernet.h>
 
 #include <sys/_task.h>
@@ -128,6 +132,8 @@
 #ifdef AIRPORT_TAHOE
 static_assert(__atomic_always_lock_free(sizeof(uint64_t), nullptr),
               "Tahoe TX rate snapshot must use a lock-free 64-bit access");
+static_assert(__atomic_always_lock_free(sizeof(uint64_t), nullptr),
+              "Tahoe deferred output token must use a lock-free 64-bit access");
 static_assert(IwxTxRate::kFormatMask == IWX_RATE_MCS_MOD_TYPE_MSK,
               "TX rate helper format mask must match Intel firmware flags");
 static_assert(IwxTxRate::kV1HtMask == IWX_RATE_MCS_HT_MSK_V1 &&
@@ -161,6 +167,668 @@ static_assert(offsetof(struct iwx_compressed_ba_notif, tx_rate) == 24,
               "BA completion rate offset must match its wire vector");
 static void iwx_store_current_tx_rate(struct iwx_softc *, struct ieee80211_node *,
                                       uint32_t, uint32_t, IwxTxRate::Source);
+
+enum : uint32_t {
+    // A valid firmware response cleared the shared watchdog. This does not
+    // prove a specific queue drained, a qid was reclaimed, or all queues are
+    // empty; those structures are outside this trace's synchronization proof.
+    kTxTimerClearFirmwareResponse = 1,
+    kTxTimerClearLifecycleReset = 2
+};
+
+static uint64_t tahoeMonotonicNs()
+{
+    uint64_t absolute = 0, nanoseconds = 0;
+    clock_get_uptime(&absolute);
+    absolutetime_to_nanoseconds(absolute, &nanoseconds);
+    return nanoseconds;
+}
+
+static bool txTimerTraceTryLock(struct iwx_softc *sc)
+{
+    uint32_t expected = 0;
+    return sc && __atomic_compare_exchange_n(&sc->sc_tx_timer_trace_lock,
+        &expected, 1U, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+}
+
+static void txTimerTraceUnlock(struct iwx_softc *sc)
+{
+    __atomic_store_n(&sc->sc_tx_timer_trace_lock, 0U, __ATOMIC_RELEASE);
+}
+
+static void recordTxTimerArm(struct iwx_softc *sc, uint32_t epoch,
+                             uint64_t submitSerial)
+{
+    if (sc)
+        (void)IwxTxQueueObservation::recordArm(&sc->sc_tx_queue_observation,
+            epoch, submitSerial, tahoeMonotonicNs());
+    if (!txTimerTraceTryLock(sc)) {
+        if (sc)
+            __atomic_store_n(&sc->sc_tx_timer_trace_dropped, 1U,
+                             __ATOMIC_RELEASE);
+        return;
+    }
+    const uint32_t sequence = __atomic_add_fetch(
+        &sc->sc_tx_timer_arm_sequence, 1U, __ATOMIC_RELAXED);
+    __atomic_store_n(&sc->sc_tx_timer_arm_output_epoch, epoch,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&sc->sc_tx_timer_arm_monotonic_ns, tahoeMonotonicNs(),
+                     __ATOMIC_RELAXED);
+    txTimerTraceUnlock(sc);
+    (void)sequence;
+}
+
+static void recordTxTimerClear(struct iwx_softc *sc, uint32_t epoch,
+                               uint32_t reason)
+{
+    if (!txTimerTraceTryLock(sc)) {
+        if (sc)
+            __atomic_store_n(&sc->sc_tx_timer_trace_dropped, 1U,
+                             __ATOMIC_RELEASE);
+        return;
+    }
+    const uint32_t sequence = __atomic_add_fetch(
+        &sc->sc_tx_timer_clear_sequence, 1U, __ATOMIC_RELAXED);
+    __atomic_store_n(&sc->sc_tx_timer_clear_output_epoch, epoch,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&sc->sc_tx_timer_clear_reason, reason, __ATOMIC_RELAXED);
+    __atomic_store_n(&sc->sc_tx_timer_clear_monotonic_ns, tahoeMonotonicNs(),
+                     __ATOMIC_RELAXED);
+    txTimerTraceUnlock(sc);
+    (void)sequence;
+}
+
+static bool readTxTimerTrace(struct iwx_softc *sc,
+                             IwxResetTrace::TxWatchdogSnapshot *sample)
+{
+    if (!sample || !txTimerTraceTryLock(sc))
+        return false;
+    sample->armOutputEpoch = __atomic_load_n(
+        &sc->sc_tx_timer_arm_output_epoch, __ATOMIC_RELAXED);
+    sample->armSequence = __atomic_load_n(&sc->sc_tx_timer_arm_sequence,
+                                           __ATOMIC_RELAXED);
+    sample->armMonotonicNs = __atomic_load_n(
+        &sc->sc_tx_timer_arm_monotonic_ns, __ATOMIC_RELAXED);
+    sample->clearOutputEpoch = __atomic_load_n(
+        &sc->sc_tx_timer_clear_output_epoch, __ATOMIC_RELAXED);
+    sample->clearSequence = __atomic_load_n(&sc->sc_tx_timer_clear_sequence,
+                                             __ATOMIC_RELAXED);
+    sample->clearReason = __atomic_load_n(&sc->sc_tx_timer_clear_reason,
+                                           __ATOMIC_RELAXED);
+    sample->clearMonotonicNs = __atomic_load_n(
+        &sc->sc_tx_timer_clear_monotonic_ns, __ATOMIC_RELAXED);
+    const bool complete = __atomic_load_n(&sc->sc_tx_timer_trace_dropped,
+                                           __ATOMIC_ACQUIRE) == 0;
+    txTimerTraceUnlock(sc);
+    return complete && __atomic_load_n(&sc->sc_tx_timer_trace_dropped,
+                                        __ATOMIC_ACQUIRE) == 0;
+}
+
+static void recordTxProgressEvent(struct iwx_softc *sc, uint32_t kind,
+                                  uint32_t reason, uint32_t sourcePresent = 0,
+                                  uint32_t qid = 0, uint32_t index = 0,
+                                  uint32_t ringCount = 0, uint32_t queued = 0,
+                                  uint32_t cur = 0, uint32_t tail = 0,
+                                  bool generationKnown = false)
+{
+    if (!sc)
+        return;
+    iwx_tx_progress_event_input event{};
+    event.reason = reason;
+    event.presence_flags = sourcePresent |
+        IWX_TX_PROGRESS_HAS_MONOTONIC_NS |
+        IWX_TX_PROGRESS_HAS_OUTPUT_EPOCH;
+    event.monotonic_ns = tahoeMonotonicNs();
+    event.output_epoch = __atomic_load_n(&sc->sc_tx_output_epoch,
+                                          __ATOMIC_ACQUIRE);
+    if (generationKnown) {
+        event.presence_flags |= IWX_TX_PROGRESS_HAS_GENERATION;
+        event.generation = static_cast<uint32_t>(sc->sc_generation);
+    }
+    event.qid = qid;
+    event.index = index;
+    event.ring_count = ringCount;
+    event.queued = queued;
+    event.cur = cur;
+    event.tail = tail;
+    (void)IwxTxProgressObservation::record(
+        &sc->sc_tx_progress_observation, kind, &event);
+    if ((kind == IWX_TX_PROGRESS_ORDINARY_RECLAIM ||
+         kind == IWX_TX_PROGRESS_FLUSH_RECLAIM) &&
+        (sourcePresent & IWX_TX_PROGRESS_HAS_QID) != 0 &&
+        qid < IWX_TXQ_OBS_QUEUE_COUNT) {
+        iwx_txq_obs_input queueSample{};
+        queueSample.presence_flags = IWX_TXQ_OBS_HAS_TIME |
+            IWX_TXQ_OBS_HAS_EPOCH;
+        queueSample.output_epoch = event.output_epoch;
+        queueSample.monotonic_ns = event.monotonic_ns;
+        // Reuse only scalars already read at the existing producer site.
+        if (sourcePresent & IWX_TX_PROGRESS_HAS_RING_COUNT) {
+            queueSample.presence_flags |= IWX_TXQ_OBS_HAS_RING_COUNT;
+            queueSample.ring_count = ringCount;
+        }
+        if (sourcePresent & IWX_TX_PROGRESS_HAS_QUEUED) {
+            queueSample.presence_flags |= IWX_TXQ_OBS_HAS_QUEUED;
+            queueSample.queued = queued;
+        }
+        if (sourcePresent & IWX_TX_PROGRESS_HAS_CUR) {
+            queueSample.presence_flags |= IWX_TXQ_OBS_HAS_CUR;
+            queueSample.cur = cur;
+        }
+        if (sourcePresent & IWX_TX_PROGRESS_HAS_TAIL) {
+            queueSample.presence_flags |= IWX_TXQ_OBS_HAS_TAIL;
+            queueSample.tail = tail;
+        }
+        (void)IwxTxQueueObservation::recordRingSample(
+            &sc->sc_tx_queue_observation, qid, event.output_epoch,
+            kind == IWX_TX_PROGRESS_ORDINARY_RECLAIM ?
+                IWX_TXQ_OBS_OP_RECLAIM : IWX_TXQ_OBS_OP_FLUSH_RECLAIM,
+            &queueSample);
+    }
+}
+
+// Only actual sc->txq members have identities. The temporary TVQM staging
+// ring has no assigned qid, even when its zeroed ring->qid happens to be zero.
+static uint32_t observedTxRingId(struct iwx_softc *sc,
+                                const struct iwx_tx_ring *ring)
+{
+    if (!sc || !ring)
+        return IWX_TXQ_OBS_UNKNOWN_QID;
+    const uintptr_t first = reinterpret_cast<uintptr_t>(&sc->txq[0]);
+    const uintptr_t end = reinterpret_cast<uintptr_t>(&sc->txq[nitems(sc->txq)]);
+    const uintptr_t address = reinterpret_cast<uintptr_t>(ring);
+    if (address < first || address >= end ||
+        (address - first) % sizeof(sc->txq[0]) != 0)
+        return IWX_TXQ_OBS_UNKNOWN_QID;
+    return static_cast<uint32_t>((address - first) / sizeof(sc->txq[0]));
+}
+
+static iwx_txq_obs_input queueObservationClock(struct iwx_softc *sc)
+{
+    iwx_txq_obs_input input{};
+    input.presence_flags = IWX_TXQ_OBS_HAS_TIME | IWX_TXQ_OBS_HAS_EPOCH;
+    input.output_epoch = __atomic_load_n(&sc->sc_tx_output_epoch,
+                                         __ATOMIC_ACQUIRE);
+    input.monotonic_ns = tahoeMonotonicNs();
+    return input;
+}
+
+static void observeTxRingInvalidation(struct iwx_softc *sc,
+                                      const struct iwx_tx_ring *ring,
+                                      uint32_t reason)
+{
+    const uint32_t qid = observedTxRingId(sc, ring);
+    if (qid == IWX_TXQ_OBS_UNKNOWN_QID)
+        return;
+    // No added reads of live occupancy, descriptors, nodes, or DMA objects.
+    const iwx_txq_obs_input input = queueObservationClock(sc);
+    if (reason == IWX_TXQ_OBS_OP_FREE)
+        (void)IwxTxQueueObservation::recordFree(
+            &sc->sc_tx_queue_observation, qid, reason, &input);
+    else
+        (void)IwxTxQueueObservation::recordReset(
+            &sc->sc_tx_queue_observation, qid, reason, &input);
+}
+
+class NativeQueueConfigObservation {
+public:
+    NativeQueueConfigObservation(struct iwx_softc *sc, uint32_t qid,
+        uint32_t stationId, uint32_t tid, uint32_t slots, uint32_t owner)
+        : sc_(sc), requested_(qid), resolved_(qid)
+    {
+        input_ = queueObservationClock(sc);
+        input_.presence_flags |= IWX_TXQ_OBS_HAS_STATION_ID |
+            IWX_TXQ_OBS_HAS_QUEUE_TID | IWX_TXQ_OBS_HAS_RING_COUNT |
+            IWX_TXQ_OBS_HAS_OWNER;
+        input_.station_id = stationId;
+        input_.queue_tid = tid;
+        input_.ring_count = slots;
+        input_.owner = owner;
+    }
+    void start()
+    {
+        attempt_ = IwxTxQueueObservation::beginConfig(
+            &sc_->sc_tx_queue_observation, requested_, &input_);
+    }
+    void finish(uint32_t resolved, uint32_t outcome)
+    {
+        resolved_ = resolved;
+        outcome_ = outcome;
+    }
+    void prepareReplacement(uint32_t qid)
+    {
+        (void)IwxTxQueueObservation::prepareReplacement(
+            &sc_->sc_tx_queue_observation, attempt_, qid);
+    }
+    ~NativeQueueConfigObservation()
+    {
+        if (!attempt_)
+            return;
+        input_.monotonic_ns = tahoeMonotonicNs();
+        (void)IwxTxQueueObservation::finishConfig(
+            &sc_->sc_tx_queue_observation, attempt_, resolved_, outcome_, &input_);
+    }
+private:
+    NativeQueueConfigObservation(const NativeQueueConfigObservation &) = delete;
+    NativeQueueConfigObservation &operator=(const NativeQueueConfigObservation &) = delete;
+    struct iwx_softc *sc_;
+    iwx_txq_obs_input input_{};
+    uint64_t attempt_{0};
+    uint32_t requested_;
+    uint32_t resolved_;
+    uint32_t outcome_{IWX_TXQ_OBS_CONFIG_OUTCOME_UNKNOWN};
+};
+
+class NativeNewstateObservation {
+public:
+    NativeNewstateObservation(ItlIwx *owner, struct iwx_softc *sc,
+        uint32_t oldState, uint32_t target, uint32_t taskGeneration,
+        uint32_t driverGeneration, int stateArgument)
+        : owner_(owner), sc_(sc), oldState_(oldState), stateArgument_(stateArgument),
+          state_(&sc->sc_tx_queue_observation)
+    {
+        token_ = IwxTxQueueObservation::beginNewState(state_, oldState, target,
+            taskGeneration, driverGeneration,
+            oldState == IEEE80211_S_AUTH && target == IEEE80211_S_AUTH,
+            tahoeMonotonicNs());
+    }
+    ~NativeNewstateObservation()
+    {
+        if (token_)
+            (void)IwxTxQueueObservation::endNewState(
+                state_, token_, terminalReason, tahoeMonotonicNs());
+    }
+    // Called before splx(s): all net80211/ifnet fields used by the terminal
+    // trace are read while the caller still owns splnet serialization.
+    void finish()
+    {
+        if (finished_)
+            return;
+        if (token_) {
+            (void)IwxTxQueueObservation::endNewState(
+                state_, token_, terminalReason, tahoeMonotonicNs());
+            token_ = 0;
+        }
+        if (owner_ && sc_)
+            owner_->tahoeRecordLinkTransition(sc_,
+                IwxLinkStateTrace::Event::kNewStateTaskCompleted,
+                oldState_, static_cast<uint32_t>(sc_->sc_ic.ic_state),
+                stateArgument_, static_cast<int>(terminalReason));
+        finished_ = true;
+    }
+    // 0..65535 are the existing task's errno at its normal out label.
+    // Reserved values describe an early task exit, never a successful AUTH.
+    uint32_t terminalReason{0x1ffffU};
+private:
+    NativeNewstateObservation(const NativeNewstateObservation &) = delete;
+    NativeNewstateObservation &operator=(const NativeNewstateObservation &) = delete;
+    ItlIwx *owner_;
+    struct iwx_softc *sc_;
+    uint32_t oldState_;
+    int stateArgument_;
+    iwx_tx_queue_observation_state *state_;
+    uint64_t token_{0};
+    bool finished_{false};
+};
+
+class NativeDeauthObservation {
+public:
+    NativeDeauthObservation(ItlIwx *owner, struct iwx_softc *sc)
+        : owner_(owner), sc_(sc), state_(static_cast<uint32_t>(sc->sc_ic.ic_state))
+    {
+        owner_->tahoeRecordLinkTransition(sc_,
+            IwxLinkStateTrace::Event::kDeauthEntered, state_, state_, 0, 0);
+    }
+    ~NativeDeauthObservation()
+    {
+        if (owner_ && sc_)
+            owner_->tahoeRecordLinkTransition(sc_,
+                IwxLinkStateTrace::Event::kDeauthReturned, state_,
+                static_cast<uint32_t>(sc_->sc_ic.ic_state), 0, result_);
+    }
+    void setResult(int result) { result_ = result; }
+
+private:
+    NativeDeauthObservation(const NativeDeauthObservation &) = delete;
+    NativeDeauthObservation &operator=(const NativeDeauthObservation &) = delete;
+    ItlIwx *owner_;
+    struct iwx_softc *sc_;
+    uint32_t state_;
+    int result_ {INT32_MIN};
+};
+
+static bool setTxProgressProperty(IOEthernetController *controller,
+                                 const char *name, uint64_t value,
+                                 uint32_t width)
+{
+    return controller && controller->setProperty(name, value, width);
+}
+
+static bool setTxProgressEventProperty(IOEthernetController *controller,
+                                       uint32_t slot, const char *field,
+                                       uint64_t value, uint32_t width)
+{
+    char name[112];
+    const int length = snprintf(name, sizeof(name),
+        "NativeResetTraceTxProgressEvent%u%s", slot, field);
+    if (length <= 0 || static_cast<size_t>(length) >= sizeof(name))
+        return false;
+    return setTxProgressProperty(controller, name, value, width);
+}
+
+static bool publishTxProgressSnapshot(
+    IOEthernetController *controller, uint32_t *versionStorage,
+    const iwx_tx_progress_observation_snapshot &snapshot,
+    uint32_t ownerWatchdogSequence, uint32_t ownerGeneration)
+{
+    if (!controller || !versionStorage)
+        return false;
+    const uint32_t finishVersion = __atomic_add_fetch(
+        versionStorage, 2U, __ATOMIC_RELAXED);
+    const uint32_t beginVersion = finishVersion - 1U;
+    if (!setTxProgressProperty(controller,
+            "NativeResetTraceTxProgressSnapshotVersionBegin",
+            beginVersion, 32))
+        return false;
+
+    // Keep the batch odd if any write fails. A reader must then discard every
+    // scalar instead of accidentally combining old and new last-event rows.
+    bool okay = setTxProgressProperty(controller,
+        "NativeResetTraceTxProgressSchema", 1, 32);
+    okay = okay && setTxProgressProperty(controller,
+        "NativeResetTraceTxProgressSnapshotAvailable", snapshot.available, 32);
+    okay = okay && setTxProgressProperty(controller,
+        "NativeResetTraceTxProgressSnapshotComplete", 0, 32);
+    okay = okay && setTxProgressProperty(controller,
+        "NativeResetTraceTxProgressDroppedCountPresent",
+        snapshot.available, 32);
+    okay = okay && setTxProgressProperty(controller,
+        "NativeResetTraceTxProgressDroppedCount", snapshot.dropped_count, 64);
+    okay = okay && setTxProgressProperty(controller,
+        "NativeResetTraceTxProgressNextSerialPresent",
+        snapshot.available, 32);
+    okay = okay && setTxProgressProperty(controller,
+        "NativeResetTraceTxProgressNextSerial", snapshot.next_serial, 64);
+    okay = okay && setTxProgressProperty(controller,
+        "NativeResetTraceTxProgressRingSnapshotComplete", 0, 32);
+    okay = okay && setTxProgressProperty(controller,
+        "NativeResetTraceTxProgressFirmwareResponseIdentityProven", 0, 32);
+    okay = okay && setTxProgressProperty(controller,
+        "NativeResetTraceTxProgressSequenceIdentityProven", 0, 32);
+    for (uint32_t i = 0; okay &&
+         i < IWX_TX_PROGRESS_RESPONSE_REASON_COUNT; ++i) {
+        char name[112];
+        const int length = snprintf(name, sizeof(name),
+            "NativeResetTraceTxProgressResponseReason%uCount", i);
+        okay = length > 0 && static_cast<size_t>(length) < sizeof(name) &&
+            setTxProgressProperty(controller, name,
+                snapshot.response_reason_counts[i], 64);
+    }
+    for (uint32_t i = 0; okay &&
+         i < IWX_TX_PROGRESS_GUARD_REASON_COUNT; ++i) {
+        char name[112];
+        const int length = snprintf(name, sizeof(name),
+            "NativeResetTraceTxProgressGuardReason%uCount", i);
+        okay = length > 0 && static_cast<size_t>(length) < sizeof(name) &&
+            setTxProgressProperty(controller, name,
+                snapshot.guard_reason_counts[i], 64);
+    }
+    for (uint32_t i = 0; okay &&
+         i < IWX_TX_PROGRESS_RUNSTOP_REASON_COUNT; ++i) {
+        char name[112];
+        const int length = snprintf(name, sizeof(name),
+            "NativeResetTraceTxProgressRunStopReason%uCount", i);
+        okay = length > 0 && static_cast<size_t>(length) < sizeof(name) &&
+            setTxProgressProperty(controller, name,
+                snapshot.runstop_reason_counts[i], 64);
+    }
+    for (uint32_t i = 0; okay && i < IWX_TX_PROGRESS_EVENT_COUNT; ++i) {
+        const iwx_tx_progress_event_record &event = snapshot.last[i];
+        okay = setTxProgressEventProperty(controller, i, "Present",
+            snapshot.available && event.event_count ? 1U : 0U, 32) &&
+            setTxProgressEventProperty(controller, i, "Count",
+                event.event_count, 64) &&
+            setTxProgressEventProperty(controller, i, "Serial",
+                event.serial, 64) &&
+            setTxProgressEventProperty(controller, i, "MonotonicNs",
+                event.monotonic_ns, 64) &&
+            setTxProgressEventProperty(controller, i, "Generation",
+                event.generation, 32) &&
+            setTxProgressEventProperty(controller, i, "OutputEpoch",
+                event.output_epoch, 32) &&
+            setTxProgressEventProperty(controller, i, "PresenceFlags",
+                event.presence_flags, 32) &&
+            setTxProgressEventProperty(controller, i, "Reason",
+                event.reason, 32) &&
+            setTxProgressEventProperty(controller, i, "Qid",
+                event.qid, 32) &&
+            setTxProgressEventProperty(controller, i, "Index",
+                event.index, 32) &&
+            setTxProgressEventProperty(controller, i, "RingCount",
+                event.ring_count, 32) &&
+            setTxProgressEventProperty(controller, i, "Queued",
+                event.queued, 32) &&
+            setTxProgressEventProperty(controller, i, "Cur",
+                event.cur, 32) &&
+            setTxProgressEventProperty(controller, i, "Tail",
+                event.tail, 32);
+    }
+    if (!okay)
+        return false;
+    // This owner anchor is independent of the main reset-trace sequence. A
+    // reader must compare it with NativeResetTraceTxWatchdogSequence before
+    // treating these retained rows as belonging to the current expiry.
+    if (!setTxProgressProperty(controller,
+            "NativeResetTraceTxProgressOwnerWatchdogSequence",
+            ownerWatchdogSequence, 32) ||
+        !setTxProgressProperty(controller,
+            "NativeResetTraceTxProgressOwnerGeneration",
+            ownerGeneration, 32))
+        return false;
+    if (!setTxProgressProperty(controller,
+            "NativeResetTraceTxProgressSnapshotComplete",
+            snapshot.available && snapshot.complete ? 1U : 0U, 32))
+        return false;
+    if (!setTxProgressProperty(controller,
+            "NativeResetTraceTxProgressSnapshotVersionEnd",
+            finishVersion, 32))
+        return false;
+    if (!setTxProgressProperty(controller,
+            "NativeResetTraceTxProgressSnapshotVersionBegin",
+            finishVersion, 32))
+        return false;
+    return true;
+}
+#endif
+
+#ifdef AIRPORT_TAHOE
+static bool publishCompletionSnapshot(IOEthernetController *controller,
+    uint32_t *versionStorage,
+    const iwx_tx_completion_observation_snapshot &snapshot,
+    uint32_t ownerSequence, uint32_t ownerGeneration)
+{
+    if (!controller || !versionStorage || (*versionStorage & 1U) != 0 ||
+        *versionStorage > UINT32_MAX - 2U)
+        return false;
+    const uint32_t finish = *versionStorage + 2U;
+    *versionStorage = finish;
+    const auto scalar = [&](const char *field, uint64_t value) {
+        char key[112];
+        const int length = snprintf(key, sizeof(key),
+            "NativeStaCompletion%s", field);
+        // Publish scalars as 64-bit OSNumbers so U32 high bits are not printed
+        // as signed values by a property-list reader. Logical widths remain
+        // bounded by the frozen C-compatible schema.
+        return length > 0 && static_cast<size_t>(length) < sizeof(key) &&
+            controller->setProperty(key, value, 64);
+    };
+    if (!scalar("SnapshotVersionBegin", finish - 1U))
+        return false;
+    bool okay = scalar("Schema", 1) && scalar("SnapshotComplete", 0) &&
+        scalar("SnapshotAvailable", snapshot.available) &&
+        scalar("DroppedCount", snapshot.dropped_count) &&
+        scalar("NextSerial", snapshot.next_serial) &&
+        scalar("OwnerWatchdogSequence", ownerSequence) &&
+        scalar("OwnerGeneration", ownerGeneration) &&
+        scalar("FirmwareResponseIdentityProven", 0) &&
+        scalar("PeerReceiptProven", 0);
+    for (uint32_t kind = 0; okay && kind < IWX_TX_COMPLETION_KIND_COUNT; ++kind) {
+        for (uint32_t reason = 0; okay &&
+             reason < IWX_TX_COMPLETION_MAX_REASON_COUNT; ++reason) {
+            char field[80];
+            const int length = snprintf(field, sizeof(field),
+                "Kind%uReason%uCount", kind, reason);
+            okay = length > 0 && static_cast<size_t>(length) < sizeof(field) &&
+                scalar(field, snapshot.terminal_reason_counts[kind][reason]);
+        }
+        const iwx_tx_completion_event_record &event = snapshot.last[kind];
+        const auto row = [&](const char *field, uint64_t value) {
+            char name[80];
+            const int length = snprintf(name, sizeof(name),
+                "Event%u%s", kind, field);
+            return length > 0 && static_cast<size_t>(length) < sizeof(name) &&
+                scalar(name, value);
+        };
+        okay = okay && row("Present", snapshot.available && event.event_count ? 1U : 0U);
+#define PUBLISH_COMPLETION_FIELD(name, member) \
+        okay = okay && row(name, event.member)
+        PUBLISH_COMPLETION_FIELD("Count", event_count);
+        PUBLISH_COMPLETION_FIELD("Serial", serial);
+        PUBLISH_COMPLETION_FIELD("MonotonicNs", monotonic_ns);
+        PUBLISH_COMPLETION_FIELD("Kind", kind);
+        PUBLISH_COMPLETION_FIELD("Stage", stage);
+        PUBLISH_COMPLETION_FIELD("TerminalReason", terminal_reason);
+        PUBLISH_COMPLETION_FIELD("PresenceFlags", presence_flags);
+        PUBLISH_COMPLETION_FIELD("OutputEpoch", output_epoch);
+        PUBLISH_COMPLETION_FIELD("RxGroup", rx_group);
+        PUBLISH_COMPLETION_FIELD("RxCommand", rx_command);
+        PUBLISH_COMPLETION_FIELD("RxHeaderQid", rx_header_qid);
+        PUBLISH_COMPLETION_FIELD("RxHeaderIndex", rx_header_index);
+        PUBLISH_COMPLETION_FIELD("RxPacketLength", rx_packet_length);
+        PUBLISH_COMPLETION_FIELD("PayloadLength", payload_length);
+        PUBLISH_COMPLETION_FIELD("FirmwareQid", firmware_qid);
+        PUBLISH_COMPLETION_FIELD("QueueIndex", queue_index);
+        PUBLISH_COMPLETION_FIELD("RingCount", ring_count);
+        PUBLISH_COMPLETION_FIELD("Queued", queued);
+        PUBLISH_COMPLETION_FIELD("Cur", cur);
+        PUBLISH_COMPLETION_FIELD("Tail", tail);
+        PUBLISH_COMPLETION_FIELD("FrameCount", frame_count);
+        PUBLISH_COMPLETION_FIELD("Ssn", ssn);
+        PUBLISH_COMPLETION_FIELD("RaTid", ra_tid);
+        PUBLISH_COMPLETION_FIELD("Status", status);
+        PUBLISH_COMPLETION_FIELD("BaStaId", ba_sta_id);
+        PUBLISH_COMPLETION_FIELD("BaFlags", ba_flags);
+        PUBLISH_COMPLETION_FIELD("BaTfdCount", ba_tfd_count);
+        PUBLISH_COMPLETION_FIELD("BaTxed", ba_txed);
+        PUBLISH_COMPLETION_FIELD("BaDone", ba_done);
+        PUBLISH_COMPLETION_FIELD("BaWirelessTime", ba_wireless_time);
+        PUBLISH_COMPLETION_FIELD("BaTfdTid", ba_tfd_tid);
+        PUBLISH_COMPLETION_FIELD("BaTfdIndex", ba_tfd_index);
+#undef PUBLISH_COMPLETION_FIELD
+    }
+    return okay && scalar("SnapshotComplete", snapshot.available && snapshot.complete ? 1U : 0U) &&
+        scalar("SnapshotVersionEnd", finish) && scalar("SnapshotVersionBegin", finish);
+}
+
+static bool publishQueueSnapshot(IOEthernetController *controller,
+    uint32_t *versionStorage, const iwx_txq_obs_snapshot &snapshot,
+    uint32_t ownerSequence, uint32_t ownerGeneration)
+{
+    if (!controller || !versionStorage || (*versionStorage & 1U) != 0 ||
+        *versionStorage > UINT32_MAX - 2U)
+        return false;
+    const uint32_t finish = *versionStorage + 2U;
+    *versionStorage = finish;
+    const auto scalar = [&](const char *field, uint64_t value) {
+        char key[112];
+        const int length = snprintf(key, sizeof(key), "NativeStaQueue%s", field);
+        return length > 0 && static_cast<size_t>(length) < sizeof(key) &&
+            controller->setProperty(key, value, 64);
+    };
+    if (!scalar("SnapshotVersionBegin", finish - 1U))
+        return false;
+    bool okay = scalar("Schema", 1) && scalar("SnapshotComplete", 0) &&
+        scalar("OwnerWatchdogSequence", ownerSequence) &&
+        scalar("OwnerGeneration", ownerGeneration) &&
+        scalar("LiveRingSnapshotProven", 0) && scalar("FirmwareIdentityProven", 0);
+    okay = okay && scalar("Available", snapshot.available);
+    okay = okay && scalar("Complete", snapshot.complete);
+    okay = okay && scalar("SnapshotStable", snapshot.snapshot_stable);
+    okay = okay && scalar("SelectedQid", snapshot.selected_qid);
+    okay = okay && scalar("SelectedReason", snapshot.selected_reason);
+    okay = okay && scalar("QueueKnown", snapshot.queue_known);
+    okay = okay && scalar("ArmBindingKnown", snapshot.arm_binding_known);
+    okay = okay && scalar("LatestConfigOutcome", snapshot.latest_config_outcome);
+    okay = okay && scalar("LatestConfigResolvedQid", snapshot.latest_config_resolved_qid);
+    okay = okay && scalar("Reserved", snapshot.reserved);
+    okay = okay && scalar("DroppedCount", snapshot.dropped_count);
+    okay = okay && scalar("MutationSerial", snapshot.mutation_serial);
+    okay = okay && scalar("QueueAgeNs", snapshot.queue_age_ns);
+    okay = okay && scalar("QueueIncarnation", snapshot.queue.incarnation);
+    okay = okay && scalar("QueueCommittedMutationSerial", snapshot.queue.committed_mutation_serial);
+    okay = okay && scalar("QueueConfigAttemptSerial", snapshot.queue.config_attempt_serial);
+    okay = okay && scalar("QueueOperationCount", snapshot.queue.operation_count);
+    okay = okay && scalar("QueueLastOperationNs", snapshot.queue.last_operation_ns);
+    okay = okay && scalar("QueueResetCount", snapshot.queue.reset_count);
+    okay = okay && scalar("QueueLastResetNs", snapshot.queue.last_reset_ns);
+    okay = okay && scalar("QueueLastResetAttemptSerial", snapshot.queue.last_reset_attempt_serial);
+    okay = okay && scalar("QueuePreviousIncarnation", snapshot.queue.previous_incarnation);
+    okay = okay && scalar("QueueMutationSerial", snapshot.queue.mutation_serial);
+    okay = okay && scalar("QueueConfigBeginMutationSerial", snapshot.queue.config_begin_mutation_serial);
+    okay = okay && scalar("QueueLastSubmitSerial", snapshot.queue.last_submit_serial);
+    okay = okay && scalar("QueueLastSubmitNs", snapshot.queue.last_submit_ns);
+    okay = okay && scalar("QueuePresenceFlags", snapshot.queue.presence_flags);
+    okay = okay && scalar("QueueSubmitPresenceFlags", snapshot.queue.submit_presence_flags);
+    okay = okay && scalar("QueuePhase", snapshot.queue.phase);
+    okay = okay && scalar("QueueLastOperation", snapshot.queue.last_operation);
+    okay = okay && scalar("QueueLastReason", snapshot.queue.last_reason);
+    okay = okay && scalar("QueueQid", snapshot.queue.qid);
+    okay = okay && scalar("QueueOutputEpoch", snapshot.queue.output_epoch);
+    okay = okay && scalar("QueueOwner", snapshot.queue.owner);
+    okay = okay && scalar("QueueStationId", snapshot.queue.station_id);
+    okay = okay && scalar("QueueStationColor", snapshot.queue.station_color);
+    okay = okay && scalar("QueueQueueTid", snapshot.queue.queue_tid);
+    okay = okay && scalar("QueueRingCount", snapshot.queue.ring_count);
+    okay = okay && scalar("QueueQueued", snapshot.queue.queued);
+    okay = okay && scalar("QueueCur", snapshot.queue.cur);
+    okay = okay && scalar("QueueTail", snapshot.queue.tail);
+    okay = okay && scalar("QueueResetRingCount", snapshot.queue.reset_ring_count);
+    okay = okay && scalar("QueueResetQueued", snapshot.queue.reset_queued);
+    okay = okay && scalar("QueueResetCur", snapshot.queue.reset_cur);
+    okay = okay && scalar("QueueResetTail", snapshot.queue.reset_tail);
+    okay = okay && scalar("QueueLastSubmitIndex", snapshot.queue.last_submit_index);
+    okay = okay && scalar("QueueLastFrameControl", snapshot.queue.last_frame_control);
+    okay = okay && scalar("QueueLastPacketTid", snapshot.queue.last_packet_tid);
+    okay = okay && scalar("QueueLastSequenceControl", snapshot.queue.last_sequence_control);
+    okay = okay && scalar("QueueLastConfigOutcome", snapshot.queue.last_config_outcome);
+    okay = okay && scalar("LastSubmitSerial", snapshot.last_submit.serial);
+    okay = okay && scalar("LastSubmitIncarnation", snapshot.last_submit.incarnation);
+    okay = okay && scalar("LastSubmitAttemptSerial", snapshot.last_submit.attempt_serial);
+    okay = okay && scalar("LastSubmitPresent", snapshot.last_submit.present);
+    okay = okay && scalar("LastSubmitQid", snapshot.last_submit.qid);
+    okay = okay && scalar("LastSubmitOutputEpoch", snapshot.last_submit.output_epoch);
+    okay = okay && scalar("LastSubmitDescriptorIndex", snapshot.last_submit.descriptor_index);
+    okay = okay && scalar("ArmSubmitSerial", snapshot.arm.submit_serial);
+    okay = okay && scalar("ArmIncarnation", snapshot.arm.incarnation);
+    okay = okay && scalar("ArmMonotonicNs", snapshot.arm.monotonic_ns);
+    okay = okay && scalar("ArmPresent", snapshot.arm.present);
+    okay = okay && scalar("ArmQid", snapshot.arm.qid);
+    okay = okay && scalar("ArmOutputEpoch", snapshot.arm.output_epoch);
+    okay = okay && scalar("ArmResult", snapshot.arm.result);
+    okay = okay && scalar("NewstateToken", snapshot.newstate.token);
+    okay = okay && scalar("NewstateBeginMonotonicNs", snapshot.newstate.begin_monotonic_ns);
+    okay = okay && scalar("NewstateEndMonotonicNs", snapshot.newstate.end_monotonic_ns);
+    okay = okay && scalar("NewstatePresenceFlags", snapshot.newstate.presence_flags);
+    okay = okay && scalar("NewstateOldState", snapshot.newstate.old_state);
+    okay = okay && scalar("NewstateTargetState", snapshot.newstate.target_state);
+    okay = okay && scalar("NewstateTaskGeneration", snapshot.newstate.task_generation);
+    okay = okay && scalar("NewstateDriverGeneration", snapshot.newstate.driver_generation);
+    okay = okay && scalar("NewstateRepeatedAuth", snapshot.newstate.repeated_auth);
+    okay = okay && scalar("NewstateTerminalReason", snapshot.newstate.terminal_reason);
+    return okay && scalar("SnapshotComplete", snapshot.available &&
+            snapshot.complete && snapshot.snapshot_stable ? 1U : 0U) &&
+        scalar("SnapshotVersionEnd", finish) && scalar("SnapshotVersionBegin", finish);
+}
 #endif
 
 #define super ItlHalService
@@ -220,9 +888,15 @@ public:
         }
     }
 
-    TahoeLifecycleGuard(ItlIwx *owner, bool acquire)
-        : owner_(owner), runWork_(!acquire)
+    TahoeLifecycleGuard(ItlIwx *owner, bool acquire,
+                        bool flushDeferredTasks = true,
+                        bool *releasedOutermost = nullptr)
+        : owner_(owner), runWork_(!acquire),
+          flushDeferredTasks_(flushDeferredTasks),
+          releasedOutermost_(releasedOutermost)
     {
+        if (releasedOutermost_)
+            *releasedOutermost_ = false;
         if (acquire && owner_ && owner_->tahoeTryLifecycleFence()) {
             locked_ = true;
             runWork_ = true;
@@ -231,8 +905,12 @@ public:
 
     ~TahoeLifecycleGuard()
     {
-        if (locked_)
-            owner_->tahoeReleaseLifecycleFence();
+        if (locked_) {
+            const bool outermost = owner_->tahoeReleaseLifecycleFence(
+                flushDeferredTasks_);
+            if (releasedOutermost_)
+                *releasedOutermost_ = outermost;
+        }
     }
 
     explicit operator bool() const { return runWork_; }
@@ -244,6 +922,8 @@ private:
     ItlIwx *owner_ {nullptr};
     bool locked_ {false};
     bool runWork_ {false};
+    bool flushDeferredTasks_ {true};
+    bool *releasedOutermost_ {nullptr};
 };
 
 bool ItlIwx::tahoeTryLifecycleFence()
@@ -257,15 +937,16 @@ bool ItlIwx::tahoeTryLifecycleFence()
     return true;
 }
 
-void ItlIwx::tahoeReleaseLifecycleFence()
+bool ItlIwx::tahoeReleaseLifecycleFence(bool flushDeferredTasks)
 {
     IORecursiveLock *lock = nativeLifecycleLock_;
     if (!lock || nativeLifecycleDepth_ == 0)
-        return;
+        return false;
     const bool outermost = (--nativeLifecycleDepth_ == 0);
     IORecursiveLockUnlock(lock);
-    if (outermost)
+    if (outermost && flushDeferredTasks)
         tahoeFlushLifecycleTasks();
+    return outermost;
 }
 
 void ItlIwx::tahoeDeferLifecycleTasks(uint32_t taskBits)
@@ -470,20 +1151,181 @@ void ItlIwx::tahoeRecordInitTaskTrigger(
     nativeResetTrace_.recordInitTaskTrigger(trigger);
 }
 
-void ItlIwx::tahoeRecordReset(IwxResetTrace::ResetReason reason,
-                              struct iwx_softc *sc)
+void ItlIwx::tahoeRecordTxWatchdogSnapshot(struct iwx_softc *sc,
+                                           uint32_t countdownAtExpiry)
+{
+    // Called only by the main-gate watchdog action while it owns the
+    // lifecycle fence. A plain numeric snapshot is safe here; TX queue and
+    // node state have other producers and are deliberately unavailable.
+    if (!sc || !tahoeP2pOnMainGate())
+        return;
+    IwxResetTrace::TxWatchdogSnapshot sample{};
+    sample.generation = static_cast<uint32_t>(sc->sc_generation);
+    sample.countdownAtExpiry = countdownAtExpiry;
+    sample.producerSnapshotAvailable = readTxTimerTrace(sc, &sample) ? 1u : 0u;
+    sample.expiryMonotonicNs = tahoeMonotonicNs();
+    sample.queueSnapshotAvailable = 0;
+    if (!IwxTxProgressObservation::snapshot(
+            &sc->sc_tx_progress_observation, &sample.txProgress)) {
+        sample.txProgress = {};
+        sample.txProgress.available = 0;
+        sample.txProgress.complete = 0;
+    }
+    const uint32_t sequence = nativeResetTrace_.recordTxWatchdog(sample);
+    __atomic_store_n(&nativeLinkTransitionWatchdogSequence_, sequence,
+                     __ATOMIC_RELEASE);
+    // Keep expiry work to a fixed numeric copy. The 100+ IORegistry writes
+    // are deferred until the existing main-gate periodic publisher runs,
+    // after watchdog recovery has been enqueued.
+    sc->sc_tx_progress_pending = sample.txProgress;
+    sc->sc_tx_progress_pending_watchdog_sequence = sequence;
+    sc->sc_tx_progress_pending_generation = sample.generation;
+    sc->sc_tx_progress_pending_present = 1;
+    if (!IwxTxCompletionObservation::snapshot(
+            &sc->sc_tx_completion_observation, &sc->sc_tx_completion_pending))
+        sc->sc_tx_completion_pending = {};
+    if (!IwxTxQueueObservation::snapshot(&sc->sc_tx_queue_observation,
+            sample.expiryMonotonicNs, &sc->sc_tx_queue_pending))
+        sc->sc_tx_queue_pending = {};
+}
+
+void ItlIwx::tahoePublishTxProgressSnapshot(
+    IOEthernetController *controller, struct iwx_softc *sc)
+{
+    if (!controller || !sc || !tahoeP2pOnMainGate() ||
+        !sc->sc_tx_progress_pending_present)
+        return;
+    const uint32_t ownerSequence =
+        sc->sc_tx_progress_pending_watchdog_sequence;
+    if (ownerSequence == nativeResetTracePublishedTxProgressWatchdogSequence_)
+        return;
+    if (publishTxProgressSnapshot(controller,
+            &sc->sc_tx_progress_publish_version,
+            sc->sc_tx_progress_pending, ownerSequence,
+            sc->sc_tx_progress_pending_generation) &&
+        publishCompletionSnapshot(controller,
+            &sc->sc_tx_completion_publish_version,
+            sc->sc_tx_completion_pending, ownerSequence,
+            sc->sc_tx_progress_pending_generation) &&
+        publishQueueSnapshot(controller, &sc->sc_tx_queue_publish_version,
+            sc->sc_tx_queue_pending, ownerSequence,
+            sc->sc_tx_progress_pending_generation))
+        nativeResetTracePublishedTxProgressWatchdogSequence_ = ownerSequence;
+}
+
+uint32_t ItlIwx::tahoeRecordReset(IwxResetTrace::ResetReason reason,
+                                  struct iwx_softc *sc)
 {
     if (!sc)
-        return;
+        return UINT32_MAX;
     struct ieee80211com *ic = &sc->sc_ic;
     struct _ifnet *ifp = &ic->ic_if;
-    nativeResetTrace_.recordReset(reason,
+    const uint32_t resetSequence = nativeResetTrace_.recordReset(reason,
         static_cast<uint32_t>(sc->sc_generation),
         static_cast<uint32_t>(sc->sc_flags),
         static_cast<uint32_t>(ifp->if_flags),
         static_cast<uint32_t>(ic->ic_state),
         ic->ic_tahoe_init_stage,
-        static_cast<uint32_t>(ic->ic_tahoe_init_error));
+        static_cast<uint32_t>(ic->ic_tahoe_init_error),
+        tahoeMonotonicNs());
+    __atomic_store_n(&nativeLinkTransitionResetSequence_, resetSequence,
+                     __ATOMIC_RELEASE);
+    tahoeRecordLinkTransition(sc, IwxLinkStateTrace::Event::kResetBegin,
+        static_cast<uint32_t>(ic->ic_state), IEEE80211_S_INIT,
+        static_cast<int>(reason), 0, resetSequence, true);
+    return resetSequence;
+}
+
+void ItlIwx::tahoeRecordLinkTransition(struct iwx_softc *sc,
+    IwxLinkStateTrace::Event event, uint32_t oldState, uint32_t newState,
+    int stateArgument, int resultCode, uint32_t resetSequence,
+    bool resetSequenceValid)
+{
+    if (!sc)
+        return;
+
+    const struct ieee80211com *ic = &sc->sc_ic;
+    const struct _ifnet *ifp = &ic->ic_if;
+    IwxLinkStateTrace::Input input{};
+    input.eventCode = static_cast<uint32_t>(event);
+    input.oldState = oldState;
+    input.newState = newState;
+    input.deauthReason = static_cast<uint32_t>(ic->ic_deauth_reason);
+    input.stateArgument = static_cast<uint32_t>(stateArgument);
+    input.resultCode = resultCode;
+    input.ifUpRunning = ((ifp->if_flags & IFF_UP) ? 1u : 0u) |
+                        ((ifp->if_flags & IFF_RUNNING) ? 2u : 0u);
+    input.driverGeneration = static_cast<uint32_t>(sc->sc_generation);
+    input.resetGeneration = resetSequenceValid ? resetSequence :
+        __atomic_load_n(&nativeLinkTransitionResetSequence_, __ATOMIC_ACQUIRE);
+    input.watchdogSequence = __atomic_load_n(
+        &nativeLinkTransitionWatchdogSequence_, __ATOMIC_ACQUIRE);
+    input.validMask = IwxLinkStateTrace::kStatePairValid |
+        IwxLinkStateTrace::kInterfaceFlagsValid |
+        IwxLinkStateTrace::kGenerationPairValid |
+        IwxLinkStateTrace::kWatchdogSequenceValid;
+
+    switch (event) {
+        case IwxLinkStateTrace::Event::kNewStateRequested:
+        case IwxLinkStateTrace::Event::kNewStateTaskCompleted:
+            input.validMask |= IwxLinkStateTrace::kDeauthReasonValid |
+                IwxLinkStateTrace::kStateArgumentValid |
+                IwxLinkStateTrace::kResultCodeValid;
+            break;
+        case IwxLinkStateTrace::Event::kDeauthEntered:
+            input.validMask |= IwxLinkStateTrace::kDeauthReasonValid;
+            break;
+        case IwxLinkStateTrace::Event::kDeauthReturned:
+            input.validMask |= IwxLinkStateTrace::kDeauthReasonValid |
+                IwxLinkStateTrace::kResultCodeValid;
+            break;
+        case IwxLinkStateTrace::Event::kResetBegin:
+            input.validMask |= IwxLinkStateTrace::kDeauthReasonValid |
+                IwxLinkStateTrace::kStateArgumentValid;
+            break;
+        case IwxLinkStateTrace::Event::kResetComplete:
+        case IwxLinkStateTrace::Event::kResetSkipped:
+            input.validMask |= IwxLinkStateTrace::kDeauthReasonValid |
+                IwxLinkStateTrace::kStateArgumentValid |
+                IwxLinkStateTrace::kResultCodeValid;
+            break;
+    }
+
+    // This is fixed-size numeric capture only. In particular, it does not
+    // retain node/interface pointers or addresses and performs no IORegistry
+    // writes in a state, deauth, or reset callback.
+    (void)nativeLinkTransitionTrace_.record(input, tahoeMonotonicNs);
+}
+
+bool ItlIwx::tahoePublishLinkTransitionTrace(
+    IOEthernetController *controller)
+{
+    if (!controller || !tahoeP2pOnMainGate())
+        return false;
+
+    IwxLinkStateTrace::Snapshot snapshot{};
+    if (!nativeLinkTransitionTrace_.snapshot(&snapshot))
+        return false;
+    if (nativeLinkTransitionPublishedOnce_ &&
+        snapshot.versionEnd == nativeLinkTransitionPublishedVersion_ &&
+        snapshot.droppedCount == nativeLinkTransitionPublishedDropped_)
+        return true;
+
+    // OSData construction and registry publication happen only on the main
+    // gate's deferred watchdog/read path, never in the radio transition path.
+    OSData *payload = OSData::withBytes(&snapshot, sizeof(snapshot));
+    if (!payload)
+        return false;
+    const bool okay = controller->setProperty(
+        "NativeWifiLinkTransitionTrace", payload);
+    payload->release();
+    if (!okay)
+        return false;
+
+    nativeLinkTransitionPublishedVersion_ = snapshot.versionEnd;
+    nativeLinkTransitionPublishedDropped_ = snapshot.droppedCount;
+    nativeLinkTransitionPublishedOnce_ = true;
+    return true;
 }
 #endif
 
@@ -511,6 +1353,30 @@ bool ItlIwx::attach(IOPCIDevice *device)
 #endif
     pci.pa_tag = device;
     pci.workloop = getMainWorkLoop();
+#ifdef AIRPORT_TAHOE
+    __atomic_store_n(&com.sc_tx_output_epoch,
+                     static_cast<uint32_t>(com.sc_generation),
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&com.sc_tx_output_kick_tag, uint64_t(0),
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&com.sc_tx_output_kick_serial, 0U, __ATOMIC_RELEASE);
+    __atomic_store_n(&com.sc_tx_timer_trace_lock, 0U, __ATOMIC_RELEASE);
+    __atomic_store_n(&com.sc_tx_timer_trace_dropped, 0U, __ATOMIC_RELEASE);
+    IwxTxProgressObservation::reset(&com.sc_tx_progress_observation);
+    IwxTxCompletionObservation::reset(&com.sc_tx_completion_observation);
+    IwxTxQueueObservation::initialize(&com.sc_tx_queue_observation);
+    com.sc_tx_queue_pending = {};
+    com.sc_tx_queue_publish_version = 0;
+    com.sc_tx_completion_pending = {};
+    com.sc_tx_completion_publish_version = 0;
+    __atomic_store_n(&com.sc_tx_progress_publish_version, 0U,
+                     __ATOMIC_RELEASE);
+    com.sc_tx_progress_pending = {};
+    com.sc_tx_progress_pending_watchdog_sequence = 0;
+    com.sc_tx_progress_pending_generation = 0;
+    com.sc_tx_progress_pending_present = 0;
+    nativeResetTracePublishedTxProgressWatchdogSequence_ = UINT32_MAX;
+#endif
     if (!iwx_attach(&com, &pci)) {
         detach(device);
         releaseAll();
@@ -2874,17 +3740,16 @@ iwx_dma_contig_alloc(bus_dma_tag_t tag, struct iwx_dma_info *dma,
 void ItlIwx::
 iwx_dma_contig_free(struct iwx_dma_info *dma)
 {
-    if (dma == NULL || dma->cmd == NULL)
-        return;
-    if (dma->vaddr == NULL)
-        return;
-    dma->cmd->clearMemoryDescriptor();
-    dma->cmd->release();
-    dma->cmd = NULL;
-    dma->buffer->complete();
-    dma->buffer->release();
-    dma->buffer = NULL;
-    dma->vaddr = NULL;
+    NativeIwxDmaInfo::freeComplete(
+        dma,
+        [](IODMACommand *cmd) {
+            cmd->clearMemoryDescriptor();
+            cmd->release();
+        },
+        [](IOBufferMemoryDescriptor *buffer) {
+            buffer->complete();
+            buffer->release();
+        });
 }
 
 /**
@@ -3157,6 +4022,9 @@ void ItlIwx::
 iwx_reset_tx_ring(struct iwx_softc *sc, struct iwx_tx_ring *ring)
 {
     int i;
+#ifdef AIRPORT_TAHOE
+    observeTxRingInvalidation(sc, ring, IWX_TXQ_OBS_OP_RESET);
+#endif
     
     for (i = 0; i < ring->ring_count; i++) {
         struct iwx_tx_data *data = &ring->data[i];
@@ -3193,6 +4061,7 @@ iwx_free_tx_ring(struct iwx_softc *sc, struct iwx_tx_ring *ring)
     int i;
 
 #ifdef AIRPORT_TAHOE
+    observeTxRingInvalidation(sc, ring, IWX_TXQ_OBS_OP_FREE);
     // Freeing a ring permanently removes any prior positive proof.
     ring->nativeUnsubmittedPlaceholder = 0;
 #endif
@@ -3963,6 +4832,14 @@ iwx_enable_txq(struct iwx_softc *sc, int sta_id, int qid, int tid,
     size_t resp_len;
     
     iwx_reset_tx_ring(sc, ring);
+#ifdef AIRPORT_TAHOE
+    NativeQueueConfigObservation queueObservation(sc,
+        static_cast<uint32_t>(qid), static_cast<uint32_t>(sta_id),
+        static_cast<uint32_t>(tid), static_cast<uint32_t>(num_slots),
+        sta_id == IWX_STATION_ID ? IWX_TXQ_OBS_OWNER_STA :
+                                  IWX_TXQ_OBS_OWNER_UNKNOWN);
+    queueObservation.start();
+#endif
     
     memset(&cmd, 0, sizeof(cmd));
     cmd.sta_id = sta_id;
@@ -4015,6 +4892,11 @@ iwx_enable_txq(struct iwx_softc *sc, int sta_id, int qid, int tid,
         goto out;
     }
 out:
+#ifdef AIRPORT_TAHOE
+    queueObservation.finish(static_cast<uint32_t>(qid),
+        err == 0 ? IWX_TXQ_OBS_CONFIG_ACK_COMMITTED :
+                   IWX_TXQ_OBS_CONFIG_RESPONSE_INVALID);
+#endif
     iwx_free_resp(sc, &hcmd);
     return err;
 }
@@ -4072,6 +4954,11 @@ iwx_tvqm_enable_txq(struct iwx_softc *sc, int tid, int ssn, uint32_t size)
         .resp_pkt_len = sizeof(*pkt) + sizeof(*resp),
     };
     struct iwx_tx_ring *ring = &sc->sc_tvqm_ring;
+#ifdef AIRPORT_TAHOE
+    NativeQueueConfigObservation queueObservation(sc,
+        IWX_TXQ_OBS_UNKNOWN_QID, IWX_STATION_ID,
+        static_cast<uint32_t>(tid), size, IWX_TXQ_OBS_OWNER_TVQM_STA);
+#endif
     
     memset(ring, 0, sizeof(*ring));
     iwx_tx_ring_init(sc, ring, size);
@@ -4132,6 +5019,9 @@ iwx_tvqm_enable_txq(struct iwx_softc *sc, int tid, int ssn, uint32_t size)
     hcmd.data[0] = &cmd;
     hcmd.len[0] = sizeof(cmd);
 
+#ifdef AIRPORT_TAHOE
+    queueObservation.start();
+#endif
     err = iwx_send_cmd(sc, &hcmd);
     if (err)
         return err;
@@ -4163,14 +5053,23 @@ iwx_tvqm_enable_txq(struct iwx_softc *sc, int tid, int ssn, uint32_t size)
         // Firmware has seen these DMA addresses. Preserve both rings rather
         // than freeing either allocation on an impossible queue collision.
         XYLog("STA TVQM queue %d collides with retained P2P lease\n", fwqid);
+        queueObservation.finish(static_cast<uint32_t>(fwqid),
+                                IWX_TXQ_OBS_CONFIG_COLLISION);
         return -EBUSY;
     }
 #endif
     ring->cur = wr_idx;
     ring->qid = fwqid;
+#ifdef AIRPORT_TAHOE
+    queueObservation.prepareReplacement(static_cast<uint32_t>(fwqid));
+#endif
     iwx_reset_tx_ring(sc, &sc->txq[fwqid]);
     iwx_free_tx_ring(sc, &sc->txq[fwqid]);
     memcpy(&sc->txq[fwqid], ring, sizeof(*ring));
+#ifdef AIRPORT_TAHOE
+    queueObservation.finish(static_cast<uint32_t>(fwqid),
+                            IWX_TXQ_OBS_CONFIG_ACK_COMMITTED);
+#endif
     return fwqid;
 fail:
     iwx_reset_tx_ring(sc, ring);
@@ -5840,7 +6739,8 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
              uint32_t device_timestamp, struct ieee80211_rxinfo *rxi,
              struct mbuf_list *ml
 #ifdef AIRPORT_TAHOE
-             , uint32_t rxStageOwnerGeneration, uint8_t rxStageKind
+             , uint32_t rxStageOwnerGeneration, uint8_t rxStageKind,
+             uint32_t rxMacPhyIndex, bool rxMacPhyIndexPresent
 #endif
              )
 {
@@ -5932,7 +6832,8 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
             TahoeAwdlRxStageCounters::kDataTapCandidate);
     tahoeP2pTapAction(sc, mtod(m, const uint8_t *), mbuf_len(m),
                       p2pFrameWasProtected, uint16_t(chanidx),
-                      device_timestamp, true);
+                      device_timestamp, true, rxMacPhyIndex,
+                      rxMacPhyIndexPresent);
 #endif
     ieee80211_inputm(IC2IFP(ic), m, ni, rxi, ml);
     ieee80211_release_node(ic, ni);
@@ -6329,6 +7230,7 @@ drop:
 
 void ItlIwx::
 iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
+               size_t actualPayloadLength, bool rpaEnabled,
                size_t maxlen, struct mbuf_list *ml)
 {
     struct ieee80211com *ic = &sc->sc_ic;
@@ -6343,6 +7245,7 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
     uint32_t rxStageOwnerGeneration = 0;
     uint8_t rxStageKind = TahoeAwdlRxStageCounters::kNotAwdl;
     bool rxStageAwdlDataCandidate = false;
+    NativeAwdlRxEntry::Epochs rxEntryEpochs{};
 #endif
     
     desc = (struct iwx_rx_mpdu_desc *)pktdata;
@@ -6350,6 +7253,69 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
         desc_size = sizeof(struct iwx_rx_mpdu_desc);
     else
         desc_size = IWX_RX_DESC_SIZE_V1;
+
+#ifdef AIRPORT_TAHOE
+    // RX entry observation and the older stage counters are scoped to the
+    // current manual P2P owner. Lease reads are forbidden outside the gate.
+    if (tahoeP2pOnMainGate()) {
+        const auto &lease = tahoe_p2p_rx_lease_;
+        if (lease.active && lease.contextGeneration != 0 &&
+            lease.contextGeneration == lease.currentContextGeneration &&
+            lease.powerGeneration == lease.currentPowerGeneration &&
+            lease.stationGeneration == lease.currentStationGeneration) {
+            rxStageOwnerGeneration =
+                static_cast<uint32_t>(lease.contextGeneration);
+            tahoe_awdl_rx_stage_counters_.beginOwner(rxStageOwnerGeneration);
+        }
+    }
+
+    if (tahoeP2pCurrentRxDiagnosticEpochs(sc, &rxEntryEpochs)) {
+        nativeAwdlRxEntryTelemetry_.beginOwner(rxEntryEpochs);
+        NativeAwdlRxEntry::Layout layout{};
+        const bool isAx210OrNewer =
+            sc->sc_device_family >= IWX_DEVICE_FAMILY_AX210;
+        layout.descriptorSize = desc_size;
+        layout.mpduLengthOffset = offsetof(struct iwx_rx_mpdu_desc, mpdu_len);
+        layout.statusOffset = offsetof(struct iwx_rx_mpdu_desc, status);
+        layout.macPhyIndexOffset = offsetof(struct iwx_rx_mpdu_desc, mac_phy_idx);
+        layout.filterMatchOffset = isAx210OrNewer ?
+            offsetof(struct iwx_rx_mpdu_desc, v3) +
+                offsetof(struct iwx_rx_mpdu_desc_v3, filter_match) :
+            offsetof(struct iwx_rx_mpdu_desc, v1) +
+                offsetof(struct iwx_rx_mpdu_desc_v1, filter_match);
+        layout.channelOffset = isAx210OrNewer ?
+            offsetof(struct iwx_rx_mpdu_desc, v3) +
+                offsetof(struct iwx_rx_mpdu_desc_v3, channel) :
+            offsetof(struct iwx_rx_mpdu_desc, v1) +
+                offsetof(struct iwx_rx_mpdu_desc_v1, channel);
+        layout.descriptorVersion = isAx210OrNewer ? 3u : 1u;
+        layout.minimumMpduLength = ic->ic_opmode == IEEE80211_M_MONITOR ?
+            sizeof(struct ieee80211_frame_cts) :
+            sizeof(struct ieee80211_frame);
+        layout.crcOkMask = IWX_RX_MPDU_RES_STATUS_CRC_OK;
+        layout.overrunOkMask = IWX_RX_MPDU_RES_STATUS_OVERRUN_OK;
+        layout.rpaEnabled = rpaEnabled;
+        const auto inspection = NativeAwdlRxEntry::inspect(
+            static_cast<const uint8_t *>(pktdata), actualPayloadLength,
+            maxlen, layout);
+        const bool awdlBssidCandidate = inspection.frameControlPresent &&
+            NativeAwdlData::isAwdlDataCandidate(
+                static_cast<const uint8_t *>(pktdata) + desc_size,
+                inspection.mpduLength);
+        (void)nativeAwdlRxEntryTelemetry_.record(
+            rxEntryEpochs, inspection, awdlBssidCandidate);
+    }
+#endif
+
+    // The RX notification declares its actual payload length separately from
+    // maxlen (remaining DMA-buffer capacity). Never read status beyond it.
+    const size_t statusEnd = offsetof(struct iwx_rx_mpdu_desc, status) +
+        sizeof(desc->status);
+    if (actualPayloadLength < statusEnd || maxlen < statusEnd) {
+        IC2IFP(ic)->netStat->inputErrors++;
+        mbuf_freem(m);
+        return;
+    }
     
     if (!(desc->status & htole16(IWX_RX_MPDU_RES_STATUS_CRC_OK)) ||
         !(desc->status & htole16(IWX_RX_MPDU_RES_STATUS_OVERRUN_OK))) {
@@ -6372,7 +7338,17 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
         mbuf_freem(m);
         return;
     }
-    if (len > maxlen - desc_size) {
+    if (actualPayloadLength < desc_size) {
+        IC2IFP(ic)->netStat->inputErrors++;
+        mbuf_freem(m);
+        return;
+    }
+    if (maxlen < desc_size || len > maxlen - desc_size) {
+        IC2IFP(ic)->netStat->inputErrors++;
+        mbuf_freem(m);
+        return;
+    }
+    if (len > actualPayloadLength - desc_size) {
         IC2IFP(ic)->netStat->inputErrors++;
         mbuf_freem(m);
         return;
@@ -6416,19 +7392,10 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
     }
 
 #ifdef AIRPORT_TAHOE
-    // Only inspect the action prefix after CRC/overrun, MPDU length, and
-    // padding have been checked. Lease/context reads are serialized by the
-    // main workloop gate; RX code outside that gate contributes no stage data.
-    if (tahoeP2pOnMainGate()) {
-        const auto &lease = tahoe_p2p_rx_lease_;
-        if (lease.active && lease.contextGeneration != 0 &&
-            lease.contextGeneration == lease.currentContextGeneration &&
-            lease.powerGeneration == lease.currentPowerGeneration &&
-            lease.stationGeneration == lease.currentStationGeneration) {
-            rxStageOwnerGeneration = lease.contextGeneration;
-            tahoe_awdl_rx_stage_counters_.beginOwner(rxStageOwnerGeneration);
-        }
-    }
+    // The descriptor-entry witness above is pre-padding and intentionally
+    // records only FC/type/BSSID booleans. Preserve PSF/MIF classification at
+    // this existing post-padding stage, where the action body is correctly
+    // aligned.
     if (rxStageOwnerGeneration) {
         const uint8_t *rxBytes = mtod(m, const uint8_t *);
         const size_t rxLength = mbuf_len(m);
@@ -6581,7 +7548,8 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
                  (phy_info & IWX_RX_MPDU_PHY_SHORT_PREAMBLE),
                  rate_n_flags, device_timestamp, &rxi, ml
 #ifdef AIRPORT_TAHOE
-                 , rxStageOwnerGeneration, rxStageKind
+                 , rxStageOwnerGeneration, rxStageKind,
+                 uint32_t(desc->mac_phy_idx), true
 #endif
                  );
 }
@@ -6681,13 +7649,213 @@ iwx_clear_oactive(struct iwx_softc *sc, struct iwx_tx_ring *ring)
     }
 }
 
+#ifdef AIRPORT_TAHOE
+static iwx_tx_completion_event_input txCompletionRxInput(
+    uint32_t kind, uint32_t stage, uint32_t reason,
+    const struct iwx_rx_packet *pkt)
+{
+    iwx_tx_completion_event_input event{};
+    event.kind = kind;
+    event.stage = stage;
+    event.terminal_reason = reason;
+    if (!pkt)
+        return event;
+
+    event.presence_flags = IWX_TX_COMPLETION_HAS_RX_GROUP |
+        IWX_TX_COMPLETION_HAS_RX_COMMAND |
+        IWX_TX_COMPLETION_HAS_RX_HEADER_QID |
+        IWX_TX_COMPLETION_HAS_RX_HEADER_INDEX |
+        IWX_TX_COMPLETION_HAS_RX_PACKET_LENGTH;
+    event.rx_group = pkt->hdr.group_id;
+    event.rx_command = pkt->hdr.cmd;
+    event.rx_header_qid = pkt->hdr.qid;
+    event.rx_header_index = pkt->hdr.idx;
+    event.rx_packet_length = iwx_rx_packet_len(pkt);
+    if (event.rx_packet_length >= sizeof(pkt->hdr)) {
+        event.presence_flags |= IWX_TX_COMPLETION_HAS_PAYLOAD_LENGTH;
+        event.payload_length = event.rx_packet_length - sizeof(pkt->hdr);
+    }
+    return event;
+}
+
+static void txCompletionSetRingFacts(iwx_tx_completion_event_input *event,
+                                     const struct iwx_tx_ring *ring)
+{
+    if (!event || !ring)
+        return;
+    event->presence_flags |= IWX_TX_COMPLETION_HAS_RING_COUNT |
+        IWX_TX_COMPLETION_HAS_QUEUED | IWX_TX_COMPLETION_HAS_CUR |
+        IWX_TX_COMPLETION_HAS_TAIL;
+    event->ring_count = ring->ring_count;
+    event->queued = ring->queued;
+    event->cur = ring->cur;
+    event->tail = ring->tail;
+}
+
+static void txCompletionSetTxRspFacts(
+    iwx_tx_completion_event_input *event,
+    const struct iwx_rx_packet *pkt, size_t payloadLength)
+{
+    if (!event || !pkt)
+        return;
+    const size_t frameCountEnd = offsetof(struct iwx_tx_resp, frame_count) +
+        sizeof(((struct iwx_tx_resp *)nullptr)->frame_count);
+    if (payloadLength >= frameCountEnd) {
+        const struct iwx_tx_resp *response =
+            reinterpret_cast<const struct iwx_tx_resp *>(pkt->data);
+        event->presence_flags |= IWX_TX_COMPLETION_HAS_FRAME_COUNT;
+        event->frame_count = response->frame_count;
+    }
+    const size_t raTidEnd = offsetof(struct iwx_tx_resp, ra_tid) +
+        sizeof(((struct iwx_tx_resp *)nullptr)->ra_tid);
+    if (payloadLength >= raTidEnd) {
+        const struct iwx_tx_resp *response =
+            reinterpret_cast<const struct iwx_tx_resp *>(pkt->data);
+        event->presence_flags |= IWX_TX_COMPLETION_HAS_RA_TID;
+        event->ra_tid = response->ra_tid;
+    }
+    const size_t queueIdEnd = offsetof(struct iwx_tx_resp, tx_queue) +
+        sizeof(((struct iwx_tx_resp *)nullptr)->tx_queue);
+    if (payloadLength >= queueIdEnd) {
+        const struct iwx_tx_resp *response =
+            reinterpret_cast<const struct iwx_tx_resp *>(pkt->data);
+        event->presence_flags |= IWX_TX_COMPLETION_HAS_FIRMWARE_QID;
+        event->firmware_qid = le16toh(response->tx_queue);
+    }
+    const size_t statusEnd = offsetof(struct iwx_tx_resp, status) +
+        sizeof(((struct iwx_agg_tx_status *)nullptr)->status);
+    if (payloadLength >= statusEnd) {
+        const struct iwx_tx_resp *response =
+            reinterpret_cast<const struct iwx_tx_resp *>(pkt->data);
+        event->presence_flags |= IWX_TX_COMPLETION_HAS_STATUS;
+        event->status = le16toh(response->status.status);
+    }
+    if ((event->presence_flags & IWX_TX_COMPLETION_HAS_FRAME_COUNT) &&
+        event->frame_count != 0) {
+        const size_t ssnOffset = offsetof(struct iwx_tx_resp, status) +
+            static_cast<size_t>(event->frame_count) *
+                sizeof(struct iwx_agg_tx_status);
+        if (ssnOffset <= payloadLength &&
+            sizeof(uint32_t) <= payloadLength - ssnOffset) {
+            uint32_t rawSsn = 0;
+            memcpy(&rawSsn, pkt->data + ssnOffset, sizeof(rawSsn));
+            event->presence_flags |= IWX_TX_COMPLETION_HAS_SSN;
+            event->ssn = le32toh(rawSsn) & 0x0fffU;
+        }
+    }
+}
+
+static void txCompletionSetBaFacts(
+    iwx_tx_completion_event_input *event,
+    const struct iwx_compressed_ba_notif *ba)
+{
+    if (!event || !ba)
+        return;
+    event->presence_flags |= IWX_TX_COMPLETION_HAS_BA_STA_ID |
+        IWX_TX_COMPLETION_HAS_BA_FLAGS |
+        IWX_TX_COMPLETION_HAS_BA_TFD_COUNT |
+        IWX_TX_COMPLETION_HAS_BA_TXED | IWX_TX_COMPLETION_HAS_BA_DONE |
+        IWX_TX_COMPLETION_HAS_BA_WIRELESS_TIME;
+    event->ba_sta_id = ba->sta_id;
+    event->ba_flags = le32toh(ba->flags);
+    event->ba_tfd_count = le16toh(ba->tfd_cnt);
+    event->ba_txed = le16toh(ba->txed);
+    event->ba_done = le16toh(ba->done);
+    event->ba_wireless_time = le32toh(ba->wireless_time);
+}
+
+static void txCompletionSetBaTfdFacts(
+    iwx_tx_completion_event_input *event,
+    const struct iwx_compressed_ba_tfd *tfd)
+{
+    if (!event || !tfd)
+        return;
+    event->presence_flags |= IWX_TX_COMPLETION_HAS_FIRMWARE_QID |
+        IWX_TX_COMPLETION_HAS_BA_TFD_TID |
+        IWX_TX_COMPLETION_HAS_BA_TFD_INDEX;
+    event->firmware_qid = le16toh(tfd->q_num);
+    event->ba_tfd_tid = tfd->tid;
+    event->ba_tfd_index = le16toh(tfd->tfd_index);
+}
+
+static void recordTxCompletionEvent(
+    struct iwx_softc *sc, iwx_tx_completion_event_input event)
+{
+    if (!sc)
+        return;
+    event.presence_flags |= IWX_TX_COMPLETION_HAS_MONOTONIC_NS |
+        IWX_TX_COMPLETION_HAS_OUTPUT_EPOCH;
+    event.monotonic_ns = tahoeMonotonicNs();
+    // Record-time owner epoch only; this does not prove firmware ACK ownership.
+    event.output_epoch = __atomic_load_n(&sc->sc_tx_output_epoch,
+                                          __ATOMIC_ACQUIRE);
+    (void)IwxTxCompletionObservation::record(
+        &sc->sc_tx_completion_observation, &event);
+}
+
+class TxCompletionTerminalScope {
+public:
+    TxCompletionTerminalScope(struct iwx_softc *sc,
+                              const iwx_tx_completion_event_input &event)
+        : sc_(sc), event_(event), active_(sc != nullptr) {}
+
+    ~TxCompletionTerminalScope()
+    {
+        if (active_)
+            recordTxCompletionEvent(sc_, event_);
+    }
+
+    TxCompletionTerminalScope(const TxCompletionTerminalScope &) = delete;
+    TxCompletionTerminalScope &operator=(
+        const TxCompletionTerminalScope &) = delete;
+
+    void setReason(uint32_t reason) { event_.terminal_reason = reason; }
+    iwx_tx_completion_event_input &event() { return event_; }
+    void dismiss() { active_ = false; }
+
+private:
+    struct iwx_softc *sc_;
+    iwx_tx_completion_event_input event_;
+    bool active_;
+};
+#endif
+
 void ItlIwx::
 iwx_rx_tx_ba_notif(struct iwx_softc *sc, struct iwx_rx_packet *pkt, struct iwx_rx_data *data)
 {
     struct ieee80211com *ic = &sc->sc_ic;
     const size_t payloadLength = iwx_rx_packet_payload_len(pkt);
-    if (payloadLength < offsetof(struct iwx_compressed_ba_notif, tfd))
+#ifdef AIRPORT_TAHOE
+    TxCompletionTerminalScope baCompletion(sc, txCompletionRxInput(
+        IWX_TX_COMPLETION_BA, IWX_TX_COMPLETION_STAGE_BA_HANDLER_TERMINAL,
+        IWX_TX_COMPLETION_BA_UNCLASSIFIED_EXIT, pkt));
+#endif
+#ifdef AIRPORT_TAHOE
+    struct iwx_compressed_ba_notif *observedBa =
+        (struct iwx_compressed_ba_notif *)pkt->data;
+    uint32_t baPresent = 0;
+    uint32_t baQid = 0;
+    if (payloadLength >= offsetof(struct iwx_compressed_ba_notif, tfd)) {
+        const uint16_t observedCount = le16toh(observedBa->tfd_cnt);
+        const size_t observedLength =
+            offsetof(struct iwx_compressed_ba_notif, tfd) +
+            static_cast<size_t>(observedCount) *
+                sizeof(struct iwx_compressed_ba_tfd);
+        if (observedCount != 0 && observedLength <= payloadLength) {
+            baQid = le16toh(observedBa->tfd[0].q_num);
+            baPresent |= IWX_TX_PROGRESS_HAS_QID;
+        }
+    }
+    recordTxProgressEvent(sc, IWX_TX_PROGRESS_RESPONSE_DISPATCH,
+        IWX_TX_PROGRESS_RESPONSE_BA, baPresent, baQid, 0, 0, 0, 0, 0,
+        false);
+#endif
+    if (payloadLength < offsetof(struct iwx_compressed_ba_notif, tfd)) {
+#ifdef AIRPORT_TAHOE
+        baCompletion.setReason(IWX_TX_COMPLETION_BA_HEADER_TOO_SHORT);
+#endif
         return;
+    }
     struct iwx_compressed_ba_notif *ba_res = (struct iwx_compressed_ba_notif *)pkt->data;
     uint8_t tid;
     uint8_t qid;
@@ -6696,8 +7864,17 @@ iwx_rx_tx_ba_notif(struct iwx_softc *sc, struct iwx_rx_packet *pkt, struct iwx_r
     const uint16_t tfdCount = le16toh(ba_res->tfd_cnt);
     const size_t requiredLength = offsetof(struct iwx_compressed_ba_notif, tfd) +
         static_cast<size_t>(tfdCount) * sizeof(struct iwx_compressed_ba_tfd);
-    if (requiredLength > payloadLength)
+    if (requiredLength > payloadLength) {
+#ifdef AIRPORT_TAHOE
+        txCompletionSetBaFacts(&baCompletion.event(), ba_res);
+        baCompletion.setReason(IWX_TX_COMPLETION_BA_TFD_ARRAY_TRUNCATED);
+#endif
         return;
+    }
+
+#ifdef AIRPORT_TAHOE
+    txCompletionSetBaFacts(&baCompletion.event(), ba_res);
+#endif
 
 #ifdef AIRPORT_TAHOE
     if (ic->ic_opmode == IEEE80211_M_STA && ba_res->sta_id != IWX_STATION_ID) {
@@ -6705,11 +7882,17 @@ iwx_rx_tx_ba_notif(struct iwx_softc *sc, struct iwx_rx_packet *pkt, struct iwx_r
             (void)iwx_tahoe_p2p_action_reject_ba_queue(
                 &nativeP2pTxQueue_, &nativeP2pActionTx_,
                 le16toh(ba_res->tfd[entry].q_num));
+        baCompletion.setReason(IWX_TX_COMPLETION_BA_STA_ID_MISMATCH);
         return;
     }
 #endif
 
-    sc->sc_tx_timer = 0;
+    IwxTxWatchdog::clear(&sc->sc_tx_timer);
+#ifdef AIRPORT_TAHOE
+    recordTxTimerClear(sc, __atomic_load_n(&sc->sc_tx_output_epoch,
+                                           __ATOMIC_ACQUIRE),
+                       kTxTimerClearFirmwareResponse);
+#endif
 
     if (le32toh(ba_res->flags) != IWX_BA_RESP_TX_BAR && le32toh(ba_res->flags) != IWX_BA_RESP_TX_AGG){
         DPRINTFN(3, ("BA_NOTIFICATION flags %x, sent:%d, acked:%d, tfd_cnt:%d, query_frame_cnt:%d, retry_cnt:%d\n",
@@ -6721,11 +7904,24 @@ iwx_rx_tx_ba_notif(struct iwx_softc *sc, struct iwx_rx_packet *pkt, struct iwx_r
               ba_res->retry_cnt));
     }
 
-    if (ic->ic_state != IEEE80211_S_RUN)
+    if (ic->ic_state != IEEE80211_S_RUN) {
+#ifdef AIRPORT_TAHOE
+        baCompletion.setReason(IWX_TX_COMPLETION_BA_NOT_STA_RUN);
+#endif
         return;
+    }
 
-    if (!le16toh(ba_res->tfd_cnt))
+    if (!le16toh(ba_res->tfd_cnt)) {
+#ifdef AIRPORT_TAHOE
+        baCompletion.setReason(IWX_TX_COMPLETION_BA_TFD_COUNT_ZERO);
+#endif
         return;
+    }
+
+#ifdef AIRPORT_TAHOE
+    // Valid BA parsing fans out into one scalar terminal observation per TFD.
+    baCompletion.dismiss();
+#endif
 
 #ifdef AIRPORT_TAHOE
     const uint32_t rateGeneration = __atomic_load_n(
@@ -6750,7 +7946,9 @@ iwx_rx_tx_ba_notif(struct iwx_softc *sc, struct iwx_rx_packet *pkt, struct iwx_r
                 iwx_tahoe_p2p_tvqm_queue_owned(&nativeP2pTxQueue_, queueId))
                 continue;
             ring = &sc->txq[queueId];
-            if (ring->ring_count == 0 || ring->queued < 0 || ring->tail < 0)
+            if (!IwxTxRingCapacity::rateQueueCanInspect(
+                    queueId, ring->qid, ring->ring_count, nitems(ring->data),
+                    ring->queued, ring->tail))
                 continue;
             const uint32_t completedEnd = IWX_AGG_SSN_TO_TXQ_IDX(
                 le16toh(ba_tfd->tfd_index), ring->ring_count);
@@ -6793,26 +7991,72 @@ iwx_rx_tx_ba_notif(struct iwx_softc *sc, struct iwx_rx_packet *pkt, struct iwx_r
     for (i = 0; i < tfdCount; i++) {
         struct iwx_compressed_ba_tfd *ba_tfd = &ba_res->tfd[i];
 
+#ifdef AIRPORT_TAHOE
+        iwx_tx_completion_event_input tfdEvent = txCompletionRxInput(
+            IWX_TX_COMPLETION_BA, IWX_TX_COMPLETION_STAGE_BA_TFD_TERMINAL,
+            IWX_TX_COMPLETION_BA_UNCLASSIFIED_EXIT, pkt);
+        txCompletionSetBaFacts(&tfdEvent, ba_res);
+        txCompletionSetBaTfdFacts(&tfdEvent, ba_tfd);
+        TxCompletionTerminalScope tfdCompletion(sc, tfdEvent);
+#endif
+
         tid = ba_tfd->tid;
 
         const uint16_t queueId = le16toh(ba_tfd->q_num);
-        if (queueId >= nitems(sc->txq))
+        if (queueId >= nitems(sc->txq)) {
+#ifdef AIRPORT_TAHOE
+            tfdCompletion.setReason(
+                IWX_TX_COMPLETION_BA_TFD_QID_OUT_OF_RANGE);
+#endif
             continue;
+        }
 #ifdef AIRPORT_TAHOE
         if (iwx_tahoe_p2p_action_reject_ba_queue(
                 &nativeP2pTxQueue_, &nativeP2pActionTx_, queueId))
+        {
+            tfdCompletion.setReason(IWX_TX_COMPLETION_BA_TFD_P2P_OWNED);
             continue;
+        }
 #endif
         qid = static_cast<uint8_t>(queueId);
         ring = &sc->txq[qid];
-        if (ring->ring_count == 0 ||
-            ring->ring_count > IWX_TFD_QUEUE_SIZE_MAX ||
-            (ring->ring_count & (ring->ring_count - 1)) != 0 || ring->qid != qid)
+#ifdef AIRPORT_TAHOE
+        txCompletionSetRingFacts(&tfdCompletion.event(), ring);
+#endif
+        uint16_t reclaimIndex = 0;
+        if (!IwxTxRingCapacity::baQueueCanReclaim(
+                queueId, ring->qid, ring->ring_count,
+                nitems(ring->data), le16toh(ba_tfd->tfd_index),
+                &reclaimIndex)) {
+#ifdef AIRPORT_TAHOE
+            tfdCompletion.setReason(
+                IWX_TX_COMPLETION_BA_TFD_RING_CAPACITY_REJECTED);
+#endif
             continue;
+        }
 
-        sc->sc_tx_timer = 0;
+        IwxTxWatchdog::clear(&sc->sc_tx_timer);
+#ifdef AIRPORT_TAHOE
+        recordTxTimerClear(sc, __atomic_load_n(&sc->sc_tx_output_epoch,
+                                               __ATOMIC_ACQUIRE),
+                           kTxTimerClearFirmwareResponse);
+#endif
 
-        iwx_ampdu_txq_advance(sc, ring, IWX_AGG_SSN_TO_TXQ_IDX(le16toh(ba_tfd->tfd_index), ring->ring_count));
+        iwx_ampdu_txq_advance(sc, ring, reclaimIndex);
+#ifdef AIRPORT_TAHOE
+        tfdCompletion.setReason(
+            IWX_TX_COMPLETION_BA_TFD_RECLAIM_COMPLETED);
+        tfdCompletion.event().presence_flags |=
+            IWX_TX_COMPLETION_HAS_QUEUE_INDEX;
+        tfdCompletion.event().queue_index = reclaimIndex;
+        txCompletionSetRingFacts(&tfdCompletion.event(), ring);
+        recordTxProgressEvent(sc, IWX_TX_PROGRESS_ORDINARY_RECLAIM, 0,
+            IWX_TX_PROGRESS_HAS_QID | IWX_TX_PROGRESS_HAS_INDEX |
+                IWX_TX_PROGRESS_HAS_RING_COUNT | IWX_TX_PROGRESS_HAS_QUEUED |
+                IWX_TX_PROGRESS_HAS_CUR | IWX_TX_PROGRESS_HAS_TAIL,
+            ring->qid, reclaimIndex, ring->ring_count, ring->queued,
+            ring->cur, ring->tail, false);
+#endif
         iwx_clear_oactive(sc, ring);
     }
 }
@@ -6862,10 +8106,8 @@ static bool iwx_tx_response_ring(
         return false;
 
     struct iwx_tx_ring *ring = &sc->txq[queueId];
-    if (ring->qid != queueId || ring->ring_count == 0 ||
-        ring->ring_count > IWX_TFD_QUEUE_SIZE_MAX ||
-        ring->ring_count > nitems(ring->data) ||
-        (ring->ring_count & (ring->ring_count - 1)) != 0)
+    if (!IwxTxRingCapacity::ringIsAddressable(
+            queueId, ring->qid, ring->ring_count, nitems(ring->data)))
         return false;
 
     *ringOut = ring;
@@ -6873,18 +8115,14 @@ static bool iwx_tx_response_ring(
 }
 
 static bool iwx_tx_response_index(
-    const struct iwx_tx_ring *ring, uint32_t ssn, uint16_t *indexOut)
+    uint16_t queueId, const struct iwx_tx_ring *ring, uint32_t ssn,
+    uint16_t *indexOut)
 {
-    if (!ring || !indexOut || ring->ring_count == 0 ||
-        ring->ring_count > IWX_TFD_QUEUE_SIZE_MAX ||
-        ring->ring_count > nitems(ring->data) ||
-        (ring->ring_count & (ring->ring_count - 1)) != 0)
+    if (!ring || !IwxTxRingCapacity::responseIndex(
+            queueId, ring->qid, ring->ring_count, nitems(ring->data),
+            ssn, indexOut))
         return false;
 
-    const uint32_t index = IWX_AGG_SSN_TO_TXQ_IDX(ssn, ring->ring_count);
-    if (index >= ring->ring_count)
-        return false;
-    *indexOut = static_cast<uint16_t>(index);
     return true;
 }
 
@@ -6893,31 +8131,72 @@ iwx_rx_tx_cmd(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
               struct iwx_rx_data *data)
 {
     const size_t payloadLength = iwx_rx_packet_payload_len(pkt);
-    if (payloadLength < sizeof(uint8_t))
+#ifdef AIRPORT_TAHOE
+    iwx_tx_completion_event_input txRspEvent = txCompletionRxInput(
+        IWX_TX_COMPLETION_TX_RSP,
+        IWX_TX_COMPLETION_STAGE_TX_RSP_TERMINAL,
+        IWX_TX_COMPLETION_TX_RSP_UNCLASSIFIED_EXIT, pkt);
+    txCompletionSetTxRspFacts(&txRspEvent, pkt, payloadLength);
+    TxCompletionTerminalScope txRspCompletion(sc, txRspEvent);
+#endif
+    if (payloadLength < sizeof(uint8_t)) {
+#ifdef AIRPORT_TAHOE
+        txRspCompletion.setReason(
+            IWX_TX_COMPLETION_TX_RSP_PAYLOAD_TOO_SHORT);
+#endif
         return;
+    }
     uint32_t ssn;
     int idx;
     int tid;
     struct iwx_tx_resp *tx_resp = (struct iwx_tx_resp *)pkt->data;
     const uint8_t frameCount = tx_resp->frame_count;
-    if (frameCount == 0)
+    if (frameCount == 0) {
+#ifdef AIRPORT_TAHOE
+        txRspCompletion.setReason(
+            IWX_TX_COMPLETION_TX_RSP_FRAME_COUNT_ZERO);
+#endif
         return;
+    }
     const size_t requiredLength =
         offsetof(struct iwx_tx_resp, status) +
         static_cast<size_t>(frameCount) * sizeof(struct iwx_agg_tx_status) +
         sizeof(uint32_t); // trailing SCD SSN
-    if (requiredLength > payloadLength)
+    if (requiredLength > payloadLength) {
+#ifdef AIRPORT_TAHOE
+        txRspCompletion.setReason(
+            IWX_TX_COMPLETION_TX_RSP_DECLARED_LENGTH_TRUNCATED);
+#endif
         return;
+    }
     const uint16_t queueId = le16toh(tx_resp->tx_queue);
+#ifdef AIRPORT_TAHOE
+    txRspCompletion.event().presence_flags |=
+        IWX_TX_COMPLETION_HAS_FIRMWARE_QID;
+    txRspCompletion.event().firmware_qid = queueId;
+#endif
     struct iwx_tx_ring *ring = nullptr;
-    if (!iwx_tx_response_ring(sc, queueId, &ring))
+    if (!iwx_tx_response_ring(sc, queueId, &ring)) {
+#ifdef AIRPORT_TAHOE
+        txRspCompletion.setReason(
+            IWX_TX_COMPLETION_TX_RSP_QUEUE_OR_RING_UNADDRESSABLE);
+#endif
         return;
+    }
+#ifdef AIRPORT_TAHOE
+    txCompletionSetRingFacts(&txRspCompletion.event(), ring);
+#endif
     struct iwx_tx_data *txd;
 
     bus_dmamap_sync(sc->sc_dmat, data->map, 0, IWX_RBUF_SIZE,
                     BUS_DMASYNC_POSTREAD);
     
-    sc->sc_tx_timer = 0;
+    IwxTxWatchdog::clear(&sc->sc_tx_timer);
+#ifdef AIRPORT_TAHOE
+    recordTxTimerClear(sc, __atomic_load_n(&sc->sc_tx_output_epoch,
+                                           __ATOMIC_ACQUIRE),
+                       kTxTimerClearFirmwareResponse);
+#endif
 
     if (frameCount > 1) {
         for (int i = 0; i < frameCount; i++) {
@@ -6931,20 +8210,53 @@ iwx_rx_tx_cmd(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
                          queueId,
                          le16_to_cpu((&tx_resp->status)[i].sequence));
         }
+#ifdef AIRPORT_TAHOE
+        txRspCompletion.setReason(
+            IWX_TX_COMPLETION_TX_RSP_AGGREGATE_WAITING_FOR_BA);
+#endif
     } else {
         tid = tx_resp->ra_tid & 0x0f;
         memcpy(&ssn, &tx_resp->status + tx_resp->frame_count, sizeof(ssn));
         ssn = le32toh(ssn) & 0xfff;
         uint16_t checkedIndex = 0;
-        if (ring->queued <= 0 ||
-            !iwx_tx_response_index(ring, ssn, &checkedIndex))
+#ifdef AIRPORT_TAHOE
+        txRspCompletion.event().presence_flags |=
+            IWX_TX_COMPLETION_HAS_SSN;
+        txRspCompletion.event().ssn = ssn;
+#endif
+        const bool responseRingEmpty = ring->queued <= 0;
+        if (responseRingEmpty ||
+            !iwx_tx_response_index(queueId, ring, ssn, &checkedIndex)) {
+#ifdef AIRPORT_TAHOE
+            txRspCompletion.setReason(responseRingEmpty ?
+                IWX_TX_COMPLETION_TX_RSP_SINGLE_RING_EMPTY :
+                IWX_TX_COMPLETION_TX_RSP_SSN_INDEX_REJECTED);
+#endif
             return;
+        }
         idx = checkedIndex;
+#ifdef AIRPORT_TAHOE
+        txRspCompletion.event().presence_flags |=
+            IWX_TX_COMPLETION_HAS_QUEUE_INDEX;
+        txRspCompletion.event().queue_index = checkedIndex;
+#endif
         txd = &ring->data[idx];
         iwx_rx_tx_cmd_single(sc, pkt, txd);
         DPRINTFN(3, ("%s tid=%d ssn=%d idx=%d\n", __FUNCTION__, tid, ssn, idx));
         iwx_ampdu_txq_advance(sc, ring, idx);
+#ifdef AIRPORT_TAHOE
+        recordTxProgressEvent(sc, IWX_TX_PROGRESS_ORDINARY_RECLAIM, 0,
+            IWX_TX_PROGRESS_HAS_QID | IWX_TX_PROGRESS_HAS_INDEX |
+                IWX_TX_PROGRESS_HAS_RING_COUNT | IWX_TX_PROGRESS_HAS_QUEUED |
+                IWX_TX_PROGRESS_HAS_CUR | IWX_TX_PROGRESS_HAS_TAIL,
+            ring->qid, idx, ring->ring_count, ring->queued,
+            ring->cur, ring->tail, false);
+#endif
         iwx_clear_oactive(sc, ring);
+#ifdef AIRPORT_TAHOE
+        txRspCompletion.setReason(
+            IWX_TX_COMPLETION_TX_RSP_SINGLE_RECLAIM_COMPLETED);
+#endif
     }
 }
 
@@ -8078,8 +9390,17 @@ iwx_tx_update_byte_tbl(struct iwx_softc *sc, struct iwx_tx_ring *txq, int idx, u
 }
 
 int ItlIwx::
-iwx_tx(struct iwx_softc *sc, mbuf_t m, struct ieee80211_node *ni, int ac)
+iwx_tx(struct iwx_softc *sc, mbuf_t m, struct ieee80211_node *ni, int ac
+#ifdef AIRPORT_TAHOE
+       , uint64_t *observedSubmitSerial
+#endif
+       )
 {
+#ifdef AIRPORT_TAHOE
+    if (observedSubmitSerial)
+        *observedSubmitSerial = 0;
+    iwx_txq_obs_input observedPacket{};
+#endif
     struct ieee80211com *ic = &sc->sc_ic;
     struct iwx_node *in = (struct iwx_node *)ni;
     struct iwx_tx_ring *ring;
@@ -8136,10 +9457,25 @@ iwx_tx(struct iwx_softc *sc, mbuf_t m, struct ieee80211_node *ni, int ac)
 
     ring = &sc->txq[qid];
     if (ring->ring_count == 0) {
+#ifdef AIRPORT_TAHOE
+        recordTxProgressEvent(sc, IWX_TX_PROGRESS_GUARD_DECISION,
+            IWX_TX_PROGRESS_GUARD_RING_REJECTED,
+            IWX_TX_PROGRESS_HAS_QID | IWX_TX_PROGRESS_HAS_RING_COUNT,
+            static_cast<uint32_t>(qid), 0, 0, 0, 0, 0, false);
+#endif
         mbuf_freem(m);
         return EINVAL;
     }
     idx = (ring->cur & (ring->ring_count - 1));
+#ifdef AIRPORT_TAHOE
+    recordTxProgressEvent(sc, IWX_TX_PROGRESS_GUARD_DECISION,
+        IWX_TX_PROGRESS_GUARD_RING_READY,
+        IWX_TX_PROGRESS_HAS_QID | IWX_TX_PROGRESS_HAS_INDEX |
+            IWX_TX_PROGRESS_HAS_RING_COUNT | IWX_TX_PROGRESS_HAS_QUEUED |
+            IWX_TX_PROGRESS_HAS_CUR | IWX_TX_PROGRESS_HAS_TAIL,
+        ring->qid, static_cast<uint32_t>(idx), ring->ring_count,
+        ring->queued, ring->cur, ring->tail, false);
+#endif
     desc = &ring->desc[idx];
     memset(desc, 0, sizeof(*desc));
     data = &ring->data[idx];
@@ -8224,6 +9560,20 @@ iwx_tx(struct iwx_softc *sc, mbuf_t m, struct ieee80211_node *ni, int ac)
         tx_gen2->rate_n_flags = htole32(rate_n_flags);
     }
     
+#ifdef AIRPORT_TAHOE
+    observedPacket.presence_flags = IWX_TXQ_OBS_HAS_FRAME_CONTROL;
+    observedPacket.frame_control = static_cast<uint32_t>(wh->i_fc[0]) |
+        (static_cast<uint32_t>(wh->i_fc[1]) << 8);
+    if (hdrlen >= sizeof(struct ieee80211_frame)) {
+        observedPacket.presence_flags |= IWX_TXQ_OBS_HAS_SEQUENCE_CONTROL;
+        observedPacket.sequence_control = static_cast<uint32_t>(wh->i_seq[0]) |
+            (static_cast<uint32_t>(wh->i_seq[1]) << 8);
+    }
+    if (ieee80211_has_qos(wh)) {
+        observedPacket.presence_flags |= IWX_TXQ_OBS_HAS_PACKET_TID;
+        observedPacket.packet_tid = ieee80211_get_qos(wh) & IEEE80211_QOS_TID;
+    }
+#endif
     /* Trim 802.11 header. */
     mbuf_adj(m, hdrlen);
     
@@ -8294,6 +9644,34 @@ iwx_tx(struct iwx_softc *sc, mbuf_t m, struct ieee80211_node *ni, int ac)
 //        XYLog("%s sc->qfullmsk is FULL qid=%d ring->cur=%d ring->queued=%d\n", __FUNCTION__, ring->qid, ring->cur, ring->queued);
         sc->qfullmsk |= 1 << ring->qid;
     }
+#ifdef AIRPORT_TAHOE
+    const uint32_t observedRingCount = ring->ring_count;
+    const uint32_t observedQueued = ring->queued;
+    const uint32_t observedCur = ring->cur;
+    const uint32_t observedTail = ring->tail;
+    recordTxProgressEvent(sc, IWX_TX_PROGRESS_DOORBELL, 0,
+        IWX_TX_PROGRESS_HAS_QID | IWX_TX_PROGRESS_HAS_INDEX |
+            IWX_TX_PROGRESS_HAS_RING_COUNT | IWX_TX_PROGRESS_HAS_QUEUED |
+            IWX_TX_PROGRESS_HAS_CUR | IWX_TX_PROGRESS_HAS_TAIL,
+        ring->qid, static_cast<uint32_t>(idx), observedRingCount,
+        observedQueued, observedCur, observedTail, false);
+    observedPacket.presence_flags |= IWX_TXQ_OBS_HAS_TIME |
+        IWX_TXQ_OBS_HAS_EPOCH | IWX_TXQ_OBS_HAS_RING_COUNT |
+        IWX_TXQ_OBS_HAS_QUEUED | IWX_TXQ_OBS_HAS_CUR |
+        IWX_TXQ_OBS_HAS_TAIL | IWX_TXQ_OBS_HAS_DESCRIPTOR_INDEX;
+    observedPacket.monotonic_ns = tahoeMonotonicNs();
+    observedPacket.output_epoch = __atomic_load_n(&sc->sc_tx_output_epoch,
+                                                  __ATOMIC_ACQUIRE);
+    observedPacket.ring_count = observedRingCount;
+    observedPacket.queued = observedQueued;
+    observedPacket.cur = observedCur;
+    observedPacket.tail = observedTail;
+    observedPacket.descriptor_index = static_cast<uint32_t>(idx);
+    const uint64_t observedSerial = IwxTxQueueObservation::recordSubmit(
+        &sc->sc_tx_queue_observation, static_cast<uint32_t>(qid), &observedPacket);
+    if (observedSubmitSerial)
+        *observedSubmitSerial = observedSerial;
+#endif
     
     return 0;
 }
@@ -8366,11 +9744,20 @@ iwx_flush_sta_tids(struct iwx_softc *sc, int sta_id, uint16_t tids)
         if (sc->sc_tid_data[tid].qid != qid)
             continue;
         txq = &sc->txq[qid];
-        if (txq->ring_count == 0 ||
-            txq->ring_count > IWX_TFD_QUEUE_SIZE_MAX ||
-            (txq->ring_count & (txq->ring_count - 1)) != 0 || txq->qid != qid)
+        uint16_t reclaimIndex = 0;
+        if (!IwxTxRingCapacity::flushQueueCanReclaim(
+                qid, txq->qid, txq->ring_count, nitems(txq->data),
+                read_after, &reclaimIndex))
             continue;
-        iwx_ampdu_txq_advance(sc, txq, IWX_AGG_SSN_TO_TXQ_IDX(read_after, txq->ring_count));
+        iwx_ampdu_txq_advance(sc, txq, reclaimIndex);
+#ifdef AIRPORT_TAHOE
+        recordTxProgressEvent(sc, IWX_TX_PROGRESS_FLUSH_RECLAIM, 0,
+            IWX_TX_PROGRESS_HAS_QID | IWX_TX_PROGRESS_HAS_INDEX |
+                IWX_TX_PROGRESS_HAS_RING_COUNT | IWX_TX_PROGRESS_HAS_QUEUED |
+                IWX_TX_PROGRESS_HAS_CUR | IWX_TX_PROGRESS_HAS_TAIL,
+            txq->qid, reclaimIndex, txq->ring_count, txq->queued,
+            txq->cur, txq->tail, false);
+#endif
     }
 out:
     iwx_free_resp(sc, &hcmd);
@@ -11195,6 +12582,9 @@ iwx_deauth(struct iwx_softc *sc)
     struct ieee80211com *ic = &sc->sc_ic;
     struct iwx_node *in = (struct iwx_node *)ic->ic_bss;
     int err;
+#ifdef AIRPORT_TAHOE
+    NativeDeauthObservation linkObservation(this, sc);
+#endif
     
     splassert(IPL_NET);
     
@@ -11205,8 +12595,12 @@ iwx_deauth(struct iwx_softc *sc)
     
     if (sc->sc_flags & IWX_FLAG_STA_ACTIVE) {
         err = iwx_rm_sta(sc, in);
-        if (err)
+        if (err) {
+#ifdef AIRPORT_TAHOE
+            linkObservation.setResult(err);
+#endif
             return err;
+        }
     }
     
     if (sc->sc_flags & IWX_FLAG_BINDING_ACTIVE) {
@@ -11214,6 +12608,9 @@ iwx_deauth(struct iwx_softc *sc)
         if (err) {
             XYLog("%s: could not remove binding (error %d)\n",
                   DEVNAME(sc), err);
+#ifdef AIRPORT_TAHOE
+            linkObservation.setResult(err);
+#endif
             return err;
         }
         sc->sc_flags &= ~IWX_FLAG_BINDING_ACTIVE;
@@ -11224,6 +12621,9 @@ iwx_deauth(struct iwx_softc *sc)
         if (err) {
             XYLog("%s: could not remove MAC context (error %d)\n",
                   DEVNAME(sc), err);
+#ifdef AIRPORT_TAHOE
+            linkObservation.setResult(err);
+#endif
             return err;
         }
         sc->sc_flags &= ~IWX_FLAG_MAC_ACTIVE;
@@ -11241,9 +12641,16 @@ iwx_deauth(struct iwx_softc *sc)
     /* Move unused PHY context to a default channel. */
     err = iwx_phy_ctxt_update(sc, &sc->sc_phyctxt[0],
                               &ic->ic_channels[1], 1, 1, 0);
-    if (err)
+    if (err) {
+#ifdef AIRPORT_TAHOE
+        linkObservation.setResult(err);
+#endif
         return err;
+    }
     
+#ifdef AIRPORT_TAHOE
+    linkObservation.setResult(0);
+#endif
     return 0;
 }
 
@@ -11557,6 +12964,10 @@ iwx_newstate_task(void *psc)
     ItlIwx *that = container_of(sc, ItlIwx, com);
     int queue_error = taskq_enter_unpaused(sc->sc_nswq);
     if (queue_error) {
+        that->tahoeRecordLinkTransition(sc,
+            IwxLinkStateTrace::Event::kNewStateTaskCompleted,
+            static_cast<uint32_t>(ic->ic_state),
+            static_cast<uint32_t>(sc->ns_nstate), sc->ns_arg, queue_error);
         IOLog("AirportItlwm[Tahoe] newstate snapshot unavailable generation=%d error=%d flags=0x%x\n",
             sc->sc_generation, queue_error, sc->sc_flags);
         splx(s);
@@ -11567,6 +12978,10 @@ iwx_newstate_task(void *psc)
     int arg = sc->ns_arg;
     const int generation = that->tahoe_newstate_generation_;
     taskq_leave(sc->sc_nswq);
+    NativeNewstateObservation stateObservation(that, sc,
+        static_cast<uint32_t>(ostate), static_cast<uint32_t>(nstate),
+        static_cast<uint32_t>(generation), static_cast<uint32_t>(sc->sc_generation),
+        arg);
 #else
     enum ieee80211_state nstate = sc->ns_nstate;
     enum ieee80211_state ostate = ic->ic_state;
@@ -11578,14 +12993,20 @@ iwx_newstate_task(void *psc)
     XYLog("%s sc->sc_flags & IWX_FLAG_SHUTDOWN %s\n", __FUNCTION__, sc->sc_flags & IWX_FLAG_SHUTDOWN ? "true" : "false");
     if (sc->sc_flags & IWX_FLAG_SHUTDOWN) {
         /* iwx_stop() is waiting for us. */
+#ifdef AIRPORT_TAHOE
+        stateObservation.terminalReason = 0x10001U;
+        stateObservation.finish();
+#endif
         //        refcnt_rele_wake(&sc->task_refs);
         splx(s);
         return;
     }
 #ifdef AIRPORT_TAHOE
     if (generation != sc->sc_generation) {
+        stateObservation.terminalReason = 0x10002U;
         IOLog("AirportItlwm[Tahoe] stale newstate task generation=%d current=%d state=%d target=%d flags=0x%x\n",
             generation, sc->sc_generation, ic->ic_state, nstate, sc->sc_flags);
+        stateObservation.finish();
         splx(s);
         return;
     }
@@ -11594,6 +13015,10 @@ iwx_newstate_task(void *psc)
     if (ostate == IEEE80211_S_SCAN) {
         if (nstate == ostate) {
             if (sc->sc_flags & IWX_FLAG_SCANNING) {
+#ifdef AIRPORT_TAHOE
+                stateObservation.terminalReason = 0x10003U;
+                stateObservation.finish();
+#endif
                 //                refcnt_rele_wake(&sc->task_refs);
                 splx(s);
                 return;
@@ -11625,14 +13050,20 @@ iwx_newstate_task(void *psc)
         
         /* Die now if iwx_stop() was called while we were sleeping. */
         if (sc->sc_flags & IWX_FLAG_SHUTDOWN) {
+#ifdef AIRPORT_TAHOE
+            stateObservation.terminalReason = 0x10001U;
+            stateObservation.finish();
+#endif
             //            refcnt_rele_wake(&sc->task_refs);
             splx(s);
             return;
         }
 #ifdef AIRPORT_TAHOE
         if (generation != sc->sc_generation) {
+            stateObservation.terminalReason = 0x10002U;
             IOLog("AirportItlwm[Tahoe] newstate task cancelled generation=%d current=%d state=%d target=%d flags=0x%x\n",
                 generation, sc->sc_generation, ic->ic_state, nstate, sc->sc_flags);
+            stateObservation.finish();
             splx(s);
             return;
         }
@@ -11648,6 +13079,10 @@ iwx_newstate_task(void *psc)
             err = that->iwx_scan(sc);
             if (err)
                 break;
+#ifdef AIRPORT_TAHOE
+            stateObservation.terminalReason = 0x10005U;
+            stateObservation.finish();
+#endif
             //        refcnt_rele_wake(&sc->task_refs);
             splx(s);
             return;
@@ -11672,11 +13107,14 @@ iwx_newstate_task(void *psc)
     
 out:
 #ifdef AIRPORT_TAHOE
+    stateObservation.terminalReason = static_cast<uint32_t>(err);
     if (generation != sc->sc_generation ||
         (sc->sc_flags & IWX_FLAG_SHUTDOWN)) {
+        stateObservation.terminalReason = 0x10004U;
         if (generation != sc->sc_generation)
             IOLog("AirportItlwm[Tahoe] newstate completion discarded generation=%d current=%d state=%d target=%d error=%d flags=0x%x\n",
                 generation, sc->sc_generation, ic->ic_state, nstate, err, sc->sc_flags);
+        stateObservation.finish();
         splx(s);
         return;
     }
@@ -11698,6 +13136,7 @@ out:
         } else {
 #ifdef AIRPORT_TAHOE
             int state_error = sc->sc_newstate(ic, nstate, arg);
+            stateObservation.terminalReason = static_cast<uint32_t>(state_error);
             if (state_error == 0 && nstate == IEEE80211_S_RUN &&
                 ic->ic_state == IEEE80211_S_RUN &&
                 ic->ic_assoc_status == IEEE80211_STATUS_SUCCESS &&
@@ -11709,6 +13148,9 @@ out:
         }
     }
     //    refcnt_rele_wake(&sc->task_refs);
+#ifdef AIRPORT_TAHOE
+    stateObservation.finish();
+#endif
     splx(s);
 }
 
@@ -11723,10 +13165,18 @@ iwx_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
     int s = splnet();
     int queue_error = taskq_enter_unpaused(sc->sc_nswq);
     if (queue_error) {
+        that->tahoeRecordLinkTransition(sc,
+            IwxLinkStateTrace::Event::kNewStateRequested,
+            static_cast<uint32_t>(ic->ic_state), static_cast<uint32_t>(nstate),
+            arg, queue_error);
         splx(s);
         return queue_error;
     }
     if (sc->sc_flags & IWX_FLAG_SHUTDOWN) {
+        that->tahoeRecordLinkTransition(sc,
+            IwxLinkStateTrace::Event::kNewStateRequested,
+            static_cast<uint32_t>(ic->ic_state), static_cast<uint32_t>(nstate),
+            arg, ENXIO);
         taskq_leave(sc->sc_nswq);
         splx(s);
         return ENXIO;
@@ -11741,6 +13191,10 @@ iwx_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
      */
     if (sc->ns_nstate == nstate && nstate != IEEE80211_S_SCAN &&
         nstate != IEEE80211_S_AUTH) {
+        that->tahoeRecordLinkTransition(sc,
+            IwxLinkStateTrace::Event::kNewStateRequested,
+            static_cast<uint32_t>(ic->ic_state), static_cast<uint32_t>(nstate),
+            arg, 0);
 #ifdef AIRPORT_TAHOE
         taskq_leave(sc->sc_nswq);
         splx(s);
@@ -11795,6 +13249,12 @@ iwx_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
 #endif
     
     that->iwx_add_task(sc, sc->sc_nswq, &sc->newstate_task);
+#ifdef AIRPORT_TAHOE
+    that->tahoeRecordLinkTransition(sc,
+        IwxLinkStateTrace::Event::kNewStateRequested,
+        static_cast<uint32_t>(ic->ic_state), static_cast<uint32_t>(nstate),
+        arg, 0);
+#endif
 #ifdef AIRPORT_TAHOE
     taskq_leave(sc->sc_nswq);
     splx(s);
@@ -12337,14 +13797,20 @@ iwx_init(struct _ifnet *ifp)
     for (i = 0; i < ARRAY_SIZE(sc->sc_tid_data); i++) {
         sc->sc_tid_data[i].qid = IWX_INVALID_QUEUE;
     }
-    
+
     //    rw_assert_wrlock(&sc->ioctl_rwl);
-    
+
     generation = ++sc->sc_generation;
-    
+#ifdef AIRPORT_TAHOE
+    __atomic_store_n(&sc->sc_tx_output_epoch,
+                     static_cast<uint32_t>(generation), __ATOMIC_RELEASE);
+    IwxOutputKick::clearOlderEpoch(&sc->sc_tx_output_kick_tag,
+        static_cast<uint32_t>(generation));
+#endif
+
     //    KASSERT(sc->task_refs.refs == 0);
     //    refcnt_init(&sc->task_refs);
-    
+
 #ifdef AIRPORT_TAHOE
     ic->ic_tahoe_init_error = 0;
 #endif
@@ -12366,23 +13832,27 @@ iwx_init(struct _ifnet *ifp)
         }
         return err;
     }
-    
+
 #ifdef AIRPORT_TAHOE
     tahoeScanOnline(true);
 #endif
     if (sc->sc_nvm.sku_cap_11n_enable)
         iwx_setup_ht_rates(sc);
-    
+
     if (sc->sc_nvm.sku_cap_11ac_enable)
         iwx_setup_vht_rates(sc);
-    
+
     if (sc->sc_nvm.sku_cap_11ax_enable)
         iwx_setup_he_rates(sc);
-    
+
     ifq_clr_oactive(&ifp->if_snd);
     ifq_flush(&ifp->if_snd);
     ifp->if_flags |= IFF_RUNNING;
-    
+#ifdef AIRPORT_TAHOE
+    recordTxProgressEvent(sc, IWX_TX_PROGRESS_RUNSTOP,
+        IWX_TX_PROGRESS_RUNSTOP_START, 0, 0, 0, 0, 0, 0, 0, true);
+#endif
+
     if (ic->ic_opmode == IEEE80211_M_MONITOR) {
         ic->ic_bss->ni_chan = ic->ic_ibss_chan;
         ieee80211_new_state(ic, IEEE80211_S_RUN, -1);
@@ -12391,7 +13861,7 @@ iwx_init(struct _ifnet *ifp)
 #endif
         return 0;
     }
-    
+
 #ifdef AIRPORT_TAHOE
     ic->ic_tahoe_init_stage = 13;
     /*
@@ -12437,48 +13907,185 @@ iwx_init(struct _ifnet *ifp)
     return 0;
 }
 
-IOReturn ItlIwx::
-_iwx_start_task(OSObject *target, void *arg0, void *arg1, void *arg2, void *arg3)
+#ifdef AIRPORT_TAHOE
+namespace {
+static constexpr uint32_t kTahoeOutputDrainBatch = 64;
+
+struct IwxStartDispatchResult {
+    bool retryOutput {false};
+    bool continueImmediately {false};
+    bool flushDeferredTasks {false};
+    uint32_t outputEpoch {0};
+};
+
+} // namespace
+
+IwxOutputKick::DrainResult ItlIwx::iwx_start_drain(struct _ifnet *ifp,
+                                                    uint32_t epoch)
 {
-    struct _ifnet *ifp = (struct _ifnet *)arg0;
-    struct iwx_softc *sc = (struct iwx_softc *)ifp->if_softc;
+    if (!ifp || !ifp->if_softc)
+        return IwxOutputKick::DrainResult::kInvalid;
+
+    struct iwx_softc *sc = static_cast<struct iwx_softc *>(ifp->if_softc);
     ItlIwx *that = container_of(sc, ItlIwx, com);
     struct ieee80211com *ic = &sc->sc_ic;
     struct ieee80211_node *ni;
     struct ether_header *eh;
     mbuf_t m;
     int ac = EDCA_AC_BE; /* XXX */
-    
-    if (!(ifp->if_flags & IFF_RUNNING) ||  ifq_is_oactive(&ifp->if_snd)) {
-        return kIOReturnError;
-    }
-    
-    for (;;) {
+    uint32_t dequeued = 0;
+
+    // Preconditions: this routine is called only while the main radio gate
+    // and Tahoe lifecycle fence are both held. Stop/reset therefore cannot
+    // retire a ring after a packet leaves if_snd and before its doorbell.
+    if (!that->tahoeP2pOnMainGate() ||
+        __atomic_load_n(&sc->sc_tx_output_epoch, __ATOMIC_ACQUIRE) != epoch ||
+        (sc->sc_flags & IWX_FLAG_SHUTDOWN) != 0 ||
+        (ifp->if_flags & (IFF_UP | IFF_RUNNING)) != (IFF_UP | IFF_RUNNING))
+        return IwxOutputKick::DrainResult::kInvalid;
+    if (ifq_is_oactive(&ifp->if_snd))
+        return IwxOutputKick::DrainResult::kTemporarilyBlocked;
+
+    IwxOutputKick::DrainResult drainResult = IwxOutputKick::DrainResult::kDrained;
+    while (dequeued < kTahoeOutputDrainBatch) {
         /* why isn't this done per-queue? */
         if (sc->qfullmsk != 0) {
             ifq_set_oactive(&ifp->if_snd);
+            drainResult = IwxOutputKick::DrainResult::kTemporarilyBlocked;
             break;
         }
 
         /* Don't queue additional frames while flushing Tx queues. */
-        if (sc->sc_flags & IWX_FLAG_TXFLUSH)
+        if (sc->sc_flags & IWX_FLAG_TXFLUSH) {
+            drainResult = IwxOutputKick::DrainResult::kTemporarilyBlocked;
             break;
-        
+        }
+
         /* need to send management frames even if we're not RUNning */
         m = mq_dequeue(&ic->ic_mgtq);
         if (m) {
-            //            ni = m->m_pkthdr.ph_cookie;
+            ++dequeued;
             ni = (struct ieee80211_node *)mbuf_pkthdr_rcvif(m);
             goto sendit;
         }
-        
-        if (
+
+        if (ic->ic_xflags & IEEE80211_F_TX_MGMT_ONLY) {
+            drainResult = IwxOutputKick::DrainResult::kTemporarilyBlocked;
+            break;
+        }
+
+        m = ifq_dequeue(&ifp->if_snd);
+        if (!m)
+            break;
+        ++dequeued;
+        if (mbuf_len(m) < sizeof (*eh) &&
+            mbuf_pullup(&m, sizeof (*eh)) != 0) {
+            ifp->netStat->outputErrors++;
+            continue;
+        }
+#if NBPFILTER > 0
+        if (ifp->if_bpf != NULL)
+            bpf_mtap(ifp->if_bpf, m, BPF_DIRECTION_OUT);
+#endif
+        if ((m = ieee80211_encap(ifp, m, &ni)) == NULL) {
+            ifp->netStat->outputErrors++;
+            continue;
+        }
+
+    sendit:
+#if NBPFILTER > 0
+        if (ic->ic_rawbpf != NULL)
+            bpf_mtap(ic->ic_rawbpf, m, BPF_DIRECTION_OUT);
+#endif
+        uint64_t observedSubmitSerial = 0;
+        if (that->iwx_tx(sc, m, ni, ac, &observedSubmitSerial) != 0) {
+            ieee80211_release_node(ic, ni);
+            ifp->netStat->outputErrors++;
+            continue;
+        }
+        ifp->netStat->outputPackets++;
+
+        if (ifp->if_flags & IFF_UP) {
+            IwxTxWatchdog::arm(&sc->sc_tx_timer);
+            recordTxTimerArm(sc, epoch, observedSubmitSerial);
+            ifp->if_timer = 1;
+        }
+    }
+
+    // Bound time under both locks. The caller may continue a budget-exhausted
+    // batch immediately after attemptAction releases the gate; a final retry
+    // token remains as the one-second contention fallback. Do not inspect
+    // ic_mgtq's lockless length macro.
+    return IwxOutputKick::classifyDrain(
+        dequeued, kTahoeOutputDrainBatch, drainResult);
+}
+#endif
+
+IOReturn ItlIwx::
+_iwx_start_task(OSObject *target, void *arg0, void *arg1, void *arg2, void *arg3)
+{
+    struct _ifnet *ifp = (struct _ifnet *)arg0;
+    struct iwx_softc *sc = (struct iwx_softc *)ifp->if_softc;
+    ItlIwx *that = container_of(sc, ItlIwx, com);
+
+#ifdef AIRPORT_TAHOE
+    auto *result = static_cast<IwxStartDispatchResult *>(arg1);
+    if (!result)
+        return kIOReturnBadArgument;
+    result->retryOutput = false;
+    result->flushDeferredTasks = false;
+    if (!that->tahoeP2pOnMainGate())
+        return kIOReturnNotReady;
+    {
+        TahoeLifecycleGuard lifecycle(that, true, false,
+                                      &result->flushDeferredTasks);
+        if (!lifecycle) {
+            result->retryOutput = true;
+            result->outputEpoch = __atomic_load_n(
+                &sc->sc_tx_output_epoch, __ATOMIC_ACQUIRE);
+            return kIOReturnBusy;
+        }
+        const uint32_t epoch = __atomic_load_n(&sc->sc_tx_output_epoch,
+                                                __ATOMIC_ACQUIRE);
+        result->outputEpoch = epoch;
+        uint64_t takenTag = 0;
+        (void)IwxOutputKick::takeForEpoch(
+            &sc->sc_tx_output_kick_tag, epoch, &takenTag);
+        const IwxOutputKick::DrainResult drain =
+            that->iwx_start_drain(ifp, epoch);
+        result->retryOutput = IwxOutputKick::shouldRetry(drain);
+        result->continueImmediately =
+            IwxOutputKick::shouldContinueImmediately(drain);
+    }
+    return kIOReturnSuccess;
+#else
+    struct ieee80211com *ic = &sc->sc_ic;
+    struct ieee80211_node *ni;
+    struct ether_header *eh;
+    mbuf_t m;
+    int ac = EDCA_AC_BE; /* XXX */
+
+    if (!(ifp->if_flags & IFF_RUNNING) || ifq_is_oactive(&ifp->if_snd))
+        return kIOReturnError;
+    for (;;) {
+        if (sc->qfullmsk != 0) {
+            ifq_set_oactive(&ifp->if_snd);
+            break;
+        }
+        if (sc->sc_flags & IWX_FLAG_TXFLUSH)
+            break;
+        m = mq_dequeue(&ic->ic_mgtq);
+        if (m) {
+            ni = (struct ieee80211_node *)mbuf_pkthdr_rcvif(m);
+            goto sendit_non_tahoe;
+        }
 #ifndef AIRPORT
-            ic->ic_state != IEEE80211_S_RUN ||
+        if (ic->ic_state != IEEE80211_S_RUN ||
+#else
+        if (
 #endif
             (ic->ic_xflags & IEEE80211_F_TX_MGMT_ONLY))
             break;
-        
         m = ifq_dequeue(&ifp->if_snd);
         if (!m)
             break;
@@ -12495,8 +14102,7 @@ _iwx_start_task(OSObject *target, void *arg0, void *arg1, void *arg2, void *arg3
             ifp->netStat->outputErrors++;
             continue;
         }
-        
-    sendit:
+    sendit_non_tahoe:
 #if NBPFILTER > 0
         if (ic->ic_rawbpf != NULL)
             bpf_mtap(ic->ic_rawbpf, m, BPF_DIRECTION_OUT);
@@ -12507,14 +14113,13 @@ _iwx_start_task(OSObject *target, void *arg0, void *arg1, void *arg2, void *arg3
             continue;
         }
         ifp->netStat->outputPackets++;
-        
         if (ifp->if_flags & IFF_UP) {
-            sc->sc_tx_timer = 15;
+            IwxTxWatchdog::arm(&sc->sc_tx_timer);
             ifp->if_timer = 1;
         }
     }
-    
     return kIOReturnSuccess;
+#endif
 }
 
 void ItlIwx::
@@ -12522,7 +14127,41 @@ iwx_start(struct _ifnet *ifp)
 {
     struct iwx_softc *sc = (struct iwx_softc*)ifp->if_softc;
     ItlIwx *that = container_of(sc, ItlIwx, com);
+#ifdef AIRPORT_TAHOE
+    IOCommandGate *gate = that->getMainCommandGate();
+    IOWorkLoop *loop = that->getMainWorkLoop();
+    const bool alreadyInMainGate = loop && loop->inGate();
+    for (uint32_t batch = 0; batch < 4; ++batch) {
+        IwxStartDispatchResult dispatch {};
+        dispatch.outputEpoch = __atomic_load_n(&sc->sc_tx_output_epoch,
+                                                __ATOMIC_ACQUIRE);
+        const IOReturn result = gate
+            ? gate->attemptAction(_iwx_start_task, ifp, &dispatch)
+            : kIOReturnNotReady;
+        // attemptAction is reentrant when a caller already owns the main
+        // gate.  In that case its return does not mean we are outside the
+        // gate, so leave lifecycle work deferred for a later outer handoff.
+        if (dispatch.flushDeferredTasks && !alreadyInMainGate)
+            that->tahoeFlushLifecycleTasks();
+
+        if (result == kIOReturnSuccess && dispatch.continueImmediately &&
+            !alreadyInMainGate && batch + 1 < 4)
+            continue;
+
+        // Publish against the captured epoch after the attempt. In the
+        // reentrant case the outer owner still holds the gate; this atomic
+        // token publication does not run deferred work or dequeue packets.
+        if ((dispatch.retryOutput || result != kIOReturnSuccess) &&
+            __atomic_load_n(&that->nativeLifecycleTearingDown_,
+                            __ATOMIC_ACQUIRE) == 0)
+            (void)IwxOutputKick::requestAtEpoch(&sc->sc_tx_output_kick_tag,
+                &sc->sc_tx_output_kick_serial, &sc->sc_tx_output_epoch,
+                dispatch.outputEpoch);
+        break;
+    }
+#else
     that->getMainCommandGate()->attemptAction(_iwx_start_task, &that->com.sc_ic.ic_ac.ac_if);
+#endif
 }
 
 int ItlIwx::
@@ -12597,7 +14236,9 @@ iwx_stop(struct _ifnet *ifp, IwxResetTrace::ResetReason reason)
     //    rw_assert_wrlock(&sc->ioctl_rwl);
     
 #ifdef AIRPORT_TAHOE
-    tahoeRecordReset(reason, sc);
+    const uint32_t linkResetOldState = static_cast<uint32_t>(ic->ic_state);
+    const uint32_t linkResetReason = static_cast<uint32_t>(reason);
+    const uint32_t linkResetSequence = tahoeRecordReset(reason, sc);
     tahoeDriverEvent(ITL_TAHOE_EVT_RESET_BEGIN);
     tahoeScanOnline(false);
 #endif
@@ -12605,6 +14246,13 @@ iwx_stop(struct _ifnet *ifp, IwxResetTrace::ResetReason reason)
 #ifdef AIRPORT_TAHOE
     /* Fence running state tasks before the firmware and rings are reset. */
     sc->sc_generation++;
+#ifdef AIRPORT_TAHOE
+    __atomic_store_n(&sc->sc_tx_output_epoch,
+                     static_cast<uint32_t>(sc->sc_generation),
+                     __ATOMIC_RELEASE);
+    IwxOutputKick::clearOlderEpoch(&sc->sc_tx_output_kick_tag,
+        static_cast<uint32_t>(sc->sc_generation));
+#endif
 #endif
     
     /* Cancel scheduled tasks and let any stale tasks finish up. */
@@ -12667,19 +14315,32 @@ iwx_stop(struct _ifnet *ifp, IwxResetTrace::ResetReason reason)
         struct iwx_rxba_data *rxba = &sc->sc_rxba_data[i];
         iwx_clear_reorder_buffer(sc, rxba);
     }
-    
-    ifp->if_timer = sc->sc_tx_timer = 0;
-    
+
+    ifp->if_timer = 0;
+    IwxTxWatchdog::clear(&sc->sc_tx_timer);
+#ifdef AIRPORT_TAHOE
+    recordTxTimerClear(sc, static_cast<uint32_t>(sc->sc_generation),
+                       kTxTimerClearLifecycleReset);
+#endif
+
 #ifdef AIRPORT_TAHOE
     // The active interface and net80211 state are now stopped. Only at this
     // point can a queued start callback observe IFF_RUNNING cleared before
     // the old dynamic host rings are retired.
     tahoeRetireStoppedQueuesAfterSoftStop(sc, hardwareStopError);
     tahoeDriverEvent(ITL_TAHOE_EVT_DRIVER_STOPPED);
+    recordTxProgressEvent(sc, IWX_TX_PROGRESS_RUNSTOP,
+        IWX_TX_PROGRESS_RUNSTOP_STOP, 0, 0, 0, 0, 0, 0, 0, true);
+    /* The old queued state was deleted and soft state is INIT before resume. */
+    tahoeRecordLinkTransition(sc,
+        IwxLinkStateTrace::Event::kResetComplete,
+        linkResetOldState,
+        static_cast<uint32_t>(ic->ic_state),
+        static_cast<int>(linkResetReason), hardwareStopError,
+        linkResetSequence, true);
 #endif
     splx(s);
 #ifdef AIRPORT_TAHOE
-    /* The old queued state was deleted and soft state is INIT before resume. */
     taskq_resume(sc->sc_nswq);
     // Keep last-rejection properties for postmortem reads, but let a future
     // stop attempt with the same state publish a fresh diagnostic if needed.
@@ -12692,45 +14353,174 @@ iwx_stop(struct _ifnet *ifp, IwxResetTrace::ResetReason reason)
     return 0;
 }
 
+#ifdef AIRPORT_TAHOE
+struct IwxWatchdogDispatchResult {
+    bool timedOut;
+    bool flushDeferredTasks;
+    bool retryOutput;
+    bool continueImmediately;
+    uint32_t outputEpoch;
+};
+
+IOReturn ItlIwx::_iwx_watchdog_task(OSObject *, void *arg0, void *arg1,
+                                    void *, void *)
+{
+    auto *ifp = static_cast<struct _ifnet *>(arg0);
+    auto *result = static_cast<IwxWatchdogDispatchResult *>(arg1);
+    if (!ifp || !ifp->if_softc || !result)
+        return kIOReturnBadArgument;
+    result->timedOut = false;
+    result->flushDeferredTasks = false;
+    result->retryOutput = false;
+    result->continueImmediately = false;
+
+    auto *sc = static_cast<struct iwx_softc *>(ifp->if_softc);
+    auto *that = container_of(sc, ItlIwx, com);
+    // attemptAction may execute on the watchdog caller's thread while it owns
+    // the radio workloop gate. Do not require onThread(): inGate is the
+    // serialization proof against command-gate and RX event-source actions.
+    if (!that->tahoeP2pOnMainGate())
+        return kIOReturnNotReady;
+
+    {
+        // stop/init paths update the same scalar under this short try-only
+        // lifecycle fence. A busy fence defers this tick; it never performs a
+        // plain decrement or queues a reset from the watchdog thread.
+        TahoeLifecycleGuard lifecycle(that, true, false,
+                                      &result->flushDeferredTasks);
+        if (!lifecycle)
+            return kIOReturnBusy;
+
+        const int32_t countdownBefore = __atomic_load_n(
+            &sc->sc_tx_timer, __ATOMIC_ACQUIRE);
+        const IwxTxWatchdog::TickResult tick =
+            IwxTxWatchdog::advance(&sc->sc_tx_timer, true);
+        if (tick == IwxTxWatchdog::TickResult::kDeferred)
+            return kIOReturnBusy;
+
+        if (tick == IwxTxWatchdog::TickResult::kRearm) {
+            ifp->if_timer = 1;
+        } else if (tick == IwxTxWatchdog::TickResult::kExpired) {
+            XYLog("%s: device timeout\n", DEVNAME(sc));
+            that->tahoeRecordTxWatchdogSnapshot(
+                sc, countdownBefore > 0 ? uint32_t(countdownBefore) : 0u);
+            const bool shutdown =
+                (sc->sc_flags & IWX_FLAG_SHUTDOWN) != 0;
+            if (IwxTxWatchdog::shouldEnqueueRecovery(tick, shutdown)) {
+                that->tahoeRecordInitTaskTrigger(
+                    IwxResetTrace::InitTaskTrigger::kTxWatchdogTimeout);
+                // Keep the reset request inside the same main-gate and
+                // lifecycle-fence epoch as the expiry decision. A concurrent
+                // stop can only advance generation and task_del after this
+                // enqueue. taskq callbacks run without tq_mtx held, so they
+                // cannot invert this gate->taskq lock order.
+                task_add(systq, &sc->init_task);
+            }
+            ifp->netStat->outputErrors++;
+            result->timedOut = true;
+        }
+        if (tick == IwxTxWatchdog::TickResult::kIdle ||
+            tick == IwxTxWatchdog::TickResult::kExpired)
+            ifp->if_timer = 0;
+
+        if (!result->timedOut) {
+            const uint32_t epoch = __atomic_load_n(
+                &sc->sc_tx_output_epoch, __ATOMIC_ACQUIRE);
+            result->outputEpoch = epoch;
+            const bool outputActive =
+                (ifp->if_flags & (IFF_UP | IFF_RUNNING)) ==
+                    (IFF_UP | IFF_RUNNING) &&
+                (sc->sc_flags & IWX_FLAG_SHUTDOWN) == 0;
+            if (outputActive) {
+                uint64_t takenTag = 0;
+                if (IwxOutputKick::takeForEpoch(
+                        &sc->sc_tx_output_kick_tag, epoch, &takenTag)) {
+                    (void)takenTag;
+                    const IwxOutputKick::DrainResult drain =
+                        that->iwx_start_drain(ifp, epoch);
+                    result->retryOutput = IwxOutputKick::shouldRetry(drain);
+                    result->continueImmediately =
+                        IwxOutputKick::shouldContinueImmediately(drain);
+                }
+            } else {
+                // Down interfaces retain a matching token until the next
+                // lifecycle epoch; only tokens from older epochs are stale.
+                IwxOutputKick::clearOlderEpoch(
+                    &sc->sc_tx_output_kick_tag, epoch);
+            }
+        }
+    }
+
+    // No ring reclamation is inferred from unavailable queue data.
+    that->tahoePublishLinkTransitionTrace(that->getController());
+    return kIOReturnSuccess;
+}
+#endif
+
 void ItlIwx::
 iwx_watchdog(struct _ifnet *ifp)
 {
     struct iwx_softc *sc = (struct iwx_softc *)ifp->if_softc;
     ItlIwx *that = container_of(sc, ItlIwx, com);
-    
-    ifp->if_timer = 0;
-    if (sc->sc_tx_timer > 0) {
-        if (--sc->sc_tx_timer == 0) {
-            XYLog("%s: device timeout\n", DEVNAME(sc));
-#ifdef IWX_DEBUG
-            int i;
 
-            /* Dump driver status (TX and RX rings) while we're here. */
-            XYLog("driver status:\n");
-            for (i = 0; i < IWX_MAX_QUEUES; i++) {
-                struct iwx_tx_ring *ring = &sc->txq[i];
-                XYLog("  tx ring %2d: qid=%-2d cur=%-3d "
-                      "queued=%-3d\n",
-                      i, ring->qid, ring->cur, ring->queued);
-            }
-            XYLog("  rx ring: cur=%d\n", sc->rxq.cur);
-            XYLog("  802.11 state %s\n",
-                  ieee80211_state_name[sc->sc_ic.ic_state]);
-
-            that->iwx_nic_error(sc);
-#endif
-            if ((sc->sc_flags & IWX_FLAG_SHUTDOWN) == 0) {
 #ifdef AIRPORT_TAHOE
-                that->tahoeRecordInitTaskTrigger(
-                    IwxResetTrace::InitTaskTrigger::kTxWatchdogTimeout);
-#endif
-                task_add(systq, &sc->init_task);
-            }
-            ifp->netStat->outputErrors++;
-            return;
+    IwxWatchdogDispatchResult dispatch {};
+    IOCommandGate *gate = that->getMainCommandGate();
+    IOWorkLoop *loop = that->getMainWorkLoop();
+    const bool alreadyInMainGate = loop && loop->inGate();
+    // attemptAction is deliberately nonblocking. If the radio gate or
+    // lifecycle fence is busy, leave sc_tx_timer untouched for the next tick.
+    const IOReturn actionResult = gate
+        ? gate->attemptAction(_iwx_watchdog_task, ifp, &dispatch)
+        : kIOReturnNotReady;
+    // The watchdog guard suppresses its destructor's deferred-task flush while
+    // the main gate is held. Flush only after attemptAction releases the gate.
+    if (dispatch.flushDeferredTasks && !alreadyInMainGate)
+        that->tahoeFlushLifecycleTasks();
+    if (actionResult == kIOReturnSuccess && dispatch.retryOutput &&
+        __atomic_load_n(&that->nativeLifecycleTearingDown_, __ATOMIC_ACQUIRE) == 0)
+        (void)IwxOutputKick::requestAtEpoch(&sc->sc_tx_output_kick_tag,
+            &sc->sc_tx_output_kick_serial, &sc->sc_tx_output_epoch,
+            dispatch.outputEpoch);
+    if (actionResult == kIOReturnSuccess && dispatch.continueImmediately &&
+        __atomic_load_n(&that->nativeLifecycleTearingDown_, __ATOMIC_ACQUIRE) == 0)
+        that->iwx_start(ifp);
+    // A busy gate/fence postpones only the TX countdown decision. Preserve
+    // the pre-existing IEEE 802.11 housekeeping (management timeout and scan
+    // retries) on the watchdog caller's thread.
+    if (actionResult == kIOReturnSuccess && dispatch.timedOut)
+        return;
+#else
+    ifp->if_timer = 0;
+    const IwxTxWatchdog::TickResult tick =
+        IwxTxWatchdog::advance(&sc->sc_tx_timer, true);
+    if (tick == IwxTxWatchdog::TickResult::kExpired) {
+        XYLog("%s: device timeout\n", DEVNAME(sc));
+#ifdef IWX_DEBUG
+        int i;
+
+        /* Dump driver status (TX and RX rings) while we're here. */
+        XYLog("driver status:\n");
+        for (i = 0; i < IWX_MAX_QUEUES; i++) {
+            struct iwx_tx_ring *ring = &sc->txq[i];
+            XYLog("  tx ring %2d: qid=%-2d cur=%-3d "
+                  "queued=%-3d\n",
+                  i, ring->qid, ring->cur, ring->queued);
         }
-        ifp->if_timer = 1;
+        XYLog("  rx ring: cur=%d\n", sc->rxq.cur);
+        XYLog("  802.11 state %s\n",
+              ieee80211_state_name[sc->sc_ic.ic_state]);
+
+        that->iwx_nic_error(sc);
+#endif
+        if ((sc->sc_flags & IWX_FLAG_SHUTDOWN) == 0)
+            task_add(systq, &sc->init_task);
+        ifp->netStat->outputErrors++;
+        return;
     }
+    if (tick == IwxTxWatchdog::TickResult::kRearm)
+        ifp->if_timer = 1;
+#endif
 
     ieee80211_watchdog(ifp);
 }
@@ -13133,9 +14923,19 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
         code = IWX_WIDE_ID(pkt->hdr.group_id, pkt->hdr.cmd);
         
         DPRINTFN(3, ("%s gid=%d cmd=%d code=0x%02x qid=%d idx=%d packet_len=%d payload_len=%d\n", __FUNCTION__, pkt->hdr.group_id, pkt->hdr.cmd, code, qid, idx, iwx_rx_packet_len(pkt), iwx_rx_packet_payload_len(pkt)));
-        
-        if (!iwx_rx_pkt_valid(pkt))
+
+#ifdef AIRPORT_TAHOE
+        TxCompletionTerminalScope rxParseStop(sc, txCompletionRxInput(
+            IWX_TX_COMPLETION_RX_PARSE_STOP,
+            IWX_TX_COMPLETION_STAGE_RX_PARSE_STOP,
+            IWX_TX_COMPLETION_RX_UNCLASSIFIED_STOP, pkt));
+#endif
+        if (!iwx_rx_pkt_valid(pkt)) {
+#ifdef AIRPORT_TAHOE
+            rxParseStop.setReason(IWX_TX_COMPLETION_RX_DESCRIPTOR_INVALID);
+#endif
             break;
+        }
 
         /*
          * XXX Intel inside (tm)
@@ -13151,8 +14951,16 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
         }
         
         len = sizeof(pkt->len_n_flags) + iwx_rx_packet_len(pkt);
-        if (len < minsz || len > (IWX_RBUF_SIZE - offset))
+        if (len < minsz || len > (IWX_RBUF_SIZE - offset)) {
+#ifdef AIRPORT_TAHOE
+            rxParseStop.setReason(
+                IWX_TX_COMPLETION_RX_PACKET_LENGTH_INVALID);
+#endif
             break;
+        }
+#ifdef AIRPORT_TAHOE
+        rxParseStop.dismiss();
+#endif
 
 #ifdef AIRPORT_TAHOE
         iwx_tahoe_p2p_action_tx_observe_rx(&nativeP2pActionTx_,
@@ -13185,7 +14993,10 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
                     /* No need to copy last frame in buffer. */
                     if (offset > 0)
                         mbuf_adj(m0, offset);
-                    iwx_rx_mpdu_mq(sc, m0, pkt->data, maxlen, ml);
+                    iwx_rx_mpdu_mq(sc, m0, pkt->data,
+                        iwx_rx_packet_payload_len(pkt),
+                        (le32toh(pkt->len_n_flags) & IWX_FH_RSCSR_RPA_EN) != 0,
+                        maxlen, ml);
                     m0 = NULL; /* stack owns m0 now; abort loop */
                 } else {
                     /*
@@ -13201,7 +15012,10 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
                         break;
                     }
                     mbuf_adj(m, offset);
-                    iwx_rx_mpdu_mq(sc, m, pkt->data, maxlen, ml);
+                    iwx_rx_mpdu_mq(sc, m, pkt->data,
+                        iwx_rx_packet_payload_len(pkt),
+                        (le32toh(pkt->len_n_flags) & IWX_FH_RSCSR_RPA_EN) != 0,
+                        maxlen, ml);
                 }
                 break;
             }
@@ -13211,9 +15025,41 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
                 
             case IWX_TX_CMD:
 #ifdef AIRPORT_TAHOE
-                if (iwx_tahoe_p2p_action_tx_response(this, sc,
-                        &nativeP2pTxQueue_, &nativeP2pActionTx_, pkt, data))
-                    break;
+                {
+                    uint32_t responsePresent = 0;
+                    uint32_t responseQid = 0;
+                    const size_t responseLength =
+                        iwx_rx_packet_payload_len(pkt);
+                    if (responseLength >= offsetof(struct iwx_tx_resp, tx_queue) +
+                                              sizeof(uint16_t)) {
+                        responseQid = le16toh(
+                            ((struct iwx_tx_resp *)pkt->data)->tx_queue);
+                        responsePresent |= IWX_TX_PROGRESS_HAS_QID;
+                    }
+                    recordTxProgressEvent(sc,
+                        IWX_TX_PROGRESS_RESPONSE_DISPATCH,
+                        IWX_TX_PROGRESS_RESPONSE_TX_RSP, responsePresent,
+                        responseQid, 0, 0, 0, 0, 0, false);
+                    if (iwx_tahoe_p2p_action_tx_response(this, sc,
+                            &nativeP2pTxQueue_, &nativeP2pActionTx_, pkt,
+                            data)) {
+                        iwx_tx_completion_event_input completionEvent =
+                            txCompletionRxInput(
+                                IWX_TX_COMPLETION_TX_RSP,
+                                IWX_TX_COMPLETION_STAGE_TX_RSP_TERMINAL,
+                                IWX_TX_COMPLETION_TX_RSP_P2P_OWNER_CONSUMED,
+                                pkt);
+                        txCompletionSetTxRspFacts(&completionEvent, pkt,
+                                                  responseLength);
+                        recordTxCompletionEvent(sc, completionEvent);
+                        recordTxProgressEvent(sc,
+                            IWX_TX_PROGRESS_RESPONSE_DISPATCH,
+                            IWX_TX_PROGRESS_RESPONSE_P2P_CONSUMED,
+                            responsePresent, responseQid, 0, 0, 0, 0, 0,
+                            false);
+                        break;
+                    }
+                }
 #endif
                 iwx_rx_tx_cmd(sc, pkt, data);
                 break;
@@ -15579,9 +17425,20 @@ iwx_init_task(void *arg1)
 #endif
     } else {
 #ifdef AIRPORT_TAHOE
-        that->tahoeRecordReset(
-            IwxResetTrace::ResetReason::kInitTaskNotRunningRecovery, sc);
+        const auto resetReason =
+            IwxResetTrace::ResetReason::kInitTaskNotRunningRecovery;
+        const uint32_t linkResetSequence = that->tahoeRecordReset(
+            resetReason, sc);
         that->tahoeDriverEvent(ITL_TAHOE_EVT_RESET_BEGIN);
+        // This branch records an init-recovery attempt without calling
+        // iwx_stop(). Close the trace explicitly so a later stop cannot be
+        // mistaken for this reset's completion.
+        const uint32_t currentState =
+            static_cast<uint32_t>(sc->sc_ic.ic_state);
+        that->tahoeRecordLinkTransition(sc,
+            IwxLinkStateTrace::Event::kResetSkipped,
+            currentState, currentState, static_cast<int>(resetReason),
+            0, linkResetSequence, true);
 #endif
         sc->sc_flags &= ~IWX_FLAG_HW_ERR;
     }

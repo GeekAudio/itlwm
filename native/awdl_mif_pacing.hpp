@@ -19,6 +19,19 @@ enum class MifPacingDecision : uint8_t {
     Stop
 };
 
+// The default preserves the historical rule that a PSF must arrive at or
+// after notBefore. Test066's admitted-same-peer MIF mode opts in to a narrower
+// rule: notBefore is still the earliest submit time, but a previously received
+// PSF may be used only while its original 16-TU freshness lease remains live.
+// Test069 changes only ordinal zero's local not-before point to phaseOrigin;
+// every ordinal still needs a fresh, same-epoch, channel-6 PSF received during
+// this local phase.
+enum class MifPacingPolicy : uint8_t {
+    LegacyPsfAfterNotBefore = 0,
+    Test066SamePeerMifTiming = 1,
+    Test069EarlyFirstMif = 2
+};
+
 enum class MifPacingReason : uint8_t {
     None,
     InvalidInput,
@@ -41,7 +54,8 @@ enum class MifPacingReason : uint8_t {
     InsufficientLease,
     FrameLimit,
     InvalidTime,
-    PreparedFrameStale
+    PreparedFrameStale,
+    PsfBeforePhaseOrigin
 };
 
 struct MifPacingInput {
@@ -67,6 +81,7 @@ struct MifPacingInput {
     bool peerPsfSyncConsistent;
     bool peerPsfFresh;
     bool peerPsfRxChannel6Confirmed;
+    MifPacingPolicy policy;
 };
 
 struct MifPacingPlan {
@@ -103,6 +118,27 @@ inline uint64_t saturatingAdd(uint64_t a, uint64_t b)
     return a > UINT64_MAX - b ? UINT64_MAX : a + b;
 }
 
+inline bool validPolicy(MifPacingPolicy policy)
+{
+    return policy == MifPacingPolicy::LegacyPsfAfterNotBefore ||
+        policy == MifPacingPolicy::Test066SamePeerMifTiming ||
+        policy == MifPacingPolicy::Test069EarlyFirstMif;
+}
+
+inline bool offsetForPolicy(uint64_t durationUs, uint32_t frameOrdinal,
+                            MifPacingPolicy policy, uint64_t *offsetUs)
+{
+    if (!validPolicy(policy) || !offsetUs ||
+        frameOrdinal >= kMifPacingMaximumFrames)
+        return false;
+    if (policy == MifPacingPolicy::Test069EarlyFirstMif &&
+        frameOrdinal == 0) {
+        *offsetUs = 0;
+        return true;
+    }
+    return quarterOffset(durationUs, frameOrdinal, offsetUs);
+}
+
 inline MifPacingPlan result(MifPacingDecision decision,
                             MifPacingReason reason,
                             uint64_t earliestUs,
@@ -118,15 +154,18 @@ inline MifPacingPlan result(MifPacingDecision decision,
 inline bool mifPacingNotBeforeUs(uint64_t phaseOriginUs,
                                  uint64_t announcedWindowEndUs,
                                  uint32_t frameOrdinal,
-                                 uint64_t *notBeforeUs)
+                                 uint64_t *notBeforeUs,
+                                 MifPacingPolicy policy =
+                                     MifPacingPolicy::LegacyPsfAfterNotBefore)
 {
     if (!notBeforeUs || !phaseOriginUs ||
         announcedWindowEndUs <= phaseOriginUs ||
         frameOrdinal >= kMifPacingMaximumFrames)
         return false;
     uint64_t offsetUs = 0;
-    if (!MifPacingDetail::quarterOffset(
-            announcedWindowEndUs - phaseOriginUs, frameOrdinal, &offsetUs) ||
+    if (!MifPacingDetail::offsetForPolicy(
+            announcedWindowEndUs - phaseOriginUs, frameOrdinal, policy,
+            &offsetUs) ||
         phaseOriginUs > UINT64_MAX - offsetUs)
         return false;
     *notBeforeUs = phaseOriginUs + offsetUs;
@@ -153,14 +192,17 @@ inline MifPacingPlan planMifPacing(const MifPacingInput &input)
         !input.stationGeneration)
         return result(MifPacingDecision::Stop, MifPacingReason::InvalidInput,
                       0, input.hardDeadlineUs);
-
-    uint64_t offsetUs = 0;
-    if (!quarterOffset(input.announcedWindowEndUs - input.phaseOriginUs,
-                       input.frameOrdinal, &offsetUs) ||
-        input.phaseOriginUs > UINT64_MAX - offsetUs)
+    if (!validPolicy(input.policy))
         return result(MifPacingDecision::Stop, MifPacingReason::InvalidInput,
                       0, input.hardDeadlineUs);
-    const uint64_t earliestUs = input.phaseOriginUs + offsetUs;
+
+    uint64_t earliestUs = 0;
+    if (!mifPacingNotBeforeUs(input.phaseOriginUs,
+                              input.announcedWindowEndUs,
+                              input.frameOrdinal, &earliestUs,
+                              input.policy))
+        return result(MifPacingDecision::Stop, MifPacingReason::InvalidInput,
+                      0, input.hardDeadlineUs);
     const uint64_t effectiveEndUs = input.announcedWindowEndUs <
         input.hardDeadlineUs ? input.announcedWindowEndUs :
                                input.hardDeadlineUs;
@@ -216,7 +258,13 @@ inline MifPacingPlan planMifPacing(const MifPacingInput &input)
     if (!input.peerPsfRxUs || input.peerPsfRxUs > input.nowUs)
         return result(MifPacingDecision::Stop, MifPacingReason::InvalidTime,
                       earliestUs, effectiveEndUs);
-    if (input.peerPsfRxUs < earliestUs)
+    if (input.policy == MifPacingPolicy::Test069EarlyFirstMif &&
+        input.peerPsfRxUs < input.phaseOriginUs)
+        return result(MifPacingDecision::Wait,
+                      MifPacingReason::PsfBeforePhaseOrigin,
+                      earliestUs, effectiveEndUs);
+    if (input.peerPsfRxUs < earliestUs &&
+        input.policy == MifPacingPolicy::LegacyPsfAfterNotBefore)
         return result(MifPacingDecision::Wait,
                       MifPacingReason::PsfBeforeNotBefore,
                       earliestUs, effectiveEndUs);

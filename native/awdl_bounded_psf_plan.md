@@ -8,11 +8,15 @@ The model itself does not access hardware.
 
 ## What it accepts
 
-The caller supplies one host-monotonic microsecond sample, an explicitly
-experimental Intel P2P MAC, a confirmed social-channel ROC window, the accepted
-ROC hard deadline, an explicit 802.11 sequence number, and confirmed HT
-capabilities. The sample must fall inside the confirmed ROC. Failures leave the
-outputs untouched.
+The caller supplies one host-monotonic microsecond sample, an Intel P2P MAC, a
+confirmed social-channel ROC window, the accepted ROC hard deadline, an
+explicit 802.11 sequence number, and confirmed HT capabilities. The sample
+must fall inside the confirmed ROC. `Request::nativeAddressVerified` is false
+by default. The HAL sets it true only after confirming, for the same generation,
+that the P2P MAC equals the native AWDL interface identity. The planner copies
+that evidence to `PsfInput::advertiseAwdlAddress`; false preserves the previous
+wire shape and true emits only the identity field. The encoder has no second
+MAC input. Failures leave the outputs untouched.
 
 The model uses that one sample as its local experimental schedule origin and
 copies its low 32 bits into both PSF timestamp fields. It builds each of the 16
@@ -51,8 +55,12 @@ current sequence and countdown from elapsed host-monotonic time. This is only
 the OWL host-clock experiment model, not a mapping to Intel GP2/TSF or proof
 that the firmware served those slots. The one-node self-master seed uses the P2P MAC for
 master and sync addresses, zero counters and distance, and metric 60, following
-the pinned OWL initialization and AWDL recommendation. The existing encoder
-continues to write Data Path State flags as zero.
+the pinned OWL initialization and AWDL recommendation. The encoder keeps the
+legacy flags-zero Data Path State when the HAL identity flag is false. When
+true, it writes flags `0x0004` and `sourceAddress` in the Data Path State.
+`Summary` reports the actual flags and address-field presence, and always leaves
+`dataPathReady=false`; address advertisement does not prove packet delivery or
+AirDrop readiness.
 
 ## What it does not prove
 
@@ -64,10 +72,13 @@ from that origin. The worker records each result separately and skips the MIF
 on failed prerequisites or END. Both frames remain a temporary control-only
 experiment, not a persistent native AWDL service.
 
-The P2P MAC is not represented as a native `awdl0` identity. The model does not
-prove AWDL clock alignment, sustained periodic PSFs, peer discovery, an IPv6
-data path, AirDrop, or transfer. Its success status means only that an
-observation-only PSF input was built from the supplied evidence.
+Without `nativeAddressVerified`, the P2P MAC is not represented as a native
+`awdl0` identity and the legacy empty Data Path value is kept. With the flag,
+the planner trusts the HAL's same-generation identity check only for advertising
+that address. The model still does not prove AWDL clock alignment, sustained
+periodic PSFs, peer discovery, an IPv6 data path, AirDrop, or transfer. Its
+success status means only that an observation-only PSF input was built from the
+supplied evidence.
 
 The caller is the manually armed P2P worker in `ItlIwxP2PProbe.cpp`, with the
 existing station/queue/TX-ticket/ROC cleanup path. A failed preflight does not
@@ -82,13 +93,14 @@ ownership, clock mapping, receive processing, and a working data path.
 ```sh
 clang++ -std=c++14 -Wall -Wextra -Werror -fsanitize=address,undefined \
   -fno-omit-frame-pointer native/awdl_action_frame.cpp \
-  native/awdl_action_encode.cpp native/awdl_bounded_psf_plan.cpp \
+  native/awdl_action_encode.cpp native/awdl_host_phase.cpp \
+  native/awdl_bounded_psf_plan.cpp \
   native/tests/awdl_bounded_psf_plan_test.cpp \
   -o /private/tmp/awdl-bounded-psf-plan-test
 /private/tmp/awdl-bounded-psf-plan-test
 ```
 
 The test checks exact slot boundaries, the 900 ms case, timestamp truncation,
-the flags-zero encoded frame, invalid evidence, and output preservation on
-rejection. Inputs in tests are synthetic; the test is not runtime or radio
-evidence.
+both default legacy and address-verified profiles, Data Path summary values,
+invalid evidence, and output preservation on rejection. Inputs in tests are
+synthetic; the test is not runtime or radio evidence.

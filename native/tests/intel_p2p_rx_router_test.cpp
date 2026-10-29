@@ -164,12 +164,28 @@ static void testActionFrameTapAndBounds()
     LeaseSnapshot lease = activeLease();
     // This bounded synthetic frame combines the legacy 0x8f24 data-path
     // flags with an opaque IEEE 802.11 container TLV.
-    const std::vector<uint8_t> frame = validPsf(true);
+    std::vector<uint8_t> frame = validPsf(true);
+    putLe32(frame.data() + 24 + 8, 0x10203040u);
+    putLe32(frame.data() + 24 + 12, 0x50607080u);
     Record record{};
+    NativeAwdlRxTrace::EventToken traceToken{
+        19, 23, 91,
+        {91, 7, 11, 91}, 3, 1, 1
+    };
+    ParseObservation parseObservation{};
 
     assert(router.tapActionFrame(frame.data(), frame.size(), false, 6, false, 0,
-                                 lease, 1234567, 0x78563412u, true) ==
+                                 lease, 1234567, 0x78563412u, true,
+                                 &traceToken, &parseObservation) ==
            RouteResult::kCapturedUnknownContext);
+    assert(parseObservation.attempted == 1 &&
+           parseObservation.resultPresent == 1);
+    assert(parseObservation.status == NativeAwdl::ParseStatus::Ok);
+    assert(parseObservation.actionInfoPresent == 1);
+    assert(parseObservation.subtypePresent == 1 &&
+           parseObservation.subtype == 0);
+    assert(parseObservation.actionInfo.phyTx == 0x10203040u);
+    assert(parseObservation.actionInfo.targetTx == 0x50607080u);
     Counters counters{};
     router.readCounters(&counters);
     assert(counters.actionFrameCaptured == 1);
@@ -183,6 +199,10 @@ static void testActionFrameTapAndBounds()
     assert(record.payload.actionFrame.rxGp2TimestampPresent);
     assert(record.payload.actionFrame.rxGp2TimestampUs == 0x78563412u);
     assert(record.payload.actionFrame.length == frame.size());
+    assert(record.payload.actionFrame.traceToken.eventSerial == 19);
+    assert(record.payload.actionFrame.traceToken.queueSerial == 23);
+    assert(record.payload.actionFrame.traceToken.sourceOrdinal == 3);
+    assert(record.payload.actionFrame.traceToken.epochs.rocGeneration == 91);
     assert(memcmp(record.payload.actionFrame.bytes, frame.data(), frame.size()) == 0);
     assert(record.payload.actionFrame.awdl.subtype == 0);
 

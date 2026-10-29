@@ -8,6 +8,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <mutex>
+#include <atomic>
 #define EJUSTRETURN (-2)
 #define MBUF_DONTWAIT 0
 #define MBUF_TYPE_DATA 1
@@ -23,13 +24,14 @@
 #define SIOCAIFADDR_IN6 0x1234
 using errno_t=int;
 using protocol_family_t=unsigned;
-struct FakeIf {unsigned refs=0;bool ipv6=false;uint8_t address[16]{};};using ifnet_t=FakeIf *;
+struct FakeIf {unsigned refs=0;bool ipv6=false;uint8_t lladdr[6]{};uint8_t address[16]{};};using ifnet_t=FakeIf *;
 struct FakeMbuf {uint8_t bytes[2048]{};size_t offset=0,length=0,total=0;unsigned flags=0;void *header=nullptr;};
 using mbuf_t=FakeMbuf *;
 using IOSimpleLock=std::mutex;using IOInterruptState=unsigned;
-extern unsigned allocated,freed,delivered,finalized,socketsOpen,socketsClosed;extern uint64_t fakeTime;
+extern std::atomic<unsigned> allocated,freed,delivered,finalized,socketsOpen,socketsClosed;extern uint64_t fakeTime;
 extern bool allocateFail,inputFail,detachDelay,offloadFail;
 extern bool ipv6Fail,socketFail,packetHeaderMissing;
+extern bool lladdrFail;
 inline IOSimpleLock *IOSimpleLockAlloc(){return new IOSimpleLock;}
 inline IOInterruptState IOSimpleLockLockDisableInterrupt(IOSimpleLock *l){l->lock();return 0;}
 inline void IOSimpleLockUnlockEnableInterrupt(IOSimpleLock *l,IOInterruptState){l->unlock();}
@@ -51,6 +53,7 @@ inline void mbuf_adj(mbuf_t m,int n){m->offset+=n;m->length-=n;if(m->flags&MBUF_
 inline void mbuf_outbound_finalize(mbuf_t,unsigned family,size_t offset){assert(family==AF_INET6&&offset==14);++finalized;}
 inline int ifnet_reference(ifnet_t p){++p->refs;return 0;}
 inline void ifnet_release(ifnet_t p){assert(p->refs);--p->refs;}
+inline int ifnet_lladdr_copy_bytes(ifnet_t p,void *out,size_t length){if(lladdrFail||!p||length!=sizeof(p->lladdr))return EINVAL;memcpy(out,p->lladdr,length);return 0;}
 inline int ifnet_set_offload(ifnet_t,unsigned){return offloadFail?EIO:0;}
 inline int ifnet_set_mtu(ifnet_t,unsigned){return 0;}
 inline int ifnet_set_flags(ifnet_t,unsigned,unsigned){return 0;}

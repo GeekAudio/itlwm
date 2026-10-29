@@ -224,6 +224,8 @@ static DecodeStatus decodeAdvertisement(const uint8_t *frame, size_t length,
             result.awPeriodTu = readLe16(value + 5);
             result.actionFramePeriodTu = readLe16(value + 7);
             result.nextAwSequence = readLe16(value + 29);
+            result.presenceMode = value[27];
+            result.presenceModePresent = true;
             uint16_t apAlignment = 0;
             if (valueLength >= kSyncEmbeddedSequenceOffset)
                 apAlignment = readLe16(value + 31);
@@ -329,6 +331,8 @@ static DecodeStatus decodeAdvertisement(const uint8_t *frame, size_t length,
                 return DecodeStatus::InvalidSync;
             }
             haveExplicitSlots = true;
+            result.type18Present = true;
+            result.type18Valid = true;
         } else if (type == 21) {
             if (haveVersion || valueLength != 2)
                 return DecodeStatus::InvalidVersion;

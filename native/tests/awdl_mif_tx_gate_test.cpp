@@ -15,7 +15,7 @@ using NativeAwdlProbe::MifFollowupWitness;
 using NativeAwdlProbe::PsfCandidate;
 using NativeAwdlProbe::PsfRuntimeWitness;
 
-static PsfCandidate firstPsfCandidate()
+static PsfCandidate firstPsfCandidate(bool nativeAddressVerified = false)
 {
     constexpr uint64_t startUs = 1000000;
     NativeAwdlProbe::Request request{};
@@ -28,6 +28,7 @@ static PsfCandidate firstPsfCandidate()
     request.ht.ampduParameters = 0x1b;
     request.ht.rxMcsMask[0] = 0xff;
     request.ht.rxMcsLength = 1;
+    request.nativeAddressVerified = nativeAddressVerified;
 
     PsfRuntimeWitness roc{};
     roc.expectedGeneration = 77;
@@ -140,6 +141,44 @@ static void testMifUsesSameOriginAndChannelTable()
            candidate.bytes[dataPath + 2] == 0);
     assert(candidate.bytes[dataPath + 3] == 0 &&
            candidate.bytes[dataPath + 4] == 0);
+}
+
+static void testVerifiedAddressSurvivesMifFollowup()
+{
+    const PsfCandidate first = firstPsfCandidate(true);
+    assert(first.input.advertiseAwdlAddress);
+    assert(first.length == 234);
+    assert(first.bytes[218] == 12 && first.bytes[219] == 8 &&
+           first.bytes[220] == 0 && first.bytes[221] == 4 &&
+           first.bytes[222] == 0);
+    assert(memcmp(first.bytes + 10, first.bytes + 223, 6) == 0);
+
+    MifFollowupWitness witness = witnessFor(first,
+        first.sampleUs + 20 * 1024);
+    const char hostname[] = "intel-awdl-probe";
+    MifCandidate candidate{};
+    assert(NativeAwdlProbe::prepareExperimentalMifFollowupCandidate(
+        &first, &witness, 1, hostname, sizeof(hostname) - 1, &candidate) ==
+        MifCandidateStatus::Encoded);
+    assert(candidate.input.advertiseAwdlAddress);
+    ActionFrameInfo info{};
+    assert(NativeAwdl::parseActionFrame(candidate.bytes, candidate.length,
+        &info) == ParseStatus::Ok);
+    assert(info.subtype == 3);
+
+    const size_t arpa = 40 + (3 + 57) + (3 + 21) + (3 + 25) +
+        (3 + 40) + (3 + 9) + (3 + 8);
+    assert(candidate.bytes[arpa] == 16);
+    const size_t dataPath = arpa + sizeof(hostname) - 1 + 7;
+    assert(candidate.bytes[dataPath] == 12);
+    assert(candidate.bytes[dataPath + 1] == 8 &&
+           candidate.bytes[dataPath + 2] == 0 &&
+           candidate.bytes[dataPath + 3] == 4 &&
+           candidate.bytes[dataPath + 4] == 0);
+    assert(memcmp(candidate.bytes + dataPath + 5,
+                  candidate.bytes + 10, 6) == 0);
+    assert(memcmp(candidate.bytes + dataPath + 5,
+                  candidate.input.sourceAddress, 6) == 0);
 }
 
 static void expectRejectedWithoutOutputChange(
@@ -257,6 +296,7 @@ static void testBlockersAndNoScheduleReset()
 int main()
 {
     testMifUsesSameOriginAndChannelTable();
+    testVerifiedAddressSurvivesMifFollowup();
     testFollowupAdmissionAndFailureBoundaries();
     testBlockersAndNoScheduleReset();
     return 0;

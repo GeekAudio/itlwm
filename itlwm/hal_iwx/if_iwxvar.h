@@ -110,6 +110,11 @@
 
 #include <IOKit/network/IOMbufMemoryCursor.h>
 #include <IOKit/IODMACommand.h>
+#ifdef AIRPORT_TAHOE
+#include "../../native/iwx_tx_progress_observation.hpp"
+#include "../../native/iwx_tx_completion_observation.hpp"
+#include "../../native/iwx_tx_queue_observation.hpp"
+#endif
 
 #define IWL_CFG_ANY (~0)
 
@@ -775,6 +780,35 @@ struct iwx_softc {
 	int sc_generation;
 #ifdef AIRPORT_TAHOE
 	uint32_t sc_tx_rate_generation;
+	/* Ordinary STA output retry token; all fields are atomic at call sites. */
+	uint32_t sc_tx_output_epoch;
+	uint64_t sc_tx_output_kick_tag;
+	uint32_t sc_tx_output_kick_serial;
+	/* Numeric watchdog producer evidence; queue identity remains unavailable. */
+	uint32_t sc_tx_timer_trace_lock;
+	uint32_t sc_tx_timer_trace_dropped;
+	uint32_t sc_tx_timer_arm_output_epoch;
+	uint32_t sc_tx_timer_arm_sequence;
+	uint64_t sc_tx_timer_arm_monotonic_ns;
+	uint32_t sc_tx_timer_clear_output_epoch;
+	uint32_t sc_tx_timer_clear_sequence;
+	uint32_t sc_tx_timer_clear_reason;
+	uint64_t sc_tx_timer_clear_monotonic_ns;
+	/* Fixed scalar-only TX lifecycle observer; no ring scan or packet storage. */
+	iwx_tx_progress_observation_state sc_tx_progress_observation;
+	uint32_t sc_tx_progress_publish_version;
+	/* Last expiry snapshot copied on the main gate; published by its later RX drain. */
+	iwx_tx_progress_observation_snapshot sc_tx_progress_pending;
+	uint32_t sc_tx_progress_pending_watchdog_sequence;
+	uint32_t sc_tx_progress_pending_generation;
+	uint32_t sc_tx_progress_pending_present;
+	/* Bounded completion branch evidence, frozen at expiry, never live rings. */
+	iwx_tx_completion_observation_state sc_tx_completion_observation;
+	iwx_tx_completion_observation_snapshot sc_tx_completion_pending;
+	uint32_t sc_tx_completion_publish_version;
+	iwx_tx_queue_observation_state sc_tx_queue_observation;
+	iwx_txq_obs_snapshot sc_tx_queue_pending;
+	uint32_t sc_tx_queue_publish_version;
 #endif
 
 //	struct rwlock ioctl_rwl;

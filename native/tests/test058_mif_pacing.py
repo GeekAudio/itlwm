@@ -58,7 +58,10 @@ def verify_production_source_contracts():
     source = PROBE_SOURCE.read_text(encoding="utf-8")
     read_gate = function_body(
         source, "static IOReturn readMifPacingPeerInGate(")
-    assert read_gate.index("owner->tahoeP2pRxDrain()") < read_gate.index(
+    # Deep pacing reads consume bounded records before sampling the clock;
+    # the Test067 stack fix moved heavy publication to the shallow drain path.
+    assert "owner->tahoeP2pRxDrain()" not in read_gate
+    assert read_gate.index("owner->tahoeP2pRxConsume()") < read_gate.index(
         "p2pProbeMonotonicNanoseconds()")
     assert "getPsfSnapshot(" in read_gate
     assert "_peer_runtime_.snapshot(" not in read_gate

@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
 	<key>AirportTahoeBuild</key>
-	<string>25G332-Test059</string>
+	<string>25G332-Test078</string>
 	<key>CFBundleDevelopmentRegion</key>
 	<string>$(DEVELOPMENT_LANGUAGE)</string>
 	<key>CFBundleExecutable</key>
@@ -38,10 +38,16 @@
 			<string>IOPCIEDeviceWrapper</string>
 			<key>IOResourceMatch</key>
 			<string>IOBSD</string>
+			<key>NativeAwdlDiscoveryCurrentAwFallbackEnabled</key>
+			<false/>
+			<key>NativeAwdlDiscoveryExperimentEnabled</key>
+			<false/>
+			<key>NativeAwdlDiscoveryMifCurrentSlotEnabled</key>
+			<false/>
 			<key>NativeP2PProbe</key>
 			<false/>
 			<key>NativeTestBuild</key>
-			<string>25G332-Test059</string>
+			<string>25G332-Test078</string>
 		</dict>
 		<key>itlwm</key>
 		<dict>

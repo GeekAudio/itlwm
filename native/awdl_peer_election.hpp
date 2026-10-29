@@ -31,6 +31,7 @@ struct Advertisement {
     uint16_t nextAwSequence;
     uint16_t syncParameterLength;
     uint16_t syncTailLength; // Bytes after the fixed 33-byte sync prefix.
+    uint8_t presenceMode;
     uint32_t phyTxTimestampUs;
     uint32_t targetTxTimestampUs;
     uint32_t height;
@@ -45,6 +46,9 @@ struct Advertisement {
     // is protocol-field consistency only; it does not establish sync to the
     // peer's radio clock or prove that its advertised schedule was served.
     bool syncConsistent;
+    bool presenceModePresent;
+    bool type18Present;
+    bool type18Valid;
     bool embeddedSequencePresent;
     bool embeddedSequenceRecognized;
     // True only when an embedded type-4 channel sequence was completely

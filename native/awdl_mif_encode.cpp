@@ -8,10 +8,8 @@
 namespace NativeAwdl {
 namespace {
 
-constexpr size_t kMacHeaderLength = 24;
-constexpr size_t kAwdlActionHeaderLength = 16;
-constexpr size_t kTlvStart = kMacHeaderLength + kAwdlActionHeaderLength;
-constexpr size_t kAwdlSubtypeOffset = kMacHeaderLength + 6;
+constexpr size_t kTlvStart = kActionMacHeaderLength + kAwdlActionHeaderLength;
+constexpr size_t kAwdlSubtypeOffset = kActionMacHeaderLength + 6;
 constexpr uint8_t kArpaTlvType = 16;
 constexpr uint8_t kArpaFlags = 3;
 constexpr uint8_t kLocalSuffixPointer[] = {0xc0, 0x0c};
@@ -77,9 +75,9 @@ void putLe16(uint8_t *bytes, uint16_t value)
     bytes[1] = static_cast<uint8_t>(value >> 8);
 }
 
-// Locate the existing empty Data Path State TLV after the HT capabilities TLV.
-// parseActionFrame has already validated all PSF TLVs; this second bounded walk
-// supplies the insertion point without rebuilding any shared serialization.
+// Locate one of the two supported Data Path State TLVs after HT capabilities.
+// parseActionFrame has validated the bounded field shape; this walk additionally
+// restricts the MIF encoder to legacy-empty or exact Addr2-advertisement form.
 bool findArpaInsertionPoint(const uint8_t *frame, size_t length,
                            size_t *insertionOffset)
 {
@@ -100,8 +98,8 @@ bool findArpaInsertionPoint(const uint8_t *frame, size_t length,
         if (frame[offset] == 7)
             sawHtCapabilities = true;
         if (frame[offset] == 12) {
-            if (!sawHtCapabilities || valueLength != 2 ||
-                frame[offset + 3] != 0 || frame[offset + 4] != 0)
+            if (!sawHtCapabilities ||
+                !detail::isSupportedMifDataPathTlv(frame, length, offset))
                 return false;
             *insertionOffset = offset;
             return true;
@@ -112,6 +110,23 @@ bool findArpaInsertionPoint(const uint8_t *frame, size_t length,
 }
 
 } // namespace
+
+bool detail::isSupportedMifDataPathTlv(const uint8_t *frame, size_t length,
+                                       size_t tlvOffset)
+{
+    if (!frame || length < kActionMacHeaderLength || tlvOffset > length ||
+        length - tlvOffset < 3 || frame[tlvOffset] != 12)
+        return false;
+    const size_t valueLength = readLe16(frame + tlvOffset + 1);
+    if (valueLength > length - tlvOffset - 3 || valueLength < 2)
+        return false;
+
+    const uint16_t flags = readLe16(frame + tlvOffset + 3);
+    if (valueLength == 2 && flags == 0)
+        return true;
+    return valueLength == 8 && flags == 0x0004 &&
+           memcmp(frame + tlvOffset + 5, frame + 10, 6) == 0;
+}
 
 MifEncodeStatus encodeMif(const MifInput *input, uint8_t *output,
                           size_t capacity, size_t *written)

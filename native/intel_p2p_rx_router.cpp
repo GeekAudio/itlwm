@@ -135,8 +135,12 @@ RouteResult Router::tapActionFrame(const uint8_t *frame, size_t length,
                                    const LeaseSnapshot &lease,
                                    uint64_t rxMonotonicUs,
                                    uint32_t rxGp2TimestampUs,
-                                   bool rxGp2TimestampPresent)
+                                   bool rxGp2TimestampPresent,
+                                   const NativeAwdlRxTrace::EventToken *traceToken,
+                                   ParseObservation *parseObservation)
 {
+    if (parseObservation)
+        *parseObservation = {};
     if (!lease.active)
         return RouteResult::kInactive;
     if (!hasCurrentLease(lease))
@@ -161,6 +165,30 @@ RouteResult Router::tapActionFrame(const uint8_t *frame, size_t length,
     NativeAwdl::ParseDiagnostics diagnostic{};
     const NativeAwdl::ParseStatus parse =
         NativeAwdl::parseActionFrame(frame, length, &info, &diagnostic);
+    if (parseObservation) {
+        parseObservation->attempted = 1;
+        parseObservation->resultPresent = 1;
+        parseObservation->envelopePresent = envelope ? 1u : 0u;
+        parseObservation->status = parse;
+        parseObservation->diagnostics = diagnostic;
+        if (parse == NativeAwdl::ParseStatus::Ok) {
+            parseObservation->actionInfoPresent = 1;
+            parseObservation->actionInfo = info;
+            parseObservation->subtypePresent = 1;
+            parseObservation->subtype = info.subtype;
+        } else if (frame && length >= 24) {
+            const size_t header = 24 + ((frame[1] & 0x80) ? 4 : 0);
+            if (length >= header + 7) {
+                const uint8_t *body = frame + header;
+                if (body[0] == 127 && body[1] == 0x00 &&
+                    body[2] == 0x17 && body[3] == 0xf2 &&
+                    body[4] == 8 && body[5] == 0x10) {
+                    parseObservation->subtypePresent = 1;
+                    parseObservation->subtype = body[6];
+                }
+            }
+        }
+    }
     if (parse == NativeAwdl::ParseStatus::ProtectedAction) {
         __atomic_fetch_add(&protectedActionRejected_, 1u, __ATOMIC_RELAXED);
         return RouteResult::kProtectedFrame;
@@ -235,6 +263,8 @@ RouteResult Router::tapActionFrame(const uint8_t *frame, size_t length,
     out.length = static_cast<uint16_t>(length);
     out.affinity = rxMacContextKnown
         ? RxMacAffinity::kP2pDevice : RxMacAffinity::kContextUnknown;
+    if (traceToken)
+        out.traceToken = *traceToken;
     out.awdl = info;
     memcpy(out.bytes, frame, length);
 

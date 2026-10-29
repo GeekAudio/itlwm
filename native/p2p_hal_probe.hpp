@@ -41,7 +41,8 @@ enum BlockedReason : uint32_t {
     kResetDrainedReason = 18,
     kGateActionFailed = 19,
     kProbeQueueBusy = 20,
-    kExerciseOutcomeUnknown = 21
+    kExerciseOutcomeUnknown = 21,
+    kNativeAwdlIdentityUnavailable = 22
 };
 
 enum class RunResult : uint8_t {

@@ -2,9 +2,10 @@
 #include "awdl_bsd_bridge_shim.hpp"
 #include "../awdl_native_bsd_data_25G332.hpp"
 #include "../awdl_bsd_packet_bridge.hpp"
-unsigned allocated=0,freed=0,delivered=0,finalized=0,socketsOpen=0,socketsClosed=0;uint64_t fakeTime=1;
+std::atomic<unsigned> allocated{0},freed{0},delivered{0},finalized{0},socketsOpen{0},socketsClosed{0};uint64_t fakeTime=1;
 bool allocateFail=false,inputFail=false,detachDelay=false,offloadFail=false;
 bool ipv6Fail=false,socketFail=false,packetHeaderMissing=false;
+bool lladdrFail=false;
 iff_filter installed;ifnet_t filterIf=nullptr;
 using namespace NativeAwdlBSD;
 const uint8_t own[6]={2,1,2,3,4,5},peer[6]={2,6,7,8,9,10};
@@ -26,11 +27,17 @@ void incoming(uint32_t generation,bool protect=false){
     capture(raw,n,protect,true,generation);
 }
 int main(int argc,char **argv){
-    assert(argc==2);int which=atoi(argv[1]);FakeIf dev;
+    assert(argc==2);int which=atoi(argv[1]);FakeIf dev;memcpy(dev.lladdr,own,6);
+    if(which==22){dev.lladdr[5]^=1;assert(!attach(&dev,own));assert(!dev.refs);return 0;}
     if(which==12){offloadFail=true;assert(!attach(&dev,own));assert(close()&&!dev.refs);return 0;}
     if(which==13||which==14){ipv6Fail=which==13;socketFail=which==14;assert(!attach(&dev,own));assert(close()&&!dev.refs);assert(socketsOpen==socketsClosed);return 0;}
     assert(attach(&dev,own));poll(true,7);
     assert(snapshot().value[Ipv6Configured]==1&&snapshot().value[Ipv6ConfigResult]==0);
+    if(which==18){uint8_t address[6]{};assert(NativeAwdlBSD::address(7,address));assert(!memcmp(address,own,6));}
+    if(which==19){uint8_t address[6];memset(address,0xa5,sizeof(address));assert(!NativeAwdlBSD::address(8,address));for(auto b:address)assert(b==0xa5);}
+    if(which==20){uint8_t address[6];memset(address,0xa5,sizeof(address));dev.lladdr[5]^=1;assert(!NativeAwdlBSD::address(7,address));for(auto b:address)assert(b==0xa5);dev.lladdr[5]^=1;}
+    if(which==21){uint8_t address[6];memset(address,0xa5,sizeof(address));lladdrFail=true;assert(!NativeAwdlBSD::address(7,address));lladdrFail=false;for(auto b:address)assert(b==0xa5);}
+    if(which==23){uint8_t address[6];memset(address,0xa5,sizeof(address));NativeAwdlBSD::publishClosing();assert(!NativeAwdlBSD::address(7,address));for(auto b:address)assert(b==0xa5);poll(true,7);assert(!NativeAwdlBSD::address(7,address));}
     if(which==1){
         accept();uint64_t token=0;auto raw=nextTx(17,&token);assert(raw&&token&&(mbuf_flags(raw)&MBUF_PKTHDR));
         NativeAwdlData::DecodedFrame d{};

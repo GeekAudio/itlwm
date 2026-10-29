@@ -20,5 +20,10 @@ struct Snapshot {
 void observeOnce(IOService *, const uint8_t address[6]);
 Snapshot snapshot();
 bool residentPending(IOService *);
+// Publish the lifecycle and BSD closing bits while serialized by the
+// controller's main radio gate. The in-gate form is for the command-gate
+// callback; the routed form is for teardown paths that are outside the gate.
+bool publishClosingInGate(IOService *);
+bool publishClosing(IOService *);
 bool stopResident(IOService *);
 }

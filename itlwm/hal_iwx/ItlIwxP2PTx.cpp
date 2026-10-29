@@ -4,6 +4,7 @@
 #ifdef AIRPORT_TAHOE
 
 #include "ItlIwx.hpp"
+#include "../../native/iwx_dma_info_lifecycle.hpp"
 #include "../../native/p2p_tx_resources.hpp"
 
 #include <IOKit/IOLib.h>
@@ -456,9 +457,7 @@ fail:
 
 static bool dmaInfoEmpty(const struct iwx_dma_info *info)
 {
-    return info && info->buffer == nullptr && info->paddr == 0 &&
-        info->vaddr == nullptr && info->size == 0 && info->bmd == nullptr &&
-        info->cmd == nullptr;
+    return NativeIwxDmaInfo::isEmpty(info);
 }
 
 struct NativeUnsubmittedPlaceholderSnapshot {
@@ -510,6 +509,9 @@ struct NativeQueueSlotDiagnostic {
     uint32_t descriptorPresent;
     uint32_t commandPresent;
     uint32_t dmaPresenceMask;
+    uint32_t descriptorDmaFieldPresenceMask;
+    uint32_t commandDmaFieldPresenceMask;
+    uint32_t byteCountDmaFieldPresenceMask;
     uint32_t firstDataQueue;
     uint32_t queueFullBit;
     uint32_t queueFullPredicateReject;
@@ -523,6 +525,9 @@ struct NativeQueueSlotDiagnostic {
           ringQueueId(UINT32_MAX), ringCount(UINT32_MAX), queued(UINT32_MAX),
           cur(UINT32_MAX), tail(UINT32_MAX), descriptorPresent(UINT32_MAX),
           commandPresent(UINT32_MAX), dmaPresenceMask(UINT32_MAX),
+          descriptorDmaFieldPresenceMask(UINT32_MAX),
+          commandDmaFieldPresenceMask(UINT32_MAX),
+          byteCountDmaFieldPresenceMask(UINT32_MAX),
           firstDataQueue(UINT32_MAX), queueFullBit(UINT32_MAX),
           queueFullPredicateReject(UINT32_MAX),
           tidMatchBitmap(UINT32_MAX), dataMapCount(UINT32_MAX),
@@ -554,6 +559,12 @@ static NativeQueueSlotDiagnostic captureQueueSlotDiagnostic(
     snapshot.tail = static_cast<uint32_t>(ring->tail);
     snapshot.descriptorPresent = ring->desc != nullptr;
     snapshot.commandPresent = ring->cmd != nullptr;
+    snapshot.descriptorDmaFieldPresenceMask =
+        NativeIwxDmaInfo::fieldPresenceMask(&ring->desc_dma);
+    snapshot.commandDmaFieldPresenceMask =
+        NativeIwxDmaInfo::fieldPresenceMask(&ring->cmd_dma);
+    snapshot.byteCountDmaFieldPresenceMask =
+        NativeIwxDmaInfo::fieldPresenceMask(&ring->bc_tbl);
     snapshot.dmaPresenceMask =
         (!dmaInfoEmpty(&ring->desc_dma) ? 1u : 0u) |
         (!dmaInfoEmpty(&ring->cmd_dma) ? 2u : 0u) |
@@ -633,6 +644,12 @@ static void publishQueueSlotDiagnostic(
                              slot.commandPresent, 32);
     controller->setProperty("NativeP2PTxHostDmaPresenceMask",
                              slot.dmaPresenceMask, 32);
+    controller->setProperty("NativeP2PTxHostDescriptorDmaFieldPresenceMask",
+                             slot.descriptorDmaFieldPresenceMask, 32);
+    controller->setProperty("NativeP2PTxHostCommandDmaFieldPresenceMask",
+                             slot.commandDmaFieldPresenceMask, 32);
+    controller->setProperty("NativeP2PTxHostByteCountDmaFieldPresenceMask",
+                             slot.byteCountDmaFieldPresenceMask, 32);
     controller->setProperty("NativeP2PTxFirstDataQueue",
                              slot.firstDataQueue, 32);
     controller->setProperty("NativeP2PTxHostQueueFullBit",

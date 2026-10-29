@@ -121,6 +121,7 @@ PlanStatus buildObservationOnlyPsfInput(const Request *request,
     planned.rxMcsLength = request->ht.rxMcsLength;
     planned.awdlVersion = 0x34;
     planned.deviceClass = 1;
+    planned.advertiseAwdlAddress = request->nativeAddressVerified;
 
     details.fullyCoveredSlots = static_cast<uint8_t>(fullSlots);
     details.rocRemainingUs = remainingUs;
@@ -129,8 +130,13 @@ PlanStatus buildObservationOnlyPsfInput(const Request *request,
         remainingUs - details.channelAdvertisedUs;
     details.sequenceDurationUs = kSequenceDurationUs;
     details.experimentPhaseOriginUs = request->monotonicSampleUs;
-    details.p2pAddressIsNativeAwdlIdentity = false;
-    details.dataPathFlagsZero = true; // encodePsf emits flags=0 unconditionally
+    details.dataPathFlags = planned.advertiseAwdlAddress ? 0x0004 : 0;
+    details.p2pAddressIsNativeAwdlIdentity = request->nativeAddressVerified;
+    details.dataPathFlagsZero = details.dataPathFlags == 0;
+    details.addressFieldPresent = planned.advertiseAwdlAddress;
+    // The encoder copies planned.sourceAddress into the advertised field.
+    details.addressMatchesSource = planned.advertiseAwdlAddress;
+    details.dataPathReady = false;
 
     *output = planned;
     *summary = details;

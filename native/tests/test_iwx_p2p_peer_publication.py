@@ -3,7 +3,7 @@
 
 This extracts only ItlIwxP2PPeer.cpp's publish method and packSlots helper.
 The mock table supplies bounded snapshots; no kernel, radio, TX, or EFI code
-is linked or run. RX-drain gate placement is checked from its production source.
+is linked or run. RX-consumer gate placement is checked from its production source.
 """
 
 from __future__ import annotations
@@ -17,6 +17,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 PUBLISH_SOURCE = ROOT / "itlwm/hal_iwx/ItlIwxP2PPeer.cpp"
 RX_SOURCE = ROOT / "itlwm/hal_iwx/ItlIwxP2PRx.cpp"
+PROBE_SOURCE = ROOT / "itlwm/hal_iwx/ItlIwxP2PProbe.cpp"
 
 
 def extract_function(source: str, signature: str) -> str:
@@ -33,10 +34,12 @@ def extract_function(source: str, signature: str) -> str:
     raise RuntimeError(f"unterminated function: {signature}")
 
 
-def check_rx_drain_source() -> None:
+def check_rx_consumer_source() -> None:
     source = RX_SOURCE.read_text()
+    probe_source = PROBE_SOURCE.read_text()
     action = extract_function(source, "IOReturn ItlIwx::tahoeP2pRxDrainAction(")
     drain = extract_function(source, "void ItlIwx::tahoeP2pRxDrain()")
+    consume = extract_function(source, "void ItlIwx::tahoeP2pRxConsume()")
 
     assert "!owner->getMainWorkLoop()->inGate()" in action
     assert "owner->tahoeP2pRxDrain();" in action
@@ -45,17 +48,73 @@ def check_rx_drain_source() -> None:
     off_gate = drain.index("if (!workLoop->inGate())")
     attempt = drain.index("gate->attemptAction(tahoeP2pRxDrainAction, this)")
     early_return = drain.index("return;", attempt)
-    queue_pop = drain.index("tahoe_p2p_rx_router_.popRecord(&record)")
-    assert off_gate < attempt < early_return < queue_pop
+    consume_call = drain.index("tahoeP2pRxConsume();")
+    publish_call = drain.index("tahoeP2pPublishPeerRuntime();")
+    assert off_gate < attempt < early_return < consume_call < publish_call
+    assert "tahoe_p2p_rx_router_.popRecord(&record)" not in drain
     assert "tahoeP2pPublishPeerRuntime();" in drain
-    assert drain.index("tahoe_awdl_peer_runtime_.observe(") < drain.index(
-        "tahoeP2pPublishPeerRuntime();"
-    )
     assert not re.search(
         r"\b(?:tahoeP2p(?:Arm|Exercise|Publish).*Tx|nativeP2pActionTx|"
         r"tahoe_awdl_peer_runtime_\.selectMaster)\s*\(",
         drain,
     )
+
+    assert "if (!tahoeP2pOnMainGate())" in consume
+    assert "for (unsigned i = 0; i < IntelP2PRx::kQueueDepth; ++i)" in consume
+    queue_pop = consume.index("tahoe_p2p_rx_router_.popRecord(&record)")
+    runtime_observe = consume.index("tahoe_awdl_peer_runtime_.observe(")
+    observer_observe = consume.index("tahoe_awdl_peer_observer_.observe(")
+    clear_record = consume.index("bzero(&record, sizeof(record));")
+    assert queue_pop < runtime_observe < observer_observe < clear_record
+    assert "tahoe_awdl_rx_stage_counters_.beginOwner" in consume
+    assert "tahoe_awdl_rx_stage_counters_.endOwner" in consume
+    assert "nativeAwdlRxEntryTelemetry_.beginOwner" in consume
+    assert "nativeAwdlRxEntryTelemetry_.endOwner" in consume
+    assert "setProperty(" not in consume
+    assert "getController(" not in consume
+    assert "tahoeP2pPublish" not in consume
+    assert "NativeAwdlBSD::snapshot()" not in consume
+    assert "tahoe_awdl_peer_observer_.snapshot(" not in consume
+    assert "attemptAction(" not in consume
+    assert "runAction(" not in consume
+    assert not re.search(
+        r"\b(?:tahoeP2p(?:Arm|Exercise|Publish).*Tx|nativeP2pActionTx|"
+        r"tahoe_awdl_peer_runtime_\.selectMaster)\s*\(",
+        consume,
+    )
+
+    mif_read = extract_function(
+        probe_source, "static IOReturn readMifPacingPeerInGate("
+    )
+    watchdog_tick = extract_function(probe_source, "void ItlIwx::nativeP2pTick()")
+    probe_task = extract_function(
+        probe_source, "void ItlIwx::tahoeP2pProbeTask(void *opaque)"
+    )
+    arm_probe = extract_function(probe_source, "IOReturn ItlIwx::nativeP2pArmProbe()")
+    submit_data_start = probe_source.index("auto submitData=[]")
+    submit_data_end = probe_source.index("gate->runAction(submitData", submit_data_start)
+    submit_data_path = probe_source[submit_data_start:submit_data_end]
+    assert "owner->tahoeP2pRxConsume();" in mif_read
+    assert probe_source.count("tahoeP2pRxConsume();") == 2
+    assert "self->tahoeP2pRxConsume();" in submit_data_path
+    assert "tahoeP2pRxDrain();" not in mif_read
+    assert "tahoeP2pRxDrain();" not in submit_data_path
+    assert "tahoeP2pRxDrain();" in watchdog_tick
+    assert watchdog_tick.index("nativeLifecycleObservationHandled(controller)") < \
+        watchdog_tick.index("bool residentStart=false") < \
+        watchdog_tick.index("residentPending(controller)") < \
+        watchdog_tick.index("if (!residentStart && __atomic_load_n(&nativeP2pProbeRunAllocationFailed_")
+    assert probe_task.index("getMainWorkLoop()") < \
+        probe_task.index("getMainCommandGate()") < \
+        probe_task.index("NativeAwdlLifecycle::residentPending(") < \
+        probe_task.index("ScopedRunStorage<P2PProbeRun> storage")
+    allocation_failure = probe_task.index("if (!storage.get())")
+    assert probe_task.index("nativeP2pProbeRunAllocationFailed_", allocation_failure) < \
+        probe_task.index("nativeP2pProbeQueued_", allocation_failure) < \
+        probe_task.index("nativeP2pCancelRequested_", allocation_failure)
+    assert arm_probe.index("nativeP2pProbeRunAllocationFailed_") < \
+        arm_probe.index("getController()")
+    assert "return kIOReturnNoMemory;" in arm_probe
 
 
 def main() -> int:
@@ -99,7 +158,7 @@ def main() -> int:
     assert "++metricIndex;" in publish
     assert not re.search(r"\b(?:PeerMetric|metrics\s*\[)", publish)
 
-    check_rx_drain_source()
+    check_rx_consumer_source()
 
     fixture = r'''
 #include "awdl_peer_runtime_table.hpp"

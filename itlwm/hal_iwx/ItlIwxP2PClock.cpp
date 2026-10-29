@@ -59,12 +59,12 @@ void releaseClockNic(void *opaque)
     owner->iwx_nic_unlock(&owner->com);
 }
 
-uint64_t clockHostUs(void *)
+uint64_t clockHostNs(void *)
 {
     uint64_t absolute = 0, nanoseconds = 0;
     clock_get_uptime(&absolute);
     absolutetime_to_nanoseconds(absolute, &nanoseconds);
-    return nanoseconds / 1000;
+    return nanoseconds;
 }
 
 uint32_t readClockPrph(void *opaque, uint32_t address)
@@ -155,7 +155,7 @@ IOReturn observeClockOnGate(OSObject *, void *opaque,
     }
 
     const IntelGp2Clock::SampleBackend backend {owner, acquireClockNic,
-        releaseClockNic, clockHostUs, readClockPrph};
+        releaseClockNic, clockHostNs, readClockPrph};
     IntelGp2Clock::RawBracketedSample sample{};
     const auto family = static_cast<IntelGp2Clock::SamplerDeviceFamily>(
         sc->sc_device_family);

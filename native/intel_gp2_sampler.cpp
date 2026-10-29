@@ -10,7 +10,7 @@ constexpr uint32_t kAx210SystemTimePrph = 0x00d02c68;
 bool validBackend(const SampleBackend &backend)
 {
     return backend.acquireNic && backend.releaseNic &&
-           backend.hostMonotonicUs && backend.readPrph;
+           backend.hostMonotonicNs && backend.readPrph;
 }
 
 uint32_t systemTimeAddress(SamplerDeviceFamily family)
@@ -66,16 +66,16 @@ SampleStatus readBracketedGp2(const SampleBackend *backend,
     // Keep the host samples immediately around the indirect PRPH read. The
     // potentially long NIC-access acquisition is intentionally outside this
     // bracket, while the caller still serializes the hardware access.
-    const uint64_t before = backend->hostMonotonicUs(backend->context);
+    const uint64_t beforeNs = backend->hostMonotonicNs(backend->context);
     const uint32_t gp2 = backend->readPrph(backend->context, address);
-    const uint64_t after = backend->hostMonotonicUs(backend->context);
-    if (after < before)
+    const uint64_t afterNs = backend->hostMonotonicNs(backend->context);
+    if (afterNs < beforeNs)
         return SampleStatus::kHostClockOrder;
 
     RawBracketedSample sample{};
     sample.gp2Us = gp2;
-    sample.hostBeforeUs = before;
-    sample.hostAfterUs = after;
+    sample.hostBeforeUs = beforeNs / 1000;
+    sample.hostAfterUs = afterNs / 1000 + (afterNs % 1000 != 0);
     sample.generation = generation;
     sample.prphAddress = address;
     sample.family = family;

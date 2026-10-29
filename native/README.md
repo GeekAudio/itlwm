@@ -1,15 +1,26 @@
-# Native Tahoe Wi-Fi adapter
+# Native Tahoe Wi-Fi and AWDL adapter
 
-This directory adds an experimental native IO80211 WCL adapter to the official
-OpenIntelWireless V2/HAL/net80211 driver. It is not an AWDL implementation.
-The new target is restricted to x86_64 Darwin 25.6.0 / build 25G241. The separate
-`include/Tahoe` declarations were checked against this machine's native Apple
-virtual tables; the adapter does not load Lilu or a legacy IO80211 family.
+This directory contains experimental Tahoe Wi-Fi and AWDL work built on the
+OpenIntelWireless V2/HAL/net80211 driver. The WCL path handles native scan,
+association, and event flow. The separate P2P/AWDL path experiments with action
+frames, peer timing, transmit queues, RX tracing, and the native `awdl0`
+interface lifecycle.
+
+The current development candidate, Test078, targets x86_64 macOS Tahoe 26.7.2
+(build 25G332) and the AX201 device match documented in the main README. It has
+been built and deployed to one machine's EFI and is awaiting its first boot.
+There is no Test078 runtime result, confirmed AWDL peer data return, or AirDrop
+file-transfer result. Do not present this candidate as AirDrop support.
+
+Some early WCL ABI investigation used macOS build 25G241. That is an analysis
+reference, not a claim that all private interfaces are validated across Tahoe
+releases. The Tahoe declarations are locally reconstructed interfaces; the
+driver does not load Lilu or a legacy IO80211 family.
 
 `wcl_wire` reads bounded kernel-owned WCL requests: scan441 is `0x1550` bytes;
-association442 is `0x6f8` bytes. Their producer excerpts and native event routing
-are retained under `evidence`. Wire offsets are read explicitly rather than
-reinterpreting an unrelated older C++ structure.
+association442 is `0x6f8` bytes. Local analysis notes are kept outside the
+repository. Wire offsets are read explicitly rather than reinterpreting an
+unrelated older C++ structure.
 
 `wcl_backend` owns request state and secret material. It accepts open networks
 and explicit WPA2-PSK/CCMP with a PMK, a bounded passphrase, or 64hex key. It rejects
@@ -80,14 +91,17 @@ clang++ -std=c++14 -Wall -Wextra -Werror -fsanitize=address,undefined \
 python3 native/tests/check_adapter_syntax.py
 ```
 
-The tests execute real portable parser/state code with fake radio operations,
-including all truncated scan/join lengths, canonical/custom timing policies,
-PMK/passphrase validation, delayed cancellation, stale generations, and deferred
-joins. The syntax command compiles actual adapter translation units against the
-local MacKernelSDK without loading anything. Hardware scans, association, RF MAC
-behavior, Bluetooth, and AirDrop require separate runtime verification.
+The parser/state tests execute portable code with fake radio operations,
+including truncated request lengths, timing policies, key validation, delayed
+cancellation, stale generations, and deferred joins. The syntax check requires
+Apple's Xcode tools and a locally supplied `MacKernelSDK`; that SDK is not
+distributed in this repository. Some ABI and request-contract tests also depend
+on local linked-image analysis files and notes that are not distributed.
+Therefore a fresh clone can run the portable tests, but cannot run every test in
+`native/tests` without those local analysis dependencies. Hardware scans,
+association, RF behavior, peer data return, Bluetooth, and AirDrop need separate
+runtime verification.
 
-The official baseline is OpenIntelWireless/itlwm commit
-`53c51c2cdd6e4b69beb91f310d74c53422b0f8bd`. The WCL implementation here is new
-code based on independently inspected local Apple protocol facts. Existing HAL,
-net80211, and cryptographic primitives retain their upstream licenses.
+The Tahoe adapter and AWDL code are experimental additions to
+OpenIntelWireless/itlwm. The project follows GPL-2.0; upstream code and firmware
+retain their respective notices and licenses.

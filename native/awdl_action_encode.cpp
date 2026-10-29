@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "awdl_action_encode.hpp"
+#include "awdl_action_frame.hpp"
 
 #include <string.h>
 
 namespace NativeAwdl {
 namespace {
 
-constexpr size_t kMacHeaderLength = 24;
-constexpr size_t kAwdlActionHeaderLength = 16;
 constexpr size_t kSyncParamsLength = 57;
 constexpr size_t kElectionParamsLength = 21;
 constexpr size_t kChannelSequenceLength = 25;
@@ -134,11 +133,11 @@ EncodeStatus encodePsf(const PsfInput *input, uint8_t *output,
         return validation;
 
     const size_t htValueLength = 7 + input->rxMcsLength;
-    const size_t requiredLength = kMacHeaderLength + kAwdlActionHeaderLength +
+    const size_t requiredLength = kActionMacHeaderLength + kAwdlActionHeaderLength +
         (3 + kSyncParamsLength) + (3 + kElectionParamsLength) +
         (3 + kChannelSequenceLength) + (3 + kElectionParamsV2Length) +
         (3 + kServiceParamsLength) + (3 + htValueLength) + (3 + 2) +
-        (3 + 2);
+        (3 + (input->advertiseAwdlAddress ? 8 : 2));
     if (capacity < requiredLength)
         return EncodeStatus::BufferTooSmall;
 
@@ -247,10 +246,15 @@ EncodeStatus encodePsf(const PsfInput *input, uint8_t *output,
     frame[offset++] = 0;
     frame[offset++] = 0;
 
-    // No active AWDL data-path address/state is known, so announce no optional
-    // Data Path State fields rather than claiming a working interface.
-    putTlvHeader(frame, &offset, 12, 2);
-    putLe16(frame, &offset, 0);
+    // Legacy frames keep the exact empty two-byte value. The optional address
+    // profile reuses Addr2; it carries no independent MAC or readiness claim.
+    const uint16_t dataPathFlags = input->advertiseAwdlAddress ? 0x0004 : 0;
+    const uint16_t dataPathLength = input->advertiseAwdlAddress ? 8 : 2;
+    putTlvHeader(frame, &offset, 12, dataPathLength);
+    putLe16(frame, &offset, dataPathFlags);
+    if (input->advertiseAwdlAddress)
+        putBytes(frame, &offset, input->sourceAddress,
+                 sizeof(input->sourceAddress));
 
     putTlvHeader(frame, &offset, 21, 2);
     frame[offset++] = input->awdlVersion;

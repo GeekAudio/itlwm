@@ -46,7 +46,28 @@ def main():
                         help='Manual native attach/start/register/stop transaction; no RF/data traffic')
     parser.add_argument('--native-awdl-resident-data', action='store_true',
                         help='Resident native awdl0 with BSD/Intel data bridge; RF remains one manual bounded session')
+    parser.add_argument('--native-awdl-tx-evidence', action='store_true',
+                        help='Record bounded PSF/MIF host-time ticket evidence; never changes TX permission')
+    parser.add_argument('--native-awdl-discovery-experiment', action='store_true',
+                        help='Allow one real native QM discovery packet using an explicitly estimated PSF target; no formal peer admission change')
+    parser.add_argument('--native-awdl-discovery-mif-current-slot', action='store_true',
+                        help='Test066: use a same-peer MIF current-slot estimate and bounded early MIF preparation')
+    parser.add_argument('--native-awdl-discovery-current-aw-fallback', action='store_true',
+                        help='Test077: try the current AW only after the original next-AW planner reports an empty conservative window')
     args = parser.parse_args()
+    if args.native_awdl_discovery_current_aw_fallback and not args.native_awdl_discovery_mif_current_slot:
+        parser.error('Current-AW fallback requires the manual MIF current-slot discovery profile')
+    if args.native_awdl_discovery_mif_current_slot and not args.native_awdl_discovery_experiment:
+        parser.error('MIF current-slot mode requires the bounded native discovery experiment')
+    if args.native_awdl_discovery_experiment and not (
+            args.native_awdl_resident_data and args.native_awdl_tx_evidence and
+            args.p2p_gp2_observation and args.p2p_manual_trigger and
+            args.p2p_awdl_psf_observation_only and args.p2p_awdl_mif_followup):
+        parser.error('Discovery experiment requires manual resident PSF/MIF, GP2 and TX evidence')
+    if args.native_awdl_tx_evidence and not (
+            args.native_awdl_resident_data and args.p2p_manual_trigger and
+            args.p2p_awdl_psf_observation_only and args.p2p_awdl_mif_followup):
+        parser.error('TX time evidence requires resident data with manual PSF/MIF')
     if args.native_awdl_resident_data and not (
             args.p2p_manual_trigger and args.p2p_tx_probe and args.p2p_awdl_mif_followup and
             not args.native_awdl_init_observation_only and not args.native_awdl_lifecycle_observation_only):
@@ -87,7 +108,12 @@ def main():
             if args.native_awdl_lifecycle_observation_only:
                 build_command.append('OTHER_CPLUSPLUSFLAGS=$(inherited) -DITL_NATIVE_AWDL_LIFECYCLE_25G332=1')
             if args.native_awdl_resident_data:
-                build_command.append('OTHER_CPLUSPLUSFLAGS=$(inherited) -DITL_NATIVE_AWDL_LIFECYCLE_25G332=1 -DITL_NATIVE_AWDL_RESIDENT_25G332=1')
+                flags = 'OTHER_CPLUSPLUSFLAGS=$(inherited) -DITL_NATIVE_AWDL_LIFECYCLE_25G332=1 -DITL_NATIVE_AWDL_RESIDENT_25G332=1'
+                if args.native_awdl_tx_evidence:
+                    flags += ' -DITL_NATIVE_AWDL_TX_EVIDENCE_25G332=1'
+                if args.native_awdl_discovery_experiment:
+                    flags += ' -DITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332=1'
+                build_command.append(flags)
             run(build_command + ['build'], log)
             bundle = derived / 'Build/Products' / args.configuration / 'Tahoe/AirportItlwm.kext'
             if not bundle.is_dir():
@@ -114,6 +140,10 @@ def main():
             personality['NativeAwdlInitObservationOnly'] = bool(args.native_awdl_init_observation_only)
             personality['NativeAwdlLifecycleObservationOnly'] = bool(args.native_awdl_lifecycle_observation_only)
             personality['NativeAwdlResidentEnabled'] = bool(args.native_awdl_resident_data)
+            personality['NativeAwdlTxEvidenceEnabled'] = bool(args.native_awdl_tx_evidence)
+            personality['NativeAwdlDiscoveryExperimentEnabled'] = bool(args.native_awdl_discovery_experiment)
+            personality['NativeAwdlDiscoveryMifCurrentSlotEnabled'] = bool(args.native_awdl_discovery_mif_current_slot)
+            personality['NativeAwdlDiscoveryCurrentAwFallbackEnabled'] = bool(args.native_awdl_discovery_current_aw_fallback)
             info_path.write_bytes(plistlib.dumps(probe_info, sort_keys=False))
             run(['/usr/bin/codesign', '--force', '--sign', '-', '--timestamp=none', str(bundle)], log)
             run(['/usr/bin/codesign', '--verify', '--strict', str(bundle)], log)
@@ -156,6 +186,10 @@ def main():
                           'native_awdl_init_observation_only': args.native_awdl_init_observation_only,
                           'native_awdl_lifecycle_observation_only': args.native_awdl_lifecycle_observation_only,
                           'native_awdl_resident_data': args.native_awdl_resident_data,
+                          'native_awdl_tx_evidence': args.native_awdl_tx_evidence,
+                          'native_awdl_discovery_experiment': args.native_awdl_discovery_experiment,
+                          'native_awdl_discovery_mif_current_slot': args.native_awdl_discovery_mif_current_slot,
+                          'native_awdl_discovery_current_aw_fallback': args.native_awdl_discovery_current_aw_fallback,
                           'test_build': build_tag, 'mach_o_uuid': match.group(1),
                           'log': str(log_path)}, ensure_ascii=False))
 

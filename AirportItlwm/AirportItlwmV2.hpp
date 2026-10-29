@@ -145,6 +145,7 @@ public:
 
     bool createMediumTables(const IONetworkMedium **primary);
     void releaseAll();
+    void detachWatchdogTimer();
     void watchdogAction(IOTimerEventSource *timer);
     
     virtual SInt32 enableFeature(IO80211FeatureCode, void*) ITL_CONTROLLER_OVERRIDE;
@@ -214,6 +215,7 @@ public:
 public:
     IOInterruptEventSource* fInterrupt;
     IOTimerEventSource *watchdogTimer;
+    bool watchdogSourceAttached {false};
     IOPCIDevice *pciNub;
     IONetworkStats *fpNetStats;
     AirportItlwmEthernetInterface *bsdInterface;

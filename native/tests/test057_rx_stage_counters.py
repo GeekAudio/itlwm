@@ -111,6 +111,10 @@ int main()
                            TahoeAwdlRxStageCounters::kAfterDecrypt));
     assert(counters.record(41, TahoeAwdlRxStageCounters::kMif,
                            TahoeAwdlRxStageCounters::kTap));
+    // The probe ROC may end before the enclosing P2P lease is retired. A late
+    // RX frame in the same still-active lease must not clear completed PSF/MIF
+    // evidence by re-beginning the identical owner generation.
+    counters.beginOwner(41);
     auto snapshot = counters.snapshot();
     assert(snapshot.ownerGeneration == 41 && snapshot.active == 1);
     assert(snapshot.counts[TahoeAwdlRxStageCounters::kEarly][0] == 1);

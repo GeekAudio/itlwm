@@ -38,11 +38,19 @@ struct MifInput {
 
 // Encode one complete public AWDL MIF Action MPDU. The existing PSF serializer
 // supplies all shared fields; this function adds the required ARPA TLV and
-// changes the AWDL subtype to MIF. Data Path State remains the PSF serializer's
-// empty, zero-flags value. On every failure, *written is zero and output is
-// left untouched.
+// changes the AWDL subtype to MIF. It preserves either supported Data Path
+// State shape from the PSF serializer: legacy empty/zero-flags or the exact
+// 0x0004 + Addr2 address form. On every failure, *written is zero and output
+// is left untouched.
 MifEncodeStatus encodeMif(const MifInput *input, uint8_t *output,
                           size_t capacity, size_t *written);
+
+namespace detail {
+// Strict MIF insertion predicate, exposed for offline contract tests. It
+// accepts only legacy empty state or flags=0x0004 with Addr2 copied exactly.
+bool isSupportedMifDataPathTlv(const uint8_t *frame, size_t length,
+                               size_t tlvOffset);
+}
 
 } // namespace NativeAwdl
 

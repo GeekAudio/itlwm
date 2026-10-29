@@ -32,6 +32,7 @@ static Request requestAt(uint64_t sampleUs)
     request.ht.rxMcsMask[0] = 0x3f;
     request.ht.rxMcsLength = 1;
     request.ht.confirmed = true;
+    // Aggregate-zero request remains the legacy flags=0 profile.
     return request;
 }
 
@@ -78,6 +79,9 @@ static void checkNineHundredMillisecondWindow()
     assert(summary.experimentPhaseOriginUs == sample);
     assert(!summary.p2pAddressIsNativeAwdlIdentity);
     assert(summary.dataPathFlagsZero);
+    assert(summary.dataPathFlags == 0 && !summary.addressFieldPresent &&
+           !summary.addressMatchesSource && !summary.dataPathReady);
+    assert(!input.advertiseAwdlAddress);
 
     // Self-master seed and explicit HT capabilities are carried through.
     assert(memcmp(input.sourceAddress, request.p2pMac.bytes, 6) == 0);
@@ -102,6 +106,36 @@ static void checkNineHundredMillisecondWindow()
     // Type 12 is at this fixed offset in the one-byte-MCS profile; flags=0
     // means the control-only probe advertises no AWDL data path.
     assert(frame[221] == 0 && frame[222] == 0);
+}
+
+static void checkVerifiedAddressPropagation()
+{
+    const uint64_t sample = 8000000;
+    Request request = requestAt(sample);
+    request.nativeAddressVerified = true;
+    RocWitness window = roc(6, sample, sample + 900000);
+    PsfInput input{};
+    Summary summary{};
+    assert(NativeAwdlProbe::buildObservationOnlyPsfInput(
+               &request, &window, &input, &summary) ==
+           PlanStatus::ObservationOnly);
+    assert(input.advertiseAwdlAddress);
+    assert(summary.p2pAddressIsNativeAwdlIdentity);
+    assert(summary.dataPathFlags == 0x0004 && !summary.dataPathFlagsZero);
+    assert(summary.addressFieldPresent && summary.addressMatchesSource);
+    assert(!summary.dataPathReady);
+
+    uint8_t frame[NativeAwdl::kMaximumEncodedPsfLength] = {};
+    size_t written = 0;
+    assert(NativeAwdl::encodePsf(&input, frame, sizeof(frame), &written) ==
+           EncodeStatus::Ok);
+    assert(written == 234);
+    // In the one-byte-MCS profile type 12 starts at offset 218.
+    assert(frame[218] == 12 && frame[219] == 8 && frame[220] == 0);
+    assert(frame[221] == 4 && frame[222] == 0);
+    assert(memcmp(frame + 223, input.sourceAddress, 6) == 0);
+    assert(memcmp(frame + 10, frame + 223, 6) == 0);
+    assert(summary.dataPathReady == false); // address presence is not a data path.
 }
 
 static void checkExactSlotBoundaries()
@@ -205,6 +239,7 @@ static void checkRefusals()
 int main()
 {
     checkNineHundredMillisecondWindow();
+    checkVerifiedAddressPropagation();
     checkExactSlotBoundaries();
     checkRefusals();
     puts("PASS: bounded observation-only PSF input and 900 ms slot coverage");

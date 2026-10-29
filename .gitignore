@@ -8,3 +8,6 @@ FwBinary.cpp
 MacKernelSDK
 include/Tahoe/evidence/
 native/evidence/
+/research/
+*.pcap
+*.pcapng

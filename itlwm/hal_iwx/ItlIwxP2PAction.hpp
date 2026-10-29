@@ -9,6 +9,12 @@
 
 #include "ItlIwxP2PTx.hpp"
 #include "../../native/p2p_action_tx.hpp"
+#if defined(ITL_NATIVE_AWDL_TX_EVIDENCE_25G332)
+#include "../../native/awdl_tx_window_evidence.hpp"
+#endif
+#if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
+#include "../../native/awdl_data_tx_trace.hpp"
+#endif
 
 struct iwx_rx_packet;
 struct iwx_rx_data;
@@ -88,7 +94,13 @@ enum class TahoeP2PActionTxSubmitStage : uint32_t {
     kDoorbellIssued = 18,
     kPostDoorbellFinish = 19,
     kPreDoorbellCancelFailed = 20,
-    kExistingTicketUnknown = 21
+    kExistingTicketUnknown = 21,
+    kNativeAwdlIdentity = 22,
+    kExperimentalDeadline = 23
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332)
+    ,
+    kControlSubmitFence = 24
+#endif
 };
 
 struct TahoeP2PActionTxPreArmDiagnostics {
@@ -130,6 +142,70 @@ struct TahoeP2PActionTxDrainDiagnostics {
           lastContextGeneration(0), lastTicketGeneration(0),
           lastTicketFlags(0), lastHardStop(0), lastActionState(0) {}
 };
+
+#if defined(ITL_NATIVE_AWDL_TX_EVIDENCE_25G332)
+struct TahoeP2PActionTxSubmitMetadata {
+    uint64_t diagnosticGeneration;
+    NativeAwdlTxWindowEvidence::Epoch epoch;
+    NativeAwdlTxWindowEvidence::FrameKind frameKind;
+    uint32_t frameOrdinal;
+};
+
+struct TahoeP2PActionTxEvidenceSidecar {
+    uint64_t ticketToken;
+    uint32_t deviceFamily;
+    uint32_t txCommandApi;
+    uint32_t txLayout;
+    uint32_t statusFlags;
+    bool used;
+
+    TahoeP2PActionTxEvidenceSidecar()
+        : ticketToken(0), deviceFamily(0), txCommandApi(0), txLayout(0),
+          statusFlags(0), used(false) {}
+};
+
+enum TahoeP2PActionTxEvidenceStatusFlag : uint32_t {
+    kP2PTxEvidenceDoorbellMarked = 1u << 0,
+    kP2PTxEvidenceDoorbellIssued = 1u << 1,
+    kP2PTxEvidenceSubmitLowerValid = 1u << 2,
+    kP2PTxEvidenceCompletionUpperValid = 1u << 3,
+    kP2PTxEvidenceFirmwareSuccess = 1u << 4,
+    kP2PTxEvidenceUnbound = 1u << 5,
+    kP2PTxEvidenceFirmwareFailure = 1u << 6,
+    kP2PTxEvidenceInvalidUnknown = 1u << 7,
+    kP2PTxEvidencePostDoorbellFinishFailure = 1u << 8
+};
+
+struct TahoeP2PActionTxWindowEvidence {
+    NativeAwdlTxWindowEvidence::Ledger ledger;
+    NativeAwdlTxWindowEvidence::TicketIdentity pendingIdentity;
+    NativeAwdlTxWindowEvidence::Epoch epoch;
+    TahoeP2PActionTxEvidenceSidecar sidecars[
+        NativeAwdlTxWindowEvidence::kTicketCapacity];
+    uint64_t diagnosticGeneration;
+    uint64_t nextTicketSerial;
+    uint64_t snapshotVersion;
+    uint64_t lastPublishedSnapshotVersion;
+    uint32_t pendingStatusFlags;
+    uint32_t droppedTicketCount;
+    uint32_t pendingSidecarIndex;
+    uint32_t pendingDeviceFamily;
+    uint32_t pendingTxCommandApi;
+    uint32_t pendingTxLayout;
+    bool initialized;
+    bool pendingTicketPrepared;
+    bool pendingIdentityValid;
+
+    TahoeP2PActionTxWindowEvidence()
+        : ledger(), pendingIdentity{}, epoch{}, sidecars{},
+          diagnosticGeneration(0), nextTicketSerial(0), snapshotVersion(0),
+          lastPublishedSnapshotVersion(0), pendingStatusFlags(0),
+          droppedTicketCount(0), pendingSidecarIndex(0xffffffffu),
+          pendingDeviceFamily(0), pendingTxCommandApi(0), pendingTxLayout(0),
+          initialized(false), pendingTicketPrepared(false),
+          pendingIdentityValid(false) {}
+};
+#endif
 
 /* Numeric-only RX-path telemetry. All concurrent access uses __atomic_* ops. */
 struct TahoeP2PTxRxDiagnostics {
@@ -203,6 +279,12 @@ struct TahoeP2PActionTxContext {
     TahoeP2PActionTxPreArmDiagnostics preArmDiagnostics;
     TahoeP2PActionTxSubmitDiagnostics submitDiagnostics;
     TahoeP2PActionTxDrainDiagnostics drainDiagnostics;
+#if defined(ITL_NATIVE_AWDL_TX_EVIDENCE_25G332)
+    TahoeP2PActionTxWindowEvidence windowEvidence;
+#endif
+#if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
+    NativeAwdlDataTxTrace::Ledger dataTxTrace;
+#endif
     uint32_t generation;
     uint32_t rocToken;
     uint16_t queueId;
@@ -223,18 +305,51 @@ struct TahoeP2PActionTxContext {
           state(TahoeP2PActionTxState::kIdle) {}
 };
 
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332)
+struct TahoeP2PActionTxControlSubmitFence {
+    uint64_t phaseOriginUs;
+    uint64_t peerMifRxUs;
+    uint64_t effectiveEndUs;
+    uint64_t preparedFrameUs;
+    uint64_t preparedFrameMaxAgeUs;
+    uint64_t contextGeneration;
+    uint64_t powerGeneration;
+    uint64_t stationGeneration;
+    uint64_t rocGeneration;
+};
+#endif
+
 /*
  * Call under the serialized native P2P mainGate after re-reading the same ROC
  * tracker. It consumes `frame` on every return path. It accepts one caller-built
  * Action MPDU only during an observed, still-open ROC. It never borrows a STA
  * node or STA queue. Success means doorbell submitted, not peer receipt.
+ * The discovery experiment can add a host-monotonic estimated submit window
+ * and station generation. The estimate is not RF airtime proof; all-zero
+ * optional arguments retain the legacy behavior.
  */
 int iwx_tahoe_p2p_action_tx_submit(
     ItlIwx *owner, struct iwx_softc *sc,
     TahoeP2PTxQueueLease *queueLease,
     TahoeP2PActionTxContext *context,
     uint32_t rocToken, bool rocStartObserved, bool rocEndObserved,
-    mbuf_t frame, uint64_t nativeDataToken = 0);
+    mbuf_t frame, uint64_t nativeDataToken = 0
+#if defined(ITL_NATIVE_AWDL_TX_EVIDENCE_25G332)
+    , const TahoeP2PActionTxSubmitMetadata *evidenceMetadata = nullptr
+#endif
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332)
+    , uint64_t estimatedNotBeforeUs = 0,
+    uint64_t estimatedDeadlineUs = 0,
+    uint32_t experimentalStationGeneration = 0,
+    const TahoeP2PActionTxControlSubmitFence *controlSubmitFence = nullptr
+#endif
+    );
+
+#if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
+// Drain the one-shot address-free Qm wire snapshot from the deferred main-gate
+// collector. A missing return value means no record was published.
+bool iwx_tahoe_p2p_action_publish_pending_qm_wire_snapshot(ItlIwx *owner);
+#endif
 
 /*
  * Call under the same native P2P mainGate, before the generic IWX_REPLY_TX handler.
@@ -268,5 +383,10 @@ void iwx_tahoe_p2p_action_tx_observe_rx(
 void iwx_tahoe_p2p_action_tx_firmware_drained(
     TahoeP2PActionTxContext *context, uint32_t newGeneration,
     bool firmwareStoppedAndRxTxDrained);
+
+#if defined(ITL_NATIVE_AWDL_TX_EVIDENCE_25G332)
+void iwx_tahoe_p2p_action_tx_mark_evidence_unknown(
+    TahoeP2PActionTxContext *context, uint32_t additionalFlags);
+#endif
 
 #endif // AIRPORT_TAHOE

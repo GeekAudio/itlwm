@@ -192,10 +192,220 @@ void testPacketObservation()
         (void)NativeAwdlData::observeAwdlTxPacket(packet, length, kOwnMac);
 }
 
+constexpr uint8_t kAirdropName[] = {
+    8, '_','a','i','r','d','r','o','p', 4, '_','t','c','p',
+    5, 'l','o','c','a','l', 0
+};
+
+size_t appendQuestion(uint8_t *dns, size_t offset, const uint8_t *name,
+                      size_t nameLength, uint16_t qclass)
+{
+    memcpy(dns + offset, name, nameLength);
+    offset += nameLength;
+    putBe16(dns + offset, 12); // PTR
+    putBe16(dns + offset + 2, qclass);
+    return offset + 4;
+}
+
+size_t makeDnsPacket(uint8_t *packet, const uint8_t *questions,
+                     size_t questionBytes, uint16_t questionCount,
+                     uint16_t dnsFlags, uint16_t sourcePort,
+                     uint16_t destinationPort)
+{
+    const size_t dnsLength = 12 + questionBytes;
+    const size_t udpLength = 8 + dnsLength;
+    const size_t ethernetLength = 14 + 40 + udpLength;
+    memset(packet, 0, ethernetLength);
+    const uint8_t destinationMac[6] = {0x33, 0x33, 0, 0, 0, 0xfb};
+    memcpy(packet, destinationMac, sizeof(destinationMac));
+    memcpy(packet + 6, kOwnMac, sizeof(kOwnMac));
+    putBe16(packet + 12, 0x86dd);
+    uint8_t *ipv6 = packet + 14;
+    ipv6[0] = 0x60;
+    putBe16(ipv6 + 4, static_cast<uint16_t>(udpLength));
+    ipv6[6] = 17;
+    ipv6[7] = 255;
+    const uint8_t source[16] = {
+        0xfe, 0x80, 0, 0, 0, 0, 0, 0,
+        0x00, 0x11, 0x22, 0xff, 0xfe, 0x33, 0x44, 0x55
+    };
+    const uint8_t destination[16] = {
+        0xff, 0x02, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0xfb
+    };
+    memcpy(ipv6 + 8, source, sizeof(source));
+    memcpy(ipv6 + 24, destination, sizeof(destination));
+    uint8_t *udp = ipv6 + 40;
+    putBe16(udp, sourcePort);
+    putBe16(udp + 2, destinationPort);
+    putBe16(udp + 4, static_cast<uint16_t>(udpLength));
+    uint8_t *dns = udp + 8;
+    putBe16(dns + 2, dnsFlags);
+    putBe16(dns + 4, questionCount);
+    if (questionBytes)
+        memcpy(dns + 12, questions, questionBytes);
+    putBe16(udp + 6, makeUdpChecksum(ipv6, udp, udpLength));
+    return ethernetLength;
+}
+
+NativeAwdlData::TxObservation observeDns(
+    uint8_t *packet, size_t length, uint16_t sourcePort,
+    uint16_t destinationPort, uint16_t questionClass = 1,
+    uint16_t dnsFlags = 0)
+{
+    uint8_t question[64]{};
+    const size_t bytes = appendQuestion(question, 0, kAirdropName,
+        sizeof(kAirdropName), questionClass);
+    const size_t lengthOut = makeDnsPacket(packet, question, bytes, 1,
+        dnsFlags, sourcePort, destinationPort);
+    assert(length >= lengthOut);
+    return NativeAwdlData::observeAwdlTxPacket(packet, lengthOut, kOwnMac);
+}
+
+void testMdnsAirdropQueryClassification()
+{
+    uint8_t packet[14 + 40 + 8 + 12 + 2 * (sizeof(kAirdropName) + 4)]{};
+    auto result = observeDns(packet, sizeof(packet), 49152, 5353);
+    assert(result.mdnsQuery.queryClass ==
+           NativeAwdlData::MdnsQueryClass::LegacyUnicastReply);
+    assert(!result.mdnsQuery.sourcePortIs5353);
+    assert(result.mdnsQuery.destinationPortIs5353);
+    assert(result.mdnsQuery.destinationIsFf02Fb);
+    assert(result.mdnsQuery.headerParsed && result.mdnsQuery.qr == 0);
+    assert(result.mdnsQuery.questionCount == 1);
+    assert(result.mdnsQuery.targetPtrInQuestionCount == 1);
+    assert(result.mdnsQuery.quQuestionMask == 0);
+
+    result = observeDns(packet, sizeof(packet), 5353, 5353, 0x8001);
+    assert(result.mdnsQuery.queryClass ==
+           NativeAwdlData::MdnsQueryClass::QuUnicastPreferred);
+    assert(result.mdnsQuery.sourcePortIs5353 &&
+           result.mdnsQuery.destinationPortIs5353);
+    assert(result.mdnsQuery.quQuestionMask == 1);
+
+    result = observeDns(packet, sizeof(packet), 5353, 5353, 1, 1u << 9);
+    assert(result.mdnsQuery.queryClass ==
+           NativeAwdlData::MdnsQueryClass::QmMulticast);
+    assert(result.mdnsQuery.tc == 1);
+    assert(result.mdnsQuery.quQuestionMask == 0);
+
+    // A second question uses a legal backward compression pointer to the
+    // first question name; both IN/PTR questions are classified as QM.
+    uint8_t multi[2 * (sizeof(kAirdropName) + 4)]{};
+    size_t multiLength = appendQuestion(multi, 0, kAirdropName,
+        sizeof(kAirdropName), 1);
+    const size_t firstNameOffset = 12;
+    multi[multiLength++] = static_cast<uint8_t>(0xc0 | (firstNameOffset >> 8));
+    multi[multiLength++] = static_cast<uint8_t>(firstNameOffset);
+    putBe16(multi + multiLength, 12);
+    putBe16(multi + multiLength + 2, 1);
+    multiLength += 4;
+    const size_t multiPacketLength = makeDnsPacket(packet, multi,
+        multiLength, 2, 0, 5353, 5353);
+    result = NativeAwdlData::observeAwdlTxPacket(
+        packet, multiPacketLength, kOwnMac);
+    assert(result.mdnsQuery.queryClass ==
+           NativeAwdlData::MdnsQueryClass::QmMulticast);
+    assert(result.mdnsQuery.questionCount == 2);
+    assert(result.mdnsQuery.targetPtrInQuestionCount == 2);
+
+    // A mixed QM/QU multi-question packet is valid DNS but not a clean
+    // single-class sample, so it remains Other.
+    multi[multiLength - 2] = 0x80;
+    multi[multiLength - 1] = 0x01;
+    const size_t mixedLength = makeDnsPacket(packet, multi,
+        multiLength, 2, 0, 5353, 5353);
+    result = NativeAwdlData::observeAwdlTxPacket(packet, mixedLength, kOwnMac);
+    assert(result.mdnsQuery.queryClass == NativeAwdlData::MdnsQueryClass::Other);
+    assert(result.mdnsQuery.quQuestionMask == 2);
+
+    result = observeDns(packet, sizeof(packet), 5353, 5353, 1, 0x8000);
+    assert(result.mdnsQuery.queryClass == NativeAwdlData::MdnsQueryClass::Other);
+    assert(result.mdnsQuery.qr == 1);
+
+    // A self-referential compression pointer is malformed and must stay
+    // Unknown rather than being mistaken for an unrelated, valid query.
+    uint8_t cycleQuestion[6] = {0xc0, 0x0c, 0, 12, 0, 1};
+    const size_t cycleLength = makeDnsPacket(packet, cycleQuestion,
+        sizeof(cycleQuestion), 1, 0, 5353, 5353);
+    result = NativeAwdlData::observeAwdlTxPacket(packet, cycleLength, kOwnMac);
+    assert(result.mdnsQuery.queryClass == NativeAwdlData::MdnsQueryClass::Unknown);
+
+    // Header count exceeds the bounded multi-question parser budget.
+    const size_t tooManyLength = makeDnsPacket(packet, nullptr, 0, 9, 0, 5353, 5353);
+    result = NativeAwdlData::observeAwdlTxPacket(packet, tooManyLength, kOwnMac);
+    assert(result.mdnsQuery.headerParsed == 1);
+    assert(result.mdnsQuery.questionCount == 9);
+    assert(result.mdnsQuery.queryClass == NativeAwdlData::MdnsQueryClass::Unknown);
+
+    // Truncated label data cannot be safely called a valid unrelated mDNS
+    // question; the parser must preserve the Unknown result.
+    const uint8_t truncatedQuestion[] = {8, '_'};
+    const size_t truncatedLength = makeDnsPacket(packet, truncatedQuestion,
+        sizeof(truncatedQuestion), 1, 0, 5353, 5353);
+    result = NativeAwdlData::observeAwdlTxPacket(packet,
+        truncatedLength, kOwnMac);
+    assert(result.mdnsQuery.headerParsed == 1);
+    assert(result.mdnsQuery.queryClass == NativeAwdlData::MdnsQueryClass::Unknown);
+
+    // A valid mDNS packet on an unrelated IPv6 multicast group is not a QM
+    // sample for ff02::fb.
+    result = observeDns(packet, sizeof(packet), 5353, 5353, 1);
+    packet[14 + 24 + 15] = 0xfc;
+    uint8_t *ipv6 = packet + 14;
+    uint8_t *udp = ipv6 + 40;
+    const size_t udpLength = 8 + 12 + sizeof(kAirdropName) + 4;
+    putBe16(udp + 6, 0);
+    putBe16(udp + 6, makeUdpChecksum(ipv6, udp, udpLength));
+    result = NativeAwdlData::observeAwdlTxPacket(packet,
+        14 + 40 + 8 + 12 + sizeof(kAirdropName) + 4, kOwnMac);
+    assert(result.mdnsQuery.queryClass == NativeAwdlData::MdnsQueryClass::Other);
+    assert(result.mdnsQuery.destinationIsFf02Fb == 0);
+}
+
+void testMdnsInvalidTransportAndRcodeClassification()
+{
+    uint8_t packet[14 + 40 + 8 + 12 + sizeof(kAirdropName) + 4]{};
+    const size_t length = 14 + 40 + 8 + 12 + sizeof(kAirdropName) + 4;
+
+    // A structurally valid packet with a non-zero mDNS RCODE is not a valid
+    // QM query, but its parsed question facts remain available for diagnosis.
+    auto result = observeDns(packet, sizeof(packet), 5353, 5353, 1, 0x0001);
+    assert(result.udpChecksumStatus == NativeAwdlData::UdpChecksumStatus::Valid);
+    assert(result.mdnsQuery.queryClass == NativeAwdlData::MdnsQueryClass::Other);
+    assert(result.mdnsQuery.headerParsed == 1);
+    assert(result.mdnsQuery.questionCount == 1);
+    assert(result.mdnsQuery.targetPtrInQuestionCount == 1);
+
+    // Keep transport and DNS observations, but never classify a target-shaped
+    // packet with an invalid UDP checksum as Legacy/QU/QM.
+    result = observeDns(packet, sizeof(packet), 5353, 5353);
+    packet[14 + 40 + 6] ^= 0x01;
+    result = NativeAwdlData::observeAwdlTxPacket(packet, length, kOwnMac);
+    assert(result.udpChecksumStatus == NativeAwdlData::UdpChecksumStatus::Invalid);
+    assert(result.mdnsQuery.queryClass == NativeAwdlData::MdnsQueryClass::Unknown);
+    assert(result.mdnsQuery.sourcePortIs5353 == 1);
+    assert(result.mdnsQuery.destinationPortIs5353 == 1);
+    assert(result.mdnsQuery.destinationIsFf02Fb == 1);
+    assert(result.mdnsQuery.headerParsed == 1);
+    assert(result.mdnsQuery.questionCount == 1);
+    assert(result.mdnsQuery.targetPtrInQuestionCount == 1);
+
+    // A malformed UDP length stays Unknown and retains the transport verdict.
+    result = observeDns(packet, sizeof(packet), 5353, 5353);
+    putBe16(packet + 14 + 40 + 4,
+            static_cast<uint16_t>(length - (14 + 40) - 1));
+    result = NativeAwdlData::observeAwdlTxPacket(packet, length, kOwnMac);
+    assert(result.udpChecksumStatus == NativeAwdlData::UdpChecksumStatus::Malformed);
+    assert(result.mdnsQuery.queryClass == NativeAwdlData::MdnsQueryClass::Unknown);
+}
+
 } // namespace
 
 int main()
 {
     testCandidateClassification();
     testPacketObservation();
+    testMdnsAirdropQueryClassification();
+    testMdnsInvalidTransportAndRcodeClassification();
 }

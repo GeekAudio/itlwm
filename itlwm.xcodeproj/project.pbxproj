@@ -21,6 +21,7 @@
 /* End PBXAggregateTarget section */
 
 /* Begin PBXBuildFile section */
+		A72400000000000000000001 /* awdl_tx_window_evidence.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A72400000000000000000002 /* awdl_tx_window_evidence.cpp */; };
 		A72300000000000000000003 /* awdl_data_frame.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A72300000000000000000004 /* awdl_data_frame.cpp */; };
 		A72300000000000000000001 /* awdl_native_bsd_data_25G332.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A72300000000000000000002 /* awdl_native_bsd_data_25G332.cpp */; };
 		A72200000000000000000005 /* awdl_native_lifecycle_25G332.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A72200000000000000000006 /* awdl_native_lifecycle_25G332.cpp */; };
@@ -1202,6 +1203,7 @@
 /* End PBXContainerItemProxy section */
 
 /* Begin PBXFileReference section */
+		A72400000000000000000002 /* awdl_tx_window_evidence.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = native/awdl_tx_window_evidence.cpp; sourceTree = "<group>"; };
 		A72300000000000000000004 /* awdl_data_frame.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = native/awdl_data_frame.cpp; sourceTree = "<group>"; };
 		A72300000000000000000002 /* awdl_native_bsd_data_25G332.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = native/awdl_native_bsd_data_25G332.cpp; sourceTree = "<group>"; };
 		A72200000000000000000006 /* awdl_native_lifecycle_25G332.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = native/awdl_native_lifecycle_25G332.cpp; sourceTree = "<group>"; };
@@ -1575,6 +1577,7 @@
 				8A4535F8288D5654CEC8FECD /* p2p_hal_probe.cpp */,
 				34FAA69AF16873FA3C660CE7 /* ItlIwxP2PRoc.cpp */,
 				FA08282755E6F14B4D0A5552 /* p2p_action_tx.cpp */,
+				A72400000000000000000002 /* awdl_tx_window_evidence.cpp */,
 				A71F00000000000000000004 /* awdl_action_encode.cpp */,
 				A71F00000000000000000005 /* awdl_bounded_psf_plan.cpp */,
 				A71F00000000000000000006 /* awdl_psf_tx_gate.cpp */,
@@ -3495,6 +3498,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A72400000000000000000001 /* awdl_tx_window_evidence.cpp in Sources */,
 				7A374B92FC24DD3E798E84D4 /* ItlIwxP2PRoc.cpp in Sources */,
 				B7C8C571F409F82CB5F59598 /* p2p_action_tx.cpp in Sources */,
 				9F72DFD4A22BABACBE15945B /* p2p_tx_resources.cpp in Sources */,

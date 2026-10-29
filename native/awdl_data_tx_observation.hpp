@@ -14,6 +14,203 @@ enum class UdpChecksumStatus : uint8_t {
     Malformed = 3
 };
 
+// Only identifies the on-wire DNS-SD query class. It does not claim a reply,
+// peer identity, or AirDrop service discovery.
+enum class MdnsQueryClass : uint8_t {
+    Unknown = 0, // Unsupported/truncated DNS/IPv6 or invalid mDNS-port UDP.
+    LegacyUnicastReply = 1,
+    QuUnicastPreferred = 2,
+    QmMulticast = 3,
+    Other = 4 // Non-mDNS UDP or DNS outside the supported target query classes.
+};
+
+struct MdnsQueryObservation {
+    MdnsQueryClass queryClass;
+    uint8_t sourcePortIs5353;
+    uint8_t destinationPortIs5353;
+    uint8_t destinationIsFf02Fb;
+    uint8_t headerParsed;
+    uint8_t qr;
+    uint8_t tc;
+    uint16_t questionCount;
+    uint16_t targetPtrInQuestionCount;
+    uint8_t quQuestionMask;
+};
+
+inline uint16_t txObservationReadBe16(const uint8_t *bytes);
+
+inline uint8_t mdnsAsciiLower(uint8_t value)
+{
+    return value >= 'A' && value <= 'Z'
+        ? static_cast<uint8_t>(value + ('a' - 'A')) : value;
+}
+
+// Decode one possibly-compressed DNS name. All reads are length checked,
+// labels are limited to 63 bytes, the expanded wire name to 255 bytes, pointer
+// chains to 16, and total steps to 128. RFC compression pointers must point
+// backwards, which also prevents loops without dynamic allocation.
+inline bool parseMdnsQuestionName(const uint8_t *dns, size_t dnsLength,
+                                  size_t *position, uint8_t *name,
+                                  size_t nameCapacity, size_t *nameLength)
+{
+    if (!dns || !position || !name || !nameLength || *position >= dnsLength)
+        return false;
+    size_t cursor = *position;
+    size_t consumed = 0;
+    size_t output = 0;
+    uint16_t pointerOffsets[16]{};
+    size_t pointerCount = 0;
+    unsigned steps = 0;
+    bool jumped = false;
+    while (steps++ < 128) {
+        if (cursor >= dnsLength)
+            return false;
+        const uint8_t label = dns[cursor];
+        if ((label & 0xc0u) == 0xc0u) {
+            if (cursor + 2 > dnsLength)
+                return false;
+            const size_t target = (static_cast<size_t>(label & 0x3fu) << 8) |
+                dns[cursor + 1];
+            if (target >= cursor || target >= dnsLength || pointerCount >= 16)
+                return false;
+            for (size_t i = 0; i < pointerCount; ++i)
+                if (pointerOffsets[i] == target)
+                    return false;
+            pointerOffsets[pointerCount++] = static_cast<uint16_t>(target);
+            if (!jumped)
+                consumed += 2;
+            cursor = target;
+            jumped = true;
+            continue;
+        }
+        if ((label & 0xc0u) != 0 || label > 63 ||
+            cursor + 1u + label > dnsLength || output + 1u + label > nameCapacity ||
+            output + 1u + label > 255)
+            return false;
+        name[output++] = label;
+        if (!jumped)
+            consumed += 1u + label;
+        ++cursor;
+        if (label == 0) {
+            *position += consumed;
+            *nameLength = output;
+            return true;
+        }
+        for (size_t i = 0; i < label; ++i)
+            name[output++] = mdnsAsciiLower(dns[cursor + i]);
+        cursor += label;
+    }
+    return false;
+}
+
+inline bool isAirdropPtrInName(const uint8_t *name, size_t length)
+{
+    static const uint8_t expected[] = {
+        8, '_','a','i','r','d','r','o','p',
+        4, '_','t','c','p',
+        5, 'l','o','c','a','l', 0
+    };
+    if (length != sizeof(expected))
+        return false;
+    uint8_t difference = 0;
+    for (size_t i = 0; i < sizeof(expected); ++i)
+        difference |= name[i] ^ expected[i];
+    return difference == 0;
+}
+
+inline MdnsQueryObservation observeMdnsAirdropQuery(
+    const uint8_t *ipv6, const uint8_t *udp, size_t udpLength,
+    UdpChecksumStatus checksumStatus)
+{
+    MdnsQueryObservation result{};
+    result.queryClass = MdnsQueryClass::Unknown;
+    if (!ipv6 || !udp || udpLength < 8 || udpLength > 65535)
+        return result;
+
+    const uint16_t sourcePort = txObservationReadBe16(udp);
+    const uint16_t destinationPort = txObservationReadBe16(udp + 2);
+    result.sourcePortIs5353 = sourcePort == 5353;
+    result.destinationPortIs5353 = destinationPort == 5353;
+    const uint8_t *destination = ipv6 + 24;
+    bool group = destination[0] == 0xff && destination[1] == 0x02 &&
+        destination[15] == 0xfb;
+    for (size_t i = 2; i < 15; ++i)
+        group = group && destination[i] == 0;
+    result.destinationIsFf02Fb = group;
+    if (!result.sourcePortIs5353 && !result.destinationPortIs5353) {
+        result.queryClass = MdnsQueryClass::Other;
+        return result;
+    }
+
+    const uint8_t *dns = udp + 8;
+    const size_t dnsLength = udpLength - 8;
+    if (dnsLength < 12)
+        return result;
+    const uint16_t flags = txObservationReadBe16(dns + 2);
+    result.qr = static_cast<uint8_t>((flags >> 15) & 1u);
+    result.tc = static_cast<uint8_t>((flags >> 9) & 1u);
+    result.questionCount = txObservationReadBe16(dns + 4);
+    result.headerParsed = 1;
+    if (result.qr || ((flags >> 11) & 0x0fu) != 0 ||
+        result.questionCount == 0) {
+        result.queryClass = checksumStatus == UdpChecksumStatus::Valid
+            ? MdnsQueryClass::Other : MdnsQueryClass::Unknown;
+        return result;
+    }
+    if (result.questionCount > 8)
+        return result; // Valid header, query analysis is outside the fixed bound.
+
+    size_t offset = 12;
+    bool allQuestionsTarget = true;
+    bool quValue = false;
+    bool haveQuValue = false;
+    bool mixedQu = false;
+    for (uint16_t i = 0; i < result.questionCount; ++i) {
+        uint8_t name[255]{};
+        size_t nameLength = 0;
+        if (!parseMdnsQuestionName(dns, dnsLength, &offset, name,
+                                   sizeof(name), &nameLength) ||
+            offset + 4 > dnsLength)
+            return result;
+        const uint16_t type = txObservationReadBe16(dns + offset);
+        const uint16_t qclass = txObservationReadBe16(dns + offset + 2);
+        offset += 4;
+        const bool qu = (qclass & 0x8000u) != 0;
+        if (qu)
+            result.quQuestionMask |= static_cast<uint8_t>(1u << i);
+        if (!haveQuValue) {
+            quValue = qu;
+            haveQuValue = true;
+        } else if (qu != quValue) {
+            mixedQu = true;
+        }
+        const bool target = type == 12 && (qclass & 0x7fffu) == 1 &&
+            isAirdropPtrInName(name, nameLength);
+        if (target)
+            ++result.targetPtrInQuestionCount;
+        else
+            allQuestionsTarget = false;
+    }
+    // Keep parsed ports, DNS header, questions, and QU mask for diagnosis,
+    // but never present an invalid mDNS-port transport packet as Legacy/QU/QM.
+    if (checksumStatus != UdpChecksumStatus::Valid)
+        return result;
+    // RFC 6762 section 18.11 requires the mDNS response-code field to be zero.
+    if ((flags & 0x000fu) != 0) {
+        result.queryClass = MdnsQueryClass::Other;
+    } else if (!group || !allQuestionsTarget || mixedQu) {
+        result.queryClass = MdnsQueryClass::Other;
+    } else if (!result.sourcePortIs5353 && result.destinationPortIs5353) {
+        result.queryClass = MdnsQueryClass::LegacyUnicastReply;
+    } else if (result.sourcePortIs5353 && result.destinationPortIs5353) {
+        result.queryClass = quValue ? MdnsQueryClass::QuUnicastPreferred
+                                    : MdnsQueryClass::QmMulticast;
+    } else {
+        result.queryClass = MdnsQueryClass::Other;
+    }
+    return result;
+}
+
 // Numeric-only facts from the actual BSD Ethernet packet immediately before
 // it is encoded as an AWDL MPDU. No address, payload, or checksum bytes escape.
 struct TxObservation {
@@ -28,6 +225,8 @@ struct TxObservation {
     uint8_t ethernetMulticastMappingMatches;
     UdpChecksumStatus udpChecksumStatus;
     uint8_t ipv6PacketWellFormed;
+    uint8_t ipv6DestinationIsAirdropMdnsGroup;
+    MdnsQueryObservation mdnsQuery;
 };
 
 struct TxObservationDelta {
@@ -166,6 +365,10 @@ inline TxObservation observeAwdlTxPacket(const uint8_t *ethernet,
     result.udpChecksumStatus = checksum != 0 &&
             txObservationChecksumValid(ipv6, udp, udpLength)
         ? UdpChecksumStatus::Valid : UdpChecksumStatus::Invalid;
+    result.mdnsQuery = observeMdnsAirdropQuery(
+        ipv6, udp, udpLength, result.udpChecksumStatus);
+    result.ipv6DestinationIsAirdropMdnsGroup =
+        result.mdnsQuery.destinationIsFf02Fb;
     return result;
 }
 

@@ -58,6 +58,7 @@ SHIM = r"""
 #include "native/awdl_action_frame.hpp"
 #include "native/awdl_action_encode.hpp"
 #include "native/awdl_mif_encode.hpp"
+#include "native/iwx_tx_ring_capacity.hpp"
 #define IEEE80211_FC0_TYPE_DATA 0x08
 
 using caddr_t = char *;
@@ -602,7 +603,7 @@ struct Fixture {
 
     int submit(mbuf_t frame) {
         return iwx_tahoe_p2p_action_tx_submit(
-            &owner, &owner.com, &lease, &context, 55, true, false, frame);
+            &owner, &owner.com, &lease, &context, 55, true, false, frame, 0);
     }
     bool response(iwx_rx_packet &packet) {
         packet.hdr.group_id = packet.rawGroup;
@@ -651,7 +652,7 @@ static void genericStaFallback(iwx_softc &sc, iwx_rx_packet &packet) {
         const uint32_t ssn = read32(packet.data + 44) & 0xfff;
         uint16_t index = 0;
         if (ring->queued <= 0 ||
-            !iwx_tx_response_index(ring, ssn, &index))
+            !iwx_tx_response_index(qid, ring, ssn, &index))
             return;
         assert(index < ring->ring_count);
     }
@@ -1547,9 +1548,17 @@ def main():
             raw_observer < dispatch_switch < response_case < generic)
     assert source_guard.rfind("iwx_tahoe_p2p_action_tx_response(", response_case, generic) >= response_case
     generic_handler = source_guard.index("iwx_rx_tx_cmd(struct iwx_softc")
-    assert "if (requiredLength > payloadLength)\n        return;" in source_guard[generic_handler:]
-    assert "if (!iwx_tx_response_ring(sc, queueId, &ring))\n        return;" in source_guard[generic_handler:]
-    assert "!iwx_tx_response_index(ring, ssn, &checkedIndex)" in source_guard[generic_handler:]
+    # The guards retain their original return, with an observation-only
+    # reason inside the block. Inspect the complete guarded block rather
+    # than requiring the pre-instrumentation brace/whitespace spelling.
+    handler = source_guard[generic_handler:]
+    length_exit = extract_function(handler, "if (requiredLength > payloadLength)")
+    ring_exit = extract_function(handler, "if (!iwx_tx_response_ring(sc, queueId, &ring))")
+    assert length_exit.count("return;") == 1
+    assert "IWX_TX_COMPLETION_TX_RSP_DECLARED_LENGTH_TRUNCATED" in length_exit
+    assert ring_exit.count("return;") == 1
+    assert "IWX_TX_COMPLETION_TX_RSP_QUEUE_OR_RING_UNADDRESSABLE" in ring_exit
+    assert "!iwx_tx_response_index(queueId, ring, ssn, &checkedIndex)" in source_guard[generic_handler:]
     with tempfile.TemporaryDirectory(prefix="itl-p2p-action-hal-") as temp:
         cpp = Path(temp) / "action_hal_test.cpp"
         binary = Path(temp) / "action_hal_test"

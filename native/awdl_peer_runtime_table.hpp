@@ -4,6 +4,7 @@
 
 #include "awdl_peer_election.hpp"
 #include "awdl_peer_observer.hpp"
+#include "awdl_peer_incarnation.hpp"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -30,6 +31,8 @@ enum class Result : uint8_t {
     kInvalidSourceAddress,
     kClockRegression,
     kInvalidPsf,
+    kIdentityExhausted,
+    kRevisionExhausted,
     kNone = 0xff
 };
 
@@ -83,20 +86,62 @@ struct PeerSnapshot {
     bool tracked;
     bool hasMif;
     bool mifFresh;
+    bool historyCompatible; // Same-source PSF/MIF master/sync/map match only.
     bool syncConsistent;
     bool mifRxGp2TimestampPresent;
     bool electionV2;
 };
 
-// Full, address-free view of one peer's PSF advertisement. Kept separate
-// from PeerSnapshot's MIF history and returned one slot at a time so the
-// worker's fixed 4 KiB Snapshot stack budget remains unchanged.
+// Narrow same-entry MIF witness for the experimental current-slot mode.
+// The first three generations come from the private runtime-table Entry;
+// ROC generation is a consumer-side transaction epoch and is added by the
+// serialized caller when it binds this witness to one active ROC window.
+// This intentionally copies decoded scalar fields, never a raw frame or the
+// 4 KiB peer table.
+struct MifWitness {
+    uint64_t peerIncarnation;
+    uint64_t mifRevision;
+    uint64_t rxMonotonicUs;
+    uint64_t rxAgeUs;
+    uint64_t contextGeneration;
+    uint64_t powerGeneration;
+    uint64_t stationGeneration;
+    uint32_t rxGp2Us;
+    uint32_t phyTxTimestampUs;
+    uint32_t targetTxTimestampUs;
+    uint16_t awCounter; // Raw nextAwSequence; contract maps /4 to AW index.
+    uint16_t txDownCounterTu;
+    uint16_t awPeriodTu;
+    uint16_t actionFramePeriodTu;
+    uint16_t nextAwSequence;
+    uint8_t presenceMode;
+    uint16_t rxChannel;
+    uint8_t canonicalSlots[16]; // Canonical type-18 sequence.
+    bool present;
+    bool complete;
+    bool syncConsistent;
+    bool fresh;
+    bool rxGp2Present;
+    bool presenceModePresent;
+    bool awCounterSemanticVerified;
+    bool type18Present;
+    bool type18Valid;
+};
+
+// Full, address-free view of one peer's PSF advertisement and its same-entry
+// MIF binding. The private source-address key never crosses this API.
 struct PsfPeerSnapshot {
     uint64_t psfAgeUs;
     uint64_t contextGeneration;
     uint64_t powerGeneration;
     uint64_t stationGeneration;
     uint64_t psfRxMonotonicUs;
+    uint64_t peerIncarnation; // Opaque table-lifetime identity; never an address.
+    uint64_t psfRevision; // Monotonic within peerIncarnation; zero means absent.
+    uint64_t mifRevision; // Monotonic within peerIncarnation; zero means absent.
+    uint64_t mifRxMonotonicUs;
+    uint64_t mifAgeUs;
+    MifWitness mif; // Atomic decoded copy from this same Entry.
     uint32_t psfRxGp2TimestampUs;
     uint32_t phyTxTimestampUs;
     uint32_t targetTxTimestampUs;
@@ -106,6 +151,7 @@ struct PsfPeerSnapshot {
     uint32_t ownMetric;
     uint32_t ownCounter;
     uint16_t rxChannel;
+    uint16_t mifRxChannel;
     uint16_t txDownCounterTu;
     uint16_t awPeriodTu;
     uint16_t actionFramePeriodTu;
@@ -117,6 +163,10 @@ struct PsfPeerSnapshot {
     uint8_t version;
     uint8_t deviceClass;
     bool tracked;
+    bool hasMif;
+    bool mifFresh;
+    bool historyCompatible; // Same-entry PSF/MIF master/sync/map match only.
+    bool mifSyncConsistent;
     bool hasPsf;
     bool psfFresh;
     bool syncConsistent;
@@ -129,6 +179,27 @@ struct PsfPeerSnapshot {
     uint8_t embeddedMismatchChannel;
     uint8_t canonicalMismatchChannel;
     bool electionV2;
+};
+
+// Minimal, address-free MIF entry view for the Test070 control bootstrap.
+// Unlike PsfPeerSnapshot, this can represent a valid MIF-only entry. It
+// deliberately omits decoded PHY/GP2/embedded-PSF fields so callers cannot
+// treat the MIF as a synchronized schedule or clock witness.
+struct MifPeerSnapshot {
+    uint64_t contextGeneration;
+    uint64_t powerGeneration;
+    uint64_t stationGeneration;
+    uint64_t peerIncarnation;
+    uint64_t mifRevision;
+    uint64_t mifRxMonotonicUs;
+    uint64_t mifAgeUs;
+    uint16_t rxChannel;
+    bool tracked;
+    bool hasMif;
+    bool hasPsf;
+    bool mifFresh;
+    bool complete;
+    bool syncConsistent;
 };
 
 struct Snapshot {
@@ -167,27 +238,49 @@ struct SelectionSummary {
     bool followsPeer;
 };
 
+// Evidence copied from the existing runtime-table decode call. It is optional
+// and adds no second parser/decoder invocation or peer-table state.
+struct ObserveEvidence {
+    uint32_t decodeAttempted;
+    uint32_t decodeResultPresent;
+    uint32_t decodeStatus;
+    IntelAwdlElection::DecodeDiagnostics decodeDiagnostics;
+};
+
 // Fixed-capacity single-consumer table for captured ActionFrameRecords. The
 // same serialized worker must call observe(), snapshot(), and selectMaster().
 // It retains no raw frame bytes, names, firmware resources, or TX permission.
 class Table {
 public:
     Table();
+    Table(const Table &) = delete;
+    Table &operator=(const Table &) = delete;
+    Table(Table &&) = delete;
+    Table &operator=(Table &&) = delete;
 
     Result observe(const IntelP2PRx::ActionFrameRecord &record,
                    const IntelAwdlPeer::RuntimeEpochs &current,
-                   uint64_t nowMonotonicUs);
+                   uint64_t nowMonotonicUs,
+                   ObserveEvidence *evidence = nullptr);
 
     Snapshot snapshot(const IntelAwdlPeer::RuntimeEpochs &current,
                       uint64_t nowMonotonicUs);
 
-    // Return one address-free PSF advertisement, including its independent
-    // 5 second freshness and same-frame RX/GP2 observation. MIF does not
-    // refresh or replace this state.
+    // Return one address-free PSF plus the same private Entry's MIF binding.
+    // The call is serialized with observe(); MIF and PSF values therefore
+    // share peerIncarnation and table epochs. This does not claim the separate
+    // PeerObserver formal-admission identity.
     bool getPsfSnapshot(uint8_t slot,
                         const IntelAwdlPeer::RuntimeEpochs &current,
                         uint64_t nowMonotonicUs,
                         PsfPeerSnapshot *output);
+
+    // Return an address-free current-epoch MIF view, including MIF-only
+    // entries. This is peer-presence evidence only, never TX permission.
+    bool getMifSnapshot(uint8_t slot,
+                        const IntelAwdlPeer::RuntimeEpochs &current,
+                        uint64_t nowMonotonicUs,
+                        MifPeerSnapshot *output);
 
     // Pure election over MIFs fresh within kMifLeaseTtlUs and internally
     // consistent. This result is diagnostic only and must not schedule TX or
@@ -212,6 +305,9 @@ private:
         uint64_t contextGeneration;
         uint64_t powerGeneration;
         uint64_t stationGeneration;
+        uint64_t peerIncarnation; // Opaque ID assigned at entry creation/reuse.
+        uint64_t psfRevision;
+        uint64_t mifRevision;
         uint32_t mifRxGp2TimestampUs;
         uint32_t psfRxGp2TimestampUs;
         uint16_t rxChannel;
@@ -222,6 +318,7 @@ private:
         bool psfRxGp2TimestampPresent;
         bool hasMif;
         bool hasPsf;
+        bool historyCompatible;
         bool used;
     };
 
@@ -238,6 +335,7 @@ private:
     Entry entries_[kPeerCapacity];
     IntelAwdlPeer::RuntimeEpochs current_;
     uint64_t lastNowUs_;
+    NativeAwdlPeerIdentity::TokenSequence peerIncarnationSequence_;
     uint64_t lastAdmittedContextGeneration_;
     uint32_t admittedTotal_;
     uint32_t updatedTotal_;
@@ -262,6 +360,8 @@ static_assert(sizeof(Snapshot) < 4 * 1024,
               "peer snapshot must remain below the 4 KiB worker stack budget");
 static_assert(sizeof(PsfPeerSnapshot) < 512,
               "single-peer PSF snapshot must remain bounded");
+static_assert(sizeof(MifPeerSnapshot) < 128,
+              "single-peer MIF snapshot must remain bounded");
 static_assert(sizeof(Table) < 12 * 1024,
               "peer election table must remain fixed and small");
 

@@ -7,6 +7,12 @@
 
 namespace NativeAwdl {
 
+// Shared offsets for a complete AWDL action MPDU. Keep producers, parsers,
+// and the HAL's bounded identity verifier on the same wire boundaries.
+constexpr size_t kActionMacHeaderLength = 24;
+constexpr size_t kActionHtControlLength = 4;
+constexpr size_t kAwdlActionHeaderLength = 16;
+
 enum class ParseStatus : uint8_t {
     Ok,
     InvalidArgument,

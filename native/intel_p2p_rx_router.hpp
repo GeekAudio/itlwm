@@ -3,6 +3,7 @@
 #define NATIVE_INTEL_P2P_RX_ROUTER_HPP
 
 #include "awdl_action_frame.hpp"
+#include "awdl_rx_event_timeline.hpp"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -82,6 +83,7 @@ struct ActionFrameRecord {
     uint16_t length;
     RxMacAffinity affinity;
     bool rxGp2TimestampPresent;
+    NativeAwdlRxTrace::EventToken traceToken;
     NativeAwdl::ActionFrameInfo awdl;
     uint8_t bytes[kMaxActionFrameBytes];
 };
@@ -92,6 +94,21 @@ struct Record {
         TimeEventRecord timeEvent;
         ActionFrameRecord actionFrame;
     } payload;
+};
+
+// Output from the router's one real parse call. Passing this by pointer lets
+// the diagnostic caller capture parse/decode status without running a second
+// parser over the frame.
+struct ParseObservation {
+    uint32_t attempted;
+    uint32_t resultPresent;
+    uint32_t envelopePresent;
+    uint32_t subtypePresent;
+    uint32_t subtype;
+    uint32_t actionInfoPresent;
+    NativeAwdl::ParseStatus status;
+    NativeAwdl::ActionFrameInfo actionInfo;
+    NativeAwdl::ParseDiagnostics diagnostics;
 };
 
 static_assert(sizeof(Record) * kQueueDepth <= kQueueMemoryLimitBytes,
@@ -156,7 +173,9 @@ public:
                                const LeaseSnapshot &lease,
                                uint64_t rxMonotonicUs = 0,
                                uint32_t rxGp2TimestampUs = 0,
-                               bool rxGp2TimestampPresent = false);
+                               bool rxGp2TimestampPresent = false,
+                               const NativeAwdlRxTrace::EventToken *traceToken = nullptr,
+                               ParseObservation *parseObservation = nullptr);
 
     // Single-producer (the serialized RX dispatcher), single-consumer queue.
     bool popRecord(Record *record);

@@ -41,6 +41,7 @@ session_helpers = "\n\n".join((
     extract(PROBE, "static bool mifBurstTicketMatchesPreviousCompletion("),
     extract(PROBE, "static NativeAwdlProbe::MifBurstRepeatState mifBurstRepeatState("),
     extract(PROBE, "static NativeAwdlProbe::MifBurstRepeatPlan mifBurstDoorbellPlan("),
+    extract(PROBE, "static void reconcileP2PTxSubmitFrame("),
     extract(PROBE, "static int readRocState("),
     extract(PROBE, "static bool psfQueueProvenUnused("),
     extract(PROBE, "static int runTxProbeSession("),

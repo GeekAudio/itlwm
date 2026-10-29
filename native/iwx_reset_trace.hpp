@@ -3,6 +3,7 @@
 #define GEEK_IWX_RESET_TRACE_HPP
 
 #include <stdint.h>
+#include "iwx_tx_progress_observation.hpp"
 
 // Fixed-size, allocation-free diagnostics for Tahoe iwx stop/recovery paths.
 // Reset writers are serialized by ItlIwx's existing lifecycle fence. Readers
@@ -59,6 +60,7 @@ struct Snapshot {
     uint32_t ieee80211State;
     uint32_t initStage;
     uint32_t initError;
+    uint64_t resetMonotonicNs;
     uint32_t resetReasonCounts[kResetReasonCount];
 
     // The trigger source is the latest recorded queue/defer source. It is not
@@ -67,6 +69,70 @@ struct Snapshot {
     uint32_t lastInitTaskTrigger;
     uint32_t initTaskTriggerRevision;
     uint32_t initTaskTriggerCounts[kInitTaskTriggerCount];
+
+    // A TX watchdog is raised after ordinary STA output has gone without a
+    // TX response/BA notification for its deadline. Preserve the small
+    // numeric queue snapshot independently of subsequent reset publication.
+    uint32_t txWatchdogSequence;
+    uint32_t txWatchdogGeneration;
+    uint32_t txWatchdogDriverFlags;
+    uint32_t txWatchdogInterfaceFlags;
+    uint32_t txWatchdog80211State;
+    uint32_t txWatchdogCountdownAtExpiry;
+    uint32_t txWatchdogArmOutputEpoch;
+    uint32_t txWatchdogArmSequence;
+    uint64_t txWatchdogArmMonotonicNs;
+    uint32_t txWatchdogClearOutputEpoch;
+    uint32_t txWatchdogClearSequence;
+    uint32_t txWatchdogClearReason;
+    uint64_t txWatchdogClearMonotonicNs;
+    uint64_t txWatchdogExpiryMonotonicNs;
+    uint32_t txWatchdogProducerSnapshotAvailable;
+    uint32_t txWatchdogNonemptyQueueCount;
+    uint32_t txWatchdogTotalQueued;
+    uint32_t txWatchdogQueueBitmap;
+    uint32_t txWatchdogP2pQueueBitmap;
+    uint32_t txWatchdogP2pLeaseFlags;
+    uint32_t txWatchdogMaxQueueId;
+    uint32_t txWatchdogMaxQueueDepth;
+    uint32_t txWatchdogBaTidMask;
+    uint32_t txWatchdogBaQueueBitmap;
+    uint64_t txWatchdogBaTidQueueMap;
+    // Zero means queue/node state was intentionally not read because a
+    // common synchronization proof was unavailable. Zero-valued counters
+    // must never be interpreted as proof that the queues were empty.
+    uint32_t txWatchdogQueueSnapshotAvailable;
+};
+
+struct TxWatchdogSnapshot {
+    uint32_t generation;
+    uint32_t driverFlags;
+    uint32_t interfaceFlags;
+    uint32_t ieee80211State;
+    uint32_t countdownAtExpiry;
+    uint32_t armOutputEpoch;
+    uint32_t armSequence;
+    uint64_t armMonotonicNs;
+    uint32_t clearOutputEpoch;
+    uint32_t clearSequence;
+    uint32_t clearReason;
+    uint64_t clearMonotonicNs;
+    uint64_t expiryMonotonicNs;
+    uint32_t producerSnapshotAvailable;
+    uint32_t nonemptyQueueCount;
+    uint32_t totalQueued;
+    uint32_t queueBitmap;
+    uint32_t p2pQueueBitmap;
+    uint32_t p2pLeaseFlags;
+    uint32_t maxQueueId;
+    uint32_t maxQueueDepth;
+    uint32_t baTidMask;
+    uint32_t baQueueBitmap;
+    uint64_t baTidQueueMap;
+    uint32_t queueSnapshotAvailable;
+    // Captured by one bounded try-lock at watchdog expiry. This is a set of
+    // last producer events, not a synchronized snapshot of the live rings.
+    iwx_tx_progress_observation_snapshot txProgress;
 };
 
 class Trace {
@@ -74,7 +140,7 @@ public:
     uint32_t recordReset(ResetReason reason, uint32_t generation,
                          uint32_t driverFlags, uint32_t interfaceFlags,
                          uint32_t ieee80211State, uint32_t initStage,
-                         uint32_t initError)
+                         uint32_t initError, uint64_t resetMonotonicNs = 0)
     {
         const uint32_t reasonIndex = indexFor(reason, kResetReasonCount);
 
@@ -93,6 +159,8 @@ public:
         __atomic_store_n(&ieee80211State_, ieee80211State, __ATOMIC_SEQ_CST);
         __atomic_store_n(&initStage_, initStage, __ATOMIC_SEQ_CST);
         __atomic_store_n(&initError_, initError, __ATOMIC_SEQ_CST);
+        __atomic_store_n(&resetMonotonicNs_, resetMonotonicNs,
+                         __ATOMIC_SEQ_CST);
         __atomic_fetch_add(&resetSnapshotVersion_, 1U, __ATOMIC_SEQ_CST);
         return sequence;
     }
@@ -133,6 +201,65 @@ public:
         __atomic_add_fetch(&initTaskTriggerRevision_, 1U, __ATOMIC_SEQ_CST);
     }
 
+    uint32_t recordTxWatchdog(const TxWatchdogSnapshot &sample)
+    {
+        __atomic_fetch_add(&watchdogSnapshotVersion_, 1U, __ATOMIC_SEQ_CST);
+        const uint32_t sequence = __atomic_add_fetch(
+            &watchdogSequence_, 1U, __ATOMIC_SEQ_CST);
+        __atomic_store_n(&watchdogGeneration_, sample.generation,
+                         __ATOMIC_SEQ_CST);
+        __atomic_store_n(&watchdogDriverFlags_, sample.driverFlags,
+                         __ATOMIC_SEQ_CST);
+        __atomic_store_n(&watchdogInterfaceFlags_, sample.interfaceFlags,
+                         __ATOMIC_SEQ_CST);
+        __atomic_store_n(&watchdog80211State_, sample.ieee80211State,
+                         __ATOMIC_SEQ_CST);
+        __atomic_store_n(&watchdogCountdownAtExpiry_, sample.countdownAtExpiry,
+                         __ATOMIC_SEQ_CST);
+        __atomic_store_n(&watchdogArmOutputEpoch_, sample.armOutputEpoch,
+                         __ATOMIC_SEQ_CST);
+        __atomic_store_n(&watchdogArmSequence_, sample.armSequence,
+                         __ATOMIC_SEQ_CST);
+        __atomic_store_n(&watchdogArmMonotonicNs_, sample.armMonotonicNs,
+                         __ATOMIC_SEQ_CST);
+        __atomic_store_n(&watchdogClearOutputEpoch_, sample.clearOutputEpoch,
+                         __ATOMIC_SEQ_CST);
+        __atomic_store_n(&watchdogClearSequence_, sample.clearSequence,
+                         __ATOMIC_SEQ_CST);
+        __atomic_store_n(&watchdogClearReason_, sample.clearReason,
+                         __ATOMIC_SEQ_CST);
+        __atomic_store_n(&watchdogClearMonotonicNs_, sample.clearMonotonicNs,
+                         __ATOMIC_SEQ_CST);
+        __atomic_store_n(&watchdogExpiryMonotonicNs_,
+                         sample.expiryMonotonicNs, __ATOMIC_SEQ_CST);
+        __atomic_store_n(&watchdogProducerSnapshotAvailable_,
+                         sample.producerSnapshotAvailable, __ATOMIC_SEQ_CST);
+        __atomic_store_n(&watchdogNonemptyQueueCount_,
+                         sample.nonemptyQueueCount, __ATOMIC_SEQ_CST);
+        __atomic_store_n(&watchdogTotalQueued_, sample.totalQueued,
+                         __ATOMIC_SEQ_CST);
+        __atomic_store_n(&watchdogQueueBitmap_, sample.queueBitmap,
+                         __ATOMIC_SEQ_CST);
+        __atomic_store_n(&watchdogP2pQueueBitmap_, sample.p2pQueueBitmap,
+                         __ATOMIC_SEQ_CST);
+        __atomic_store_n(&watchdogP2pLeaseFlags_, sample.p2pLeaseFlags,
+                         __ATOMIC_SEQ_CST);
+        __atomic_store_n(&watchdogMaxQueueId_, sample.maxQueueId,
+                         __ATOMIC_SEQ_CST);
+        __atomic_store_n(&watchdogMaxQueueDepth_, sample.maxQueueDepth,
+                         __ATOMIC_SEQ_CST);
+        __atomic_store_n(&watchdogBaTidMask_, sample.baTidMask,
+                         __ATOMIC_SEQ_CST);
+        __atomic_store_n(&watchdogBaQueueBitmap_, sample.baQueueBitmap,
+                         __ATOMIC_SEQ_CST);
+        __atomic_store_n(&watchdogBaTidQueueMap_, sample.baTidQueueMap,
+                         __ATOMIC_SEQ_CST);
+        __atomic_store_n(&watchdogQueueSnapshotAvailable_,
+                         sample.queueSnapshotAvailable, __ATOMIC_SEQ_CST);
+        __atomic_fetch_add(&watchdogSnapshotVersion_, 1U, __ATOMIC_SEQ_CST);
+        return sequence;
+    }
+
     // Bounded read: a busy writer causes a false return and the next existing
     // watchdog/main-gate drain retries. All snapshot words are atomic so the
     // reader is race-free even when it has to discard an inconsistent pass.
@@ -158,12 +285,18 @@ public:
                 &ieee80211State_, __ATOMIC_SEQ_CST);
             value.initStage = __atomic_load_n(&initStage_, __ATOMIC_SEQ_CST);
             value.initError = __atomic_load_n(&initError_, __ATOMIC_SEQ_CST);
+            value.resetMonotonicNs = __atomic_load_n(&resetMonotonicNs_,
+                                                     __ATOMIC_SEQ_CST);
             for (uint32_t i = 0; i < kResetReasonCount; ++i)
                 value.resetReasonCounts[i] = __atomic_load_n(
                     &resetReasonCounts_[i], __ATOMIC_SEQ_CST);
 
             const uint32_t triggerRevisionBefore = __atomic_load_n(
                 &initTaskTriggerRevision_, __ATOMIC_SEQ_CST);
+            const uint32_t watchdogVersionBefore = __atomic_load_n(
+                &watchdogSnapshotVersion_, __ATOMIC_SEQ_CST);
+            if (watchdogVersionBefore & 1U)
+                continue;
             const uint64_t triggerTag = __atomic_load_n(
                 &lastInitTaskTriggerTag_, __ATOMIC_ACQUIRE);
             value.lastInitTaskTriggerSequence =
@@ -178,9 +311,66 @@ public:
                 continue;
             value.initTaskTriggerRevision = triggerRevisionAfter;
 
+            value.txWatchdogSequence = __atomic_load_n(
+                &watchdogSequence_, __ATOMIC_SEQ_CST);
+            value.txWatchdogGeneration = __atomic_load_n(
+                &watchdogGeneration_, __ATOMIC_SEQ_CST);
+            value.txWatchdogDriverFlags = __atomic_load_n(
+                &watchdogDriverFlags_, __ATOMIC_SEQ_CST);
+            value.txWatchdogInterfaceFlags = __atomic_load_n(
+                &watchdogInterfaceFlags_, __ATOMIC_SEQ_CST);
+            value.txWatchdog80211State = __atomic_load_n(
+                &watchdog80211State_, __ATOMIC_SEQ_CST);
+            value.txWatchdogCountdownAtExpiry = __atomic_load_n(
+                &watchdogCountdownAtExpiry_, __ATOMIC_SEQ_CST);
+            value.txWatchdogArmOutputEpoch = __atomic_load_n(
+                &watchdogArmOutputEpoch_, __ATOMIC_SEQ_CST);
+            value.txWatchdogArmSequence = __atomic_load_n(
+                &watchdogArmSequence_, __ATOMIC_SEQ_CST);
+            value.txWatchdogArmMonotonicNs = __atomic_load_n(
+                &watchdogArmMonotonicNs_, __ATOMIC_SEQ_CST);
+            value.txWatchdogClearOutputEpoch = __atomic_load_n(
+                &watchdogClearOutputEpoch_, __ATOMIC_SEQ_CST);
+            value.txWatchdogClearSequence = __atomic_load_n(
+                &watchdogClearSequence_, __ATOMIC_SEQ_CST);
+            value.txWatchdogClearReason = __atomic_load_n(
+                &watchdogClearReason_, __ATOMIC_SEQ_CST);
+            value.txWatchdogClearMonotonicNs = __atomic_load_n(
+                &watchdogClearMonotonicNs_, __ATOMIC_SEQ_CST);
+            value.txWatchdogExpiryMonotonicNs = __atomic_load_n(
+                &watchdogExpiryMonotonicNs_, __ATOMIC_SEQ_CST);
+            value.txWatchdogProducerSnapshotAvailable = __atomic_load_n(
+                &watchdogProducerSnapshotAvailable_, __ATOMIC_SEQ_CST);
+            value.txWatchdogNonemptyQueueCount = __atomic_load_n(
+                &watchdogNonemptyQueueCount_, __ATOMIC_SEQ_CST);
+            value.txWatchdogTotalQueued = __atomic_load_n(
+                &watchdogTotalQueued_, __ATOMIC_SEQ_CST);
+            value.txWatchdogQueueBitmap = __atomic_load_n(
+                &watchdogQueueBitmap_, __ATOMIC_SEQ_CST);
+            value.txWatchdogP2pQueueBitmap = __atomic_load_n(
+                &watchdogP2pQueueBitmap_, __ATOMIC_SEQ_CST);
+            value.txWatchdogP2pLeaseFlags = __atomic_load_n(
+                &watchdogP2pLeaseFlags_, __ATOMIC_SEQ_CST);
+            value.txWatchdogMaxQueueId = __atomic_load_n(
+                &watchdogMaxQueueId_, __ATOMIC_SEQ_CST);
+            value.txWatchdogMaxQueueDepth = __atomic_load_n(
+                &watchdogMaxQueueDepth_, __ATOMIC_SEQ_CST);
+            value.txWatchdogBaTidMask = __atomic_load_n(
+                &watchdogBaTidMask_, __ATOMIC_SEQ_CST);
+            value.txWatchdogBaQueueBitmap = __atomic_load_n(
+                &watchdogBaQueueBitmap_, __ATOMIC_SEQ_CST);
+            value.txWatchdogBaTidQueueMap = __atomic_load_n(
+                &watchdogBaTidQueueMap_, __ATOMIC_SEQ_CST);
+            value.txWatchdogQueueSnapshotAvailable = __atomic_load_n(
+                &watchdogQueueSnapshotAvailable_, __ATOMIC_SEQ_CST);
+            const uint32_t watchdogVersionAfter = __atomic_load_n(
+                &watchdogSnapshotVersion_, __ATOMIC_SEQ_CST);
+
             const uint32_t after = __atomic_load_n(
                 &resetSnapshotVersion_, __ATOMIC_SEQ_CST);
-            if (before == after && !(after & 1U)) {
+            if (before == after && !(after & 1U) &&
+                watchdogVersionBefore == watchdogVersionAfter &&
+                !(watchdogVersionAfter & 1U)) {
                 *out = value;
                 return true;
             }
@@ -205,12 +395,41 @@ private:
     uint32_t ieee80211State_ {0};
     uint32_t initStage_ {0};
     uint32_t initError_ {0};
+    uint64_t resetMonotonicNs_ {0};
     uint32_t resetReasonCounts_[kResetReasonCount] {};
 
     uint32_t initTaskTriggerSequence_ {0};
     uint32_t initTaskTriggerRevision_ {0};
     uint64_t lastInitTaskTriggerTag_ {0};
     uint32_t initTaskTriggerCounts_[kInitTaskTriggerCount] {};
+
+    uint32_t watchdogSnapshotVersion_ {0};
+    uint32_t watchdogSequence_ {0};
+    uint32_t watchdogGeneration_ {0};
+    uint32_t watchdogDriverFlags_ {0};
+    uint32_t watchdogInterfaceFlags_ {0};
+    uint32_t watchdog80211State_ {0};
+    uint32_t watchdogCountdownAtExpiry_ {0};
+    uint32_t watchdogArmOutputEpoch_ {0};
+    uint32_t watchdogArmSequence_ {0};
+    uint64_t watchdogArmMonotonicNs_ {0};
+    uint32_t watchdogClearOutputEpoch_ {0};
+    uint32_t watchdogClearSequence_ {0};
+    uint32_t watchdogClearReason_ {0};
+    uint64_t watchdogClearMonotonicNs_ {0};
+    uint64_t watchdogExpiryMonotonicNs_ {0};
+    uint32_t watchdogProducerSnapshotAvailable_ {0};
+    uint32_t watchdogNonemptyQueueCount_ {0};
+    uint32_t watchdogTotalQueued_ {0};
+    uint32_t watchdogQueueBitmap_ {0};
+    uint32_t watchdogP2pQueueBitmap_ {0};
+    uint32_t watchdogP2pLeaseFlags_ {0};
+    uint32_t watchdogMaxQueueId_ {0};
+    uint32_t watchdogMaxQueueDepth_ {0};
+    uint32_t watchdogBaTidMask_ {0};
+    uint32_t watchdogBaQueueBitmap_ {0};
+    uint64_t watchdogBaTidQueueMap_ {0};
+    uint32_t watchdogQueueSnapshotAvailable_ {0};
 };
 
 } // namespace IwxResetTrace

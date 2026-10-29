@@ -8,8 +8,9 @@
 
 namespace NativeAwdlProbe {
 
-// Deliberately distinct from a native awdl0 identity. The MAC comes from the
-// isolated Intel P2P role and is accepted only for an observation-only probe.
+// MAC supplied by the isolated Intel P2P role. It is treated as a native
+// awdl0 identity only when Request::nativeAddressVerified carries the HAL's
+// same-generation identity check.
 struct ExperimentalP2pMac {
     uint8_t bytes[6];
 };
@@ -38,6 +39,10 @@ struct Request {
     uint64_t monotonicSampleUs;
     uint16_t ieee80211SequenceNumber;
     HtCapabilityWitness ht;
+
+    // Set only after the HAL validates the same-generation native AWDL BSD
+    // identity and confirms it equals p2pMac. Zero preserves the legacy frame.
+    bool nativeAddressVerified;
 };
 
 enum class PlanStatus : uint8_t {
@@ -62,8 +67,12 @@ struct Summary {
     uint64_t partialTailNotAdvertisedUs;
     uint64_t sequenceDurationUs;
     uint64_t experimentPhaseOriginUs;
-    bool p2pAddressIsNativeAwdlIdentity; // always false
+    uint16_t dataPathFlags;
+    bool p2pAddressIsNativeAwdlIdentity;
     bool dataPathFlagsZero;
+    bool addressFieldPresent;
+    bool addressMatchesSource;
+    bool dataPathReady; // always false; advertising the address is not readiness
 };
 
 // Makes one *experimental* PSF input at a single host-monotonic sample.

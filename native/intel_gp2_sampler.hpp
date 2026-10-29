@@ -24,7 +24,8 @@ struct SampleBackend {
     void *context;
     bool (*acquireNic)(void *context);
     void (*releaseNic)(void *context);
-    uint64_t (*hostMonotonicUs)(void *context);
+    // Raw nanoseconds allow the sampler to round both endpoints outward.
+    uint64_t (*hostMonotonicNs)(void *context);
     uint32_t (*readPrph)(void *context, uint32_t address);
 };
 
@@ -43,6 +44,8 @@ struct RawBracketedSample {
 // All hardware operations are supplied by the caller so this helper does not
 // acquire device access by itself. Acquire must guarantee the NIC is awake;
 // readPrph must perform a direct, read-only PRPH read while that lock is held.
+// Host endpoints are sampled in nanoseconds, then rounded down before the
+// read and up after it. The microsecond result encloses sub-microsecond reads.
 SampleStatus readBracketedGp2(const SampleBackend *backend,
                               SamplerDeviceFamily family,
                               uint64_t generation,

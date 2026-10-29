@@ -141,15 +141,21 @@
 #include <HAL/ItlHalService.hpp>
 #include <HAL/ItlDriverInfo.hpp>
 #include <HAL/ItlDriverController.hpp>
+#include "../../native/iwx_tx_watchdog.hpp"
+#include "../../native/iwx_output_kick.hpp"
 
 #ifdef AIRPORT_TAHOE
 #include "../../native/intel_p2p_rx_router.hpp"
+#include "../../native/awdl_rx_event_timeline.hpp"
 #include "../../native/awdl_data_frame.hpp"
+#include "../../native/awdl_rx_entry_telemetry.hpp"
+#include "../../native/awdl_rx_entry_publisher.hpp"
 #include "../../native/awdl_peer_observer.hpp"
 #include "../../native/awdl_peer_runtime_table.hpp"
 #include "../../native/p2p_hal_probe.hpp"
 #include "../../native/intel_roc_event_state.hpp"
 #include "../../native/iwx_reset_trace.hpp"
+#include "../../native/iwx_link_state_trace.hpp"
 #include "ItlIwxP2PTx.hpp"
 #include "ItlIwxP2PAction.hpp"
 #endif
@@ -324,6 +330,10 @@ public:
     
     static bool intrFilter(OSObject *object, IOFilterInterruptEventSource *src);
     static IOReturn _iwx_start_task(OSObject *target, void *arg0, void *arg1, void *arg2, void *arg3);
+#ifdef AIRPORT_TAHOE
+    IwxOutputKick::DrainResult iwx_start_drain(struct _ifnet *, uint32_t epoch);
+    static IOReturn _iwx_watchdog_task(OSObject *target, void *arg0, void *arg1, void *arg2, void *arg3);
+#endif
     
     virtual ItlDriverInfo *getDriverInfo() override;
     
@@ -360,18 +370,32 @@ public:
     uint32_t nativeLifecycleTearingDown_ {0};
     uint64_t nativeLifecycleStopRejectFingerprint_ {0};
     IwxResetTrace::Trace nativeResetTrace_ {};
+    IwxLinkStateTrace::Trace nativeLinkTransitionTrace_ {};
     uint32_t nativeResetTracePublishedSequence_ {UINT32_MAX};
     uint32_t nativeResetTracePublishedTriggerSequence_ {UINT32_MAX};
     uint32_t nativeResetTracePublishedTriggerRevision_ {UINT32_MAX};
+    uint32_t nativeResetTracePublishedTxProgressWatchdogSequence_ {UINT32_MAX};
     uint32_t nativeResetTracePublishVersion_ {0};
     bool nativeResetTracePublishedOnce_ {false};
+    uint32_t nativeLinkTransitionResetSequence_ {0};
+    uint32_t nativeLinkTransitionWatchdogSequence_ {0};
+    uint32_t nativeLinkTransitionPublishedVersion_ {0};
+    uint32_t nativeLinkTransitionPublishedDropped_ {0};
+    bool nativeLinkTransitionPublishedOnce_ {false};
+    void tahoeRecordLinkTransition(struct iwx_softc *,
+        IwxLinkStateTrace::Event, uint32_t, uint32_t, int, int,
+        uint32_t resetSequence = UINT32_MAX,
+        bool resetSequenceValid = false);
+    bool tahoePublishLinkTransitionTrace(IOEthernetController *);
     bool tahoeTryLifecycleFence();
-    void tahoeReleaseLifecycleFence();
+    bool tahoeReleaseLifecycleFence(bool flushDeferredTasks = true);
     void tahoeDeferLifecycleTasks(uint32_t);
     void tahoeFlushLifecycleTasks();
     void tahoeClearStopBlockState();
     void tahoeRecordInitTaskTrigger(IwxResetTrace::InitTaskTrigger);
-    void tahoeRecordReset(IwxResetTrace::ResetReason, struct iwx_softc *);
+    void tahoeRecordTxWatchdogSnapshot(struct iwx_softc *, uint32_t);
+    void tahoePublishTxProgressSnapshot(IOEthernetController *, struct iwx_softc *);
+    uint32_t tahoeRecordReset(IwxResetTrace::ResetReason, struct iwx_softc *);
     void tahoePublishResetTrace(IOEthernetController *);
 
     void nativeP2pTick() override;
@@ -399,10 +423,16 @@ public:
     void tahoeRetireStoppedQueuesAfterSoftStop(struct iwx_softc *, int);
     void tahoeP2pTapTimeEvent(struct iwx_softc *, const uint8_t *, size_t);
     void tahoeP2pTapAction(struct iwx_softc *, const uint8_t *, size_t, bool,
-                           uint16_t, uint32_t, bool);
+                           uint16_t, uint32_t, bool, uint32_t, bool);
+    void tahoeP2pRxConsume();
     void tahoeP2pRxDrain();
     static IOReturn tahoeP2pRxDrainAction(OSObject *, void *, void *, void *, void *);
+    bool tahoeP2pCurrentRxDiagnosticEpochs(
+        struct iwx_softc *, NativeAwdlRxEntry::Epochs *);
     void tahoeP2pPublishRxStageCounters(IOEthernetController *);
+    void tahoeP2pPublishRxEntryTelemetry(IOEthernetController *);
+    void tahoeP2pPublishRxEventTimeline(IOEthernetController *);
+    void tahoeP2pPublishNativeAwdlAttachTrace(IOEthernetController *);
     void tahoeP2pPublishProbeState();
     void tahoeP2pObserveGp2(uint32_t, uint32_t, uint32_t, uint32_t);
     static int tahoeP2pExerciseRoc(void *);
@@ -444,6 +474,7 @@ public:
     struct task tahoe_p2p_probe_task_;
     uint32_t tahoe_p2p_probe_task_initialized_ {0};
     uint32_t nativeP2pProbeQueued_ {0};
+    uint32_t nativeP2pProbeRunAllocationFailed_ {0};
     uint32_t nativeP2pManualArmRequested_ {0};
     uint32_t nativeP2pCancelRequested_ {0};
     uint32_t nativeP2pProbeBusy_ {0};
@@ -456,12 +487,27 @@ public:
     NativeP2PProbe::Snapshot nativeP2pProbePublished_{};
 
     IntelP2PRx::Router tahoe_p2p_rx_router_;
+    NativeAwdlRxTrace::Timeline nativeAwdlRxEventTimeline_{};
+    uint64_t nativeAwdlRxEventOwnerSerial_ {0};
+    uint64_t nativeAwdlRxEventNextOwnerSerial_ {0};
+    uint64_t nativeAwdlRxEventPublishedRevision_ {UINT64_MAX};
+    uint64_t nativeAwdlRxEventPublishVersion_ {0};
+    bool nativeAwdlRxEventPublishedOnce_ {false};
+    uint64_t nativeAwdlAttachTracePublishedRevision_ {UINT64_MAX};
+    uint32_t nativeAwdlAttachTracePublishVersion_ {0};
+    bool nativeAwdlAttachTracePublishedOnce_ {false};
+    bool nativeAwdlAttachTraceInvalidated_ {false};
     IntelP2PRx::LeaseSnapshot tahoe_p2p_rx_lease_{};
     IntelP2PRx::Counters tahoe_p2p_rx_published_{};
     bool tahoe_p2p_rx_published_once_ {false};
     TahoeAwdlRxStageCounters tahoe_awdl_rx_stage_counters_{};
     TahoeAwdlRxStageCounters::Snapshot tahoe_awdl_rx_stage_published_{};
     bool tahoe_awdl_rx_stage_published_once_ {false};
+    NativeAwdlRxEntry::Telemetry nativeAwdlRxEntryTelemetry_{};
+    NativeAwdlRxEntry::Snapshot nativeAwdlRxEntryPublished_{};
+    uint32_t nativeAwdlRxEntryAttemptVersion_ {0};
+    uint32_t nativeAwdlRxEntryPublishVersion_ {0};
+    bool nativeAwdlRxEntryPublishedOnce_ {false};
     IntelAwdlPeer::Observer tahoe_awdl_peer_observer_;
     IntelAwdlPeerRuntime::Table tahoe_awdl_peer_runtime_;
     uint64_t tahoe_awdl_runtime_published_[176] {};
@@ -648,11 +694,15 @@ public:
            uint32_t, struct ieee80211_rxinfo *, struct mbuf_list *
 #ifdef AIRPORT_TAHOE
            , uint32_t rxStageOwnerGeneration = 0,
-           uint8_t rxStageKind = TahoeAwdlRxStageCounters::kNotAwdl
+           uint8_t rxStageKind = TahoeAwdlRxStageCounters::kNotAwdl,
+           uint32_t rxMacPhyIndex = 0,
+           bool rxMacPhyIndexPresent = false
 #endif
            );
     void iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
-                        size_t maxlen, struct mbuf_list *ml);
+                        size_t actualPayloadLength, bool rpaEnabled,
+                        size_t maxlen,
+                        struct mbuf_list *ml);
     void    iwx_rx_tx_cmd_single(struct iwx_softc *, struct iwx_rx_packet *,
             struct iwx_tx_data *);
     void iwx_txd_done(struct iwx_softc *sc, struct iwx_tx_data *txd);
@@ -685,7 +735,11 @@ public:
                             const struct iwx_rate *rinfo, int type, struct ieee80211_frame *wh);
     void    iwx_toggle_tx_ant(struct iwx_softc *sc, uint8_t *ant);
     void    iwx_tx_update_byte_tbl(struct iwx_softc *, struct iwx_tx_ring *, int, uint16_t, uint16_t);
-    int    iwx_tx(struct iwx_softc *, mbuf_t, struct ieee80211_node *, int);
+    int    iwx_tx(struct iwx_softc *, mbuf_t, struct ieee80211_node *, int
+#ifdef AIRPORT_TAHOE
+                  , uint64_t * = nullptr
+#endif
+                  );
     int    iwx_flush_sta_tids(struct iwx_softc *, int, uint16_t);
     int    iwx_flush_sta(struct iwx_softc *, struct iwx_node *);
     int    iwx_drain_sta(struct iwx_softc *sc, struct iwx_node *, int);

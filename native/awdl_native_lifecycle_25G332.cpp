@@ -182,7 +182,17 @@ bool ItlAwdlLifecycle25G332::aliasClear() {
 bool ItlAwdlLifecycle25G332::retire(const NativeAwdlLifecycle::TransactionState &state) {
     phase(10);
 #if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
-    if(resident25&&!NativeAwdlBSD::close()){note(NativeAwdlLifecycle::Quarantined);return false;}
+    if(resident25) {
+        auto loop=controller_?controller_->getWorkLoop():nullptr;
+        // Startup-failure retirement is initiated by the off-gate observer.
+        // Keep the potentially waiting teardown outside the same gate used by
+        // P2P submissions, but publish the close bit through that gate first.
+        if(!loop||loop->inGate()||loop->onThread()||
+           !NativeAwdlLifecycle::publishClosing(controller_)||
+           !NativeAwdlBSD::close()) {
+            note(NativeAwdlLifecycle::Quarantined);return false;
+        }
+    }
 #endif
     // Native attach first links the IO80211 plane, then tries IOService attach.
     // A false result does not prove absence of the first side effect.
@@ -234,6 +244,33 @@ void ItlAwdlLifecycle25G332::free() {
 }
 
 namespace NativeAwdlLifecycle {
+namespace {
+IOReturn publishClosingAction(OSObject *target,void *,void *,void *,void *) {
+    return publishClosingInGate(static_cast<IOService *>(target))
+        ?kIOReturnSuccess:kIOReturnNotReady;
+}
+}
+bool publishClosingInGate(IOService *controller) {
+#if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
+    if(!controller)return false;
+    auto loop=controller->getWorkLoop();
+    if(!loop||!loop->inGate())return false;
+    __atomic_store_n(&residentClosing25,1u,__ATOMIC_RELEASE);
+    NativeAwdlBSD::publishClosing();
+    return true;
+#else
+    return controller!=nullptr;
+#endif
+}
+bool publishClosing(IOService *controller) {
+    if(!controller)return false;
+    auto loop=controller->getWorkLoop();
+    if(!loop)return false;
+    if(loop->inGate())return publishClosingInGate(controller);
+    // IOWorkLoop::runAction synchronizes with the IOCommandGate actions
+    // registered on this same main workloop; it does not dispatch a worker.
+    return loop->runAction(publishClosingAction,controller)==kIOReturnSuccess;
+}
 bool residentPending(IOService *controller) {
 #if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
     return !__atomic_load_n(&residentClosing25,__ATOMIC_ACQUIRE)&&controller&&
@@ -243,7 +280,8 @@ bool residentPending(IOService *controller) {
 #endif
 }
 bool stopResident(IOService *controller) {
-    __atomic_store_n(&residentClosing25,1u,__ATOMIC_RELEASE);
+    if(!controller||!__atomic_load_n(&residentClosing25,__ATOMIC_ACQUIRE))
+        return false;
     auto loop=controller->getWorkLoop();
     if(!loop||loop->inGate()||loop->onThread())return false;
     for(unsigned i=0;i<3000&&__atomic_load_n(&residentStarting25,__ATOMIC_ACQUIRE);++i)IOSleep(1);
@@ -314,7 +352,9 @@ void observeOnce(IOService *controller,const uint8_t address[6]) {
 #if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
     if(complete&&resident) {
         ifnet_t interface=nullptr;
-        if(ifnet_find_by_name("awdl0",&interface)==0) {
+        const int lookupResult=ifnet_find_by_name("awdl0",&interface);
+        NativeAwdlBSD::noteResidentLookupResult(lookupResult);
+        if(lookupResult==0) {
             const bool attached=NativeAwdlBSD::attach(interface,address);ifnet_release(interface);
             if(attached){
                 residentState25=state;

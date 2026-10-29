@@ -33,6 +33,16 @@ OSDefineMetaClassAndStructors(CTimeout, OSObject)
 IO80211WorkQueue *_fWorkloop;
 IOCommandGate *_fCommandGate;
 
+#if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
+static IOReturn publishNativeAwdlClosingAction(
+    OSObject *target, void *, void *, void *, void *)
+{
+    return NativeAwdlLifecycle::publishClosingInGate(
+        static_cast<IOService *>(target)) ? kIOReturnSuccess :
+                                            kIOReturnNotReady;
+}
+#endif
+
 #ifdef AIRPORT_TAHOE
 namespace {
 uint64_t nativePowerUptimeNanoseconds()
@@ -69,8 +79,26 @@ bool nativeStartupResult(IOService *controller, IOService *provider,
 #define ITL_STARTUP_RESULT(provider, stage, result) (result)
 #endif
 
+void AirportItlwm::detachWatchdogTimer()
+{
+    if (!watchdogTimer)
+        return;
+    watchdogTimer->cancelTimeout();
+    watchdogTimer->disable();
+    // removeEventSource takes the source off its workloop after any current
+    // watchdogAction returns. stop() calls this before detaching the HAL.
+    if (watchdogSourceAttached && fWatchdogWorkLoop) {
+        fWatchdogWorkLoop->removeEventSource(watchdogTimer);
+        watchdogSourceAttached = false;
+    }
+    // The callback may have re-armed itself just before removal drained it.
+    watchdogTimer->cancelTimeout();
+    watchdogTimer->disable();
+}
+
 void AirportItlwm::releaseAll()
 {
+    detachWatchdogTimer();
 #ifdef AIRPORT_TAHOE
     // Parent stop must first destroy its monitor, which borrows nativeLogger.
     releaseNativeCapture();
@@ -98,17 +126,11 @@ void AirportItlwm::releaseAll()
             scanSource->release();
             scanSource = NULL;
         }
-        if (fWatchdogWorkLoop && watchdogTimer) {
-            watchdogTimer->cancelTimeout();
-            fWatchdogWorkLoop->removeEventSource(watchdogTimer);
-            watchdogTimer->release();
-            watchdogTimer = NULL;
-            fWatchdogWorkLoop->release();
-            fWatchdogWorkLoop = NULL;
-        }
         _fWorkloop->release();
         _fWorkloop = NULL;
     }
+    OSSafeReleaseNULL(watchdogTimer);
+    OSSafeReleaseNULL(fWatchdogWorkLoop);
     unregistPM();
 }
 
@@ -213,6 +235,9 @@ IOReturn AirportItlwm::setProperties(OSObject *properties)
                     request->getObject("NativeAwdlInitObservationCompiled") ||
                     request->getObject("NativeAwdlLifecycleObservationOnly") ||
                     request->getObject("NativeAwdlLifecycleCompiled") ||
+                    request->getObject("NativeAwdlTxEvidenceEnabled") ||
+                    request->getObject("NativeAwdlDiscoveryExperimentEnabled") ||
+                    request->getObject("NativeAwdlDiscoveryCurrentAwFallbackEnabled") ||
                     request->getObject("NativeAwdlResidentEnabled") ||
                     request->getObject("NativeAwdlResidentCompiled")))
         return kIOReturnUnsupported;
@@ -462,7 +487,6 @@ bool AirportItlwm::start(IOService *provider)
     bool skywalkAttached = false;
     bool controllerAttached = false;
     bool bsdAttached = false;
-    bool watchdogAttached = false;
     // No interface is published until the complete adapter is ready. Failure
     // must drain our ingress before releasing its gate, HAL or owner leases.
     auto failNativeStart = [&]() -> bool {
@@ -470,12 +494,9 @@ bool AirportItlwm::start(IOService *provider)
         // its original gate and callbacks may still be alive.
         auto wrapper = OSDynamicCast(IOPCIEDeviceWrapper, provider);
         if (wrapper && wrapper->fHalService == fHalService) wrapper->fHalService = nullptr;
+        detachWatchdogTimer();
         bool drained = !fNetIf ||
             static_cast<AirportItlwmSkywalkInterface *>(fNetIf)->stopNative();
-        if (watchdogTimer) {
-            watchdogTimer->cancelTimeout();
-            watchdogTimer->disable();
-        }
         struct _ifnet *ifp = &fHalService->get80211Controller()->ic_ac.ac_if;
         if (!drained || nativeActivationAttempted || (ifp->if_flags & (IFF_UP | IFF_RUNNING))) {
             // The inherited HAL detach does not establish an active-task
@@ -486,10 +507,7 @@ bool AirportItlwm::start(IOService *provider)
             XYLog("Native startup failed; HAL resources retained until reboot\n");
             return false;
         }
-        if (watchdogTimer) {
-            if (watchdogAttached) fWatchdogWorkLoop->removeEventSource(watchdogTimer);
-            OSSafeReleaseNULL(watchdogTimer);
-        }
+        OSSafeReleaseNULL(watchdogTimer);
         OSSafeReleaseNULL(fWatchdogWorkLoop);
         // HAL teardown may still reference ifp->iface. Keep BSD alive through
         // it, then remove that borrowed pointer before terminating BSD.
@@ -536,9 +554,10 @@ bool AirportItlwm::start(IOService *provider)
     if (!nativeStartupResult(this, provider, "watchdog-source",
             fWatchdogWorkLoop->addEventSource(watchdogTimer) == kIOReturnSuccess))
         return failNativeStart();
-    watchdogAttached = true;
+    watchdogSourceAttached = true;
 #else
-    fWatchdogWorkLoop->addEventSource(watchdogTimer);
+    watchdogSourceAttached =
+        fWatchdogWorkLoop->addEventSource(watchdogTimer) == kIOReturnSuccess;
 #endif
 #ifndef AIRPORT_TAHOE
     scanSource = IOTimerEventSource::timerEventSource(this, &fakeScanDone);
@@ -666,12 +685,27 @@ bool AirportItlwm::start(IOService *provider)
 void AirportItlwm::stop(IOService *provider)
 {
 #if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
+    // The HAL uses this same command gate for the final address check and
+    // Action-frame doorbell. Publish the close bit here before the off-gate
+    // detach/drain so no submit can pass its final gate check afterward.
+    IOReturn closingResult = kIOReturnNotReady;
+    if (_fWorkloop && _fWorkloop->inGate())
+        closingResult = NativeAwdlLifecycle::publishClosingInGate(this) ?
+            kIOReturnSuccess : kIOReturnNotReady;
+    else if (_fCommandGate)
+        closingResult = _fCommandGate->runAction(
+            publishNativeAwdlClosingAction, this);
+    if (closingResult != kIOReturnSuccess) {
+        XYLog("Native AWDL close publication failed; owner retained\n");
+        return;
+    }
     if(!NativeAwdlLifecycle::stopResident(this)) {
         XYLog("Native AWDL stop pending; owner retained\n");return;
     }
 #endif
     XYLog("%s\n", __PRETTY_FUNCTION__);XYLog("%s\n", __PRETTY_FUNCTION__);
     struct _ifnet *ifp = &fHalService->get80211Controller()->ic_ac.ac_if;
+    detachWatchdogTimer();
 #ifdef AIRPORT_TAHOE
     // This barrier must run outside the radio gate. HAL producers are detached
     // afterwards; only then may the ingress allocation and its owner refs go.

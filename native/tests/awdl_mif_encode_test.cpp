@@ -169,6 +169,96 @@ static void testRoundTripAndFieldLayout()
                   psf + insert, psfLength - insert) == 0);
 }
 
+static void testAddressProfileAndStrictInsertionShapes()
+{
+    const char hostname[] = "native-awdl";
+    MifInput input = {validPsfInput(), hostname, sizeof(hostname) - 1};
+    input.psf.advertiseAwdlAddress = true;
+
+    uint8_t psf[NativeAwdl::kMaximumEncodedPsfLength] = {};
+    size_t psfLength = 0;
+    assert(NativeAwdl::encodePsf(&input.psf, psf, sizeof(psf), &psfLength) ==
+           NativeAwdl::EncodeStatus::Ok);
+    assert(psfLength == 234);
+
+    uint8_t frame[NativeAwdl::kMaximumEncodedMifLength] = {};
+    size_t written = 0;
+    assert(NativeAwdl::encodeMif(&input, frame, sizeof(frame), &written) ==
+           MifEncodeStatus::Ok);
+    assert(written == psfLength + input.hostnameLength + 7);
+    ActionFrameInfo info{};
+    assert(NativeAwdl::parseActionFrame(frame, written, &info) == ParseStatus::Ok);
+    assert(info.subtype == 3 && info.tlvCount == 9);
+
+    const size_t arpaOffset = findTlv(frame, written, 16);
+    const size_t dataPathOffset = findTlv(frame, written, 12);
+    assert(arpaOffset < dataPathOffset && dataPathOffset < written);
+    assert(arpaOffset == 218); // ARPA stays at the legacy insertion point.
+    const size_t arpaTlvLength = input.hostnameLength + 7;
+    assert(readLe16(frame + dataPathOffset + 1) == 8);
+    assert(frame[dataPathOffset + 3] == 0x04 &&
+           frame[dataPathOffset + 4] == 0x00);
+    assert(memcmp(frame + dataPathOffset + 5, frame + 10, 6) == 0);
+    assert(memcmp(frame + dataPathOffset + 5,
+                  input.psf.sourceAddress, 6) == 0);
+
+    // The ARPA TLV is inserted immediately before the original Data Path TLV;
+    // no address is regenerated, duplicated, or changed by MIF conversion.
+    const size_t psfDataPathOffset = findTlv(psf, psfLength, 12);
+    assert(psfDataPathOffset == arpaOffset);
+    assert(memcmp(frame, psf, 30) == 0);
+    assert(frame[30] == 3 && psf[30] == 0);
+    assert(memcmp(frame + 31, psf + 31, arpaOffset - 31) == 0);
+    assert(memcmp(frame + dataPathOffset,
+                  psf + psfDataPathOffset,
+                  psfLength - psfDataPathOffset) == 0);
+    assert(dataPathOffset == psfDataPathOffset + arpaTlvLength);
+
+    // Exercise the same strict predicate used by the insertion scanner: only
+    // exact legacy-empty and exact source-address forms are accepted.
+    assert(NativeAwdl::detail::isSupportedMifDataPathTlv(
+        frame, written, dataPathOffset));
+    uint8_t malformed[NativeAwdl::kMaximumEncodedMifLength];
+    memcpy(malformed, frame, written);
+    malformed[dataPathOffset + 3] = 0x05; // Additional flag bit.
+    assert(!NativeAwdl::detail::isSupportedMifDataPathTlv(
+        malformed, written, dataPathOffset));
+    memcpy(malformed, frame, written);
+    malformed[dataPathOffset + 1] = 7; // Truncated advertised address.
+    assert(!NativeAwdl::detail::isSupportedMifDataPathTlv(
+        malformed, written, dataPathOffset));
+    memcpy(malformed, frame, written);
+    malformed[dataPathOffset + 1] = 2; // Address flag without address bytes.
+    assert(!NativeAwdl::detail::isSupportedMifDataPathTlv(
+        malformed, written, dataPathOffset));
+    memcpy(malformed, frame, written);
+    malformed[dataPathOffset + 1] = 9; // Unsupported trailing byte.
+    assert(!NativeAwdl::detail::isSupportedMifDataPathTlv(
+        malformed, written, dataPathOffset));
+    memcpy(malformed, frame, written);
+    malformed[dataPathOffset + 10] ^= 0x80; // Address must match Addr2.
+    assert(!NativeAwdl::detail::isSupportedMifDataPathTlv(
+        malformed, written, dataPathOffset));
+    assert(!NativeAwdl::detail::isSupportedMifDataPathTlv(
+        frame, dataPathOffset + 10, dataPathOffset)); // Truncated final address byte.
+
+    // Check the legacy form independently as a second accepted shape.
+    input.psf.advertiseAwdlAddress = false;
+    assert(NativeAwdl::encodeMif(&input, frame, sizeof(frame), &written) ==
+           MifEncodeStatus::Ok);
+    const size_t legacyDataPathOffset = findTlv(frame, written, 12);
+    assert(legacyDataPathOffset < written);
+    assert(readLe16(frame + legacyDataPathOffset + 1) == 2);
+    assert(frame[legacyDataPathOffset + 3] == 0 &&
+           frame[legacyDataPathOffset + 4] == 0);
+    assert(NativeAwdl::detail::isSupportedMifDataPathTlv(
+        frame, written, legacyDataPathOffset));
+    memcpy(malformed, frame, written);
+    malformed[legacyDataPathOffset + 1] = 8;
+    assert(!NativeAwdl::detail::isSupportedMifDataPathTlv(
+        malformed, written, legacyDataPathOffset));
+}
+
 static void testHostnameRejections()
 {
     PsfInput psf = validPsfInput();
@@ -236,15 +326,26 @@ static void testInputAndCapacityFailures()
     input.psf.rxMcsMask[3] = 0xff;
     assert(NativeAwdl::encodeMif(&input, full, sizeof(full), &written) ==
            MifEncodeStatus::Ok);
-    assert(written == NativeAwdl::kMaximumEncodedMifLength);
+    assert(written == 301); // Legacy MCS4 + 63-byte host label.
     ActionFrameInfo info = {};
     assert(NativeAwdl::parseActionFrame(full, written, &info) == ParseStatus::Ok);
     assert(info.subtype == 3 && info.tlvCount == 9);
+
+    input.psf.advertiseAwdlAddress = true;
+    assertOutputUnchangedOnFailure(input, MifEncodeStatus::BufferTooSmall, 306);
+    assert(NativeAwdl::encodeMif(&input, full, sizeof(full), &written) ==
+           MifEncodeStatus::Ok);
+    assert(written == 307 && written == NativeAwdl::kMaximumEncodedMifLength);
+    assert(NativeAwdl::parseActionFrame(full, written, &info) == ParseStatus::Ok);
+    const size_t dataPathOffset = findTlv(full, written, 12);
+    assert(readLe16(full + dataPathOffset + 1) == 8);
+    assert(memcmp(full + dataPathOffset + 5, full + 10, 6) == 0);
 }
 
 int main()
 {
     testRoundTripAndFieldLayout();
+    testAddressProfileAndStrictInsertionShapes();
     testHostnameRejections();
     testInputAndCapacityFailures();
     return 0;

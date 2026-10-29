@@ -4,6 +4,19 @@
 #include <string.h>
 
 namespace IntelAwdlPeerRuntime {
+
+namespace {
+
+// Source-reviewed wire-field interpretation used only by the Test066
+// experimental phase helper. The decoder reads type-4 offset 29 into the
+// unmodified `nextAwSequence` field. OWL's public wire-field names identify
+// the corresponding RX value as `aw_counter_master` and TX value as
+// `next_aw_seq`/`awdl_sync_current_aw` (src/rx.c:31-48, src/tx.c:112-114).
+// This confirms the field's AW-counter meaning; it does not verify the GP2 to
+// host clock map, peer phase, airtime, or RF reception.
+constexpr bool kReviewedMifWireAwCounterInterpretation = true;
+
+} // namespace
 namespace {
 
 bool sameEpochs(const IntelAwdlPeer::RuntimeEpochs &a,
@@ -18,6 +31,15 @@ bool sameAddress(const IntelAwdlElection::Address &a,
                  const IntelAwdlElection::Address &b)
 {
     return memcmp(a.bytes, b.bytes, sizeof(a.bytes)) == 0;
+}
+
+bool sameCanonicalHistory(const IntelAwdlElection::Advertisement &mif,
+                          const IntelAwdlElection::Advertisement &psf)
+{
+    return sameAddress(mif.master, psf.master) &&
+           sameAddress(mif.sync, psf.sync) &&
+           memcmp(mif.channelSlots, psf.channelSlots,
+                  sizeof(mif.channelSlots)) == 0;
 }
 
 bool sameParsedInfo(const NativeAwdl::ActionFrameInfo &a,
@@ -57,6 +79,8 @@ void Table::clearEntries()
 
 void Table::reset()
 {
+    // peerIncarnationSequence_ intentionally survives reset so an old token
+    // can never become valid again during this Table object's lifetime.
     clearEntries();
     current_ = IntelAwdlPeer::RuntimeEpochs{};
     lastNowUs_ = 0;
@@ -133,8 +157,11 @@ bool Table::recordMatchesEpochs(
 
 Result Table::observe(const IntelP2PRx::ActionFrameRecord &record,
                       const IntelAwdlPeer::RuntimeEpochs &current,
-                      uint64_t nowMonotonicUs)
+                      uint64_t nowMonotonicUs,
+                      ObserveEvidence *evidence)
 {
+    if (evidence)
+        *evidence = {};
     const bool recordMif = record.awdl.subtype == 3;
     const bool recordPsf = record.awdl.subtype == 0;
     synchronizeEpochs(current);
@@ -202,8 +229,15 @@ Result Table::observe(const IntelP2PRx::ActionFrameRecord &record,
     IntelAwdlElection::Advertisement advertisement{};
     if (isMif) {
         IntelAwdlElection::DecodeDiagnostics decodeDiagnostics{};
+        if (evidence)
+            evidence->decodeAttempted = 1;
         const auto decode = IntelAwdlElection::decodeMif(
             record.bytes, record.length, &advertisement, &decodeDiagnostics);
+        if (evidence) {
+            evidence->decodeResultPresent = 1;
+            evidence->decodeStatus = static_cast<uint32_t>(decode);
+            evidence->decodeDiagnostics = decodeDiagnostics;
+        }
         lastMifDecodeStatus_ = static_cast<uint8_t>(decode);
         lastMifRejectDiagnostics_ = decodeDiagnostics;
         if (decode != IntelAwdlElection::DecodeStatus::Ok ||
@@ -215,8 +249,15 @@ Result Table::observe(const IntelP2PRx::ActionFrameRecord &record,
         }
     } else if (isPsf) {
         IntelAwdlElection::DecodeDiagnostics decodeDiagnostics{};
+        if (evidence)
+            evidence->decodeAttempted = 1;
         const auto decode = IntelAwdlElection::decodePsf(
             record.bytes, record.length, &advertisement, &decodeDiagnostics);
+        if (evidence) {
+            evidence->decodeResultPresent = 1;
+            evidence->decodeStatus = static_cast<uint32_t>(decode);
+            evidence->decodeDiagnostics = decodeDiagnostics;
+        }
         lastPsfDecodeStatus_ = static_cast<uint8_t>(decode);
         lastPsfRejectDiagnostics_ = decodeDiagnostics;
         if (decode != IntelAwdlElection::DecodeStatus::Ok ||
@@ -261,6 +302,11 @@ Result Table::observe(const IntelP2PRx::ActionFrameRecord &record,
 
     Entry next = existed ? *slot : Entry{};
     if (!existed) {
+        if (!peerIncarnationSequence_.allocate(&next.peerIncarnation)) {
+            noteRejected(Result::kIdentityExhausted, current.contextGeneration,
+                         isMif, isPsf);
+            return Result::kIdentityExhausted;
+        }
         memcpy(next.sourceAddress, source.bytes, sizeof(next.sourceAddress));
         next.contextGeneration = current.contextGeneration;
         next.powerGeneration = current.powerGeneration;
@@ -269,6 +315,11 @@ Result Table::observe(const IntelP2PRx::ActionFrameRecord &record,
     }
     next.lastFrameUs = record.rxMonotonicUs;
     if (isMif) {
+        if (!NativeAwdlPeerIdentity::advanceRevision(&next.mifRevision)) {
+            noteRejected(Result::kRevisionExhausted, current.contextGeneration,
+                         true, false);
+            return Result::kRevisionExhausted;
+        }
         next.mifAdvertisement = advertisement;
         next.lastMifUs = record.rxMonotonicUs;
         next.mifRxGp2TimestampUs = record.rxGp2TimestampPresent
@@ -278,6 +329,11 @@ Result Table::observe(const IntelP2PRx::ActionFrameRecord &record,
         next.hasMif = true;
         increment(&mifFrameTotal_);
     } else if (isPsf) {
+        if (!NativeAwdlPeerIdentity::advanceRevision(&next.psfRevision)) {
+            noteRejected(Result::kRevisionExhausted, current.contextGeneration,
+                         false, true);
+            return Result::kRevisionExhausted;
+        }
         next.psfAdvertisement = advertisement;
         next.lastPsfUs = record.rxMonotonicUs;
         next.psfRxGp2TimestampUs = record.rxGp2TimestampPresent
@@ -288,6 +344,13 @@ Result Table::observe(const IntelP2PRx::ActionFrameRecord &record,
         increment(&candidateFrameTotal_);
         increment(&acceptedPsfTotal_);
     }
+
+    // Addr2 identifies the source-keyed Entry, but it alone does not prove
+    // that a historical PSF and current MIF describe the same peer schedule.
+    // Keep only an address-free compatibility bit after comparing both
+    // decoded master/sync identities and the full canonical type-18 map.
+    next.historyCompatible = next.hasMif && next.hasPsf &&
+        sameCanonicalHistory(next.mifAdvertisement, next.psfAdvertisement);
 
     // The last three validated observations remain source-tagged. A duplicate
     // tap timestamp does not fabricate another relative-clock sample.
@@ -370,6 +433,7 @@ Snapshot Table::snapshot(const IntelAwdlPeer::RuntimeEpochs &current,
         peer.stationGeneration = entry.stationGeneration;
         peer.frameAgeUs = nowMonotonicUs - entry.lastFrameUs;
         peer.hasMif = entry.hasMif;
+        peer.historyCompatible = entry.historyCompatible;
         peer.timingSampleCount = entry.timingCount;
 
         for (size_t sampleIndex = 0; sampleIndex < entry.timingCount;
@@ -478,12 +542,66 @@ bool Table::getPsfSnapshot(
 
     output->tracked = true;
     output->hasPsf = entry.hasPsf;
+    output->peerIncarnation = entry.peerIncarnation;
+    output->psfRevision = entry.psfRevision;
+    output->mifRevision = entry.mifRevision;
+    output->hasMif = entry.hasMif;
+    output->historyCompatible = entry.historyCompatible;
     output->contextGeneration = entry.contextGeneration;
     output->powerGeneration = entry.powerGeneration;
     output->stationGeneration = entry.stationGeneration;
     output->psfAgeUs = nowMonotonicUs - entry.lastPsfUs;
     output->psfRxMonotonicUs = entry.lastPsfUs;
     output->psfRxGp2TimestampUs = entry.psfRxGp2TimestampUs;
+    if (entry.hasMif) {
+        output->mifAgeUs = nowMonotonicUs - entry.lastMifUs;
+        output->mifRxMonotonicUs = entry.lastMifUs;
+        output->mifRxChannel = entry.rxChannel;
+        output->mifSyncConsistent = entry.mifAdvertisement.syncConsistent;
+        output->mifFresh = output->mifAgeUs <= kMifLeaseTtlUs &&
+                           output->mifSyncConsistent;
+
+        // Export a narrow, same-Entry MIF witness. Do not synthesize it from
+        // the latest global MIF or from the PSF advertisement below.
+        const auto &mifAd = entry.mifAdvertisement;
+        MifWitness &mif = output->mif;
+        mif.peerIncarnation = entry.peerIncarnation;
+        mif.mifRevision = entry.mifRevision;
+        mif.rxMonotonicUs = entry.lastMifUs;
+        mif.rxAgeUs = output->mifAgeUs;
+        mif.contextGeneration = entry.contextGeneration;
+        mif.powerGeneration = entry.powerGeneration;
+        mif.stationGeneration = entry.stationGeneration;
+        mif.rxGp2Us = entry.mifRxGp2TimestampUs;
+        mif.phyTxTimestampUs = mifAd.phyTxTimestampUs;
+        mif.targetTxTimestampUs = mifAd.targetTxTimestampUs;
+        mif.awCounter = mifAd.nextAwSequence;
+        mif.nextAwSequence = mifAd.nextAwSequence;
+        mif.txDownCounterTu = mifAd.txDownCounterTu;
+        mif.awPeriodTu = mifAd.awPeriodTu;
+        mif.actionFramePeriodTu = mifAd.actionFramePeriodTu;
+        mif.presenceMode = mifAd.presenceMode;
+        mif.rxChannel = entry.rxChannel;
+        memcpy(mif.canonicalSlots, mifAd.channelSlots,
+               sizeof(mif.canonicalSlots));
+        mif.present = true;
+        mif.syncConsistent = mifAd.syncConsistent;
+        mif.fresh = output->mifFresh;
+        mif.rxGp2Present = entry.mifRxGp2TimestampPresent;
+        mif.presenceModePresent = mifAd.presenceModePresent;
+        // Enable only with the source-reviewed wire interpretation above and
+        // a decoded type-4/presence-4/full-type-18 same-entry witness. This is
+        // not a verified clock or over-the-air phase claim.
+        mif.awCounterSemanticVerified =
+            kReviewedMifWireAwCounterInterpretation &&
+            mifAd.presenceModePresent && mifAd.presenceMode == 4 &&
+            mifAd.type18Present && mifAd.type18Valid &&
+            mifAd.syncConsistent;
+        mif.type18Present = mifAd.type18Present;
+        mif.type18Valid = mifAd.type18Valid;
+        mif.complete = mif.syncConsistent && mif.rxGp2Present &&
+            mif.presenceModePresent && mif.type18Present && mif.type18Valid;
+    }
     output->psfRxGp2TimestampPresent = entry.psfRxGp2TimestampPresent;
     output->rxChannel = entry.psfRxChannel;
     output->psfFresh = output->psfAgeUs <= kPsfLeaseTtlUs &&
@@ -519,6 +637,60 @@ bool Table::getPsfSnapshot(
     output->deviceClass = ad.deviceClass;
     output->syncConsistent = ad.syncConsistent;
     output->electionV2 = ad.electionV2;
+    return true;
+}
+
+bool Table::getMifSnapshot(
+    uint8_t slot, const IntelAwdlPeer::RuntimeEpochs &current,
+    uint64_t nowMonotonicUs, MifPeerSnapshot *output)
+{
+    if (!output)
+        return false;
+    *output = MifPeerSnapshot{};
+    synchronizeEpochs(current);
+    if (!current.active || nowMonotonicUs == 0)
+        return false;
+    if (lastNowUs_ != 0 && nowMonotonicUs < lastNowUs_) {
+        clearEntries();
+        lastNowUs_ = nowMonotonicUs;
+        return false;
+    }
+    lastNowUs_ = nowMonotonicUs;
+    expire(nowMonotonicUs);
+    if (slot >= kPeerCapacity)
+        return false;
+
+    const Entry &entry = entries_[slot];
+    if (!entry.used || !entry.hasMif ||
+        entry.contextGeneration != current.contextGeneration ||
+        entry.powerGeneration != current.powerGeneration ||
+        entry.stationGeneration != current.stationGeneration)
+        return false;
+
+    output->tracked = true;
+    output->hasMif = true;
+    output->hasPsf = entry.hasPsf;
+    output->contextGeneration = entry.contextGeneration;
+    output->powerGeneration = entry.powerGeneration;
+    output->stationGeneration = entry.stationGeneration;
+    output->peerIncarnation = entry.peerIncarnation;
+    output->mifRevision = entry.mifRevision;
+    output->mifRxMonotonicUs = entry.lastMifUs;
+    output->rxChannel = entry.rxChannel;
+    output->syncConsistent = entry.mifAdvertisement.syncConsistent;
+    output->complete = entry.mifAdvertisement.syncConsistent &&
+        entry.mifRxGp2TimestampPresent &&
+        entry.mifAdvertisement.presenceModePresent &&
+        entry.mifAdvertisement.type18Present &&
+        entry.mifAdvertisement.type18Valid;
+    if (nowMonotonicUs >= entry.lastMifUs) {
+        output->mifAgeUs = nowMonotonicUs - entry.lastMifUs;
+        output->mifFresh = output->mifAgeUs <= kMifLeaseTtlUs &&
+                           output->syncConsistent;
+    } else {
+        output->mifAgeUs = UINT64_MAX;
+        output->mifFresh = false;
+    }
     return true;
 }
 

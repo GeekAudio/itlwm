@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "../awdl_peer_runtime_table.hpp"
 #include "../awdl_mif_encode.hpp"
+#include "../awdl_discovery_admitted_binding.hpp"
+#include "../awdl_peer_incarnation.hpp"
 
 #include <assert.h>
 #include <stdint.h>
@@ -73,24 +75,11 @@ static RuntimeEpochs activeEpochs()
     return epochs;
 }
 
-static ActionFrameRecord makeRecord(uint8_t peerId, uint64_t rxUs,
-                                    uint8_t subtype = 3,
-                                    uint64_t context = 9,
-                                    uint64_t power = 10,
-                                    uint64_t station = 11,
-                                    bool gp2Present = true,
-                                    uint32_t rxGp2 = 0xfffffff0u,
-                                    uint32_t phy = 1000,
-                                    uint32_t target = 1200,
-                                    uint8_t nextChannel = 6,
-                                    uint16_t downCounter = 32,
-                                    uint16_t nextSequence = 4,
-                                    uint32_t masterMetric = 500,
-                                    uint8_t height = 2)
+static ActionFrameRecord makeRecordForPsf(
+    const NativeAwdl::PsfInput &psf, uint64_t rxUs, uint8_t subtype,
+    uint64_t context = 9, uint64_t power = 10, uint64_t station = 11,
+    bool gp2Present = true, uint32_t rxGp2 = 0xfffffff0u)
 {
-    NativeAwdl::PsfInput psf = validPsf(peerId, phy, target, nextChannel,
-                                        downCounter, nextSequence,
-                                        masterMetric, height);
     uint8_t frame[NativeAwdl::kMaximumEncodedMifLength]{};
     size_t length = 0;
     if (subtype == 3) {
@@ -120,6 +109,27 @@ static ActionFrameRecord makeRecord(uint8_t peerId, uint64_t rxUs,
                                         &record.awdl) ==
            NativeAwdl::ParseStatus::Ok);
     return record;
+}
+
+static ActionFrameRecord makeRecord(uint8_t peerId, uint64_t rxUs,
+                                    uint8_t subtype = 3,
+                                    uint64_t context = 9,
+                                    uint64_t power = 10,
+                                    uint64_t station = 11,
+                                    bool gp2Present = true,
+                                    uint32_t rxGp2 = 0xfffffff0u,
+                                    uint32_t phy = 1000,
+                                    uint32_t target = 1200,
+                                    uint8_t nextChannel = 6,
+                                    uint16_t downCounter = 32,
+                                    uint16_t nextSequence = 4,
+                                    uint32_t masterMetric = 500,
+                                    uint8_t height = 2)
+{
+    const NativeAwdl::PsfInput psf = validPsf(peerId, phy, target,
+        nextChannel, downCounter, nextSequence, masterMetric, height);
+    return makeRecordForPsf(psf, rxUs, subtype, context, power, station,
+                            gp2Present, rxGp2);
 }
 
 static void corruptMifMasterButKeepFrameParseable(ActionFrameRecord *record)
@@ -232,6 +242,50 @@ static void testMifWithoutEmbeddedCopyCarriesUnverifiedPeerShape()
            !state.lastMifRejectDiagnostics.embeddedSequenceVerified);
 }
 
+static void testMifOnlySnapshotCarriesExactPresenceBinding()
+{
+    Table table;
+    const RuntimeEpochs epochs = activeEpochs();
+    assert(table.observe(makeRecord(5, 100000, 3), epochs, 100100) ==
+           Result::kAdmitted);
+
+    const auto state = table.snapshot(epochs, 100200);
+    assert(state.latestFreshMifSlot < IntelAwdlPeerRuntime::kPeerCapacity);
+    IntelAwdlPeerRuntime::MifPeerSnapshot mif{};
+    assert(table.getMifSnapshot(state.latestFreshMifSlot, epochs, 100200,
+                                &mif));
+    assert(mif.tracked && mif.hasMif && !mif.hasPsf && mif.mifFresh &&
+           mif.complete && mif.syncConsistent);
+    assert(mif.peerIncarnation != 0 && mif.mifRevision != 0 &&
+           mif.mifRxMonotonicUs == 100000 && mif.mifAgeUs == 200 &&
+           mif.rxChannel == 36);
+
+    // A MIF-only entry stays invisible to the strict PSF snapshot API.
+    IntelAwdlPeerRuntime::PsfPeerSnapshot psf{};
+    assert(!table.getPsfSnapshot(state.latestFreshMifSlot, epochs, 100200,
+                                 &psf));
+
+    // A later same-entry PSF updates only the hasPsf marker; the MIF revision
+    // and original receive tuple stay bound to the exact MIF observation.
+    assert(table.observe(makeRecord(5, 100250, 0), epochs, 100300) ==
+           Result::kCandidate);
+    IntelAwdlPeerRuntime::MifPeerSnapshot afterPsf{};
+    assert(table.getMifSnapshot(state.latestFreshMifSlot, epochs, 100300,
+                                &afterPsf));
+    assert(afterPsf.hasPsf && afterPsf.peerIncarnation == mif.peerIncarnation &&
+           afterPsf.mifRevision == mif.mifRevision &&
+           afterPsf.mifRxMonotonicUs == mif.mifRxMonotonicUs);
+
+    assert(table.observe(makeRecord(5, 100350, 3), epochs, 100400) ==
+           Result::kUpdated);
+    IntelAwdlPeerRuntime::MifPeerSnapshot replaced{};
+    assert(table.getMifSnapshot(state.latestFreshMifSlot, epochs, 100400,
+                                &replaced));
+    assert(replaced.peerIncarnation == mif.peerIncarnation &&
+           replaced.mifRevision > mif.mifRevision &&
+           replaced.mifRxMonotonicUs == 100350);
+}
+
 static void testPsfAndMifPairsPlusFullSchedule()
 {
     Table table;
@@ -296,6 +350,7 @@ static void testPsfAndMifPairsPlusFullSchedule()
            psf.psfRxGp2TimestampUs == 0x80u &&
            psf.phyTxTimestampUs == 0xa0u &&
            psf.targetTxTimestampUs == 0xc0u);
+    assert(psf.historyCompatible);
     assert(psf.nextAwChannel == 6 && psf.syncParameterLength == 57 &&
            psf.embeddedSequenceVerified);
 
@@ -859,6 +914,754 @@ static void testMifLeaseBoundaryAndLatestMifSlot()
     assert(state.peers[state.latestFreshMifSlot].mifRxMonotonicUs == 10500000);
 }
 
+
+using NativeAwdlDiscoveryBinding::Decision;
+using NativeAwdlDiscoveryBinding::Mode;
+using NativeAwdlDiscoveryBinding::OneShot;
+using NativeAwdlDiscoveryBinding::QueueHead;
+using BindingSnapshot = NativeAwdlDiscoveryBinding::Snapshot;
+using NativeAwdlDiscoveryBinding::Window;
+
+static ActionFrameRecord makeRecordAtChannel(uint8_t peerId, uint64_t rxUs,
+                                              uint8_t subtype)
+{
+    auto record = makeRecord(peerId, rxUs, subtype);
+    record.channel = 6; // Synthetic RX index chosen to map to IEEE channel 6.
+    return record;
+}
+
+static BindingSnapshot bindingFromRuntimePsf(
+    const IntelAwdlPeerRuntime::PsfPeerSnapshot &source,
+    uint64_t nowUs, bool psfOnChannel6 = true, bool mifOnChannel6 = true)
+{
+    BindingSnapshot out{};
+    out.mode = Mode::kPsfNextSlot;
+    out.psfHistorySameEntryPresent = source.tracked && source.hasPsf;
+    out.historyCompatible = source.historyCompatible;
+    out.peerIncarnation = source.peerIncarnation;
+    out.psfRevision = source.psfRevision;
+    out.mifRevision = source.mifRevision;
+    out.mifRxMonotonicUs = source.mifRxMonotonicUs;
+    out.mifAgeUs = source.mifAgeUs;
+    out.psfAgeUs = source.psfAgeUs;
+    out.hasMif = source.hasMif;
+    out.mifFresh = source.mifFresh;
+    out.mifSyncConsistent = source.mifSyncConsistent;
+    out.mifRxChannel6 = mifOnChannel6;
+    out.mif.peerIncarnation = source.mif.peerIncarnation;
+    out.mif.mifRevision = source.mif.mifRevision;
+    out.mif.rxMonotonicUs = source.mif.rxMonotonicUs;
+    out.mif.rxAgeUs = source.mif.rxAgeUs;
+    out.mif.epochs = {source.mif.contextGeneration,
+                      source.mif.powerGeneration,
+                      source.mif.stationGeneration,
+                      source.contextGeneration};
+    out.mif.rxGp2Us = source.mif.rxGp2Us;
+    out.mif.phyTxTimestampUs = source.mif.phyTxTimestampUs;
+    out.mif.targetTxTimestampUs = source.mif.targetTxTimestampUs;
+    out.mif.awCounter = source.mif.awCounter;
+    out.mif.txDownCounterTu = source.mif.txDownCounterTu;
+    out.mif.awPeriodTu = source.mif.awPeriodTu;
+    out.mif.presenceMode = source.mif.presenceMode;
+    out.mif.rxChannel = source.mif.rxChannel;
+    memcpy(out.mif.canonicalSlots, source.mif.canonicalSlots,
+           sizeof(out.mif.canonicalSlots));
+    out.mif.present = source.mif.present;
+    out.mif.complete = source.mif.complete;
+    out.mif.syncConsistent = source.mif.syncConsistent;
+    out.mif.fresh = source.mif.fresh;
+    out.mif.rxGp2Present = source.mif.rxGp2Present;
+    out.mif.presenceModePresent = source.mif.presenceModePresent;
+    out.mif.awCounterSemanticVerified =
+        source.mif.awCounterSemanticVerified;
+    out.mif.type18Present = source.mif.type18Present;
+    out.mif.type18Valid = source.mif.type18Valid;
+    out.mif.peerMifRxChannel6Confirmed = mifOnChannel6;
+    auto &psf = out.psf;
+    psf.peerToken = source.peerIncarnation;
+    psf.scheduleRevision = source.psfRevision;
+    psf.epochs = {source.contextGeneration, source.powerGeneration,
+                  source.stationGeneration, source.contextGeneration};
+    psf.rxHostUs = source.psfRxMonotonicUs;
+    psf.rxGp2 = source.psfRxGp2TimestampUs;
+    psf.phyTxTimestampUs = source.phyTxTimestampUs;
+    psf.targetTxTimestampUs = source.targetTxTimestampUs;
+    psf.awCounter = source.nextAwSequence;
+    psf.txDownTu = source.txDownCounterTu;
+    psf.awPeriodTu = source.awPeriodTu;
+    psf.presenceMode = 4; // decodePsf only publishes presence mode 4 entries.
+    psf.rxChannel = psfOnChannel6 ? 6 : 44;
+    memcpy(psf.canonicalChannels, source.channelSlots,
+           sizeof(psf.canonicalChannels));
+    psf.complete = source.tracked && source.hasPsf && source.psfFresh &&
+                   source.syncConsistent &&
+                   source.contextGeneration != 0 &&
+                   source.powerGeneration != 0 &&
+                   source.stationGeneration != 0;
+    (void)nowUs;
+    return out;
+}
+
+static BindingSnapshot validBindingSnapshot(uint64_t nowUs = 2000000)
+{
+    BindingSnapshot out{};
+    out.mode = Mode::kPsfNextSlot;
+    out.psfHistorySameEntryPresent = true;
+    out.historyCompatible = true;
+    out.peerIncarnation = 42;
+    out.psfRevision = 3;
+    out.mifRevision = 2;
+    out.mifRxMonotonicUs = nowUs - 10000;
+    out.mifAgeUs = 10000;
+    out.psfAgeUs = 5000;
+    out.hasMif = true;
+    out.mifFresh = true;
+    out.mifSyncConsistent = true;
+    out.mifRxChannel6 = true;
+    auto &psf = out.psf;
+    psf.peerToken = out.peerIncarnation;
+    psf.scheduleRevision = out.psfRevision;
+    psf.epochs = {9, 10, 11, 9};
+    psf.rxHostUs = nowUs - out.psfAgeUs;
+    psf.rxGp2 = 0x12345678u;
+    psf.phyTxTimestampUs = 0x12346000u;
+    psf.targetTxTimestampUs = 0x12345f00u;
+    psf.awCounter = 28; // Synthetic next canonical slot 8.
+    psf.txDownTu = 32;
+    psf.awPeriodTu = 16;
+    psf.presenceMode = 4;
+    psf.rxChannel = 6;
+    for (uint8_t i = 0; i < 16; ++i)
+        psf.canonicalChannels[i] = 44;
+    psf.canonicalChannels[8] = 6;
+    psf.complete = true;
+    auto &mif = out.mif;
+    mif.peerIncarnation = out.peerIncarnation;
+    mif.mifRevision = out.mifRevision;
+    mif.rxMonotonicUs = out.mifRxMonotonicUs;
+    mif.epochs = {psf.epochs.context, psf.epochs.power,
+                  psf.epochs.station, psf.epochs.roc};
+    mif.rxGp2Us = 0x12345679u;
+    mif.phyTxTimestampUs = 0x12346000u;
+    mif.targetTxTimestampUs = 0x12345f00u;
+    mif.awCounter = 20320; // Synthetic current slot 8.
+    mif.txDownCounterTu = 32;
+    mif.awPeriodTu = 16;
+    mif.presenceMode = 4;
+    mif.rxChannel = 6;
+    for (uint8_t i = 0; i < 16; ++i)
+        mif.canonicalSlots[i] = 44;
+    mif.canonicalSlots[8] = 6;
+    mif.present = true;
+    mif.complete = true;
+    mif.syncConsistent = true;
+    mif.fresh = true;
+    mif.rxGp2Present = true;
+    mif.presenceModePresent = true;
+    mif.awCounterSemanticVerified = true;
+    mif.type18Present = true;
+    mif.type18Valid = true;
+    mif.peerMifRxChannel6Confirmed = true;
+    return out;
+}
+
+static Window validWindowFor(const BindingSnapshot &snapshot, uint64_t nowUs,
+                             bool requireRuntimeMifBinding = true)
+{
+    Window window{};
+    window.mode = snapshot.mode;
+    window.epochs = {snapshot.psf.epochs.context,
+                     snapshot.psf.epochs.power,
+                     snapshot.psf.epochs.station,
+                     snapshot.psf.epochs.roc};
+    window.nowUs = nowUs;
+    window.leaseStartUs = nowUs - 1000;
+    window.leaseEndUs = nowUs + 100000;
+    window.phaseEarliestUs = nowUs - 100;
+    window.phaseLatestUs = nowUs + 10000;
+    window.requireRuntimeMifBinding = requireRuntimeMifBinding;
+    window.phaseCandidateValid = true; // Supplied only after existing estimator.
+    window.rocActive = true;
+    window.windowOpen = true;
+    return window;
+}
+
+static QueueHead validQmHead(const Window &window)
+{
+    QueueHead head{};
+    head.token = 70;
+    head.bornUs = window.nowUs - 100;
+    head.generation = static_cast<uint32_t>(window.epochs.power);
+    head.queryClass = static_cast<uint8_t>(
+        NativeAwdlData::MdnsQueryClass::QmMulticast);
+    head.eligible = true;
+    return head;
+}
+
+static void testRuntimeSnapshotBindsSameSourceMifAndPsf()
+{
+    Table table;
+    const auto epochs = activeEpochs();
+    assert(table.observe(makeRecordAtChannel(5, 1000000, 0), epochs,
+                         1000010) == Result::kCandidate);
+    assert(table.observe(makeRecordAtChannel(5, 1010000, 3), epochs,
+                         1010010) == Result::kAdmitted);
+    assert(table.observe(makeRecordAtChannel(5, 1020000, 0), epochs,
+                         1020010) == Result::kCandidate);
+    auto state = table.snapshot(epochs, 1020100);
+    assert(state.latestFreshPsfSlot < IntelAwdlPeerRuntime::kPeerCapacity);
+    IntelAwdlPeerRuntime::PsfPeerSnapshot raw{};
+    assert(table.getPsfSnapshot(state.latestFreshPsfSlot, epochs, 1020100,
+                                &raw));
+    assert(raw.peerIncarnation != 0 && raw.psfRevision == 2 &&
+           raw.mifRevision == 1 && raw.hasMif && raw.mifFresh &&
+           raw.mifSyncConsistent && raw.psfFresh);
+    assert(raw.mif.present && raw.mif.complete && raw.mif.syncConsistent &&
+           raw.mif.fresh && raw.mif.rxGp2Present &&
+           raw.mif.presenceModePresent && raw.mif.awCounterSemanticVerified &&
+           raw.mif.type18Present && raw.mif.type18Valid &&
+           raw.mif.peerIncarnation == raw.peerIncarnation &&
+           raw.mif.mifRevision == raw.mifRevision &&
+           raw.mif.contextGeneration == epochs.contextGeneration &&
+           raw.mif.powerGeneration == epochs.powerGeneration &&
+           raw.mif.stationGeneration == epochs.stationGeneration &&
+           raw.mif.rxMonotonicUs == 1010000 && raw.mif.rxChannel == 6 &&
+           raw.mif.presenceMode == 4 && raw.mif.awCounter == 4 &&
+           raw.mif.awCounter == raw.mif.nextAwSequence);
+    auto snapshot = bindingFromRuntimePsf(raw, 1020100);
+    auto window = validWindowFor(snapshot, 1020100);
+    auto head = validQmHead(window);
+    OneShot oneShot;
+    assert(oneShot.lock(snapshot, head, window) == Decision::kReady);
+    assert(oneShot.authorizeTake(snapshot, head, window) == Decision::kReady);
+    assert(oneShot.attempted());
+}
+
+
+static void testObserverAggregateCannotAuthorizeForeignRuntimePsf()
+{
+    Table table;
+    IntelAwdlPeer::Observer formalObserver;
+    const auto epochs = activeEpochs();
+    const auto verifiedMif = makeRecordAtChannel(5, 1000000, 3);
+    assert(formalObserver.observe(verifiedMif, epochs, 1000010) ==
+           IntelAwdlPeer::ObserveResult::kAdmittedPeer);
+    assert(table.observe(verifiedMif, epochs, 1000010) == Result::kAdmitted);
+    assert(table.observe(makeRecordAtChannel(6, 1010000, 0), epochs,
+                         1010010) == Result::kCandidate);
+    const auto observerSummary = formalObserver.snapshot(epochs, 1010100);
+    assert(observerSummary.validPeerCount == 1);
+
+    const auto runtimeSummary = table.snapshot(epochs, 1010100);
+    IntelAwdlPeerRuntime::PsfPeerSnapshot candidate{};
+    assert(table.getPsfSnapshot(runtimeSummary.latestFreshPsfSlot, epochs,
+                                1010100, &candidate));
+    assert(candidate.hasPsf && !candidate.hasMif);
+    const auto snapshot = bindingFromRuntimePsf(candidate, 1010100);
+    auto window = validWindowFor(snapshot, 1010100, true);
+    auto head = validQmHead(window);
+    OneShot oneShot;
+    // The unrelated observer count requests same-entry runtime binding; it is
+    // never used to authenticate this other PSF table slot.
+    assert(oneShot.lock(snapshot, head, window) ==
+           Decision::kMissingMifBinding);
+    assert(!oneShot.attempted());
+}
+
+static void testIncarnationNeverReusedAcrossTableReset()
+{
+    Table table;
+    const auto epochs = activeEpochs();
+    assert(table.observe(makeRecordAtChannel(5, 1000000, 0), epochs,
+                         1000010) == Result::kCandidate);
+    auto summary = table.snapshot(epochs, 1000100);
+    IntelAwdlPeerRuntime::PsfPeerSnapshot first{};
+    assert(table.getPsfSnapshot(summary.latestFreshPsfSlot, epochs, 1000100,
+                                &first));
+    table.reset();
+    assert(table.observe(makeRecordAtChannel(5, 2000000, 0), epochs,
+                         2000010) == Result::kCandidate);
+    summary = table.snapshot(epochs, 2000100);
+    IntelAwdlPeerRuntime::PsfPeerSnapshot second{};
+    assert(table.getPsfSnapshot(summary.latestFreshPsfSlot, epochs, 2000100,
+                                &second));
+    assert(first.peerIncarnation != 0 && second.peerIncarnation >
+           first.peerIncarnation);
+    auto changedEpochs = epochs;
+    changedEpochs.powerGeneration++;
+    (void)table.snapshot(changedEpochs, 2000200);
+    auto afterEpochRecord = makeRecordAtChannel(5, 2000300, 0);
+    afterEpochRecord.powerGeneration = changedEpochs.powerGeneration;
+    assert(table.observe(afterEpochRecord, changedEpochs, 2000310) ==
+           Result::kCandidate);
+    summary = table.snapshot(changedEpochs, 2000400);
+    IntelAwdlPeerRuntime::PsfPeerSnapshot afterEpoch{};
+    assert(table.getPsfSnapshot(summary.latestFreshPsfSlot, changedEpochs,
+                                2000400, &afterEpoch));
+    assert(afterEpoch.peerIncarnation > second.peerIncarnation);
+}
+
+static void testRuntimeSnapshotRejectsCrossSourceMifAndPsf()
+{
+    Table table;
+    const auto epochs = activeEpochs();
+    assert(table.observe(makeRecordAtChannel(5, 1000000, 3), epochs,
+                         1000010) == Result::kAdmitted);
+    assert(table.observe(makeRecordAtChannel(6, 1010000, 0), epochs,
+                         1010010) == Result::kCandidate);
+    const auto state = table.snapshot(epochs, 1010100);
+    IntelAwdlPeerRuntime::PsfPeerSnapshot raw{};
+    assert(table.getPsfSnapshot(state.latestFreshPsfSlot, epochs, 1010100,
+                                &raw));
+    assert(raw.hasPsf && raw.psfFresh && !raw.hasMif &&
+           raw.peerIncarnation != 0);
+    const auto snapshot = bindingFromRuntimePsf(raw, 1010100);
+    const auto window = validWindowFor(snapshot, 1010100, true);
+    auto head = validQmHead(window);
+    OneShot oneShot;
+    assert(oneShot.lock(snapshot, head, window) ==
+           Decision::kMissingMifBinding);
+    assert(!oneShot.attempted());
+}
+
+static void testSlotReuseInvalidatesLockedPeerIncarnation()
+{
+    Table table;
+    const auto epochs = activeEpochs();
+    assert(table.observe(makeRecordAtChannel(1, 1000000, 3), epochs,
+                         1000010) == Result::kAdmitted);
+    assert(table.observe(makeRecordAtChannel(1, 1000100, 0), epochs,
+                         1000110) == Result::kCandidate);
+    uint64_t timestamp = 1010000;
+    for (uint8_t peer = 2; peer <= IntelAwdlPeerRuntime::kPeerCapacity;
+         ++peer) {
+        assert(table.observe(makeRecordAtChannel(peer, timestamp, 3), epochs,
+                             timestamp + 10) == Result::kAdmitted);
+        timestamp += 1000;
+    }
+    auto state = table.snapshot(epochs, timestamp);
+    const uint8_t oldSlot = state.latestFreshPsfSlot;
+    assert(oldSlot < IntelAwdlPeerRuntime::kPeerCapacity);
+    IntelAwdlPeerRuntime::PsfPeerSnapshot oldRaw{};
+    assert(table.getPsfSnapshot(oldSlot, epochs, timestamp, &oldRaw));
+    const auto oldSnapshot = bindingFromRuntimePsf(oldRaw, timestamp);
+    auto window = validWindowFor(oldSnapshot, timestamp);
+    auto head = validQmHead(window);
+    OneShot oneShot;
+    assert(oneShot.lock(oldSnapshot, head, window) == Decision::kReady);
+
+    assert(table.observe(makeRecordAtChannel(99, timestamp + 1000, 3), epochs,
+                         timestamp + 1010) == Result::kAdmitted);
+    assert(table.observe(makeRecordAtChannel(99, timestamp + 1100, 0), epochs,
+                         timestamp + 1110) == Result::kCandidate);
+    const uint64_t currentNow = timestamp + 1200;
+    IntelAwdlPeerRuntime::PsfPeerSnapshot currentRaw{};
+    assert(table.getPsfSnapshot(oldSlot, epochs, currentNow, &currentRaw));
+    const auto currentSnapshot = bindingFromRuntimePsf(currentRaw, currentNow);
+    assert(currentSnapshot.peerIncarnation != oldSnapshot.peerIncarnation);
+    window.nowUs = currentNow;
+    assert(oneShot.authorizeTake(currentSnapshot, head, window) ==
+           Decision::kPeerIncarnationChanged);
+    assert(!oneShot.attempted());
+}
+
+static void testSnapshotRevisionsFreshnessEpochChannelLeaseAndClose()
+{
+    const uint64_t nowUs = 2000000;
+    const auto base = validBindingSnapshot(nowUs);
+    auto window = validWindowFor(base, nowUs);
+    auto head = validQmHead(window);
+    OneShot oneShot;
+    assert(oneShot.lock(base, head, window) == Decision::kReady);
+
+    auto changedPsf = base;
+    ++changedPsf.psfRevision;
+    changedPsf.psf.scheduleRevision = changedPsf.psfRevision;
+    assert(oneShot.authorizeTake(changedPsf, head, window) ==
+           Decision::kPsfRevisionChanged);
+
+    OneShot psfWitnessGuard;
+    window = validWindowFor(base, nowUs);
+    head = validQmHead(window);
+    assert(psfWitnessGuard.lock(base, head, window) == Decision::kReady);
+    auto changedPsfField = base;
+    changedPsfField.psf.canonicalChannels[0] = 149;
+    assert(psfWitnessGuard.authorizeTake(changedPsfField, head, window) ==
+           Decision::kPsfWitnessChanged);
+    assert(!psfWitnessGuard.attempted());
+
+    OneShot mifRevisionGuard;
+    assert(mifRevisionGuard.lock(base, head, window) == Decision::kReady);
+    auto changedMif = base;
+    ++changedMif.mifRevision;
+    changedMif.mifRxMonotonicUs++;
+    changedMif.mifAgeUs--;
+    assert(mifRevisionGuard.authorizeTake(changedMif, head, window) ==
+           Decision::kMifRevisionChanged);
+
+    auto stalePsf = base;
+    window.nowUs = stalePsf.psf.rxHostUs +
+                   NativeAwdlDiscoveryBinding::kPsfLeaseUs + 1;
+    window.leaseStartUs = window.nowUs - 1000;
+    window.leaseEndUs = window.nowUs + 100000;
+    window.phaseEarliestUs = window.nowUs - 100;
+    window.phaseLatestUs = window.nowUs + 10000;
+    assert(NativeAwdlDiscoveryBinding::validate(
+               stalePsf, head, window) == Decision::kStalePsf);
+
+    auto staleMif = base;
+    window.nowUs = staleMif.mifRxMonotonicUs +
+                   NativeAwdlDiscoveryBinding::kMifLeaseUs + 1;
+    staleMif.mifAgeUs = NativeAwdlDiscoveryBinding::kMifLeaseUs + 1;
+    staleMif.psf.rxHostUs = window.nowUs - 100;
+    staleMif.psfAgeUs = 100;
+    window.leaseStartUs = window.nowUs - 1000;
+    window.leaseEndUs = window.nowUs + 100000;
+    window.phaseEarliestUs = window.nowUs - 100;
+    window.phaseLatestUs = window.nowUs + 10000;
+    assert(NativeAwdlDiscoveryBinding::validate(
+               staleMif, head, window) == Decision::kStaleMif);
+
+    window = validWindowFor(base, nowUs);
+    window.epochs.context++;
+    assert(NativeAwdlDiscoveryBinding::validate(
+               base, head, window) == Decision::kEpochMismatch);
+    window = validWindowFor(base, nowUs);
+    window.epochs.power++;
+    assert(NativeAwdlDiscoveryBinding::validate(
+               base, head, window) == Decision::kEpochMismatch);
+    window = validWindowFor(base, nowUs);
+    window.epochs.station++;
+    assert(NativeAwdlDiscoveryBinding::validate(
+               base, head, window) == Decision::kEpochMismatch);
+    window = validWindowFor(base, nowUs);
+    window.epochs.roc++;
+    assert(NativeAwdlDiscoveryBinding::validate(
+               base, head, window) == Decision::kEpochMismatch);
+    window = validWindowFor(base, nowUs);
+    auto wrongChannel = base;
+    wrongChannel.mifRxChannel6 = false;
+    assert(NativeAwdlDiscoveryBinding::validate(
+               wrongChannel, head, window) == Decision::kChannelMismatch);
+    window.nowUs = nowUs;
+    window.leaseEndUs = nowUs;
+    assert(NativeAwdlDiscoveryBinding::validate(
+               base, head, window) == Decision::kLeaseOutside);
+    window = validWindowFor(base, nowUs);
+    window.phaseLatestUs = nowUs;
+    assert(NativeAwdlDiscoveryBinding::validate(
+               base, head, window) == Decision::kPhaseExpired);
+    window = validWindowFor(base, nowUs);
+    window.closing = true;
+    assert(NativeAwdlDiscoveryBinding::validate(
+               base, head, window) == Decision::kWindowClosed);
+    OneShot closingGuard;
+    window = validWindowFor(base, nowUs);
+    assert(closingGuard.lock(base, head, window) == Decision::kReady);
+    window.closing = true;
+    assert(closingGuard.authorizeTake(base, head, window) ==
+           Decision::kWindowClosed);
+    assert(!closingGuard.attempted());
+    assert(closingGuard.authorizeTake(base, head, validWindowFor(base, nowUs)) ==
+           Decision::kWindowClosed);
+    window = validWindowFor(base, nowUs);
+    window.rocActive = false;
+    assert(NativeAwdlDiscoveryBinding::validate(
+               base, head, window) == Decision::kRocInactive);
+    window = validWindowFor(base, nowUs);
+    head.queryClass = static_cast<uint8_t>(
+        NativeAwdlData::MdnsQueryClass::QuUnicastPreferred);
+    assert(NativeAwdlDiscoveryBinding::validate(
+               base, head, window) == Decision::kQueueHeadInvalid);
+}
+
+static void testPeerIdentityAndRevisionOverflowFailClosed()
+{
+    NativeAwdlPeerIdentity::TokenSequence sequence(UINT64_MAX - 1);
+    uint64_t first = 0;
+    uint64_t oldEntryToken = 77;
+    assert(sequence.allocate(&first) && first == UINT64_MAX);
+    assert(!sequence.allocate(&oldEntryToken));
+    assert(oldEntryToken == 77); // Failed allocation leaves old entry intact.
+    uint64_t revision = UINT64_MAX;
+    assert(!NativeAwdlPeerIdentity::advanceRevision(&revision));
+    assert(revision == UINT64_MAX);
+    revision = 0;
+    assert(NativeAwdlPeerIdentity::advanceRevision(&revision) && revision == 1);
+}
+
+struct MockExactHeadQueue {
+    QueueHead current;
+    uint32_t dequeueCalls;
+    uint32_t consumed;
+
+    MockExactHeadQueue(const QueueHead &head)
+        : current(head), dequeueCalls(0), consumed(0) {}
+
+    bool nextDiscoveryTx(const QueueHead &expected)
+    {
+        ++dequeueCalls;
+        if (!NativeAwdlDiscoveryBinding::sameQueueHead(current, expected))
+            return false;
+        ++consumed;
+        return true;
+    }
+};
+
+static void testOneShotStrictQmTakeHasNoFallback()
+{
+    const uint64_t nowUs = 3000000;
+    const auto snapshot = validBindingSnapshot(nowUs);
+    auto window = validWindowFor(snapshot, nowUs);
+    auto head = validQmHead(window);
+    OneShot waiting;
+    window.phaseEarliestUs = nowUs + 10;
+    assert(waiting.lock(snapshot, head, window) == Decision::kReady);
+    assert(waiting.authorizeTake(snapshot, head, window) ==
+           Decision::kPhaseNotYetOpen);
+    assert(!waiting.attempted());
+    window.nowUs += 20;
+    auto freshSnapshot = snapshot;
+    freshSnapshot.psfAgeUs += 20;
+    freshSnapshot.mifAgeUs += 20;
+    freshSnapshot.mif.rxAgeUs += 20;
+    assert(waiting.authorizeTake(freshSnapshot, head, window) ==
+           Decision::kReady);
+
+    window = validWindowFor(snapshot, nowUs);
+    head = validQmHead(window);
+    OneShot oneShot;
+    assert(oneShot.lock(snapshot, head, window) == Decision::kReady);
+    MockExactHeadQueue queue(head);
+    assert(oneShot.authorizeTake(snapshot, head, window) == Decision::kReady);
+    assert(queue.nextDiscoveryTx(head));
+    assert(queue.dequeueCalls == 1 && queue.consumed == 1);
+    assert(oneShot.authorizeTake(snapshot, head, window) ==
+           Decision::kAlreadyAttempted);
+    assert(queue.dequeueCalls == 1 && queue.consumed == 1);
+    uint32_t ordinaryFallbackCalls = 0;
+    assert(ordinaryFallbackCalls == 0);
+
+    OneShot changedHead;
+    assert(changedHead.lock(snapshot, head, window) == Decision::kReady);
+    auto changed = head;
+    ++changed.token;
+    assert(changedHead.authorizeTake(snapshot, changed, window) ==
+           Decision::kQueueHeadChanged);
+    assert(!changedHead.attempted());
+}
+
+static void testReplayCanonicalSlotsWithoutChannel6RemainClosed()
+{
+    const uint64_t nowUs = 4000000;
+    const uint16_t counters[] = {20324, 20330, 20337};
+    const uint8_t expectedSlots[] = {10, 11, 13};
+    const uint8_t expectedChannels[] = {149, 0, 149};
+    for (size_t i = 0; i < sizeof(counters) / sizeof(counters[0]); ++i) {
+        auto snapshot = validBindingSnapshot(nowUs);
+        for (uint8_t slot = 0; slot < 16; ++slot)
+            snapshot.psf.canonicalChannels[slot] = 0;
+        snapshot.psf.canonicalChannels[8] = 6;
+        snapshot.psf.canonicalChannels[10] = 149;
+        snapshot.psf.canonicalChannels[11] = 0;
+        snapshot.psf.canonicalChannels[13] = 149;
+        snapshot.psf.awCounter = counters[i];
+        const uint8_t nextSlot = static_cast<uint8_t>(
+            ((snapshot.psf.awCounter / 4u) + 1u) % 16u);
+        assert(nextSlot == expectedSlots[i]);
+        assert(snapshot.psf.canonicalChannels[nextSlot] == expectedChannels[i]);
+        auto window = validWindowFor(snapshot, nowUs, true);
+        auto head = validQmHead(window);
+        OneShot oneShot;
+        assert(oneShot.lock(snapshot, head, window) ==
+               Decision::kNoChannel6NextSlot);
+        assert(!oneShot.attempted());
+        MockExactHeadQueue queue(head);
+        assert(queue.dequeueCalls == 0 && queue.consumed == 0);
+    }
+}
+
+static void testMifCurrentSlotAllowsOldPsfHistoryButTakesOneQmOnly()
+{
+    const uint64_t nowUs = 560619407;
+    auto snapshot = validBindingSnapshot(nowUs);
+    snapshot.mode = Mode::kMifCurrentSlot;
+    snapshot.psfHistorySameEntryPresent = true;
+    snapshot.historyCompatible = true;
+    snapshot.psfAgeUs = 287000; // Identity history only in this mode.
+    snapshot.psf.rxHostUs = nowUs - snapshot.psfAgeUs;
+    snapshot.psf.rxChannel = 149;
+    snapshot.psf.awCounter = 20324; // Old PSF's next slot 10 is not channel 6.
+    for (uint8_t slot = 0; slot < 16; ++slot)
+        snapshot.psf.canonicalChannels[slot] = 0;
+    snapshot.psf.canonicalChannels[8] = 6;
+    snapshot.psf.canonicalChannels[10] = 149;
+
+    snapshot.mif.peerIncarnation = snapshot.peerIncarnation;
+    snapshot.mif.mifRevision = snapshot.mifRevision;
+    snapshot.mif.rxMonotonicUs = nowUs - 4000;
+    snapshot.mif.rxAgeUs = 4000;
+    snapshot.mif.epochs = {snapshot.psf.epochs.context,
+                           snapshot.psf.epochs.power,
+                           snapshot.psf.epochs.station,
+                           snapshot.psf.epochs.roc};
+    snapshot.mif.rxGp2Us = 0x13572468u;
+    snapshot.mif.phyTxTimestampUs = 0x13572500u;
+    snapshot.mif.targetTxTimestampUs = 0x13572400u;
+    snapshot.mif.awCounter = 20320; // Current MIF slot 8 is channel 6.
+    snapshot.mif.txDownCounterTu = 32;
+    snapshot.mif.awPeriodTu = 16;
+    snapshot.mif.presenceMode = 4;
+    snapshot.mif.rxChannel = 6; // Raw index is mapped by this fixture.
+    for (uint8_t slot = 0; slot < 16; ++slot)
+        snapshot.mif.canonicalSlots[slot] = 44;
+    snapshot.mif.canonicalSlots[8] = 6;
+    snapshot.mif.present = true;
+    snapshot.mif.complete = true;
+    snapshot.mif.syncConsistent = true;
+    snapshot.mif.fresh = true;
+    snapshot.mif.rxGp2Present = true;
+    snapshot.mif.presenceModePresent = true;
+    snapshot.mif.awCounterSemanticVerified = true;
+    snapshot.mif.type18Present = true;
+    snapshot.mif.type18Valid = true;
+    snapshot.mif.peerMifRxChannel6Confirmed = true;
+    memcpy(snapshot.mif.canonicalSlots, snapshot.psf.canonicalChannels,
+           sizeof(snapshot.mif.canonicalSlots));
+    snapshot.mifAgeUs = 4000;
+    snapshot.mifRxMonotonicUs = snapshot.mif.rxMonotonicUs;
+    snapshot.mifRxMonotonicUs = snapshot.mif.rxMonotonicUs;
+    snapshot.hasMif = true;
+    snapshot.mifFresh = true;
+    snapshot.mifSyncConsistent = true;
+
+    auto window = validWindowFor(snapshot, nowUs, true);
+    window.mode = Mode::kMifCurrentSlot;
+    window.phaseCandidateValid = true; // Only a successful MIF timing helper result.
+    auto head = validQmHead(window);
+    OneShot oneShot;
+    assert(oneShot.lock(snapshot, head, window) == Decision::kReady);
+    assert(oneShot.authorizeTake(snapshot, head, window) == Decision::kReady);
+    MockExactHeadQueue queue(head);
+    assert(queue.nextDiscoveryTx(head));
+    assert(queue.dequeueCalls == 1 && queue.consumed == 1);
+    assert(oneShot.authorizeTake(snapshot, head, window) ==
+           Decision::kAlreadyAttempted);
+    assert(queue.dequeueCalls == 1 && queue.consumed == 1);
+
+    OneShot wrongMode;
+    auto psfWindow = window;
+    psfWindow.mode = Mode::kPsfNextSlot;
+    assert(wrongMode.lock(snapshot, head, psfWindow) ==
+           Decision::kModeMismatch);
+
+    OneShot changedMif;
+    assert(changedMif.lock(snapshot, head, window) == Decision::kReady);
+    auto changed = snapshot;
+    changed.mif.canonicalSlots[8] = 149;
+    assert(changedMif.authorizeTake(changed, head, window) ==
+           Decision::kMifWitnessMismatch);
+
+    OneShot changedHistory;
+    assert(changedHistory.lock(snapshot, head, window) == Decision::kReady);
+    auto incompatible = snapshot;
+    incompatible.historyCompatible = false;
+    assert(!NativeAwdlDiscoveryBinding::sameLockedSnapshot(
+        snapshot, incompatible, Mode::kMifCurrentSlot, true));
+    assert(changedHistory.authorizeTake(incompatible, head, window) ==
+           Decision::kHistoryIncompatible);
+    MockExactHeadQueue untouched(head);
+    assert(untouched.dequeueCalls == 0 && untouched.consumed == 0);
+}
+
+static void testSameAddr2HistoryMustMatchMapMasterAndSync()
+{
+    const RuntimeEpochs epochs = activeEpochs();
+    for (uint8_t mismatchKind = 0; mismatchKind < 3; ++mismatchKind) {
+        Table table;
+        const NativeAwdl::PsfInput mifAdvertisement = validPsf(5);
+        auto mif = makeRecordForPsf(mifAdvertisement, 1000000, 3);
+        mif.channel = 6;
+        assert(table.observe(mif, epochs, 1000010) == Result::kAdmitted);
+
+        NativeAwdl::PsfInput psfAdvertisement = mifAdvertisement;
+        if (mismatchKind == 0) {
+            // Preserve a valid social schedule while changing one canonical
+            // type-18 slot; the PSF and MIF still share the same Addr2.
+            psfAdvertisement.channelSlots[0] = 44;
+        } else if (mismatchKind == 1) {
+            setAddress(psfAdvertisement.masterAddress, 31);
+        } else {
+            setAddress(psfAdvertisement.syncAddress, 25);
+        }
+        auto psf = makeRecordForPsf(psfAdvertisement, 1000100, 0);
+        psf.channel = 6;
+        assert(table.observe(psf, epochs, 1000110) == Result::kCandidate);
+
+        const auto summary = table.snapshot(epochs, 1000200);
+        IntelAwdlPeerRuntime::PsfPeerSnapshot raw{};
+        assert(table.getPsfSnapshot(summary.latestFreshPsfSlot, epochs,
+                                    1000200, &raw));
+        assert(raw.hasPsf && raw.hasMif && raw.peerIncarnation != 0);
+        assert(!raw.historyCompatible);
+        assert(!summary.peers[summary.latestFreshPsfSlot].historyCompatible);
+
+        auto snapshot = bindingFromRuntimePsf(raw, 1000200);
+        snapshot.mode = Mode::kMifCurrentSlot;
+        auto window = validWindowFor(snapshot, 1000200, true);
+        auto head = validQmHead(window);
+        OneShot oneShot;
+        assert(oneShot.lock(snapshot, head, window) ==
+               Decision::kHistoryIncompatible);
+        MockExactHeadQueue untouched(head);
+        assert(untouched.dequeueCalls == 0 && untouched.consumed == 0);
+    }
+}
+
+static void testMifCurrentSlotRejectsAbsentOrLateMifCandidate()
+{
+    const uint64_t nowUs = 560619407;
+    Table table;
+    const auto epochs = activeEpochs();
+    // Actual-source-derived no-early-MIF shape: PSF history exists, but no
+    // same-entry accepted MIF can drive the MIF-current phase helper.
+    assert(table.observe(makeRecordAtChannel(5, nowUs - 300000, 0), epochs,
+                         nowUs - 299990) == Result::kCandidate);
+    const auto summary = table.snapshot(epochs, nowUs - 299900);
+    IntelAwdlPeerRuntime::PsfPeerSnapshot raw{};
+    assert(table.getPsfSnapshot(summary.latestFreshPsfSlot, epochs,
+                                nowUs - 299900, &raw));
+    auto missing = bindingFromRuntimePsf(raw, nowUs - 299900);
+    missing.mode = Mode::kMifCurrentSlot;
+    auto missingWindow = validWindowFor(missing, nowUs - 299900, true);
+    missingWindow.mode = Mode::kMifCurrentSlot;
+    auto missingHead = validQmHead(missingWindow);
+    OneShot noMif;
+    assert(noMif.lock(missing, missingHead, missingWindow) ==
+           Decision::kMissingMifBinding);
+    MockExactHeadQueue untouched(missingHead);
+    assert(untouched.dequeueCalls == 0 && untouched.consumed == 0);
+
+    // Captured Test065-derived timing interval was already expired at the
+    // consumer's actual time. Even a complete fresh MIF cannot reopen it.
+    auto late = validBindingSnapshot(nowUs);
+    late.mode = Mode::kMifCurrentSlot;
+    late.psfHistorySameEntryPresent = true;
+    late.psfAgeUs = 287000;
+    late.psf.rxHostUs = nowUs - late.psfAgeUs;
+    auto lateWindow = validWindowFor(late, nowUs, true);
+    lateWindow.mode = Mode::kMifCurrentSlot;
+    lateWindow.phaseEarliestUs = 560570845;
+    lateWindow.phaseLatestUs = 560576088;
+    lateWindow.phaseCandidateValid = false; // timing helper says expired
+    auto lateHead = validQmHead(lateWindow);
+    OneShot expired;
+    assert(expired.lock(late, lateHead, lateWindow) ==
+           Decision::kInvalidPhaseCandidate);
+    MockExactHeadQueue lateUntouched(lateHead);
+    assert(lateUntouched.dequeueCalls == 0 && lateUntouched.consumed == 0);
+}
+
 int main()
 {
     testPsfAndMifPairsPlusFullSchedule();
@@ -868,9 +1671,22 @@ int main()
     testRejectedPsfPreservesAdvertisementAndMifDiagnostics();
     testPsfSequenceCopyMismatchIsAcceptedAndObservable();
     testMifWithoutEmbeddedCopyCarriesUnverifiedPeerShape();
+    testMifOnlySnapshotCarriesExactPresenceBinding();
     testRejectsBadEpochTimeParserAndOrdering();
     testRejectedMifPreservesPeerAndValidMifReplacesAtomically();
     testCapacityExpiryEpochAndClockRegression();
     testMifLeaseBoundaryAndLatestMifSlot();
+    testRuntimeSnapshotBindsSameSourceMifAndPsf();
+    testObserverAggregateCannotAuthorizeForeignRuntimePsf();
+    testIncarnationNeverReusedAcrossTableReset();
+    testRuntimeSnapshotRejectsCrossSourceMifAndPsf();
+    testSlotReuseInvalidatesLockedPeerIncarnation();
+    testSnapshotRevisionsFreshnessEpochChannelLeaseAndClose();
+    testPeerIdentityAndRevisionOverflowFailClosed();
+    testOneShotStrictQmTakeHasNoFallback();
+    testReplayCanonicalSlotsWithoutChannel6RemainClosed();
+    testMifCurrentSlotAllowsOldPsfHistoryButTakesOneQmOnly();
+    testSameAddr2HistoryMustMatchMapMasterAndSync();
+    testMifCurrentSlotRejectsAbsentOrLateMifCandidate();
     return 0;
 }

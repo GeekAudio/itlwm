@@ -89,6 +89,7 @@ BlockedReason transientReason(BlockedReason reason)
         case kGateActionFailed:
         case kProbeQueueBusy:
         case kCanceledBeforeStart:
+        case kNativeAwdlIdentityUnavailable:
             return reason;
         default:
             return kNotBlocked;

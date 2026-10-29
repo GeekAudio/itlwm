@@ -11,8 +11,13 @@ The ARPA value is encoded as flags `3`, one length byte, the caller's single
 ASCII DNS host label (1–63 characters), and the fixed `c0 0c` compressed `.local`
 suffix. Dots, NUL, non-ASCII bytes, underscores, malformed hyphen placement,
 and caller-supplied compressed layouts are rejected. The host label must omit
-`.local`. Data Path State remains the existing empty value (`00 00` flags); this
-encoder does not claim an active `awdl0` or data path.
+`.local`. The MIF scanner accepts exactly two Data Path State shapes: legacy
+flags `0` with no payload, or flags `0x0004` with six address bytes equal to
+802.11 Addr2. It rejects other flag words, lengths, or address mismatches. This
+identity field does not claim that `awdl0` or an IPv6 data path is ready.
+
+The maximum MIF is 307 bytes: a 237-byte address-profile PSF, a 63-byte host
+label, and the seven-byte ARPA overhead. Legacy MCS4 MIF remains 301 bytes.
 
 The wire shape follows the primary OWL sources: `src/frame.h` declares MIF
 subtype 3 and the type-16 ARPA fields; `src/tx.c` emits flags 3, the supplied
@@ -39,7 +44,8 @@ clang++ -std=c++17 -O1 -g -fsanitize=address,undefined \
 /tmp/awdl_mif_encode_test_asan
 ```
 
-The test is offline and synthetic. It covers MIF parse round-trip, byte/layout
-bounds, zero Data Path State, malformed labels, maximum label/capacity, and
-output-preservation on failure. It does not test radio TX/RX, native `awdl0`,
-peer acknowledgement, or AirDrop.
+The test is offline and synthetic. It covers MIF parse round-trip, both Data
+Path shapes, exact address reuse, strict insertion-shape rejection, byte/layout
+bounds, malformed labels, maximum label/capacity, and output-preservation on
+failure. It does not test radio TX/RX, native `awdl0`, peer acknowledgement, or
+AirDrop.

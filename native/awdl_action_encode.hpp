@@ -58,9 +58,16 @@ struct PsfInput {
     // Version TLV fields; the current target is macOS (device class 1).
     uint8_t awdlVersion;
     uint8_t deviceClass;
+
+    // Optional AWDL address form for Data Path State. When true, serializes
+    // flags=0x0004 and reuses sourceAddress as the six-byte advertised address.
+    // Aggregate-zero callers retain the legacy flags=0, two-byte value.
+    bool advertiseAwdlAddress;
 };
 
-constexpr size_t kMaximumEncodedPsfLength = 231;
+// MCS 0..31 occupies up to four bytes: 231 legacy bytes plus the optional
+// six-byte AWDL address value.
+constexpr size_t kMaximumEncodedPsfLength = 237;
 
 // Encode one complete 802.11 Action MPDU containing a PSF. The destination is
 // broadcast and the BSSID is the AWDL BSSID from AWDL-1. No FCS/radiotap is

@@ -11,7 +11,8 @@
 
 using namespace NativeAwdlProbe;
 
-static Request request(uint64_t sampleUs, uint16_t sequence)
+static Request request(uint64_t sampleUs, uint16_t sequence,
+                       bool nativeAddressVerified = false)
 {
     Request value{};
     const uint8_t mac[6] = {0x02, 0x5a, 0x71, 0x23, 0x45, 0x67};
@@ -24,7 +25,38 @@ static Request request(uint64_t sampleUs, uint16_t sequence)
     value.ht.rxMcsMask[1] = 0xff;
     value.ht.rxMcsLength = 4;
     value.ht.confirmed = true;
+    value.nativeAddressVerified = nativeAddressVerified;
     return value;
+}
+
+static PsfRuntimeWitness witness(uint64_t startUs, uint64_t sampleUs,
+                                 uint64_t deadlineUs);
+
+static void testVerifiedAddressSurvivesCandidateGate()
+{
+    const uint64_t startUs = 500000;
+    const uint64_t sampleUs = startUs + 1000;
+    const Request input = request(sampleUs, 0x44, true);
+    const PsfRuntimeWitness live = witness(startUs, sampleUs,
+        startUs + 900000 - kPsfLeaseSafetyMarginUs);
+    PsfCandidate candidate{};
+    assert(prepareExperimentalPsfCandidate(&input, &live, &candidate) ==
+           PsfCandidateStatus::Encoded);
+    assert(candidate.input.advertiseAwdlAddress);
+    assert(candidate.length == 237);
+
+    NativeAwdl::ParseDiagnostics diagnostics{};
+    NativeAwdl::ActionFrameInfo parsed{};
+    assert(NativeAwdl::parseActionFrame(candidate.bytes, candidate.length,
+        &parsed, &diagnostics) == NativeAwdl::ParseStatus::Ok);
+    assert(diagnostics.dataPathFlags == 0x0004);
+    // MCS4 puts the Data Path TLV at offset 221; its payload reuses Addr2.
+    assert(candidate.bytes[221] == 12 && candidate.bytes[222] == 8 &&
+           candidate.bytes[223] == 0 && candidate.bytes[224] == 4 &&
+           candidate.bytes[225] == 0);
+    assert(memcmp(candidate.bytes + 10, candidate.bytes + 226, 6) == 0);
+    assert(p2pPsfObservationTxBlockers(&candidate, &live, sampleUs + 1) ==
+           kPsfTxNoBlocker);
 }
 
 static PsfRuntimeWitness witness(uint64_t startUs, uint64_t sampleUs,
@@ -173,6 +205,7 @@ static void testSerializationFailureFromInvalidHtIsFailClosed()
 int main()
 {
     testEncodedCandidateStillFailsClosedFor900ms();
+    testVerifiedAddressSurvivesCandidateGate();
     testSyntheticCompleteLeaseCanPassOnlyWithAllWitnesses();
     testLateStartAndInvalidWitnessLeaveOutputUntouched();
     testSubmitRejectsStaleEndedAndChangedEpoch();
