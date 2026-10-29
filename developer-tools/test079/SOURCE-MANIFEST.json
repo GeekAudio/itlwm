@@ -32,8 +32,9 @@
       "source_relative_path": "IntelWirelessNative/tools/run_test079_router_observation_once.py",
       "snapshot_path": "tools/run_test079_router_observation_once.py",
       "original_sha256": "0ff325114d13deeff435c501021fc4a64f328b9a1f6cdd478cb00547c1bfa907",
-      "snapshot_sha256": "0ff325114d13deeff435c501021fc4a64f328b9a1f6cdd478cb00547c1bfa907",
-      "change_note": "Copied byte-for-byte from the recorded source file."
+      "snapshot_sha256": "4e3f7fc0ce58578fe96d94ebe44c4795c1209c4083e80396e50c3a2d0cf3f775",
+      "change_note": "Updated after Test079 boot to validate the existing channel 6 / 149 AP layout; no retune and no RF budget increase. Original hash retains the earlier snapshot provenance.",
+      "current_source_sha256": "4e3f7fc0ce58578fe96d94ebe44c4795c1209c4083e80396e50c3a2d0cf3f775"
     },
     {
       "source_relative_path": "IntelWirelessNative/tools/awdl_ioreg_u32.py",
@@ -88,8 +89,9 @@
       "source_relative_path": "IntelWirelessNative/tools/test_run_test079_router_observation_once.py",
       "snapshot_path": "tools/test_run_test079_router_observation_once.py",
       "original_sha256": "c7ee2543ffb54381b0e001007b6cf594b974d58761ce071168463f7e93d63413",
-      "snapshot_sha256": "c7ee2543ffb54381b0e001007b6cf594b974d58761ce071168463f7e93d63413",
-      "change_note": "Copied byte-for-byte from the recorded source file."
+      "snapshot_sha256": "d6ec06982f6a73481ad8e26c10e1120bd4c1330dd701b8efb04f28fc3614d504",
+      "change_note": "Updated after Test079 boot to validate the existing channel 6 / 149 AP layout; no retune and no RF budget increase. Original hash retains the earlier snapshot provenance. The mock SSH host uses a non-routable placeholder.",
+      "current_source_sha256": "d6ec06982f6a73481ad8e26c10e1120bd4c1330dd701b8efb04f28fc3614d504"
     },
     {
       "source_relative_path": "IntelWirelessNative/tools/test_openwrt_capture_once.py",
@@ -130,6 +132,6 @@
     "build products",
     "site source"
   ],
-  "updated_at": "2026-10-29T18:35:24.563365+08:00",
-  "source_context_note": "The Git commit identifies driver context at capture; author tool bytes originate in the separate runtime workspace and are identified by their recorded hashes."
+  "updated_at": "2026-10-29T23:05:19.335954+08:00",
+  "source_context_note": "source_commit retains the original driver-context snapshot. Updated host tool bytes are identified by current_source_sha256 and snapshot_sha256; this does not represent a new kernel build."
 }

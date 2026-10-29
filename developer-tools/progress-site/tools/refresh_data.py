@@ -97,7 +97,9 @@ def main() -> None:
         "deploymentState": raw.get("deployment_state"),
         "milestones": milestones,
         "progressModel": {"version": "current-runtime-v2", "fixed_total": 40,
-                          "meaning": "当前版本已实测通过项占固定验收清单的比例，部分通过不计完成"},
+                          "meaning": safe_summary(raw.get("progress_model", {}).get(
+                              "meaning", "当前启动的实机验收；未覆盖项不计通过，历史覆盖单独展示。"),
+                              "project", "progress_model_meaning")},
     }
     for field in ("runningCandidate", "nextCandidate", "deploymentState"):
         value = data[field]

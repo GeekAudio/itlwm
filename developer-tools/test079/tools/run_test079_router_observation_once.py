@@ -104,7 +104,7 @@ def receiver_capture_args(python_executable, host, control_path, folder):
     return [python_executable,str(ROOT/'tools/openwrt_capture_once.py'),
         '--host',host,'--control-path',control_path,
         '--ap','wlan0','--ap','wlan1','--interface','wlan0','--monitor','iwawdl0',
-        '--expect-ap','wlan0:0:6:2437:20','--expect-ap','wlan1:1:36:5180:160',
+        '--expect-ap','wlan0:0:6:2437:20','--expect-ap','wlan1:1:149:5745:80',
         '--capture','--duration',str(DURATION),'--max-packets',str(MAX_CAPTURE_PACKETS),
         '--output',str(folder/'receiver-private.pcap')]
 

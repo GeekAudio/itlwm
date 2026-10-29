@@ -45,6 +45,27 @@ class Test079CoordinatorSafetyTests(unittest.TestCase):
         self.assertIn("capture_test079_resident_data_once.py", source)
         self.assertNotIn('capture_test077_resident_data_once.py', source)
 
+    def test_receiver_pins_current_dual_ap_topology_without_retuning(self):
+        args = MODULE.receiver_capture_args(
+            '/usr/bin/python3', 'root@router.invalid',
+            '/tmp/openwrt-control.sock', ROOT / 'receiver-private')
+        ap_values = [args[index + 1] for index, value in enumerate(args)
+                     if value == '--ap']
+        expected_values = [args[index + 1] for index, value in enumerate(args)
+                           if value == '--expect-ap']
+        self.assertEqual(ap_values, ['wlan0', 'wlan1'])
+        self.assertEqual(expected_values, [
+            'wlan0:0:6:2437:20',
+            'wlan1:1:149:5745:80',
+        ])
+        self.assertEqual(args[args.index('--interface') + 1], 'wlan0')
+        self.assertEqual(args[args.index('--monitor') + 1], 'iwawdl0')
+        self.assertEqual(args[args.index('--duration') + 1], '20')
+        self.assertEqual(args[args.index('--max-packets') + 1], '4096')
+        self.assertNotIn('--channel', args)
+        self.assertNotIn('--frequency', args)
+        self.assertIn('--capture', args)
+
 
 if __name__ == '__main__':
     unittest.main()
