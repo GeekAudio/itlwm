@@ -36,6 +36,12 @@ Test079 新增引导后配对阶段，保留引导历史，要求新的同条目
 
 能力链显示：若实际采用原生 PCIe bus 的 FlowID capability，manager 会选择跳过写入 legacy 组播允许位的替代分支；该分支的最终出队效果尚未闭合，不能把 legacy peer gate 代表为全部原生发送路径。AW-start 事件已静态追到 PostOffice 和条件性 WCL 投递；`SkywalkInterface::postMessage` 与相邻的 `reportDataPathEvents` 是不同回调，到 manager 的订阅和资格分支仍未知。下一步只追这两处缺口，不凭局部没有 MIF 比较就删除 Intel 条件。以上没有增加 RF、稳定性或 AirDrop 验收。
 
+后续有界复核已把替代分支条件性静态追到 Proximity 注册输出、PCIe 队列 factory、`p2pMulticastTx` 与 `dequeuePackets` 入口；没有据此认定运行时选中了这些类、队列注册成功或实际出队。AW 事件的 outgoing Glue 指向 WCLGlue，已区分发送、反向接收和同步 fallback 的方向；订阅门及通用 fanout 不代表已找到具体 manager 消费者，正常返回也不代表 pipe 写入或消费者收件。
+
+Intel 当前实际实验链是另一条路径：`awdl_native_bsd_data_25G332.cpp` 的 `IntelNativeAWDLData` ifnet 过滤器把查询放入自有 `Ring<Tx,32>`，`ItlIwxP2PProbe` 用自有 peer table 和 MIF-current 条件绑定、验证并消费，再经 `iwx_tahoe_p2p_action_tx_submit` 向 Intel IWX 队列提交。在本次限定检查中，原生 Proximity 队列注册、Intel 的 FlowID override 和 WCL AW0x29 接收入口未定位；ABI 声明或 Intel Session Protection ROC 状态不能代替这些证据。这不排除未检查路径，但不能用博通静态队列直接解释或替换当前 Intel 实验发送链。
+
+原生静态步骤到此收口。后续回到 Intel 自有授权与频道时序问题，保留同条目 MIF、时效、代际和资源保护，直到有依据的替代设计通过验证。静态入口定位没有增加实机验收项。
+
 ## 本次博通实测对照
 
 新启动已核对博通驱动绑定及 USB 蓝牙归属。手机确认正向收件；Mac 新收到的反向文件为 32768 字节，SHA 与源文件一致。独立的成功控制/BPF窗口完整：观测 622 包、33 条 mDNS 应答；控制样本 PSF 76、MIF 85，733 条观察中有 572 条主动抽稀。窗口级匿名别名交集不等于逐包关联，也不证明 `ifnet_input` 返回值。
