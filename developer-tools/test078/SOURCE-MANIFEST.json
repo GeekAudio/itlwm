@@ -1,0 +1,114 @@
+{
+  "schema_version": 1,
+  "snapshot": "Test078 host diagnostics source snapshot",
+  "source_repository": "https://github.com/GeekAudio/itlwm",
+  "source_branch": "codex/tahoe-test078",
+  "source_commit": "a98d788",
+  "source_worktree_dirty": true,
+  "created_at": "2026-10-29T16:52:28+08:00",
+  "file_count": 13,
+  "files": [
+    {
+      "source_relative_path": "IntelWirelessNative/capture_test078_resident_data_once.py",
+      "snapshot_path": "capture_test078_resident_data_once.py",
+      "original_sha256": "9da33acd25fa491706c49a57719feced84c65f57e85f3298d270a385f2b6d69e",
+      "snapshot_sha256": "9da33acd25fa491706c49a57719feced84c65f57e85f3298d270a385f2b6d69e",
+      "change_note": "Copied byte-for-byte from the recorded source file."
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/probe_wifi_rate.py",
+      "snapshot_path": "probe_wifi_rate.py",
+      "original_sha256": "6e802a71ebeb5b9010ae0e0f7f0edd6f2782c51e50d8a5d566492c996efd9ca0",
+      "snapshot_sha256": "6e802a71ebeb5b9010ae0e0f7f0edd6f2782c51e50d8a5d566492c996efd9ca0",
+      "change_note": "Copied byte-for-byte from the recorded source file."
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/probe_p2p_result.py",
+      "snapshot_path": "probe_p2p_result.py",
+      "original_sha256": "7d41e4c5d236325e4cfe235717048030ab80d8f97392ac37307c9bf82603a732",
+      "snapshot_sha256": "7d41e4c5d236325e4cfe235717048030ab80d8f97392ac37307c9bf82603a732",
+      "change_note": "Copied byte-for-byte from the recorded source file."
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/tools/run_test078_router_observation_once.py",
+      "snapshot_path": "tools/run_test078_router_observation_once.py",
+      "original_sha256": "58078ff574d508bbf374ab474024f4e4348d0e183da550bff7735a55715922dd",
+      "snapshot_sha256": "58078ff574d508bbf374ab474024f4e4348d0e183da550bff7735a55715922dd",
+      "change_note": "Copied byte-for-byte from the recorded source file."
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/tools/awdl_ioreg_u32.py",
+      "snapshot_path": "tools/awdl_ioreg_u32.py",
+      "original_sha256": "4a4fef3e2ac9189ab53fe93a39a5f183c6081a1b10c69a5901d06b495f1d3ff3",
+      "snapshot_sha256": "4a4fef3e2ac9189ab53fe93a39a5f183c6081a1b10c69a5901d06b495f1d3ff3",
+      "change_note": "Copied byte-for-byte from the recorded source file."
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/tools/awdl_osdata_diagnostics.py",
+      "snapshot_path": "tools/awdl_osdata_diagnostics.py",
+      "original_sha256": "544edfe631e91f39e584a2e8f68c3f4bbeb880bdd5bf9a9e056eab48c075c7f2",
+      "snapshot_sha256": "544edfe631e91f39e584a2e8f68c3f4bbeb880bdd5bf9a9e056eab48c075c7f2",
+      "change_note": "Copied byte-for-byte from the recorded source file."
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/tools/iwx_link_state_trace_diagnostics.py",
+      "snapshot_path": "tools/iwx_link_state_trace_diagnostics.py",
+      "original_sha256": "4d2d83b715b23d586ec6cbd8173a80123eb2261072f0109ee68c5ccc3243e78f",
+      "snapshot_sha256": "4d2d83b715b23d586ec6cbd8173a80123eb2261072f0109ee68c5ccc3243e78f",
+      "change_note": "Copied byte-for-byte from the recorded source file."
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/tools/openwrt_capture_once.py",
+      "snapshot_path": "tools/openwrt_capture_once.py",
+      "original_sha256": "7c7b750604acf3c18372600084bcf6a899f3b8c2e0c364ebb6a1129d77dbeac2",
+      "snapshot_sha256": "7c7b750604acf3c18372600084bcf6a899f3b8c2e0c364ebb6a1129d77dbeac2",
+      "change_note": "Copied byte-for-byte from the recorded source file."
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/tools/test_awdl_osdata_diagnostics.py",
+      "snapshot_path": "tools/test_awdl_osdata_diagnostics.py",
+      "original_sha256": "d9cef1618d3dfae4cbd941735d58bdbc577233e05d2d96bab840d4fda45f0d79",
+      "snapshot_sha256": "d9cef1618d3dfae4cbd941735d58bdbc577233e05d2d96bab840d4fda45f0d79",
+      "change_note": "Copied byte-for-byte from the recorded source file."
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/tools/test_iwx_link_state_trace_diagnostics.py",
+      "snapshot_path": "tools/test_iwx_link_state_trace_diagnostics.py",
+      "original_sha256": "c4daec094de8bff126ee2c642fd47acb7fe0beea9c5ae3401e1dcdaa02340198",
+      "snapshot_sha256": "c4daec094de8bff126ee2c642fd47acb7fe0beea9c5ae3401e1dcdaa02340198",
+      "change_note": "Copied byte-for-byte from the recorded source file."
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/tools/test_capture_test078_resident_data_once.py",
+      "snapshot_path": "tools/test_capture_test078_resident_data_once.py",
+      "original_sha256": "97c72d13ea81a618a75173e89e7268cac68a40a4461ba39ab1bbcc4228337077",
+      "snapshot_sha256": "7473f433af9ff25f1a582f1fefe672a3f0d3901e5333f20e24af561a5d7e2c7d",
+      "change_note": "Snapshot-only change: skip this metadata-template check only when the private Test078 runtime template is absent; if present, keep all assertions active and fail on malformed or incomplete metadata."
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/tools/test_run_test078_router_observation_once.py",
+      "snapshot_path": "tools/test_run_test078_router_observation_once.py",
+      "original_sha256": "17aa5a361b93386b316db96c68405e8b643518977ee57159e4af56d9de34d501",
+      "snapshot_sha256": "17aa5a361b93386b316db96c68405e8b643518977ee57159e4af56d9de34d501",
+      "change_note": "Copied byte-for-byte from the recorded source file."
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/tools/test_openwrt_capture_once.py",
+      "snapshot_path": "tools/test_openwrt_capture_once.py",
+      "original_sha256": "b0784c533c06f3d6db0a930631a8f8a611fbb2f08cd20c58e5a5e135ca931bda",
+      "snapshot_sha256": "b0784c533c06f3d6db0a930631a8f8a611fbb2f08cd20c58e5a5e135ca931bda",
+      "change_note": "Copied byte-for-byte from the recorded source file."
+    }
+  ],
+  "content_rule": "For every file, original_sha256 identifies the captured source and snapshot_sha256 identifies the committed snapshot bytes; any difference is explained by change_note.",
+  "exclusions": [
+    "private runtime metadata",
+    "research logs",
+    "packet captures",
+    "credentials",
+    "Apple binaries",
+    "build products",
+    "site source"
+  ],
+  "updated_at": "2026-10-29T16:57:26+08:00"
+}

@@ -1,0 +1,2101 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="description" content="Intel 原生无线驱动项目的本地实测进度、阶段证据与验收记录。">
+  <title>IntelWirelessNative · 项目进度</title>
+  <style>
+:root {
+  color-scheme: light dark;
+  --page: light-dark(#f3f5f4, #101412);
+  --surface: light-dark(#ffffff, #181e1b);
+  --surface-raised: light-dark(#f8faf9, #202824);
+  --surface-accent: light-dark(#e9f1eb, #22332a);
+  --text: light-dark(#1d2721, #e9eee9);
+  --text-soft: light-dark(#59655e, #a3aea6);
+  --text-faint: light-dark(#7d8981, #78867c);
+  --line: light-dark(#e0e6e1, #2d3831);
+  --line-strong: light-dark(#cbd5ce, #435148);
+  --green: light-dark(#247247, #73cf91);
+  --green-soft: light-dark(#e6f4e9, #1c3a27);
+  --amber: light-dark(#98631a, #f0bd68);
+  --amber-soft: light-dark(#fbf1df, #3c2e1b);
+  --blue: light-dark(#386b8d, #8cbfe0);
+  --blue-soft: light-dark(#e9f3f9, #203342);
+  --shadow: light-dark(0 16px 38px rgb(30 52 38 / 5%), 0 18px 46px rgb(0 0 0 / 18%));
+  --radius: 18px;
+  font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  background: var(--page);
+  color: var(--text);
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; scroll-padding-top: 22px; }
+body { margin: 0; min-width: 320px; background: var(--page); color: var(--text); }
+a { color: inherit; text-decoration: none; }
+a:hover { color: var(--green); }
+a:focus-visible, summary:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; border-radius: 6px; }
+button, input, select, textarea { font: inherit; }
+
+.site-shell { min-height: 100vh; display: grid; grid-template-columns: 250px minmax(0, 1fr); }
+.sidebar {
+  position: sticky;
+  top: 0;
+  align-self: start;
+  height: 100vh;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 25px 17px 18px;
+  background: var(--surface);
+  border-right: 1px solid var(--line);
+}
+.brand { display: flex; align-items: center; gap: 12px; padding: 4px 7px 21px; }
+.brand-mark {
+  display: grid;
+  place-items: center;
+  width: 39px;
+  height: 39px;
+  flex: 0 0 auto;
+  border-radius: 12px;
+  background: var(--green-soft);
+  color: var(--green);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: .04em;
+}
+.brand-copy { display: grid; min-width: 0; gap: 4px; }
+.brand-copy strong { overflow-wrap: anywhere; font-size: 13px; font-weight: 650; letter-spacing: -.01em; }
+.brand-copy small { color: var(--text-faint); font-size: 10px; letter-spacing: .14em; }
+.nav-label { padding: 14px 9px 8px; color: var(--text-faint); font-size: 10px; font-weight: 650; letter-spacing: .13em; text-transform: uppercase; }
+.primary-nav, .stage-nav { display: grid; gap: 3px; }
+.primary-nav a, .stage-nav a {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 9px;
+  border-radius: 9px;
+  color: var(--text-soft);
+  font-size: 12px;
+  transition: background-color .15s ease, color .15s ease;
+}
+.primary-nav a:hover, .stage-nav a:hover { background: var(--surface-raised); color: var(--text); }
+.primary-nav a.is-active { background: var(--surface-accent); color: var(--green); }
+.nav-glyph { display: grid; place-items: center; width: 23px; height: 22px; flex: 0 0 auto; color: var(--text-faint); font-size: 9px; font-variant-numeric: tabular-nums; }
+.side-divider { height: 1px; margin: 14px 7px 4px; background: var(--line); }
+.stage-nav { grid-template-columns: 1fr; }
+.stage-nav a { gap: 9px; padding: 7px 9px; font-size: 11px; }
+.stage-nav a span:first-child { width: 22px; flex: 0 0 auto; color: var(--text-faint); font-size: 10px; font-variant-numeric: tabular-nums; }
+.stage-nav a span:last-child { min-width: 0; overflow-wrap: anywhere; }
+.stage-nav a.is-active { background: var(--surface-accent); color: var(--green); }
+.sidebar-foot { display: flex; align-items: center; gap: 8px; margin: 20px 8px 0; padding-top: 14px; border-top: 1px solid var(--line); color: var(--text-faint); font-size: 10px; }
+.local-indicator, .snapshot-dot { width: 7px; height: 7px; flex: 0 0 auto; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 3px var(--green-soft); }
+
+.main-content { min-width: 0; max-width: 1500px; width: 100%; margin: 0 auto; padding: 0 clamp(18px, 3.3vw, 48px) 42px; }
+.topbar { display: flex; min-height: 62px; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--line); }
+.breadcrumb { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 9px; color: var(--text-faint); font-size: 11px; }
+.breadcrumb strong { color: var(--text-soft); font-weight: 550; overflow-wrap: anywhere; }
+.breadcrumb-sep { color: var(--line-strong); }
+.snapshot-label { display: flex; flex: 0 0 auto; align-items: center; gap: 8px; color: var(--text-soft); font-size: 10px; }
+.snapshot-dot { width: 6px; height: 6px; box-shadow: none; }
+
+.hero { position: relative; display: flex; min-height: 205px; align-items: center; justify-content: space-between; gap: 28px; overflow: hidden; padding: 30px 4px 26px; }
+.hero-copy { position: relative; z-index: 1; min-width: 0; }
+.eyebrow, .section-kicker { display: flex; align-items: center; gap: 8px; color: var(--green); font-size: 10px; font-weight: 650; letter-spacing: .13em; }
+.eyebrow-line { width: 17px; height: 1px; background: currentColor; }
+h1, h2, h3, p { margin-top: 0; }
+.hero h1 { margin: 14px 0 7px; font-size: clamp(28px, 4vw, 40px); font-weight: 620; letter-spacing: -.045em; line-height: 1.16; }
+.hero-copy > p { margin: 0; color: var(--text-soft); font-size: 14px; }
+.hero-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin-top: 19px; color: var(--text-faint); font-size: 10px; }
+.hero-meta time { color: var(--text-soft); font-variant-numeric: tabular-nums; }
+.meta-separator { color: var(--line-strong); }
+.hero-emblem { position: relative; display: grid; width: 138px; height: 138px; flex: 0 0 auto; place-items: center; margin-right: 5%; border: 1px solid var(--line); border-radius: 50%; color: var(--green); }
+.hero-emblem::before, .hero-emblem::after { position: absolute; content: ""; border: 1px solid var(--line); border-radius: 50%; }
+.hero-emblem::before { inset: 12px; }
+.hero-emblem::after { inset: 27px; border-color: var(--line-strong); }
+.hero-emblem span { z-index: 1; font-size: 18px; font-weight: 650; letter-spacing: .08em; }
+.hero-emblem i { position: absolute; width: 6px; height: 6px; border-radius: 50%; background: var(--green); }
+.hero-emblem i:nth-of-type(1) { top: 7px; left: 49%; }
+.hero-emblem i:nth-of-type(2) { right: 10px; bottom: 36px; background: var(--blue); }
+.hero-emblem i:nth-of-type(3) { bottom: 11px; left: 31px; background: var(--amber); }
+
+.version-section { margin: 5px 0 48px; }
+.version-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.version-card { position: relative; min-width: 0; min-height: 132px; overflow: hidden; padding: 18px 19px; border: 1px solid var(--line); border-radius: 15px; background: var(--surface); box-shadow: var(--shadow); }
+.version-card::after { position: absolute; right: -25px; bottom: -49px; width: 124px; height: 124px; content: ""; border: 1px solid var(--line); border-radius: 50%; opacity: .65; }
+.version-card.next::after { right: -39px; bottom: -62px; width: 145px; height: 145px; }
+.version-card-top { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 7px; color: var(--text-faint); font-size: 10px; }
+.version-chip, .status-chip { display: inline-flex; max-width: 100%; align-items: center; padding: 4px 8px; border-radius: 99px; background: var(--green-soft); color: var(--green); font-size: 10px; font-weight: 600; line-height: 1.3; }
+.version-card.next .version-chip { background: var(--blue-soft); color: var(--blue); }
+.version-id { position: relative; z-index: 1; margin: 16px 0 5px; overflow-wrap: anywhere; font-size: clamp(16px, 2vw, 19px); font-weight: 620; letter-spacing: -.02em; font-variant-numeric: tabular-nums; }
+.version-subtitle { position: relative; z-index: 1; margin: 0; color: var(--text-soft); font-size: 11px; line-height: 1.6; }
+
+.content-section { scroll-margin-top: 20px; margin-top: 54px; }
+.section-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; margin-bottom: 20px; }
+.section-kicker { margin-bottom: 8px; font-size: 9px; letter-spacing: .16em; }
+.section-heading h2 { margin: 0; font-size: 22px; font-weight: 610; letter-spacing: -.035em; }
+.section-heading p { max-width: 620px; margin: 7px 0 0; color: var(--text-soft); font-size: 11px; line-height: 1.65; }
+.section-count { flex: 0 0 auto; padding-bottom: 3px; color: var(--text-faint); font-size: 10px; font-variant-numeric: tabular-nums; }
+
+.milestone-toolbar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; margin: -1px 0 5px; }
+.filter-group, .disclosure-group { display: flex; flex-wrap: wrap; align-items: center; gap: 5px; }
+.stage-filter, .disclosure-button { min-height: 32px; padding: 6px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface); color: var(--text-soft); font-size: 10px; cursor: pointer; }
+.stage-filter:hover, .disclosure-button:hover { border-color: var(--line-strong); background: var(--surface-raised); color: var(--text); }
+.stage-filter.is-selected, .stage-filter[aria-pressed="true"] { border-color: transparent; background: var(--surface-accent); color: var(--green); font-weight: 620; }
+.filter-summary { min-height: 16px; margin: 0 0 12px; color: var(--text-faint); font-size: 9px; }
+.milestone-item[hidden] { display: none; }
+
+.milestone-list { position: relative; display: grid; gap: 12px; margin: 0; padding: 0; list-style: none; }
+.milestone-list::before { position: absolute; top: 26px; bottom: 26px; left: 14px; width: 1px; content: ""; background: var(--line-strong); }
+.milestone-item { position: relative; min-width: 0; padding-left: 39px; scroll-margin-top: 20px; }
+.stage-node { position: absolute; z-index: 1; top: 20px; left: 7px; display: grid; width: 15px; height: 15px; place-items: center; border: 1px solid var(--line-strong); border-radius: 50%; background: var(--page); }
+.stage-node::after { width: 5px; height: 5px; content: ""; border-radius: 50%; background: var(--text-faint); }
+.milestone-item.tone-success .stage-node { border-color: var(--green); }
+.milestone-item.tone-success .stage-node::after { background: var(--green); }
+.milestone-item.tone-warning .stage-node { border-color: var(--amber); }
+.milestone-item.tone-warning .stage-node::after { background: var(--amber); }
+.milestone-item.tone-working .stage-node { border-color: var(--blue); }
+.milestone-item.tone-working .stage-node::after { background: var(--blue); }
+.milestone-card { min-width: 0; overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
+.milestone-card[open] { box-shadow: var(--shadow); }
+.milestone-summary { display: grid; min-width: 0; grid-template-columns: 34px minmax(0, 1fr) 15px; align-items: center; gap: 10px; padding: 15px 16px; list-style: none; cursor: pointer; }
+.milestone-summary::-webkit-details-marker { display: none; }
+.stage-number { color: var(--text-faint); font-size: 11px; font-variant-numeric: tabular-nums; }
+.summary-copy { display: flex; min-width: 0; flex-wrap: wrap; align-items: center; gap: 7px 10px; }
+.summary-copy strong { min-width: 0; overflow-wrap: anywhere; font-size: 13px; font-weight: 620; letter-spacing: -.01em; }
+.status-chip.tone-success { background: var(--green-soft); color: var(--green); }
+.status-chip.tone-warning { background: var(--amber-soft); color: var(--amber); }
+.status-chip.tone-working { background: var(--blue-soft); color: var(--blue); }
+.status-chip.tone-pending { background: var(--surface-raised); color: var(--text-soft); }
+.disclosure-chevron { width: 8px; height: 8px; justify-self: center; transform: rotate(45deg) translate(-1px, -1px); border-right: 1.5px solid var(--text-faint); border-bottom: 1.5px solid var(--text-faint); transition: transform .18s ease; }
+.milestone-card[open] .disclosure-chevron { transform: rotate(225deg) translate(-1px, -1px); }
+.milestone-details { display: grid; gap: 0; padding: 0 19px 17px 60px; }
+.detail-row { display: grid; grid-template-columns: 112px minmax(0, 1fr); gap: 12px; padding: 10px 0; border-top: 1px solid var(--line); }
+.detail-row dt { color: var(--text-faint); font-size: 10px; font-weight: 600; }
+.detail-row dd { min-width: 0; margin: 0; color: var(--text-soft); font-size: 11px; line-height: 1.75; overflow-wrap: anywhere; }
+.detail-row dd[data-field="acceptance"] { color: var(--text); }
+
+.record-jump { display: flex; flex-wrap: wrap; gap: 8px; margin: -1px 0 14px; }
+.record-jump a { display: inline-flex; align-items: center; gap: 9px; padding: 8px 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--surface); color: var(--text); font-size: 11px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.record-jump a:hover { border-color: var(--line-strong); background: var(--surface-raised); }
+.record-jump span { color: var(--text-faint); font-size: 9px; font-weight: 450; }
+.record-list { display: grid; gap: 14px; }
+.record-card { min-width: 0; scroll-margin-top: 18px; overflow: hidden; border: 1px solid var(--line); border-radius: 15px; background: var(--surface); box-shadow: var(--shadow); }
+.record-header { display: flex; min-width: 0; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 18px 19px 15px; border-bottom: 1px solid var(--line); }
+.record-header h3 { margin: 0; overflow-wrap: anywhere; font-size: 16px; font-weight: 620; letter-spacing: -.02em; }
+.record-eyebrow { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 7px; color: var(--text-faint); font-size: 9px; }
+.record-date { flex: 0 0 auto; color: var(--text-faint); font-size: 10px; font-variant-numeric: tabular-nums; }
+.record-summary { margin: 13px 19px 0; color: var(--text-soft); font-size: 11px; line-height: 1.7; }
+.record-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; padding: 17px 19px 19px; }
+.record-block { min-width: 0; }
+.record-block h4 { margin: 0 0 9px; color: var(--text-faint); font-size: 10px; font-weight: 650; letter-spacing: .04em; }
+.record-block ul { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.record-block li { position: relative; padding-left: 14px; color: var(--text-soft); font-size: 10px; line-height: 1.7; overflow-wrap: anywhere; }
+.record-block li::before { position: absolute; top: .65em; left: 1px; width: 4px; height: 4px; content: ""; border-radius: 50%; background: var(--line-strong); }
+.record-block.evidence li::before { background: var(--green); }
+.record-block.blockers li::before { background: var(--amber); }
+.record-block.next li::before { background: var(--blue); }
+.record-next { padding: 0 19px 19px; }
+.record-next h4 { margin: 0 0 9px; color: var(--text-faint); font-size: 10px; font-weight: 650; }
+.record-footer { padding: 0 19px 17px; color: var(--text-faint); font-size: 9px; }
+
+.acceptance-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.acceptance-link { display: grid; min-width: 0; grid-template-columns: 31px minmax(0, 1fr) 13px; align-items: start; gap: 10px; padding: 13px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.acceptance-link:hover { border-color: var(--line-strong); background: var(--surface-raised); }
+.acceptance-index { color: var(--text-faint); font-size: 10px; font-variant-numeric: tabular-nums; }
+.acceptance-copy { min-width: 0; }
+.acceptance-copy strong { display: block; margin-bottom: 5px; font-size: 10px; font-weight: 620; }
+.acceptance-copy span { display: block; color: var(--text-soft); font-size: 10px; line-height: 1.65; overflow-wrap: anywhere; }
+.acceptance-arrow { color: var(--text-faint); font-size: 13px; }
+.page-footer { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px; margin-top: 52px; padding-top: 15px; border-top: 1px solid var(--line); color: var(--text-faint); font-size: 9px; }
+.empty-state { padding: 16px 18px; border: 1px dashed var(--line-strong); border-radius: 12px; color: var(--text-soft); font-size: 11px; }
+
+@media (max-width: 900px) {
+  .site-shell { display: block; }
+  .sidebar { position: static; height: auto; overflow: visible; padding: 14px clamp(14px, 3vw, 24px) 13px; border-right: 0; border-bottom: 1px solid var(--line); }
+  .brand { padding: 0 2px 12px; }
+  .brand-mark { width: 34px; height: 34px; }
+  .nav-label { padding: 8px 2px 7px; }
+  .primary-nav { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 4px; }
+  .primary-nav a { justify-content: center; gap: 6px; padding: 8px 5px; font-size: 10px; }
+  .nav-glyph { width: auto; font-size: 8px; }
+  .side-divider { margin: 11px 2px 2px; }
+  .stage-nav { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 3px; }
+.stage-nav a { gap: 6px; padding: 6px 5px; font-size: 10px; }
+  .stage-nav a span:first-child { width: 17px; font-size: 9px; }
+  .sidebar-foot { display: none; }
+  .main-content { padding-right: clamp(14px, 3vw, 24px); padding-left: clamp(14px, 3vw, 24px); }
+  .hero { min-height: 184px; }
+  .version-section { margin-bottom: 39px; }
+  .content-section { margin-top: 43px; }
+}
+
+@media (max-width: 560px) {
+  .topbar { min-height: 54px; }
+  .breadcrumb { gap: 6px; font-size: 9px; }
+  .snapshot-label { gap: 6px; font-size: 9px; }
+  .snapshot-dot { width: 5px; height: 5px; }
+  .primary-nav { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .primary-nav a { justify-content: flex-start; padding: 8px; }
+  .stage-nav { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .stage-nav a { padding: 6px 7px; }
+  .hero { min-height: 164px; padding: 25px 2px 22px; }
+  .hero h1 { font-size: 29px; }
+  .hero-copy > p { max-width: 270px; font-size: 12px; line-height: 1.6; }
+  .hero-emblem { width: 72px; height: 72px; margin: 0 1px 0 0; }
+  .hero-emblem::before { inset: 7px; }
+  .hero-emblem::after { inset: 17px; }
+  .hero-emblem span { font-size: 12px; }
+  .hero-emblem i { width: 4px; height: 4px; }
+  .hero-emblem i:nth-of-type(2) { right: 4px; bottom: 19px; }
+  .hero-emblem i:nth-of-type(3) { bottom: 4px; left: 17px; }
+  .hero-emblem i:nth-of-type(1) { top: 3px; }
+  .hero-meta { gap: 5px 7px; margin-top: 14px; font-size: 9px; }
+  .version-grid { grid-template-columns: minmax(0, 1fr); gap: 9px; }
+  .version-card { min-height: 116px; padding: 15px; }
+  .version-id { margin-top: 12px; font-size: 17px; }
+  .version-section { margin-bottom: 34px; }
+  .content-section { margin-top: 38px; }
+  .section-heading { align-items: flex-start; gap: 9px; }
+  .section-heading h2 { font-size: 20px; }
+  .section-heading p { max-width: 100%; font-size: 10px; }
+  .section-count { padding-top: 3px; }
+  .milestone-toolbar { align-items: flex-start; }
+  .filter-group, .disclosure-group { gap: 4px; }
+  .stage-filter, .disclosure-button { min-height: 31px; padding: 6px 8px; font-size: 9px; }
+  .milestone-list { gap: 9px; }
+  .milestone-item { padding-left: 27px; }
+  .milestone-list::before { left: 9px; }
+  .stage-node { left: 2px; }
+  .milestone-summary { grid-template-columns: 26px minmax(0, 1fr) 12px; gap: 7px; padding: 13px 11px; }
+  .summary-copy { align-items: flex-start; gap: 6px; }
+  .summary-copy strong { padding-top: 2px; font-size: 11px; }
+  .status-chip { font-size: 9px; }
+  .milestone-details { padding: 0 12px 12px 44px; }
+  .detail-row { grid-template-columns: minmax(0, 1fr); gap: 4px; padding: 9px 0; }
+  .detail-row dt { font-size: 10px; }
+  .detail-row dd { font-size: 11px; }
+  .record-jump { gap: 6px; }
+  .record-jump a { padding: 7px 9px; font-size: 10px; }
+  .record-header { padding: 15px 14px 13px; }
+  .record-header h3 { font-size: 14px; }
+  .record-date { font-size: 9px; }
+  .record-summary { margin-right: 14px; margin-left: 14px; font-size: 10px; }
+  .record-columns { grid-template-columns: minmax(0, 1fr); gap: 14px; padding: 14px; }
+  .record-block h4, .record-next h4 { font-size: 9px; }
+  .record-block li { font-size: 11px; }
+  .record-next { padding: 0 14px 14px; }
+  .record-footer { padding: 0 14px 14px; }
+  .acceptance-list { grid-template-columns: minmax(0, 1fr); gap: 7px; }
+  .acceptance-link { grid-template-columns: 25px minmax(0, 1fr) 10px; gap: 7px; padding: 11px 10px; }
+  .acceptance-copy strong, .acceptance-copy span { font-size: 10px; }
+  .page-footer { margin-top: 38px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; }
+}
+
+.reference-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; }
+.reference-card { padding:20px; border:1px solid var(--line); border-radius:15px; background:var(--surface); }
+.reference-label { font-size:10px; color:var(--text-faint); letter-spacing:.05em; }
+.reference-card h3 { margin:10px 0; font-size:16px; }
+.reference-card h3 a { color:var(--text); text-decoration:none; }
+.reference-card p { font-size:12px; line-height:1.8; color:var(--text-soft); margin:0 0 12px; }
+.reference-secondary { color:var(--blue); font-size:11px; text-underline-offset:3px; }
+@media(max-width:640px) { .reference-grid { grid-template-columns:1fr; } }
+
+/* Acceptance evidence is cumulative; the current run has its own verdict. */
+.progress-overview { padding: 20px 22px; margin: 0 0 28px; background: var(--surface); border: 1px solid var(--line); border-radius: 18px; }
+.progress-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 14px; margin: 8px 0; }
+.progress-caption { color: var(--text-soft); font-size: 12px; }
+.progress-value { font-size: 26px; font-weight: 650; color: var(--green); letter-spacing: -.6px; }
+.progress-track { height: 9px; overflow: hidden; border-radius: 99px; background: var(--green-soft); }
+.progress-fill { display: block; height: 100%; border-radius: inherit; background: var(--green); }
+.progress-count { margin-top: 7px; color: var(--text-soft); font-size: 11px; }
+.progress-explanation { margin: 12px 0; font-size: 12px; line-height: 1.7; color: var(--text-soft); }
+.current-result-counts, .stage-statuses { display: flex; flex-wrap: wrap; gap: 7px; align-items: center; }
+.current-result-label { font-size: 11px; color: var(--text-soft); margin-right: 3px; }
+.stage-proof { margin: 0 19px 12px 60px; }
+.stage-proof .progress-value { font-size: 20px; }
+.stage-proof .progress-track { height: 6px; }
+.stage-proof .acceptance-progress { margin-bottom: 13px; }
+.proof-row { padding: 9px 11px; border-radius: 9px; margin: 6px 0; background: var(--surface-raised); }
+.proof-history { background: var(--green-soft); }
+.proof-label { font-size: 11px; font-weight: 600; color: var(--text-soft); }
+.proof-row p { font-size: 12px; line-height: 1.65; margin: 3px 0 0; }
+.checkpoint-details { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; }
+.checkpoint-details summary { font-size: 12px; color: var(--text-soft); cursor: pointer; }
+.checkpoint-list { list-style: none; padding: 0; margin: 9px 0 0; }
+.checkpoint-item { padding: 10px 0; border-bottom: 1px solid var(--line); }
+.checkpoint-title { display: flex; gap: 8px; align-items: baseline; font-size: 12px; }
+.checkpoint-verified { color: var(--green); }
+.checkpoint-open { color: var(--text-soft); }
+.checkpoint-evidence { font-size: 11px; color: var(--text-soft); margin: 5px 0 5px 20px; }
+.checkpoint-current { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px; font-size: 11px; line-height: 1.6; margin-left: 20px; }
+@media (max-width: 640px) { .progress-overview { padding: 15px; } .stage-proof { margin-left: 44px; margin-right: 12px; } .proof-row { padding: 8px; } }
+
+/* Current implementation route: separate this live evidence from the historical checklist. */
+#workflow-overview {
+  scroll-margin-top: 18px;
+  margin: 0 0 24px;
+}
+.workflow-heading {
+  display: flex;
+  min-width: 0;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 10px 18px;
+  margin: 0 0 11px;
+}
+.workflow-heading h2 {
+  margin: 3px 0 0;
+  font-size: 20px;
+  font-weight: 620;
+  letter-spacing: -.03em;
+}
+.workflow-heading .section-kicker,
+.workflow-heading .workflow-label {
+  margin: 0;
+  color: var(--green);
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: .08em;
+}
+.workflow-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px 12px;
+  color: var(--text-soft);
+  font-size: 10px;
+}
+.workflow-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+.workflow-legend-item::before {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  content: "";
+  border: 1px solid var(--line-strong);
+  border-radius: 2px;
+  background: var(--surface-raised);
+}
+.workflow-legend-item.is-verified::before { border-color: var(--green); background: var(--green-soft); }
+.workflow-legend-item.is-blocked::before { border-color: var(--amber); background: var(--amber-soft); }
+.workflow-legend-item.is-partial::before { border-color: var(--blue); background: var(--blue-soft); }
+.workflow-layout {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1.08fr) minmax(300px, .92fr);
+  align-items: start;
+  gap: 13px;
+}
+.workflow-route {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.workflow-route::before {
+  position: absolute;
+  top: 24px;
+  bottom: 24px;
+  left: 17px;
+  width: 1px;
+  content: "";
+  background: var(--line-strong);
+}
+.flow-step { position: relative; min-width: 0; }
+.flow-link {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 35px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--surface);
+  transition: border-color .15s ease, background-color .15s ease;
+}
+.flow-link:hover { border-color: var(--line-strong); background: var(--surface-raised); color: var(--text); }
+.flow-link:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.flow-marker {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  width: 31px;
+  height: 31px;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  background: var(--page);
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+}
+.flow-copy { min-width: 0; }
+.flow-copy h3 {
+  margin: 0 0 2px;
+  font-size: 14px;
+  font-weight: 620;
+  line-height: 1.35;
+}
+.flow-copy p,
+.flow-copy .flow-detail {
+  margin: 0;
+  color: var(--text-soft);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.flow-state {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  padding: 4px 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-raised);
+  color: var(--text-soft);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.25;
+  white-space: nowrap;
+}
+.flow-step.is-verified .flow-marker,
+.flow-step.is-verified .flow-state { border-color: var(--green); background: var(--green-soft); color: var(--green); }
+.flow-step.is-blocked .flow-link { border-color: color-mix(in srgb, var(--amber) 55%, var(--line)); background: var(--amber-soft); }
+.flow-step.is-blocked .flow-marker,
+.flow-step.is-blocked .flow-state { border-color: var(--amber); background: var(--amber-soft); color: var(--amber); }
+.flow-step.is-blocked .flow-marker { border-radius: 8px; }
+.flow-step.is-blocked .flow-state::before {
+  width: 7px;
+  height: 7px;
+  content: "";
+  border: 1px solid currentColor;
+  border-radius: 2px;
+}
+.flow-step.is-partial .flow-marker,
+.flow-step.is-partial .flow-state { border-color: var(--blue); background: var(--blue-soft); color: var(--blue); }
+.flow-step.is-waiting .flow-marker { color: var(--text-faint); }
+.workflow-focus {
+  min-width: 0;
+  padding: 15px 16px 14px;
+  border: 1px solid var(--line-strong);
+  border-radius: 13px;
+  background: var(--surface);
+}
+.workflow-focus:has(.focus-next) { box-shadow: var(--shadow); }
+.focus-kicker {
+  margin: 0 0 5px;
+  color: var(--amber);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: .08em;
+}
+.workflow-focus h2 {
+  margin: 0 0 7px;
+  font-size: 17px;
+  font-weight: 650;
+  line-height: 1.35;
+  letter-spacing: -.02em;
+}
+.focus-summary {
+  margin: 0;
+  color: var(--text-soft);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.focus-next {
+  margin: 11px 0 0;
+  padding: 9px 11px;
+  border-left: 3px solid var(--amber);
+  border-radius: 0 8px 8px 0;
+  background: var(--amber-soft);
+}
+.focus-next strong { display: block; margin-bottom: 3px; color: var(--amber); font-size: 11px; font-weight: 680; }
+.focus-next p { margin: 0; color: var(--text); font-size: 12px; line-height: 1.5; }
+.flow-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  margin: 11px 0 10px;
+}
+.flow-facts > div {
+  min-width: 0;
+  padding: 8px 9px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface-raised);
+}
+.flow-facts dt { margin: 0 0 3px; color: var(--text-faint); font-size: 10px; line-height: 1.35; }
+.flow-facts dd { margin: 0; color: var(--text); font-size: 13px; font-weight: 650; line-height: 1.35; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.focus-evidence-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--blue);
+  font-size: 11px;
+  font-weight: 600;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, var(--blue) 45%, transparent);
+  text-underline-offset: 3px;
+}
+.focus-evidence-link:hover { color: var(--green); }
+.stage-brief {
+  margin: 0 0 11px;
+  padding: 11px 13px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--surface-raised);
+}
+.stage-brief h2, .stage-brief h3 { margin: 0 0 4px; font-size: 14px; font-weight: 620; }
+.stage-brief p { margin: 0; color: var(--text-soft); font-size: 12px; line-height: 1.55; }
+.record-history-group details,
+.historical-record details,
+details.record-history-group,
+details.historical-record {
+  margin-top: 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.record-history-group > summary,
+.historical-record > summary,
+.record-history-group details > summary,
+.historical-record details > summary {
+  padding: 9px 11px;
+  color: var(--text-soft);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  list-style-position: inside;
+}
+.record-history-group[open] > summary,
+.historical-record[open] > summary,
+.record-history-group details[open] > summary,
+.historical-record details[open] > summary { border-bottom: 1px solid var(--line); }
+.record-history-group > :not(summary),
+.historical-record > :not(summary),
+.record-history-group details > :not(summary),
+.historical-record details > :not(summary) { padding-right: 11px; padding-left: 11px; }
+
+@media (max-width: 900px) {
+  .workflow-layout { grid-template-columns: minmax(0, 1fr); }
+  .workflow-focus { order: 0; }
+}
+@media (max-width: 560px) {
+  .workflow-heading { align-items: flex-start; flex-direction: column; gap: 7px; }
+  .workflow-heading h2 { font-size: 18px; }
+  .workflow-legend { justify-content: flex-start; gap: 5px 10px; }
+  .workflow-layout { gap: 9px; }
+  .workflow-route { gap: 5px; }
+  .workflow-route::before { left: 15px; }
+  .flow-link { grid-template-columns: 31px minmax(0, 1fr); gap: 8px; padding: 8px; }
+  .flow-marker { width: 28px; height: 28px; font-size: 10px; }
+  .flow-copy h3 { font-size: 14px; }
+  .flow-copy p, .flow-copy .flow-detail { font-size: 11px; }
+  .flow-state { grid-column: 2; justify-self: start; margin-top: -2px; font-size: 9px; }
+  .workflow-focus { padding: 13px; }
+  .workflow-focus h2 { font-size: 16px; }
+  .focus-summary { font-size: 12px; }
+  .flow-facts { gap: 6px; }
+  .flow-facts > div { padding: 7px; }
+  .flow-facts dt { font-size: 9px; }
+  .flow-facts dd { font-size: 12px; }
+  .stage-brief { padding: 10px; }
+  .record-history-group > summary,
+  .historical-record > summary,
+  .record-history-group details > summary,
+  .historical-record details > summary { padding: 8px 9px; }
+  .primary-nav {
+    display: flex;
+    flex-wrap: nowrap;
+    gap: 4px;
+    overflow-x: auto;
+    padding: 1px 0 4px;
+    scrollbar-width: none;
+  }
+  .primary-nav::-webkit-scrollbar { display: none; }
+  .primary-nav a { flex: 0 0 auto; justify-content: flex-start; padding: 7px 8px; }
+  .side-divider, .side-divider + .nav-label, .stage-nav { display: none; }
+  .sidebar { padding-bottom: 8px; }
+  .brand { padding-bottom: 8px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .flow-link { transition: none; }
+}
+
+/* A condition awaiting confirmation is distinct from a hard workflow blocker. */
+.workflow-route > ol { display: grid; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.summary-copy .stage-brief { flex-basis: 100%; margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; }
+.summary-copy .stage-brief p { color: var(--text-soft); font-size: 12px; line-height: 1.5; }
+.flow-step.is-attention .flow-link {
+  border-left: 3px solid var(--amber);
+  background: var(--surface);
+}
+.flow-step.is-attention .flow-marker {
+  border-color: var(--amber);
+  background: var(--surface);
+  color: var(--amber);
+}
+.flow-step.is-attention .flow-state {
+  border: 1px dashed var(--amber);
+  background: var(--surface);
+  color: var(--amber);
+}
+.flow-step.is-attention .flow-state::before {
+  width: 7px;
+  height: 7px;
+  content: "";
+  border: 1px solid currentColor;
+  border-radius: 50%;
+}
+.workflow-legend > span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-soft);
+  font-size: 11px;
+  line-height: 1.4;
+}
+.focus-alert {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--amber) 42%, var(--line));
+  border-radius: 10px;
+  background: var(--amber-soft);
+}
+.focus-alert h3,
+.focus-alert .focus-alert-title,
+.focus-alert > strong {
+  margin: 0;
+  color: var(--amber);
+  font-size: 13px;
+  font-weight: 680;
+  line-height: 1.4;
+}
+.focus-alert p {
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.focus-alert a {
+  display: inline-flex;
+  width: fit-content;
+  align-items: center;
+  margin-top: 1px;
+  color: var(--amber);
+  font-size: 11px;
+  font-weight: 650;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.focus-alert a:hover { color: var(--text); }
+
+/* Keep the title and version cards compact so the live workflow stays above the fold. */
+.hero {
+  min-height: 100px;
+  gap: 18px;
+  padding: 13px 4px 11px;
+}
+.hero h1 { margin: 5px 0 4px; font-size: clamp(24px, 3vw, 32px); }
+.hero-copy > p { font-size: 14px; }
+.hero-meta { margin-top: 8px; }
+.hero-emblem { display: none; }
+.version-section { margin: 0 0 16px; }
+.version-grid { gap: 9px; }
+.version-card { min-height: 0; padding: 12px 14px; border-radius: 12px; box-shadow: none; }
+.version-id { margin: 8px 0 3px; font-size: 13px; }
+.version-subtitle { font-size: 11px; line-height: 1.5; }
+.workflow-focus .focus-summary { font-size: 14px; }
+.workflow-focus .focus-next p { font-size: 13px; }
+.flow-copy h3 { font-size: 15px; }
+.flow-copy p, .flow-copy .flow-detail { font-size: 13px; }
+.flow-state { font-size: 11px; }
+.section-heading p { font-size: 12px; }
+.summary-copy strong { font-size: 14px; }
+.detail-row dd { font-size: 12px; }
+.record-summary { font-size: 12px; }
+.record-block li { font-size: 11px; }
+.acceptance-copy span { font-size: 11px; }
+
+/* Current verification totals stay compact and must not imply AirDrop success probability. */
+.progress-overview.secondary-progress {
+  margin: 0 0 16px;
+  padding: 11px 14px;
+  border-radius: 12px;
+  box-shadow: none;
+}
+.secondary-progress .progress-heading { gap: 9px; margin: 2px 0 5px; }
+.secondary-progress .progress-value { font-size: 18px; }
+.secondary-progress .progress-track { height: 6px; }
+.secondary-progress .progress-count { margin-top: 5px; font-size: 10px; }
+.secondary-progress .progress-explanation { margin: 7px 0; font-size: 11px; line-height: 1.5; }
+.secondary-progress .current-result-counts,
+.secondary-progress .stage-statuses { gap: 5px; }
+.secondary-progress .current-result-label { font-size: 10px; }
+.secondary-progress .progress-comparison { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.secondary-progress .acceptance-progress { min-width: 0; }
+.secondary-progress .history-progress .progress-value { color: var(--blue); }
+.secondary-progress .history-progress .progress-track { background: var(--blue-soft); }
+.secondary-progress .history-progress .progress-fill { background: var(--blue); }
+.secondary-progress .progress-sequence { display: flex; flex-wrap: wrap; align-items: baseline; gap: 5px 9px; margin-top: 9px; padding-top: 8px; border-top: 1px solid var(--line); }
+.secondary-progress .progress-sequence-label { flex: 0 0 auto; color: var(--text-faint); font-size: 10px; font-weight: 600; }
+.secondary-progress .progress-sequence-flow { color: var(--text-soft); font-size: 10px; line-height: 1.6; }
+
+@media (max-width: 560px) {
+  .hero { min-height: 80px; padding: 10px 2px 8px; }
+  .hero h1 { margin: 4px 0 3px; font-size: 25px; }
+  .hero-copy > p { font-size: 12px; }
+  .hero-meta { margin-top: 6px; }
+  .version-card { padding: 10px 11px; }
+  .version-id { margin-top: 7px; font-size: 13px; }
+  .workflow-focus .focus-summary { font-size: 13px; }
+  .flow-copy h3 { font-size: 14px; }
+  .flow-copy p, .flow-copy .flow-detail { font-size: 12px; }
+  .focus-alert { padding: 9px 10px; }
+  .focus-alert p { font-size: 12px; }
+  .secondary-progress .progress-heading { align-items: baseline; }
+  .secondary-progress .progress-value { font-size: 16px; }
+  .secondary-progress .progress-comparison { grid-template-columns: minmax(0, 1fr); gap: 9px; }
+  .secondary-progress .progress-sequence { gap: 3px 7px; }
+  .secondary-progress .progress-sequence-flow { font-size: 9px; }
+}
+
+/* Compact, current-candidate timeline. Pending nodes deliberately have no date. */
+#development-timeline {
+  scroll-margin-top: 18px;
+  margin: 28px 0 0;
+  padding: 12px 14px 8px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+}
+#development-timeline[hidden] { display: none; }
+.timeline-heading {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px 14px;
+  margin-bottom: 8px;
+}
+.timeline-heading .section-kicker {
+  margin: 0;
+  color: var(--text-faint);
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: .08em;
+}
+.timeline-heading h2 {
+  margin: 2px 0 0;
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: -.02em;
+}
+.timeline-intro {
+  margin: 3px 0 0;
+  color: var(--text-soft);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.timeline-scope {
+  color: var(--text-faint);
+  font-size: 10px;
+  white-space: nowrap;
+}
+.timeline-candidate {
+  color: var(--text-faint);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.timeline-head-meta {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 4px 9px;
+}
+.timeline-timezone { color: var(--text-faint); font-size: 9px; white-space: nowrap; }
+.timeline-list {
+  position: relative;
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.timeline-list::before {
+  position: absolute;
+  top: 14px;
+  bottom: 14px;
+  left: 11px;
+  width: 1px;
+  content: "";
+  background: var(--line-strong);
+}
+.timeline-step {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  grid-template-columns: 23px minmax(0, 1fr);
+  gap: 9px;
+  padding: 6px 0;
+}
+.timeline-marker {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  width: 23px;
+  height: 23px;
+  place-items: center;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--text-faint);
+  font-size: 11px;
+  font-weight: 700;
+}
+.timeline-entry { min-width: 0; padding: 1px 0 3px; }
+.timeline-entry-top {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 7px 12px;
+}
+.timeline-event-meta {
+  display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 4px 8px;
+}
+.timeline-label {
+  min-width: 0;
+  margin: 0;
+  font-size: 12px;
+  font-weight: 640;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.timeline-state {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  font-size: 10px;
+  font-weight: 620;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.timeline-version {
+  color: var(--text-faint);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.timeline-time {
+  display: block;
+  margin-top: 2px;
+  color: var(--text-faint);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+.timeline-time-unknown { font-style: italic; }
+.timeline-detail {
+  margin: 3px 0 0;
+  color: var(--text-soft);
+  font-size: 11px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.timeline-stage-link {
+  display: inline-flex;
+  margin-top: 4px;
+  color: var(--blue);
+  font-size: 10px;
+  font-weight: 600;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.timeline-step.is-done .timeline-marker {
+  border-color: var(--green);
+  background: var(--green-soft);
+  color: var(--green);
+}
+.timeline-step.is-done .timeline-state { color: var(--green); }
+.timeline-step.is-current .timeline-marker {
+  border: 2px solid var(--blue);
+  background: var(--blue-soft);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue) 12%, transparent);
+}
+.timeline-step.is-current .timeline-label,
+.timeline-step.is-current .timeline-state { color: var(--blue); }
+.timeline-step.is-current .timeline-entry { padding-left: 8px; border-left: 2px solid var(--blue); }
+.timeline-step.is-pending .timeline-marker { border-style: dashed; }
+.timeline-step.is-pending .timeline-label { color: var(--text-soft); }
+.timeline-step.is-pending .timeline-state { color: var(--amber); }
+@media (max-width: 560px) {
+  #development-timeline { margin-top: 22px; padding: 10px 11px 6px; }
+  .timeline-heading { align-items: flex-start; }
+  .timeline-heading h2 { font-size: 15px; }
+  .timeline-head-meta { flex-direction: column; align-items: flex-end; gap: 2px; }
+  .timeline-scope, .timeline-timezone { font-size: 9px; }
+  .timeline-candidate { max-width: 42vw; }
+  .timeline-step { grid-template-columns: 21px minmax(0, 1fr); gap: 8px; padding: 5px 0; }
+  .timeline-marker { width: 21px; height: 21px; font-size: 10px; }
+  .timeline-list::before { left: 10px; }
+  .timeline-label { font-size: 11px; }
+  .timeline-detail { font-size: 10px; }
+  .timeline-entry-top { align-items: flex-start; }
+  .timeline-event-meta { flex-wrap: wrap; gap: 2px 5px; }
+  .timeline-state, .timeline-time { font-size: 9px; }
+  .timeline-state { max-width: 42vw; white-space: normal; text-align: right; }
+  .timeline-version { font-size: 8px; }
+}
+
+/* Fixed 8 x 5 acceptance matrix */
+.acceptance-matrix-section {
+  margin: 14px 0 38px;
+  padding: clamp(17px, 2.3vw, 28px);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+.matrix-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; margin-bottom: 8px; }
+.matrix-title-copy { min-width: 0; }
+.matrix-heading h2 { margin: 5px 0 0; font-size: clamp(18px, 2.2vw, 24px); font-weight: 620; letter-spacing: -.03em; }
+.matrix-heading p { margin: 6px 0 0; color: var(--text-soft); font-size: 11px; line-height: 1.6; }
+.matrix-switcher { display: inline-flex; flex: 0 0 auto; padding: 3px; gap: 3px; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-raised); }
+.matrix-mode { min-height: 32px; padding: 6px 10px; border: 0; border-radius: 7px; background: transparent; color: var(--text-soft); font-size: 10px; cursor: pointer; }
+.matrix-mode:hover { color: var(--text); }
+.matrix-mode.is-selected { background: var(--surface); color: var(--green); font-weight: 650; box-shadow: 0 1px 3px rgb(0 0 0 / 10%); }
+.matrix-summary { margin: 10px 0 9px; color: var(--text-soft); font-size: 12px; font-weight: 560; line-height: 1.6; font-variant-numeric: tabular-nums; }
+.matrix-legend { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 0 0 13px; color: var(--text-soft); font-size: 10px; }
+.matrix-legend-item { display: inline-flex; align-items: center; gap: 7px; }
+.matrix-swatch { display: inline-grid; width: 20px; height: 14px; place-items: center; border: 1px solid var(--line-strong); border-radius: 4px; background: var(--surface-raised); color: var(--text-faint); font-size: 12px; font-weight: 700; line-height: 1; }
+.matrix-swatch.matrix-passed { border-color: var(--green); background: var(--green-soft); color: var(--green); }
+.matrix-swatch.matrix-partial { border-color: var(--amber); background: var(--amber-soft); color: var(--amber); }
+.matrix-swatch.matrix-regressed { border-color: var(--red, #b8463a); background: var(--red-soft, #fae8e5); color: var(--red, #b8463a); }
+.matrix-scroll { max-width: 100%; overflow-x: auto; overscroll-behavior-inline: contain; }
+.acceptance-matrix { width: 100%; min-width: 760px; table-layout: fixed; border-collapse: separate; border-spacing: 5px 6px; margin: -5px; }
+.acceptance-matrix th, .acceptance-matrix td { padding: 0; }
+.matrix-stage-head, .matrix-row-head { width: 22%; text-align: left; }
+.matrix-stage-head { padding: 0 10px 1px !important; color: var(--text-faint); font-size: 9px; font-weight: 550; }
+.matrix-col-head { padding: 0 3px 1px !important; color: var(--text-faint); font-size: 9px; font-weight: 550; text-align: center; }
+.matrix-row-head { padding: 4px 10px 4px 0 !important; color: var(--text); font-size: clamp(11px, 1.15vw, 14px); font-weight: 570; line-height: 1.4; vertical-align: middle; }
+.matrix-cell { display: grid; width: 100%; min-height: clamp(34px, 3.5vw, 48px); place-items: center; border: 1px solid var(--line-strong); border-radius: 9px; background: var(--surface-raised); color: var(--text-faint); cursor: pointer; transition: transform .12s ease, box-shadow .12s ease, filter .12s ease; }
+.matrix-cell:hover { filter: brightness(.98); transform: translateY(-1px); }
+.matrix-cell:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.matrix-cell[aria-expanded="true"] { box-shadow: 0 0 0 2px var(--blue); }
+.matrix-cell.matrix-passed { border-color: var(--green); background: var(--green-soft); color: var(--green); }
+.matrix-cell.matrix-partial { border-color: var(--amber); background: var(--amber-soft); color: var(--amber); }
+.matrix-cell.matrix-regressed { border-color: var(--red, #b8463a); background: var(--red-soft, #fae8e5); color: var(--red, #b8463a); }
+.matrix-symbol { font-size: clamp(19px, 2.1vw, 27px); font-weight: 600; line-height: 1; }
+.matrix-detail { margin: 13px 0 0; padding: 14px 16px; border-left: 3px solid var(--blue); border-radius: 0 10px 10px 0; background: var(--surface-raised); }
+.matrix-detail[hidden] { display: none; }
+.matrix-detail h3 { margin: 0 0 5px; font-size: 13px; font-weight: 650; }
+.matrix-detail p { margin: 5px 0 0; color: var(--text-soft); font-size: 11px; line-height: 1.7; }
+.matrix-detail .matrix-detail-label { color: var(--text); font-size: 10px; font-weight: 620; }
+.matrix-detail .matrix-detail-history { color: var(--green); }
+.matrix-detail .matrix-detail-current { padding-top: 8px; border-top: 1px solid var(--line); }
+@media (max-width: 640px) {
+  .acceptance-matrix-section { margin: 8px 0 30px; padding: 15px 12px; border-radius: 14px; }
+  .matrix-heading { align-items: flex-start; flex-direction: column; gap: 10px; }
+  .matrix-switcher { align-self: stretch; }
+  .matrix-mode { flex: 1; }
+  .matrix-summary { font-size: 11px; }
+  .matrix-legend { gap: 7px 12px; font-size: 9px; }
+  .acceptance-matrix { min-width: 720px; border-spacing: 4px 5px; }
+  .matrix-stage-head, .matrix-row-head { width: 175px; }
+  .matrix-row-head { font-size: 11px; }
+  .matrix-cell { min-height: 36px; border-radius: 7px; }
+  .matrix-detail { padding: 12px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .matrix-cell { transition: none; }
+}
+
+</style>
+  
+  
+  
+</head>
+<body>
+  <div class="site-shell">
+    <aside class="sidebar" aria-label="项目导航">
+      <a class="brand" href="#overview" aria-label="IntelWirelessNative 项目总览">
+        <span class="brand-mark" aria-hidden="true">IW</span>
+        <span class="brand-copy"><strong>IntelWirelessNative</strong><small>PROJECT STATUS</small></span>
+      </a>
+
+      <div class="nav-label">项目</div>
+      <nav class="primary-nav" aria-label="主要导航">
+        <a href="#overview"><span class="nav-glyph" aria-hidden="true">01</span><span>当前流程</span></a>
+        <a href="#milestones"><span class="nav-glyph" aria-hidden="true">02</span><span>验收里程碑</span></a>
+        <a href="#development-timeline"><span class="nav-glyph" aria-hidden="true">03</span><span>开发时间线</span></a>
+        <a href="#test-records"><span class="nav-glyph" aria-hidden="true">04</span><span>本轮记录</span></a>
+        <a href="#acceptance"><span class="nav-glyph" aria-hidden="true">05</span><span>下一步</span></a>
+      </nav>
+
+      <div class="side-divider"></div>
+      <div class="nav-label">八阶段</div>
+      <nav class="stage-nav" aria-label="里程碑阶段导航">
+        <a href="#stage-1"><span>01</span><span>原生 Wi-Fi</span></a>
+        <a href="#stage-2"><span>02</span><span>P2P 资源</span></a>
+        <a href="#stage-3"><span>03</span><span>频道驻留</span></a>
+        <a href="#stage-4"><span>04</span><span>AWDL 接收</span></a>
+        <a href="#stage-5"><span>05</span><span>AWDL 发送</span></a>
+        <a href="#stage-6"><span>06</span><span>原生 awdl0</span></a>
+        <a href="#stage-7"><span>07</span><span>IPv6 与发现</span></a>
+        <a href="#stage-8"><span>08</span><span>双向 AirDrop</span></a>
+      </nav>
+
+      <div class="sidebar-foot"><span class="local-indicator" aria-hidden="true"></span>本机项目记录</div>
+    </aside>
+
+    <main class="main-content">
+      <div class="topbar">
+        <div class="breadcrumb"><span>项目工作区</span><span class="breadcrumb-sep">/</span><strong>IntelWirelessNative</strong></div>
+        <div class="snapshot-label"><span class="snapshot-dot" aria-hidden="true"></span>实测快照</div>
+      </div>
+
+      <header class="hero" id="overview">
+        <div class="hero-copy">
+          <div class="eyebrow"><span class="eyebrow-line"></span>从连接到文件传输</div>
+          <h1>Intel 原生无线进度</h1>
+          <p>当前卡点、下一步与实测证据</p>
+          <div class="hero-meta">
+            <span id="current-version">当前版本读取中</span>
+            <span class="meta-separator" aria-hidden="true">·</span>
+            <span>数据更新 <time id="updated-at">读取中</time></span>
+            <span class="meta-separator" aria-hidden="true">·</span>
+            <span id="deployment-label">候选状态读取中</span>
+          </div>
+        </div>
+      </header>
+
+      <section id="workflow-overview" class="workflow-overview" aria-label="当前数据通路与卡点"></section>
+
+      <section id="progress-overview" class="progress-overview secondary-progress" aria-label="历史验收覆盖与当前版本复验进度"></section>
+
+      <section id="acceptance-matrix" class="acceptance-matrix-section" aria-label="40 项固定验收矩阵"></section>
+
+      <section class="version-section" aria-label="当前版本与下一候选">
+        <div id="version-cards" class="version-grid"></div>
+      </section>
+
+      <section class="content-section" id="milestones">
+        <div class="section-heading">
+          <div>
+            <div class="section-kicker">VALIDATION MAP</div>
+            <h2>八阶段验收详情</h2>
+            <p>逐项查看当前版本的验证结果、证据和验收条件。部分通过与未覆盖单独列出。</p>
+          </div>
+          <span class="section-count">08 阶段</span>
+        </div>
+        <div class="milestone-toolbar">
+          <div class="filter-group" role="group" aria-label="按验收状态筛选">
+            <button class="stage-filter is-selected" type="button" data-stage-filter="all" aria-pressed="true">全部</button>
+            <button class="stage-filter" type="button" data-stage-filter="pending" aria-pressed="false">待解决</button>
+            <button class="stage-filter" type="button" data-stage-filter="regressed" aria-pressed="false">本轮未通过</button>
+            <button class="stage-filter" type="button" data-stage-filter="verified" aria-pressed="false">本轮通过</button>
+          </div>
+          <div class="disclosure-group" role="group" aria-label="展开或收起里程碑详情">
+            <button class="disclosure-button" id="expand-all" type="button">展开全部</button>
+            <button class="disclosure-button" id="collapse-all" type="button">收起全部</button>
+          </div>
+        </div>
+        <p class="filter-summary" id="filter-summary" aria-live="polite"></p>
+        <ol class="milestone-list" id="milestone-list" aria-label="八个无线功能验收阶段"></ol>
+      </section>
+
+      <section id="development-timeline" class="timeline-overview" aria-label="项目开发总时间线" hidden></section>
+
+      <section class="content-section records-section" id="test-records">
+        <div class="section-heading">
+          <div>
+            <div class="section-kicker">BUILD & RUNTIME</div>
+            <h2>本轮验证记录</h2>
+            <p>当前版本的实机结果与待解决问题。</p>
+          </div>
+        </div>
+        <nav class="record-jump" id="record-jump" aria-label="测试版本快速跳转"></nav>
+        <div id="record-list" class="record-list"></div>
+      </section>
+
+      <section class="content-section acceptance-section" id="acceptance">
+        <div class="section-heading">
+          <div>
+            <div class="section-kicker">NEXT CHECKS</div>
+            <h2>待验收事项</h2>
+            <p>每项都链接回对应里程碑，完成后用新的实测证据更新状态。</p>
+          </div>
+        </div>
+        <div id="acceptance-list" class="acceptance-list"></div>
+      </section>
+
+      <footer class="page-footer">
+        <span>IntelWirelessNative</span>
+        <span>百分比只统计当前版本已实测通过项，部分通过不计完成。</span>
+      </footer>
+    </main>
+  </div>
+<script>
+window.PROGRESS_DATA = {"updatedAt":"2026-10-29T16:59:03+08:00","runningCandidate":"25G332-Test077","nextCandidate":"25G332-Test078","deploymentState":"test078_deployed_waiting_reboot_disarmed","milestones":[{"stage":1,"name":"原生 Wi-Fi","status":"两段短测稳定；长期与睡眠恢复待验","evidence":"Test077诊断前后各约125秒Wi-Fi短测稳定，复位5→5，无新增错误。随后同一次启动在约16:04出现1次发送看门狗超时，复位累计5→10；这不是前后两段约125秒观察窗口内的事件。16:09起新增305.153秒被动观察，en1始终关联、保有IPv4，窗口内复位10→10，未新增看门狗或固件/硬件错误。本次启动未记录睡眠；看门狗与断链的因果关系尚未确定。默认路由仍为en0，未验证绑定en1的公网请求。","pending":"定位后段看门狗与复位的触发链；继续验证更长时间运行、睡眠恢复、Wi-Fi开关回连与私有地址轮换，并单独测试绑定en1的公网请求。","acceptance":"连续短测期间Wi-Fi保持关联，watchdog/reset不增加，公网请求成功。","validated_scope":"Test077诊断前后各约125秒Wi-Fi短测稳定，复位5→5，无新增错误。随后同一次启动在约16:04出现1次发送看门狗超时，复位累计5→10；这不是前后两段约125秒观察窗口内的事件。16:09起新增305.153秒被动观察，en1始终关联、保有IPv4，窗口内复位10→10，未新增看门狗或固件/硬件错误。本次启动未记录睡眠；看门狗与断链的因果关系尚未确定。默认路由仍为en0，未验证绑定en1的公网请求。","candidate_check":"Test077 本次启动当前验收；其他启动结果不计入。","change_note":"Test077 本次启动实测；不继承其他启动结果。","current_summary":"Test077诊断前后各约125秒Wi-Fi短测稳定，复位5→5，无新增错误。随后同一次启动在约16:04出现1次发送看门狗超时，复位累计5→10；这不是前后两段约125秒观察窗口内的事件。16:09起新增305.153秒被动观察，en1始终关联、保有IPv4，窗口内复位10→10，未新增看门狗或固件/硬件错误。本次启动未记录睡眠；看门狗与断链的因果关系尚未确定。默认路由仍为en0，未验证绑定en1的公网请求。","unfinished_summary":"定位后段看门狗与复位的触发链；继续验证更长时间运行、睡眠恢复、Wi-Fi开关回连与私有地址轮换，并单独测试绑定en1的公网请求。","current_result_label":"本次启动后段出现看门狗与复位，原因待查","has_runtime_evidence":true,"has_pending_work":true,"status_tone":"working","current_result":"partial","checkpoints":[{"id":"1-1","name":"网卡识别与系统 Wi-Fi 接口","current_detail":"本次启动已识别 en1 并保持关联；125 秒基线内 IPv4 可用。","current_result":"passed","history_verified":true,"verified_in":"Test037 / Test054 / Test055 / Test056 / Test057 / Test058 / Test059"},{"id":"1-2","name":"认证、IPv4 与完整联网请求","current_detail":"125 秒被动基线内维持关联与 IPv4；本轮未发起公网请求，联网验证未完成。","current_result":"partial","history_verified":true,"verified_in":"Test048 / Test051 / Test055 / Test056 / Test057 / Test058 / Test059"},{"id":"1-3","name":"私有 Wi-Fi 地址","current_detail":"Test077 本次启动未覆盖此验收项。","current_result":"not_covered","history_verified":true,"verified_in":"Test048 / Test054 / Test055 / Test056 / Test057 / Test058 / Test059"},{"id":"1-4","name":"关闭、开启及自动回连","current_detail":"Test077 本次启动未覆盖此验收项。","current_result":"not_covered","history_verified":true,"verified_in":"Test048"},{"id":"1-5","name":"长期运行及睡眠恢复","current_detail":"诊断前后各约125秒以及后续305.153秒被动窗口内链路稳定。两组窗口之间出现发送看门狗1次，复位累计5→10；后续窗口复位10→10，未新增错误。较长时间稳定性与睡眠恢复未通过验收。","current_result":"partial","history_verified":false,"verified_in":"尚无完整验收"}]},{"stage":2,"name":"P2P 单次发送","status":"本轮未覆盖 P2P 资源完整创建与回收","evidence":"本次没有独立验收 P2P MAC、广播站和队列创建/完整回收。","pending":"后续在不影响当前单次 RF 边界的情况下补充独立生命周期验收。","acceptance":"当前启动完成一轮有界创建、发送和回收证据。","validated_scope":"本次没有独立验收 P2P MAC、广播站和队列创建/完整回收。","candidate_check":"Test077 本次启动当前验收；其他启动结果不计入。","change_note":"Test077 本次启动实测；不继承其他启动结果。","current_summary":"本次没有独立验收 P2P MAC、广播站和队列创建/完整回收。","unfinished_summary":"后续在不影响当前单次 RF 边界的情况下补充独立生命周期验收。","current_result_label":"本轮未覆盖 P2P 资源完整创建与回收","has_runtime_evidence":false,"has_pending_work":true,"status_tone":"pending","current_result":"not_covered","checkpoints":[{"id":"2-1","name":"固件 P2P MAC 上下文创建 ACK","current_detail":"Test077 本次启动未覆盖此验收项。","current_result":"not_covered","history_verified":true,"verified_in":"Test029 / Test051 / Test054 / Test055 / Test056 / Test057 / Test058 / Test059"},{"id":"2-2","name":"独立广播站点创建","current_detail":"Test077 本次启动未覆盖此验收项。","current_result":"not_covered","history_verified":true,"verified_in":"Test029 / Test051 / Test054 / Test055 / Test056 / Test057 / Test058 / Test059"},{"id":"2-3","name":"独立发送队列安装","current_detail":"Test077 本次启动未覆盖此验收项。","current_result":"not_covered","history_verified":true,"verified_in":"Test051 / Test054 / Test055 / Test056 / Test057 / Test058 / Test059"},{"id":"2-4","name":"队列、站点及上下文完整回收","current_detail":"Test077 本次启动未覆盖此验收项。","current_result":"not_covered","history_verified":true,"verified_in":"Test048 / Test051 / Test055 / Test056 / Test057 / Test058 / Test059"},{"id":"2-5","name":"冲突队列归属及旧 DMA 硬停回收","current_detail":"Test077 本次启动未覆盖此验收项。","current_result":"not_covered","history_verified":false,"verified_in":"仅有离线测试"}]},{"stage":3,"name":"频道与时序","status":"单次 ROC 启停通过；时钟映射未验证","evidence":"本轮 900 毫秒 ROC 启动与所有者结束成功。当前 AW 详细轨迹发布不完整，因此没有完整的 AW 时序与跨设备时钟映射。","pending":"修复并完整采集当前 AW trace，再做对端时钟关联。","acceptance":"有界START/END与时间映射均有当前启动证据。","validated_scope":"本轮 900 毫秒 ROC 启动与所有者结束成功。当前 AW 详细轨迹发布不完整，因此没有完整的 AW 时序与跨设备时钟映射。","candidate_check":"Test077 本次启动当前验收；其他启动结果不计入。","change_note":"Test077 本次启动实测；不继承其他启动结果。","current_summary":"本轮 900 毫秒 ROC 启动与所有者结束成功。当前 AW 详细轨迹发布不完整，因此没有完整的 AW 时序与跨设备时钟映射。","unfinished_summary":"修复并完整采集当前 AW trace，再做对端时钟关联。","current_result_label":"单次 ROC 启停通过；时钟映射未验证","has_runtime_evidence":true,"has_pending_work":true,"status_tone":"working","current_result":"partial","checkpoints":[{"id":"3-1","name":"指定频道驻留 START","current_detail":"本轮有界 900 毫秒诊断的 ROC 启动成功。","current_result":"passed","history_verified":true,"verified_in":"Test031 / Test054 / Test055 / Test056 / Test057 / Test058 / Test059"},{"id":"3-2","name":"有界驻留 END","current_detail":"同一 ROC 所有者正常结束；未证明对端时钟映射。","current_result":"passed","history_verified":true,"verified_in":"Test031 / Test054 / Test055 / Test056 / Test057 / Test058 / Test059"},{"id":"3-3","name":"硬件与主机原始时钟采样","current_detail":"Test077 本次启动未覆盖此验收项。","current_result":"not_covered","history_verified":true,"verified_in":"Test044 / Test048"},{"id":"3-4","name":"时钟映射与对端相位同步","current_detail":"Test077 本次启动未覆盖此验收项。","current_result":"not_covered","history_verified":false,"verified_in":"尚未验证"},{"id":"3-5","name":"持续多频道时隙调度","current_detail":"Test077 本次启动未覆盖此验收项。","current_result":"not_covered","history_verified":false,"verified_in":"尚未验证"}]},{"stage":4,"name":"AWDL 对端接收","status":"7 条控制事件唯一匹配；数据回包未证实","evidence":"OpenWrt 20 秒、channel 6 抓包捕获 2218 包，其中 155 条 Action、151 条 Apple vendor Action。7 条驱动控制 RX trace 均按 sequence control 与 MPDU 长度唯一匹配：6 条 PSF-like subtype 0、1 条已接纳的 AWDL subtype 3/MIF；发现表 peer count=1，PSF revision=2、MIF revision=1，运行时 MIF 绑定有效。旁路时序对照把 peer MIF 目标解释为 RX 后约 920 微秒的下一 AW 几何；这只是与旧规划器路径相符的推断，不能证明 current-AW fallback 实际采用。PCAP 另有 262 条 Data 类帧，其中 96 条被归为与候选控制帧同 TA 的普通 ToDS Data；这类 DS=1/subtype 0 帧不等同于本次 Qm 票据。当前 Qm 没有 FC/sequence/MPDU 长度的精确空口匹配，驱动数据 RX 捕获、解码和交付计数为 0。候选控制帧没有 payload 或源/目的地址关联，完整接收/浏览窗口重叠未证明；监听只覆盖 channel 6，不能据此断言其他频道或受保护帧没有回包。current-AW trace 只有 Begin=5、Complete=0，缺少可判断实际规划路径的字段。","pending":"补齐 current-AW trace 的完整发布与实际规划时间/回退选择字段；扩大独立接收覆盖并关联数据帧票据、频道和窗口时序。控制帧匹配不等于数据回包或 AirDrop 成功。","acceptance":"本轮捕获有完整窗口和可复核的接收解析结果。","validated_scope":"OpenWrt 20 秒、channel 6 抓包捕获 2218 包，其中 155 条 Action、151 条 Apple vendor Action。7 条驱动控制 RX trace 均按 sequence control 与 MPDU 长度唯一匹配：6 条 PSF-like subtype 0、1 条已接纳的 AWDL subtype 3/MIF；发现表 peer count=1，PSF revision=2、MIF revision=1，运行时 MIF 绑定有效。旁路时序对照把 peer MIF 目标解释为 RX 后约 920 微秒的下一 AW 几何；这只是与旧规划器路径相符的推断，不能证明 current-AW fallback 实际采用。PCAP 另有 262 条 Data 类帧，其中 96 条被归为与候选控制帧同 TA 的普通 ToDS Data；这类 DS=1/subtype 0 帧不等同于本次 Qm 票据。当前 Qm 没有 FC/sequence/MPDU 长度的精确空口匹配，驱动数据 RX 捕获、解码和交付计数为 0。候选控制帧没有 payload 或源/目的地址关联，完整接收/浏览窗口重叠未证明；监听只覆盖 channel 6，不能据此断言其他频道或受保护帧没有回包。current-AW trace 只有 Begin=5、Complete=0，缺少可判断实际规划路径的字段。","candidate_check":"Test077 本次启动当前验收；其他启动结果不计入。","change_note":"Test077 本次启动实测；不继承其他启动结果。","current_summary":"OpenWrt 20 秒、channel 6 抓包捕获 2218 包，其中 155 条 Action、151 条 Apple vendor Action。7 条驱动控制 RX trace 均按 sequence control 与 MPDU 长度唯一匹配：6 条 PSF-like subtype 0、1 条已接纳的 AWDL subtype 3/MIF；发现表 peer count=1，PSF revision=2、MIF revision=1，运行时 MIF 绑定有效。旁路时序对照把 peer MIF 目标解释为 RX 后约 920 微秒的下一 AW 几何；这只是与旧规划器路径相符的推断，不能证明 current-AW fallback 实际采用。PCAP 另有 262 条 Data 类帧，其中 96 条被归为与候选控制帧同 TA 的普通 ToDS Data；这类 DS=1/subtype 0 帧不等同于本次 Qm 票据。当前 Qm 没有 FC/sequence/MPDU 长度的精确空口匹配，驱动数据 RX 捕获、解码和交付计数为 0。候选控制帧没有 payload 或源/目的地址关联，完整接收/浏览窗口重叠未证明；监听只覆盖 channel 6，不能据此断言其他频道或受保护帧没有回包。current-AW trace 只有 Begin=5、Complete=0，缺少可判断实际规划路径的字段。","unfinished_summary":"补齐 current-AW trace 的完整发布与实际规划时间/回退选择字段；扩大独立接收覆盖并关联数据帧票据、频道和窗口时序。控制帧匹配不等于数据回包或 AirDrop 成功。","current_result_label":"7 条控制帧事件匹配；Qm 数据帧及对端回包未证实","has_runtime_evidence":true,"has_pending_work":true,"status_tone":"working","current_result":"partial","checkpoints":[{"id":"4-1","name":"真实 AWDL 控制帧捕获","current_detail":"20 秒、channel 6 PCAP 捕获 2218 包；7 条驱动控制 RX trace 均按 sequence control 与 MPDU 长度唯一匹配。窗口完整重叠、其他频道及指定 iPhone 来源未证明。","current_result":"partial","history_verified":true,"verified_in":"Test040 / Test054 / Test055 / Test056 / Test057 / Test058 / Test059"},{"id":"4-2","name":"PSF 解析与接纳","current_detail":"6 条 driver RX 控制事件与 PCAP 唯一匹配，分类为 PSF-like subtype 0；发现表 peer count=1、PSF revision=2。没有 payload 或源/目的地址关联，不能据此认定指定 iPhone 完整对端身份。","current_result":"partial","history_verified":true,"verified_in":"Test048 / Test054 / Test055 / Test056 / Test057 / Test058 / Test059"},{"id":"4-3","name":"MIF 解析与接纳","current_detail":"1 条 AWDL subtype 3/MIF 驱动事件与 PCAP 帧按 sequence control、MPDU 长度唯一匹配并被接纳；旁路时序推断目标符合 RX 后约 920 微秒的 legacy next-AW 几何，不证明 current-AW fallback 采用。来源和 payload 未关联。","current_result":"partial","history_verified":true,"verified_in":"Test048 / Test054 / Test055 / Test056 / Test058 / Test059"},{"id":"4-4","name":"对端状态新鲜度与到期","current_detail":"Test077 本次启动未覆盖此验收项。","current_result":"not_covered","history_verified":true,"verified_in":"Test048"},{"id":"4-5","name":"真实 AWDL 数据帧捕获与解码","current_detail":"PCAP 有 262 条 Data 类帧，其中 96 条属于与候选控制帧同 TA 的普通 ToDS Data；没有当前 Qm 票据 FC/sequence/length 精确匹配，也没有可归属该 Qm 的明文 IPv6/mDNS 数据。频道与时序覆盖有限，不能据此断言无空口数据或无对端回包。","current_result":"not_covered","history_verified":false,"verified_in":"尚未验证"}]},{"stage":5,"name":"AWDL 对端发送","status":"一条 Qm 查询完成固件发送；空口与对端回包未证实","evidence":"驱动对一条原生 Qm 查询记录编码、提交并报告固件完成/成功各 1，owner 绑定 TX trace 完整；固件没有回显完整身份。PCAP 中未找到此 Qm 票据对应的 FC=8、sequence control=32、MPDU 长度 125（含 FCS 为 129）数据帧精确匹配。抓包另含 96 条与候选控制帧同 TA 的普通 ToDS Data，其 DS 位与该 Qm 帧型不同，不能替代 Qm 空口证据。独立时序对照推断 MIF 目标符合 legacy next-AW 几何；current-AW trace 不完整，无法确认 fallback 是否被实际采用。上述缺口不能证明该 Qm 绝未发射或对端绝无响应。","pending":"修复 current-AW trace 完整采集，输出实际 planner 时间与 fallbackUsed；在新诊断窗口中把 Qm 票据与空口帧、接收回包及频道时序关联。","acceptance":"当前启动得到同包阶段记录和明确固件回报；不把本地相关性说成固件完整身份回显。","validated_scope":"驱动对一条原生 Qm 查询记录编码、提交并报告固件完成/成功各 1，owner 绑定 TX trace 完整；固件没有回显完整身份。PCAP 中未找到此 Qm 票据对应的 FC=8、sequence control=32、MPDU 长度 125（含 FCS 为 129）数据帧精确匹配。抓包另含 96 条与候选控制帧同 TA 的普通 ToDS Data，其 DS 位与该 Qm 帧型不同，不能替代 Qm 空口证据。独立时序对照推断 MIF 目标符合 legacy next-AW 几何；current-AW trace 不完整，无法确认 fallback 是否被实际采用。上述缺口不能证明该 Qm 绝未发射或对端绝无响应。","candidate_check":"Test078待验收：新启动中读取QM帧身份、规划窗口、提交与完成记录，并关联OpenWrt对应空口帧；固件完成不能单独证明对端收到。","change_note":"Test077 本次启动实测；不继承其他启动结果。","current_summary":"驱动对一条原生 Qm 查询记录编码、提交并报告固件完成/成功各 1，owner 绑定 TX trace 完整；固件没有回显完整身份。PCAP 中未找到此 Qm 票据对应的 FC=8、sequence control=32、MPDU 长度 125（含 FCS 为 129）数据帧精确匹配。抓包另含 96 条与候选控制帧同 TA 的普通 ToDS Data，其 DS 位与该 Qm 帧型不同，不能替代 Qm 空口证据。独立时序对照推断 MIF 目标符合 legacy next-AW 几何；current-AW trace 不完整，无法确认 fallback 是否被实际采用。上述缺口不能证明该 Qm 绝未发射或对端绝无响应。","unfinished_summary":"修复 current-AW trace 完整采集，输出实际 planner 时间与 fallbackUsed；在新诊断窗口中把 Qm 票据与空口帧、接收回包及频道时序关联。","current_result_label":"Qm 固件侧完成；本票据空口帧与对端回包未证实","has_runtime_evidence":true,"has_pending_work":true,"status_tone":"working","current_result":"partial","checkpoints":[{"id":"5-1","name":"PSF 固件提交与完成","current_detail":"Test077 本次启动未覆盖此验收项。","current_result":"not_covered","history_verified":true,"verified_in":"Test042 / Test048 / Test051 / Test056 / Test057 / Test058 / Test059"},{"id":"5-2","name":"同会话 MIF 固件提交与完成","current_detail":"Test077 本次启动未覆盖此验收项。","current_result":"not_covered","history_verified":true,"verified_in":"Test043 / Test048 / Test051 / Test056 / Test057 / Test058 / Test059"},{"id":"5-3","name":"真实数据帧固件发送与完成","current_detail":"驱动对一条原生 Qm 查询记录编码、提交并报告固件完成/成功各 1，owner 绑定 TX trace 完整；固件没有回显完整身份。PCAP 中未找到此 Qm 票据对应的 FC=8、sequence control=32、MPDU 长度 125（含 FCS 为 129）数据帧精确匹配。抓包另含 96 条与候选控制帧同 TA 的普通 ToDS Data，其 DS 位与该 Qm 帧型不同，不能替代 Qm 空口证据。独立时序对照推断 MIF 目标符合 legacy next-AW 几何；current-AW trace 不完整，无法确认 fallback 是否被实际采用。上述缺口不能证明该 Qm 绝未发射或对端绝无响应。","current_result":"partial","history_verified":true,"verified_in":"Test058 / Test059"},{"id":"5-4","name":"对端 ACK 或实际收包","current_detail":"Test077 本次启动未覆盖此验收项。","current_result":"not_covered","history_verified":false,"verified_in":"尚未验证"},{"id":"5-5","name":"持续双向数据交换","current_detail":"Test077 本次启动未覆盖此验收项。","current_result":"not_covered","history_verified":false,"verified_in":"尚未验证"}]},{"stage":6,"name":"原生 awdl0","status":"awdl0 常驻，软件队列与单次查询有进展","evidence":"awdl0 保持 UP/RUNNING 和 IPv6 链路本地地址；2 条 BSD 输出进入驱动队列，其中一条 Qm 查询到达固件完成。RX 到原生 ifnet 交付未出现。","pending":"补齐接收解码、数据队列回包与原生 ifnet 交付。","acceptance":"当前启动看到匹配查询的发送阶段与真实无线数据包交付ifnet。","validated_scope":"awdl0 保持 UP/RUNNING 和 IPv6 链路本地地址；2 条 BSD 输出进入驱动队列，其中一条 Qm 查询到达固件完成。RX 到原生 ifnet 交付未出现。","candidate_check":"Test078待验收：核对awdl0注册、UP/RUNNING、IPv6及接收解析计数，证明对端数据进入原生ifnet；同时记录Wi-Fi链路状态与看门狗变化。","change_note":"Test077 本次启动实测；不继承其他启动结果。","current_summary":"awdl0 保持 UP/RUNNING 和 IPv6 链路本地地址；2 条 BSD 输出进入驱动队列，其中一条 Qm 查询到达固件完成。RX 到原生 ifnet 交付未出现。","unfinished_summary":"补齐接收解码、数据队列回包与原生 ifnet 交付。","current_result_label":"awdl0 常驻，软件队列与单次查询有进展","has_runtime_evidence":true,"has_pending_work":true,"status_tone":"working","current_result":"partial","checkpoints":[{"id":"6-1","name":"原生对象初始化与释放","current_detail":"Test077 本次启动未覆盖此验收项。","current_result":"not_covered","history_verified":true,"verified_in":"Test049"},{"id":"6-2","name":"原生注册、临时启动和停止","current_detail":"Test077 本次启动未覆盖此验收项。","current_result":"not_covered","history_verified":true,"verified_in":"Test050"},{"id":"6-3","name":"原生 awdl0 常驻","current_detail":"本次启动 awdl0 为 UP/RUNNING，IPv6 链路本地地址可用，诊断后 resident 状态保持。","current_result":"passed","history_verified":true,"verified_in":"Test051 / Test054 / Test055 / Test056 / Test057 / Test058 / Test059"},{"id":"6-4","name":"真实内核输出进入驱动队列","current_detail":"真实 BSD 输出有 2 条进入驱动软件队列；其中一条查询到达固件完成。队列接纳本身不代表空口发送。","current_result":"passed","history_verified":true,"verified_in":"Test051 / Test054 / Test055 / Test056 / Test057 / Test058 / Test059"},{"id":"6-5","name":"真实无线包交付原生 ifnet","current_detail":"Test077 本次启动未覆盖此验收项。","current_result":"not_covered","history_verified":false,"verified_in":"尚未验证"}]},{"stage":7,"name":"IPv6 与服务发现","status":"原生 Qm 查询通过固件完成；Bonjour 对端响应未验证","evidence":"系统原生浏览触发一条 Qm 查询，并在驱动和固件计数中完成；没有查询应答、有效邻居或分享服务握手证明。","pending":"对照本轮 PCAP 与接收队列，闭环 IPv6/mDNS 对端响应。","acceptance":"对端地址、服务应答与原生握手均有当前启动证据。","validated_scope":"系统原生浏览触发一条 Qm 查询，并在驱动和固件计数中完成；没有查询应答、有效邻居或分享服务握手证明。","candidate_check":"Test078待验收：将AirDrop浏览触发的mDNS/Bonjour查询与iPhone回包、邻居和服务握手按同一窗口关联；没有捕获回应时只记为未验证。","change_note":"Test077 本次启动实测；不继承其他启动结果。","current_summary":"系统原生浏览触发一条 Qm 查询，并在驱动和固件计数中完成；没有查询应答、有效邻居或分享服务握手证明。","unfinished_summary":"对照本轮 PCAP 与接收队列，闭环 IPv6/mDNS 对端响应。","current_result_label":"原生 Qm 查询通过固件完成；Bonjour 对端响应未验证","has_runtime_evidence":true,"has_pending_work":true,"status_tone":"working","current_result":"partial","checkpoints":[{"id":"7-1","name":"自动 RUNNING 与 IPv6 链路本地地址","current_detail":"本次启动 awdl0 自动处于 RUNNING 并具有 IPv6 链路本地地址。","current_result":"passed","history_verified":true,"verified_in":"Test052 / Test054 / Test055 / Test056 / Test057 / Test058 / Test059"},{"id":"7-2","name":"应用 IPv6 UDP 输出接纳","current_detail":"原生 DNS-SD 浏览产生一条 Qm 查询并通过驱动提交及固件完成；没有空口与对端应答证明。","current_result":"partial","history_verified":true,"verified_in":"Test051 / Test054 / Test055 / Test056 / Test057 / Test058 / Test059"},{"id":"7-3","name":"有效对端的IPv6地址与原生邻居可达性","current_detail":"Test077 本次启动未覆盖此验收项。","current_result":"not_covered","history_verified":false,"verified_in":"尚未验证"},{"id":"7-4","name":"mDNS / Bonjour 对端服务应答","current_detail":"Test077 本次启动未覆盖此验收项。","current_result":"not_covered","history_verified":false,"verified_in":"尚未验证"},{"id":"7-5","name":"原生分享服务握手","current_detail":"Test077 本次启动未覆盖此验收项。","current_result":"not_covered","history_verified":false,"verified_in":"尚未验证"}]},{"stage":8,"name":"双向 AirDrop","status":"AirDrop 文件传输未验证","evidence":"本轮没有 Mac→iPhone 或 iPhone→Mac 文件收件及完整性校验。","pending":"先闭环对端数据回包、原生 ifnet 和 Bonjour 服务响应，再验证双向文件传输。","acceptance":"两方向均完成实际收件并核对文件完整性。","validated_scope":"本轮没有 Mac→iPhone 或 iPhone→Mac 文件收件及完整性校验。","candidate_check":"Test078待验收：完成Mac→iPhone和iPhone→Mac真实小文件收发并核对SHA-256；重复传输和睡眠恢复另行验收。","change_note":"Test077 本次启动实测；不继承其他启动结果。","current_summary":"本轮没有 Mac→iPhone 或 iPhone→Mac 文件收件及完整性校验。","unfinished_summary":"先闭环对端数据回包、原生 ifnet 和 Bonjour 服务响应，再验证双向文件传输。","current_result_label":"AirDrop 文件传输未验证","has_runtime_evidence":false,"has_pending_work":true,"status_tone":"pending","current_result":"not_covered","checkpoints":[{"id":"8-1","name":"Mac → iPhone 小文件收件","current_detail":"Test077 本次启动未覆盖此验收项。","current_result":"not_covered","history_verified":false,"verified_in":"尚无成功记录"},{"id":"8-2","name":"iPhone → Mac 小文件收件","current_detail":"Test077 本次启动未覆盖此验收项。","current_result":"not_covered","history_verified":false,"verified_in":"尚无成功记录"},{"id":"8-3","name":"双向重复传输稳定","current_detail":"Test077 本次启动未覆盖此验收项。","current_result":"not_covered","history_verified":false,"verified_in":"尚未验证"},{"id":"8-4","name":"大文件与完整性校验","current_detail":"Test077 本次启动未覆盖此验收项。","current_result":"not_covered","history_verified":false,"verified_in":"尚未验证"},{"id":"8-5","name":"睡眠恢复后传输及 Wi-Fi 共存","current_detail":"Test077 本次启动未覆盖此验收项。","current_result":"not_covered","history_verified":false,"verified_in":"尚未验证"}]}],"progressModel":{"version":"current-runtime-v2","fixed_total":40,"meaning":"当前版本已实测通过项占固定验收清单的比例，部分通过不计完成"},"validationLabel":"Test077 本轮 6/40 项通过（15.0%），7 项部分验证；7 条控制事件与外部抓包唯一匹配，数据回包未证实。","nextCandidateState":"Test078 已部署，待重启验收","nextCandidateSummary":"Test078已部署并保留整份EFI备份；current-AW实际planner时间、fallback标志与协调器最终摘要已完成离线修复。待新启动核对加载、Wi-Fi和数据回包。驱动及主机工具源码已纳入Git；AirDrop文件传输尚未验证。","workflow":{"candidate":"25G332-Test077","phaseLabel":"Test078 已部署；等待重启验收","headline":"Test078 已就绪，等待新启动验证","summary":"当前启动仍是 Test077：6/40 项通过、7 项部分验证。较早出现一次发送看门狗并使复位累计增加，后续 305 秒被动观察未新增错误；更长时间稳定性仍待验证。Test078 已部署并保留完整 EFI 备份，但尚无新启动的驱动加载、Wi-Fi、AWDL 对端回包或 AirDrop 证据。","nextAction":"重启核对Test078身份和Wi-Fi；同一启动按依赖合并接口、时序、收发与旁路证据，再独立观察长期稳定性。历史已验收项保留，本轮未覆盖项标记待复验。","primaryStage":7,"steps":[{"id":"stage-1","title":"原生 Wi-Fi","detail":"Test077 当前启动得分仍为6/40，7项部分验证；后段看门狗与复位原因待查。Test078 已部署，Wi-Fi和AWDL新埋点须重启后再验。","status":"partial","stage":1},{"id":"stage-2","title":"P2P 单次发送","detail":"本次没有独立验收 P2P MAC、广播站和队列创建/完整回收。 待办：后续在不影响当前单次 RF 边界的情况下补充独立生命周期验收。","status":"waiting","stage":2},{"id":"stage-3","title":"频道与时序","detail":"本轮 900 毫秒 ROC 启动与所有者结束成功。当前 AW 详细轨迹发布不完整，因此没有完整的 AW 时序与跨设备时钟映射。 待办：修复并完整采集当前 AW trace，再做对端时钟关联。","status":"partial","stage":3},{"id":"stage-4","title":"AWDL 对端接收","detail":"OpenWrt 20 秒、channel 6 抓包捕获 2218 包，其中 155 条 Action、151 条 Apple vendor Action。7 条驱动控制 RX trace 均按 sequence control 与 MPDU 长度唯一匹配：6 条 PSF-like subtype 0、1 条已接纳的 AWDL subtype 3/MIF；发现表 peer count=1，PSF revision=2、MIF revision=1，运行时 MIF 绑定有效。旁路时序对照把 peer MIF 目标解释为 RX 后约 920 微秒的下一 AW 几何；这只是与旧规划器路径相符的推断，不能证明 current-AW fallback 实际采用。PCAP 另有 262 条 Data 类帧，其中 96 条被归为与候选控制帧同 TA 的普通 ToDS Data；这类 DS=1/subtype 0 帧不等同于本次 Qm 票据。当前 Qm 没有 FC/sequence/MPDU 长度的精确空口匹配，驱动数据 RX 捕获、解码和交付计数为 0。候选控制帧没有 payload 或源/目的地址关联，完整接收/浏览窗口重叠未证明；监听只覆盖 channel 6，不能据此断言其他频道或受保护帧没有回包。current-AW trace 只有 Begin=5、Complete=0，缺少可判断实际规划路径的字段。 待办：补齐 current-AW trace 的完整发布与实际规划时间/回退选择字段；扩大独立接收覆盖并关联数据帧票据、频道和窗口时序。控制帧匹配不等于数据回包或 AirDrop 成功。","status":"partial","stage":4},{"id":"stage-5","title":"AWDL 对端发送","detail":"驱动对一条原生 Qm 查询记录编码、提交并报告固件完成/成功各 1，owner 绑定 TX trace 完整；固件没有回显完整身份。PCAP 中未找到此 Qm 票据对应的 FC=8、sequence control=32、MPDU 长度 125（含 FCS 为 129）数据帧精确匹配。抓包另含 96 条与候选控制帧同 TA 的普通 ToDS Data，其 DS 位与该 Qm 帧型不同，不能替代 Qm 空口证据。独立时序对照推断 MIF 目标符合 legacy next-AW 几何；current-AW trace 不完整，无法确认 fallback 是否被实际采用。上述缺口不能证明该 Qm 绝未发射或对端绝无响应。 待办：修复 current-AW trace 完整采集，输出实际 planner 时间与 fallbackUsed；在新诊断窗口中把 Qm 票据与空口帧、接收回包及频道时序关联。","status":"partial","stage":5},{"id":"stage-6","title":"原生 awdl0","detail":"awdl0 保持 UP/RUNNING 和 IPv6 链路本地地址；2 条 BSD 输出进入驱动队列，其中一条 Qm 查询到达固件完成。RX 到原生 ifnet 交付未出现。 待办：补齐接收解码、数据队列回包与原生 ifnet 交付。","status":"partial","stage":6},{"id":"stage-7","title":"IPv6 与服务发现","detail":"系统原生浏览触发一条 Qm 查询，并在驱动和固件计数中完成；没有查询应答、有效邻居或分享服务握手证明。 待办：对照本轮 PCAP 与接收队列，闭环 IPv6/mDNS 对端响应。","status":"partial","stage":7},{"id":"stage-8","title":"双向 AirDrop","detail":"本轮没有 Mac→iPhone 或 iPhone→Mac 文件收件及完整性校验。 待办：先闭环对端数据回包、原生 ifnet 和 Bonjour 服务响应，再验证双向文件传输。","status":"waiting","stage":8}],"facts":[{"label":"运行版本","value":"当前启动 Test077；Test078 已部署待重启"},{"label":"Wi-Fi","value":"短测与后续305秒稳定；其间发生1次看门狗、复位累计5→10"},{"label":"外部监听","value":"20秒捕获2218包 · 155条Action · 7条驱动控制事件唯一匹配"},{"label":"Qm 查询","value":"驱动编码、提交、完成、成功各 1；不是对端回包证明"},{"label":"RX 入口","value":"6条PSF-like + 1条已接纳MIF · 无数据RX交付"},{"label":"原生通路","value":"awdl0 常驻；2 条 BSD 输出入队，RX ifnet 交付 0"},{"label":"AirDrop","value":"对端数据回包与双向文件收件未验证"},{"label":"本轮进度","value":"6/40 项通过（15.0%），7 项部分验证"}],"alert":{"title":"对端回包与空口发送尚未闭环","detail":"本地固件完成计数只证明驱动观察到完成；PCAP未证明窗口与发送重叠，TX响应也没有完整身份回显。","stage":5}},"timeline":{"scope":"project","title":"开发总时间线","summary":"开发总时间线记录源码、部署和实测。验收矩阵并列保留历史证据与本轮复验；Test078仍待首次启动，不把未覆盖当作回退。","steps":[{"id":"intel-port","label":"原生移植启动与接口注册","status":"done","detail":"基于官方itlwm启动Tahoe原生移植。最初没有Wi-Fi接口，随后注册出en1；当时开关仍不可用。","stateLabel":"初版起步","candidate":"Test001–004","time":"2026-10-25","stage":1},{"id":"scan-join","label":"开关、扫描与首次联网","status":"done","detail":"先打通Wi-Fi开关与扫描，再排查连接预检。Test016记录新网络关联、DHCP与真实IP流量，开关稳定性继续修正。","stateLabel":"首次联网","candidate":"Test005–016","time":"2026-10-26","stage":1},{"id":"wifi-throughput","label":"私有地址、新网络与测速","status":"done","detail":"私有地址预检与新网络连接取得进展；Test017一次5GHz下载约804Mbps，报告链路1733Mbps，并通过当次开关重连。该样本不代表当前长期稳定性。","stateLabel":"当轮验证","candidate":"Test016–017","time":"2026-10-27T00:13:11.492641+08:00","stage":1},{"id":"p2p-control","label":"P2P控制发送与回收","status":"done","detail":"专用P2P控制帧取得本地固件完成，走通一次有界驻留与回收流程；尚未证明对端收到。","stateLabel":"固件完成","candidate":"Test029–031","time":"2026-10-27","stage":2},{"id":"tahoe-peer","label":"系统升级适配与有效对端解析","status":"done","detail":"适配macOS 26.7.2后恢复en1识别。Test041解析4个AWDL控制帧并接纳1个有效对端，数据通路仍未接通。","stateLabel":"有效对端","candidate":"Test037–041","time":"2026-10-27","stage":4},{"id":"native-awdl","label":"原生awdl0生命周期与软件入口","status":"done","detail":"原生接口注册、启停通过，随后awdl0常驻并接纳真实内核输出。期间出现内核崩溃，继续排查内存和队列回收。","stateLabel":"接口验证","candidate":"Test050–053","time":"2026-10-28","stage":6},{"id":"continuity-discovery","label":"即时热点与双向设备发现","status":"done","detail":"即时热点早期曾在蓝牙协商超时；后续用户回报热点可连接、AirDrop双向可见，文件传输仍失败。蓝牙归属及接力未独立完成验收。","stateLabel":"发现进展","candidate":"Test027–061","time":"2026-10-28","stage":7},{"id":"firmware-data","label":"真实数据推进到固件发送","status":"done","detail":"真实内核数据从软件队列进入固件，并记录本地发送完成；尚无无线数据回包、原生输入交付或AirDrop收件证明。","stateLabel":"本地发送","candidate":"Test062–063","time":"2026-10-28","stage":6},{"id":"air-capture-regression","label":"独立空口对照与回归定位","status":"done","detail":"引入OpenWrt旁路对照，匹配本机PSF并接纳对端MIF。Test069缺少完整对端PSF锚点，且同轮出现Wi-Fi中断；回包和AirDrop未通过。","stateLabel":"卡点定位","candidate":"Test067–069","time":"2026-10-29T02:04:14.738+08:00","stage":4},{"id":"test070-deployed","label":"Test070修复合并并部署","status":"done","detail":"Test070的2×120秒与独立300秒Wi-Fi观察通过；抓到唯一匹配peer PSF同源的9个MIF，但驱动未接纳同条目MIF。严格QM队首分类通过但未出队；AirDrop文件收件未验证。","stateLabel":"本轮实测完成，AirDrop未通过","candidate":"Test070","time":"2026-10-29T03:39:46.100934+08:00","stage":1},{"id":"test071-deployed","label":"Test071接收事件追踪与准入诊断","status":"done","detail":"Test071前后两段Wi-Fi短测稳定；驱动记录8个PSF和1个同源MIF，MIF在900ms窗口中段解析并入表。PCAP中的本机AirDrop目标QM查询具有有效IPv6/UDP校验和，并与驱动QM计数1/1/1/1相符，但没有精确DataTx票据关联。本轮未建立与查询对应的窗口内数据回包或Bonjour应答；PCAP覆盖不完整，不能判定对端未响应。Mac侧AWDL数据RX/ifnet交付及实际文件传输仍待证。 后续同一启动在开发期出现一次发送watchdog与Wi-Fi自行断开，已纳入Test072排查；没有据此擅自延长超时或更改队列回收策略。","stateLabel":"本轮诊断完成，后续出现Wi-Fi发送超时","candidate":"Test071","time":"2026-10-29T05:36:13.923567+08:00","stage":4},{"id":"test072-deployed","label":"Test072同包发送身份与时序","status":"done","detail":"Test072加载身份已核对；en1在Wi-Fi快照时仍关联，awdl0为up/running且有IPv6链路本地地址。本启动watchdog从2增至4、复位从13增至25；稍后seq5快照为watchdog 5、复位30，用户确认没有手动切网或睡眠。数据发送trace预检为空，没有本轮可关联的发送票据；未执行RF、browse或claim。AirDrop和对端回包仍未验证。源码另发现Tahoe普通TX_RSP回报路径被跳过，generic fallback未执行；Test073修复尚未部署。","stateLabel":"本轮RF暂停，定位普通TX回报分发回归","candidate":"Test072","time":"2026-10-29T08:00:11+08:00","stage":5},{"id":"test073-deployed","label":"Test073恢复普通TX回报分发","status":"done","detail":"Test073加载身份已核对。en1在125.196秒观察期间保持关联并有IPv4，reset保持5，watchdog、固件和硬件错误计数没有新增。HTTP 200使用en0默认路由，不能作为Wi-Fi公网验收。 生命周期记录见到一次注册、启动、BSD出现和停止释放；本次最终awdl0不存在，DataAttached=0、Closing=1、LinkReady=0，后续NotReady，常驻与IPv6未建立。本轮未运行RF、browse或boot claim；数据发送trace仅为完整空预检，没有发送或AirDrop证明。","stateLabel":"Wi-Fi短测通过，数据桥挂接失败，RF暂停","candidate":"Test073","time":"2026-10-29T09:55:12.397403+08:00","stage":1},{"id":"test074-deployed","label":"Test074记录数据桥挂接错误","status":"done","detail":"前一次Test074启动：Wi-Fi在54.285秒观察中断链，稍后记录watchdog增加1、reset从5到10；这段旧启动观察只保留在开发总时间线，不计入当前得分。 本次启动：Test074加载身份已核对；en1当前已关联并有IPv4，awdl0已挂接、UP/RUNNING并有IPv6链路本地地址。这只是只读点快照，没有做120秒稳定性、公网、RF、browse、claim或AirDrop测试。","stateLabel":"新启动awdl0与IPv6点快照通过；Wi-Fi稳定性未测","candidate":"Test074","time":"2026-10-29T11:39:31.606490+08:00","stage":6},{"id":"test075-deployed","label":"Test075发送队列边界修复","status":"done","detail":"两段约125秒Wi-Fi观察期间保持连接且未出现新超时；之后在用户未操作时记录到一次发送看门狗超时，复位计数由5升至10。PSF及3条MIF本地完成，5个内核输出进入本机队列，但数据帧未提交；没有对端数据交付、Bonjour应答或双向AirDrop成功证据。","stateLabel":"Test075本轮完成：11/40通过；后段watchdog超时，MIF 0，数据未提交","candidate":"Test075","time":"2026-10-29T12:13:14.427194+08:00","stage":1},{"id":"test076-deployed","label":"Test076队列身份、对端接收与发送终态诊断","status":"done","detail":"本次启动：en1前后两段各约125秒观察保持关联，reset 5→5且无新增watchdog/固件错误；3次绑定en1的1 MB请求均HTTP 200，平均1.93 Mbps是公网路径速度。P2P MAC ADD/REMOVE成功，广播站/发送队列准备阶段返回成功且探针完成。900ms ROC START/END及主机/GP2原始时钟可见。OpenWrt PCAP解析出115个AWDL控制帧候选；7条驱动RX事件中6条唯一匹配PCAP，含同源PSF与1个被接纳MIF。PSF固件本地完成1次、MIF burst本地完成3次。另捕获12个AWDL数据候选并解出IPv6/UDP/mDNS，但来源方向未知；2048包上限使PCAP仅覆盖15.18秒，完整窗口/时钟重叠未证明。真实BSD数据队列接纳2个包，编码、固件提交及完成均为0；无数据回包、Bonjour对端应答或AirDrop文件收件证明。MIF下一AW可用窗口因16TU新鲜度限制为空，差2464微秒。 离线重放：下一AW起点比16TU新鲜度上限晚2464微秒；当前AW固定模型窗宽8189微秒，但实际planner now未导出。Test077正在离线合并，不计实机通过。 后续14:04:17在用户未操作、未睡眠时自动断链，约22秒后自动重连；Wi-Fi开关保持开启，无新增watchdog、复位、固件或硬件错误。原因仍在排查。","stateLabel":"MIF已接纳；数据发送受时窗限制，后段出现自动断链","candidate":"25G332-Test076","time":"2026-10-29T13:37:27.127929+08:00","stage":5},{"id":"test077-deployed","label":"Test077 当前 AW 候选合并与 EFI 部署","status":"done","detail":"合并当前 AW 受限候选及失败日志保护；完成离线验证、独立复核、EFI 备份并部署。离线检查不计实机通过。","stateLabel":"备份后部署；等待重启验收","candidate":"25G332-Test077","time":"2026-10-29T14:35:48.703769+08:00"},{"id":"test077-runtime","label":"Test077 首次重启与 AWDL 回包诊断","status":"done","detail":"新启动核对 Test077。诊断前后各约 125 秒 Wi-Fi 观察保持 en1 关联、UP/RUNNING 与 IPv4，复位 5→5，无新增 watchdog/固件/硬件错误；默认路由 en0，未验证 en1 公网请求。一次 900 毫秒诊断中，原生 Qm 查询在驱动记录编码、提交、完成、成功各 1，owner 绑定 TX trace 完整。OpenWrt channel 6 抓包 20 秒、捕获 2218 包；7 条驱动控制 RX 事件按序号与 MPDU 长度唯一匹配。旁路时序推断 MIF 目标符合 legacy next-AW 几何，不能证明 current-AW fallback 采用。PCAP 另有与候选控制帧同 TA 的普通 ToDS Data，但没有当前 Qm 票据的精确数据帧匹配；驱动数据 RX 捕获/解码/交付计数为 0。监听限于 channel 6，接收与浏览完整窗口重叠未证明，所以不能据此断言 Qm 未发射或对端未响应。current-AW trace 不完整，coordinator 汇总输出异常；启动单次额度已消耗。原生 ifnet 数据交付和 AirDrop 收件仍未证实。","stateLabel":"Qm 查询到固件完成；对端回包未证实","candidate":"25G332-Test077","time":"2026-10-29T15:34:41.762644+08:00","stage":5},{"id":"test077-wifi-followup","label":"Test077同启动Wi-Fi后续观察","status":"done","detail":"随后同一次启动在约16:04出现1次发送看门狗超时，复位累计5→10；这不是前后两段约125秒观察窗口内的事件。16:09起新增305.153秒被动观察，en1始终关联、保有IPv4，窗口内复位10→10，未新增看门狗或固件/硬件错误。本次启动未记录睡眠；看门狗与断链的因果关系尚未确定。本轮未重做RF诊断，AWDL对端回包和AirDrop仍未证实。","stateLabel":"后段看门狗已记录；新增305秒窗口稳定","candidate":"25G332-Test077","time":"2026-10-29T16:14:19.330036+08:00","stage":1},{"id":"test078-deployed","label":"Test078合并并部署，等待启动验收","status":"done","detail":"合并 AWDL 当前规划与 QM 数据发送追踪、Wi-Fi 状态迁移埋点并完成 Tahoe 构建。内置 EFI 已部署且整份备份通过哈希核对；新启动加载、Wi-Fi稳定性、对端回包和 AirDrop 均待实测。","stateLabel":"已部署，待重启验收","candidate":"25G332-Test078","time":"2026-10-29T16:36:05+08:00","stage":4},{"id":"source-and-validation-matrix","label":"Test078源码入库与验收视图调整","status":"current","detail":"Test060–078驱动源码已基于最新origin/master提交并推送，提交a98d788。新增8×5验收矩阵，分别展示历史曾验收24/40与Test077本轮复验6/40；历史覆盖不代表当前版本通过。按依赖合并同启动的采集窗口，主动固件session的重开仍需完整资源回收证据。","stateLabel":"源码已推送；历史与本轮验收分开显示","candidate":"25G332-Test078","time":"2026-10-29T16:59:03+08:00","stage":6}],"candidate":"25G332-Test078"}};
+
+</script>
+<script>
+window.TEST_RECORDS = [
+  {
+    "id": "record-test077",
+    "version": "25G332-Test077",
+    "label": "本轮验证记录",
+    "state": "Test077 本轮 6/40 项通过（15%），7 项部分验证；7条控制事件唯一匹配，数据回包未证实。",
+    "tone": "working",
+    "date": "2026-10-29",
+    "summary": "Test077 新启动实测：诊断前后各约125秒 Wi-Fi观察均保持en1关联、UP/RUNNING与IPv4，复位5→5，无新增watchdog、固件或硬件错误；默认路由为en0，未验证en1公网请求。OpenWrt 20秒捕获2218包，含155条Action和151条Apple vendor Action。7条驱动控制RX事件按序列控制字段和MPDU长度唯一匹配，含6条PSF-like subtype 0及1条已接纳AWDL subtype 3/MIF；peer count=1且运行时MIF绑定有效。没有payload或源/目的地址关联，窗口重叠未证明，监听只覆盖channel 6。当前Qm TX无PCAP数据帧精确匹配，数据RX捕获、解码、交付均为0。current-AW trace不完整；coordinator汇总输出异常，单次额度已消耗。无对端数据回包或AirDrop收件证明。 随后同一次启动在约16:04出现1次发送看门狗超时，复位累计5→10；这不是前后两段约125秒观察窗口内的事件。16:09起新增305.153秒被动观察，en1始终关联、保有IPv4，窗口内复位10→10，未新增看门狗或固件/硬件错误。本次启动未记录睡眠；看门狗与断链的因果关系尚未确定。",
+    "evidence": [
+      "Wi-Fi：诊断前 125.134 秒、后 125.233 秒被动观察均保持 en1 关联、UP/RUNNING 与 IPv4；复位 5→5，无新增 watchdog、固件或硬件错误。默认路由为 en0，本轮没有验证 en1 公网请求或吞吐。 随后同一次启动在约16:04出现1次发送看门狗超时，复位累计5→10；这不是前后两段约125秒观察窗口内的事件。16:09起新增305.153秒被动观察，en1始终关联、保有IPv4，窗口内复位10→10，未新增看门狗或固件/硬件错误。本次启动未记录睡眠；看门狗与断链的因果关系尚未确定。",
+      "发送：原生 Qm 查询在驱动 TX trace 中有当前 token 绑定，编码、提交、完成、成功各 1；固件未回显完整身份，不能据此证明空口或对端收到。",
+      "监听与归因：OpenWrt 20秒捕获2218包，155条Action、151条Apple vendor Action；7条驱动控制RX事件按sequence control和MPDU长度唯一匹配。接收窗口与browse时序重叠未证明，且监听只覆盖channel 6。",
+      "控制接收：6条PSF-like subtype 0事件、1条被接纳的AWDL subtype 3/MIF事件唯一匹配；peer count=1、PSF revision=2、MIF revision=1，运行时MIF绑定有效。没有payload/地址关联，不证明指定iPhone身份。",
+      "数据通路：当前Qm查询有驱动编码、提交、完成、成功各1，但PCAP无按帧控制/序列/长度精确匹配的数据帧；数据RX捕获、解码和交付均为0。",
+      "诊断器：数据记录已落盘，但最终汇总打印因参数错误退出；coordinator complete=false。单次启动 claim 已消耗，不允许重试。",
+      "AirDrop：没有对端数据回包、Bonjour 服务应答、双向文件收件或文件哈希校验。"
+    ],
+    "blockers": [
+      "定位后段看门狗与复位的触发链；继续验证更长时间运行、睡眠恢复、Wi-Fi开关回连与私有地址轮换，并单独测试绑定en1的公网请求。",
+      "控制帧归因已完成；仍需在覆盖相应频道和窗口的独立观察中关联Qm数据帧、发送/接收时序与对端来源。",
+      "修复收集器汇总输出参数；补齐当前 AW trace 发布字段，再在新启动准备下一轮。",
+      "AWDL RX控制事件已确认，但数据RX捕获、解码、ifnet交付均为0；需继续核对数据帧 descriptor、过滤和输入路径。",
+      "仍需证明 Bonjour 对端服务应答及双向 AirDrop 文件完整性。"
+    ],
+    "next": [
+      "修复current-AW trace与诊断汇总输出；再按受控的完整频道/窗口证据闭环Qm数据回包、原生ifnet与AirDrop。"
+    ]
+  }
+];
+
+</script>
+<script>
+(() => {
+  "use strict";
+
+  const data = window.PROGRESS_DATA;
+  const sourceRecords = window.TEST_RECORDS || [];
+  const $ = (selector, root = document) => root.querySelector(selector);
+  let activeFilter = "all";
+
+  function node(tag, className, value) {
+    const element = document.createElement(tag);
+    if (className) element.className = className;
+    if (value !== undefined && value !== null) element.textContent = String(value);
+    return element;
+  }
+
+  function statusTone(label) {
+    const value = String(label || "");
+    if (/(未通过|未完成|待修|拒绝|尚未|未打通|失败|回归|超时)/.test(value)) return "warning";
+    if (/开发中/.test(value)) return "working";
+    if (/(已验证|通过)/.test(value) && !/(待|未|失败|拒绝|待修)/.test(value)) return "success";
+    return "pending";
+  }
+
+  const workflowStatusLabels = {
+    verified: "本轮通过",
+    blocked: "当前卡点",
+    waiting: "待验证",
+    partial: "部分通过",
+    attention: "出现异常"
+  };
+
+  function currentWorkflow() {
+    const workflow = data?.workflow;
+    return workflow && workflow.candidate === data?.runningCandidate ? workflow : null;
+  }
+
+  function stageHref(stage) {
+    if (stage === undefined || stage === null || stage === "") return null;
+    const value = String(stage);
+    return value.startsWith("stage-") ? `#${value}` : `#stage-${value}`;
+  }
+
+  function stageKey(stage) {
+    return String(stage ?? "").replace(/^stage-/, "");
+  }
+
+  function renderWorkflow() {
+    const target = $("#workflow-overview");
+    if (!target) return;
+    target.replaceChildren();
+
+    const workflow = currentWorkflow();
+    const heading = node("div", "workflow-heading");
+    const title = node("div", "workflow-title");
+    title.append(node("div", "section-kicker", "CURRENT WORKFLOW"));
+    title.append(node("h2", "", workflow?.headline || "本轮流程摘要待更新"));
+    if (workflow?.phaseLabel) title.append(node("span", "workflow-label", workflow.phaseLabel));
+    heading.append(title);
+
+    const legend = node("div", "workflow-legend");
+    for (const [status, label] of Object.entries(workflowStatusLabels)) {
+      legend.append(node("span", `workflow-legend-item is-${status}`, label));
+    }
+    heading.append(legend);
+    target.append(heading);
+
+    if (!workflow) {
+      target.append(node("p", "workflow-stale", "当前流程候选与正在运行的版本不匹配，等待本轮摘要更新。"));
+      return;
+    }
+
+    const layout = node("div", "workflow-layout");
+    const route = node("section", "workflow-route");
+    route.setAttribute("aria-label", "本轮流程步骤");
+    const steps = node("ol");
+    for (const [index, step] of (workflow.steps || []).entries()) {
+      const status = Object.prototype.hasOwnProperty.call(workflowStatusLabels, step?.status) ? step.status : "waiting";
+      const item = node("li", `flow-step is-${status}`);
+      const anchor = node("a", "flow-link");
+      const href = stageHref(step?.stage);
+      if (href) anchor.href = href;
+      else anchor.setAttribute("aria-disabled", "true");
+      anchor.append(node("span", "flow-marker", status === "verified" ? "✓" : String(index + 1)));
+      const copy = node("div", "flow-copy");
+      copy.append(node("h3", "", step?.title || "步骤待补充"));
+      copy.append(node("p", "flow-detail", step?.detail || "本步骤说明待更新。"));
+      anchor.append(copy, node("span", "flow-state", workflowStatusLabels[status]));
+      item.append(anchor);
+      steps.append(item);
+    }
+    if (!workflow.steps?.length) steps.append(node("li", "flow-empty", "本轮步骤待更新。"));
+    route.append(steps);
+
+    const focus = node("section", "workflow-focus");
+    focus.append(node("div", "focus-kicker", workflow.phaseLabel || "本轮进度"));
+    const primaryStep = (workflow.steps || []).find(step => stageKey(step?.stage) === stageKey(workflow.primaryStage));
+    focus.append(node("h2", "", primaryStep?.title || workflow.headline || "当前焦点待更新"));
+    focus.append(node("p", "focus-summary", workflow.summary || "本轮摘要待更新。"));
+
+    const next = node("div", "focus-next");
+    next.append(node("strong", "", "下一步"));
+    next.append(node("p", "", workflow.nextAction || "下一步待更新。"));
+    focus.append(next);
+
+    if (workflow.facts?.length) {
+      const facts = node("dl", "flow-facts");
+      for (const fact of workflow.facts) {
+        const cell = node("div");
+        cell.append(node("dt", "", fact?.label || "状态"));
+        cell.append(node("dd", "", fact?.value ?? "待更新"));
+        facts.append(cell);
+      }
+      focus.append(facts);
+    }
+
+    const evidenceHref = stageHref(workflow.primaryStage);
+    if (evidenceHref) {
+      const evidence = node("a", "focus-evidence-link", "查看本阶段验收详情 ↗");
+      evidence.href = evidenceHref;
+      focus.append(evidence);
+    }
+
+    if (workflow.alert?.title || workflow.alert?.detail) {
+      const alert = node("aside", "focus-alert");
+      alert.append(node("strong", "", workflow.alert.title || "待复核事项"));
+      alert.append(node("p", "", workflow.alert.detail || "异常详情待更新。"));
+      const alertHref = stageHref(workflow.alert.stage);
+      if (alertHref) {
+        const link = node("a", "", "查看相关阶段");
+        link.href = alertHref;
+        alert.append(link);
+      }
+      focus.append(alert);
+    }
+
+    layout.append(route, focus);
+    target.append(layout);
+  }
+
+  const timelineStatusLabels = {
+    done: "已完成",
+    current: "进行中",
+    pending: "待验收"
+  };
+
+  function formatTimelineTime(value) {
+    if (!value) return null;
+    const dateOnly = String(value).match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (dateOnly) return `${dateOnly[1]}/${dateOnly[2]}/${dateOnly[3]}`;
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return null;
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Shanghai",
+      year: "numeric",
+      month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", hourCycle: "h23"
+    }).formatToParts(date);
+    const valueFor = type => parts.find(part => part.type === type)?.value;
+    return `${valueFor("year")}/${valueFor("month")}/${valueFor("day")} ${valueFor("hour")}:${valueFor("minute")}`;
+  }
+
+  function renderTimeline() {
+    const target = $("#development-timeline");
+    if (!target) return;
+    target.replaceChildren();
+
+    const timeline = data?.timeline;
+    if (!timeline || timeline.scope !== "project" || !Array.isArray(timeline.steps) || !timeline.steps.length) {
+      target.hidden = true;
+      return;
+    }
+
+    target.hidden = false;
+    const heading = node("div", "timeline-heading");
+    const headingCopy = node("div");
+    headingCopy.append(node("div", "section-kicker", "PROJECT DEVELOPMENT"));
+    headingCopy.append(node("h2", "", timeline.title || "开发总时间线"));
+    headingCopy.append(node("p", "timeline-intro", timeline.summary || "记录关键开发阶段与首次进展，当前验收结果见本轮实测。"));
+    const meta = node("div", "timeline-head-meta");
+    meta.append(node("span", "timeline-scope", "项目全程"));
+    meta.append(node("span", "timeline-timezone", "北京时间"));
+    if (timeline.candidate) meta.append(node("span", "timeline-candidate", `数据快照 ${timeline.candidate}`));
+    heading.append(headingCopy, meta);
+    target.append(heading);
+
+    const list = node("ol", "timeline-list");
+    for (const [index, step] of timeline.steps.entries()) {
+      if (!step || !Object.prototype.hasOwnProperty.call(timelineStatusLabels, step.status)) continue;
+      const item = node("li", `timeline-step is-${step.status}`);
+      const marker = node("span", "timeline-marker", step.status === "done" ? "✓" : String(index + 1));
+      marker.setAttribute("aria-hidden", "true");
+      const body = node("div", "timeline-entry");
+      const top = node("div", "timeline-entry-top");
+      top.append(node("h3", "timeline-label", step.label || "步骤待补充"));
+      const entryMeta = node("div", "timeline-event-meta");
+      if (step.candidate) entryMeta.append(node("span", "timeline-version", step.candidate));
+      const stateLabel = step.stateLabel || timelineStatusLabels[step.status];
+      entryMeta.append(node("span", "timeline-state", stateLabel));
+      top.append(entryMeta);
+      body.append(top);
+
+      if (step.time && step.status !== "pending") {
+        const formatted = formatTimelineTime(step.time);
+        if (formatted) {
+          const time = node("time", "timeline-time", formatted);
+          time.dateTime = step.time;
+          body.append(time);
+        }
+      } else if (step.status === "done" && !step.time) {
+        body.append(node("span", "timeline-time timeline-time-unknown", "日期未记录"));
+      }
+
+      if (step.detail) body.append(node("p", "timeline-detail", step.detail));
+      const href = stageHref(step.stage);
+      if (href) {
+        const link = node("a", "timeline-stage-link", "查看相关里程碑 ↗");
+        link.href = href;
+        body.append(link);
+      }
+
+      item.append(marker, body);
+      list.append(item);
+    }
+    target.append(list);
+  }
+
+  function chip(label, tone = "pending") {
+    return node("span", `status-chip tone-${tone}`, label || "待更新");
+  }
+
+  function nextCandidateStatus() {
+    const next = data?.nextCandidate;
+    const deployed = Boolean(next && /deployed.*waiting[_-]reboot|deployed_waiting_reboot/i.test(data?.deploymentState || ""));
+    return {
+      deployed,
+      label: deployed ? "已部署候选" : "下一候选",
+      state: data?.nextCandidateState || (deployed ? "待重启验收" : "候选待验收"),
+      tone: deployed ? "pending" : "working",
+      subtitle: data?.nextCandidateSummary || (deployed ? "候选已部署，等待下一启动验收。" : "候选验收状态见本轮记录。")
+    };
+  }
+
+  function nextCandidatePresentation() {
+    const running = data?.runningCandidate || "当前版本";
+    const next = data?.nextCandidate;
+    const nextStatus = nextCandidateStatus();
+    const workflow = currentWorkflow();
+
+    if (nextStatus.deployed) {
+      return {
+        badge: `${next} 已部署 · 待重启验收`,
+        ...nextStatus
+      };
+    }
+    if (workflow) {
+      return {
+        badge: workflow.phaseLabel || "本轮实测",
+        recordLabel: "本轮运行记录",
+        recordState: data?.deploymentState === "test069_runtime_psf_anchor_missing"
+          ? "本轮诊断完成"
+          : workflow.phaseLabel || "本轮实测",
+        tone: "working",
+        subtitle: `${workflow.phaseLabel || "本轮实测"}，详情见本轮记录。`
+      };
+    }
+    if (next) {
+      return {
+        badge: `${running} · 本轮流程摘要待更新`,
+        recordLabel: "下一候选",
+        recordState: "候选状态待更新",
+        tone: "pending",
+        subtitle: "候选状态待更新。"
+      };
+    }
+    return {
+      badge: `${running} · 本轮流程摘要待更新`,
+      recordLabel: "本轮运行记录",
+      recordState: "状态待更新",
+      tone: "pending",
+      subtitle: "本轮状态待更新。"
+    };
+  }
+
+  function renderHeader() {
+    const updated = $("#updated-at");
+    const deployment = $("#deployment-label");
+    const version = $("#current-version");
+    if (version) version.textContent = data?.runningCandidate || "当前版本待核对";
+    if (data?.updatedAt) {
+      const date = new Date(data.updatedAt);
+      updated.dateTime = data.updatedAt;
+      updated.textContent = Number.isNaN(date.getTime())
+        ? "时间待补充"
+        : new Intl.DateTimeFormat("zh-CN", {
+            year: "numeric", month: "2-digit", day: "2-digit",
+            hour: "2-digit", minute: "2-digit", hourCycle: "h23"
+          }).format(date);
+    } else {
+      updated.textContent = "时间待补充";
+    }
+
+    const presentation = nextCandidatePresentation();
+    deployment.textContent = presentation.badge;
+    const cards = $("#version-cards");
+    if (!cards) return;
+    const section = cards.closest(".version-section");
+    if (section) section.hidden = !data?.nextCandidate;
+    const currentRecord = sourceRecords.find(record => record.version === data?.runningCandidate);
+    const current = node("article", "version-card current");
+    const currentState = data?.deploymentState === "test069_runtime_psf_anchor_missing"
+      ? "本轮诊断完成"
+      : currentRecord?.state || "运行状态待核验";
+    const currentTop = node("div", "version-card-top");
+    currentTop.append(node("span", "", "当前运行"), node("span", `version-chip status-chip tone-${statusTone(currentState)}`, currentState));
+    current.append(currentTop);
+    current.append(node("h2", "version-id", data?.runningCandidate || "版本待补充"));
+    const currentSummary = data?.deploymentState === "test069_runtime_psf_anchor_missing"
+      ? "本轮诊断已结束；详情见流程摘要与版本记录。"
+      : currentRecord?.short_summary || "运行证据与验收细节见版本记录。";
+    current.append(node("p", "version-subtitle", currentSummary));
+
+    const cardsToRender = [current];
+    if (data?.nextCandidate && data.nextCandidate !== data?.runningCandidate) {
+      const nextStatus = nextCandidateStatus();
+      const next = node("article", "version-card next");
+      const nextTop = node("div", "version-card-top");
+      nextTop.append(node("span", "", nextStatus.label), node("span", `version-chip status-chip tone-${nextStatus.tone}`, nextStatus.state));
+      next.append(nextTop);
+      next.append(node("h2", "version-id", data.nextCandidate));
+      next.append(node("p", "version-subtitle", nextStatus.subtitle));
+      cardsToRender.push(next);
+    }
+
+    cards.replaceChildren(...cardsToRender);
+  }
+
+  const verdictLabels = {
+    passed: "本轮通过", regressed: "本轮未通过", partial: "部分通过",
+    not_covered: "未覆盖", not_implemented: "未覆盖"
+  };
+  const verdictTones = {
+    passed: "success", regressed: "warning", partial: "working",
+    not_covered: "pending", not_implemented: "pending"
+  };
+  function acceptanceCounts(checks, scope = "current") {
+    const total = checks.length;
+    const passed = scope === "history"
+      ? checks.filter(check => check.history_verified === true).length
+      : checks.filter(check => check.current_result === "passed").length;
+    const percent = total ? Math.round(passed / total * 1000) / 10 : 0;
+    return { total, passed, percent };
+  }
+  function acceptanceBar(checks, label, scope = "current") {
+    const count = acceptanceCounts(checks, scope);
+    const historical = scope === "history";
+    const block = node("div", `acceptance-progress ${historical ? "history-progress" : "current-progress"}`);
+    const heading = node("div", "progress-heading");
+    heading.append(node("span", "progress-caption", label),
+      node("strong", "progress-value", `${count.percent}%`));
+    const track = node("div", "progress-track");
+    track.setAttribute("role", "progressbar");
+    track.setAttribute("aria-label", label);
+    track.setAttribute("aria-valuemin", "0");
+    track.setAttribute("aria-valuemax", "100");
+    track.setAttribute("aria-valuenow", String(count.percent));
+    track.setAttribute("aria-valuetext", historical
+      ? `历史曾验收 ${count.passed} / ${count.total} 项，历史证据覆盖 ${count.percent}%，不代表当前版本已复验`
+      : `${label} ${count.passed} / ${count.total} 项，${count.percent}%`);
+    const fill = node("span", "progress-fill");
+    fill.style.width = `${count.percent}%`;
+    track.append(fill);
+    const countText = historical
+      ? `历史曾验收 ${count.passed} / ${count.total} 项 · 仅表示历史证据覆盖`
+      : `本轮复验通过 ${count.passed} / ${count.total} 项`;
+    block.append(heading, track, node("div", "progress-count", countText));
+    return block;
+  }
+  function renderProgress() {
+    const target = $("#progress-overview");
+    if (!target) return;
+    const checks = (data?.milestones || []).flatMap(m => m.checkpoints || []);
+    if (!checks.length) return;
+    const currentCounts = acceptanceCounts(checks);
+    const history = acceptanceCounts(checks, "history");
+    target.append(node("div", "section-kicker", "EVIDENCE COVERAGE · CURRENT RETEST"));
+    const comparison = node("div", "progress-comparison");
+    comparison.append(
+      acceptanceBar(checks, "历史证据覆盖 · 历史曾验收", "history"),
+      acceptanceBar(checks, `${String(data?.runningCandidate || "本轮").split("-").pop()} · 本轮复验通过`)
+    );
+    target.append(comparison);
+    target.append(node("p", "progress-explanation", `历史曾验收 ${history.passed}/${history.total} 仅表示保留了历史证据，不代表当前版本复验，也不是项目完成率；本轮复验 ${currentCounts.passed}/${currentCounts.total} 只统计当前运行版本通过项。部分通过、未覆盖和未通过分别列出，未覆盖不代表失败。`));
+    const sequence = node("div", "progress-sequence");
+    sequence.append(node("span", "progress-sequence-label", "功能依赖顺序"),
+      node("span", "progress-sequence-flow", "Wi-Fi / 资源 → 控制与时序 → 数据收发 → IPv6 / 服务发现 → 文件传输"));
+    target.append(sequence);
+    const current = node("div", "current-result-counts");
+    current.append(node("span", "current-result-label", data?.validationLabel || `${data.runningCandidate} 本轮`));
+    const countFor = keys => checks.filter(check => keys.includes(check.current_result)).length;
+    current.append(chip(`本轮通过 ${countFor(["passed"])} 项`, verdictTones.passed));
+    current.append(chip(`部分通过 ${countFor(["partial"])} 项`, verdictTones.partial));
+    current.append(chip(`本轮未通过 ${countFor(["regressed"])} 项`, verdictTones.regressed));
+    current.append(chip(`未覆盖 ${countFor(["not_covered", "not_implemented"])} 项`, verdictTones.not_covered));
+    target.append(current);
+  }
+
+  function renderAcceptanceMatrix() {
+    const target = $("#acceptance-matrix");
+    const milestones = [...(data?.milestones || [])].sort((a, b) => a.stage - b.stage);
+    const checks = milestones.flatMap(item => item.checkpoints || []);
+    if (!target || milestones.length !== 8 || checks.length !== 40) return;
+
+    let mode = "current";
+    let selected = null;
+    const heading = node("div", "matrix-heading");
+    const titleCopy = node("div", "matrix-title-copy");
+    titleCopy.append(node("div", "section-kicker", "FIXED ACCEPTANCE CHECKLIST"));
+    const title = node("h2", "", `40 项固定验收 · ${data.runningCandidate || "当前版本"} 本轮结果`);
+    titleCopy.append(title, node("p", "", "按 8 个阶段查看 40 项验收。点选方格可查看证据和待补条件。"));
+    const switcher = node("div", "matrix-switcher");
+    switcher.setAttribute("role", "group");
+    switcher.setAttribute("aria-label", "验收结果范围");
+    const currentButton = node("button", "matrix-mode is-selected");
+    currentButton.type = "button";
+    currentButton.textContent = `${data.runningCandidate || "本轮"} 本轮`;
+    currentButton.setAttribute("aria-pressed", "true");
+    const historyButton = node("button", "matrix-mode");
+    historyButton.type = "button";
+    historyButton.textContent = "历史曾验收";
+    historyButton.setAttribute("aria-pressed", "false");
+    switcher.append(currentButton, historyButton);
+    heading.append(titleCopy, switcher);
+
+    const summary = node("p", "matrix-summary");
+    summary.setAttribute("aria-live", "polite");
+    const legend = node("div", "matrix-legend");
+    const scroll = node("div", "matrix-scroll");
+    const table = node("table", "acceptance-matrix");
+    table.setAttribute("aria-label", "8 阶段 40 项固定验收表");
+    const thead = node("thead");
+    const headerRow = node("tr");
+    const firstHeader = node("th", "matrix-stage-head", "阶段");
+    firstHeader.scope = "col";
+    headerRow.append(firstHeader);
+    for (let index = 1; index <= 5; index++) {
+      const th = node("th", "matrix-col-head", `验收 ${index}`);
+      th.scope = "col";
+      headerRow.append(th);
+    }
+    thead.append(headerRow);
+    const tbody = node("tbody");
+    const detail = node("section", "matrix-detail");
+    detail.id = "acceptance-matrix-detail";
+    detail.hidden = true;
+    detail.setAttribute("aria-live", "polite");
+
+    const clearDetail = () => {
+      selected = null;
+      detail.hidden = true;
+      detail.replaceChildren();
+      table.querySelectorAll(".matrix-cell[aria-expanded='true']").forEach(button => button.setAttribute("aria-expanded", "false"));
+    };
+
+    const showDetail = (check, stage, button) => {
+      const key = `${stage.stage}:${check.id}`;
+      if (selected === key) {
+        clearDetail();
+        return;
+      }
+      table.querySelectorAll(".matrix-cell[aria-expanded='true']").forEach(item => item.setAttribute("aria-expanded", "false"));
+      selected = key;
+      button.setAttribute("aria-expanded", "true");
+      detail.hidden = false;
+      const currentStatus = verdictLabels[check.current_result] || "未覆盖";
+      detail.replaceChildren(
+        node("h3", "", check.name || "验收项"),
+        node("p", "matrix-detail-label", `${stage.name} · ${mode === "current" ? currentStatus : (check.history_verified === true ? "历史曾验收" : "尚无完整验收记录")}`)
+      );
+      if (mode === "current") {
+        detail.append(node("p", "", check.current_detail || "本轮证据待补充。"));
+        if (check.history_verified === true) {
+          detail.append(node("p", "matrix-detail-history", `历史曾验收：${check.verified_in || "历史版本记录"}。这不代表当前版本已复验。`));
+        }
+      } else {
+        detail.append(node("p", "", check.history_verified === true
+          ? `曾通过记录：${check.verified_in || "历史版本，详情待补充。"}`
+          : "尚无完整历史验收记录。"));
+        detail.append(node("p", "matrix-detail-current", `${data.runningCandidate || "本轮"} 当前结果：${currentStatus}。${check.current_detail || "本轮证据待补充。"}`));
+      }
+    };
+
+    const updateSummary = () => {
+      const counts = { passed: 0, partial: 0, regressed: 0, uncovered: 0 };
+      for (const check of checks) {
+        if (mode === "history") {
+          if (check.history_verified === true) counts.passed++;
+          else counts.uncovered++;
+        } else if (check.current_result === "passed") counts.passed++;
+        else if (check.current_result === "partial") counts.partial++;
+        else if (check.current_result === "regressed") counts.regressed++;
+        else counts.uncovered++;
+      }
+      summary.textContent = mode === "history"
+        ? `历史曾验收 ${counts.passed} · 尚无完整验收记录 ${counts.uncovered}（不代表当前版本已通过）`
+        : `${data.runningCandidate || "本轮"}：通过 ${counts.passed} · 部分通过 ${counts.partial} · 未通过 ${counts.regressed} · 未覆盖 ${counts.uncovered}（未覆盖不代表失败）`;
+      const legendItems = mode === "history"
+        ? [["passed", "✓", "历史曾验收"], ["not_covered", "", "尚无完整验收记录"]]
+        : [["passed", "✓", "本轮通过"], ["partial", "−", "部分通过"], ["regressed", "!", "本轮未通过"], ["not_covered", "", "未覆盖（不是失败）"]];
+      legend.replaceChildren(...legendItems.map(([status, symbol, label]) => {
+        const item = node("span", "matrix-legend-item");
+        const swatch = node("span", `matrix-swatch matrix-${status}`, symbol);
+        swatch.setAttribute("aria-hidden", "true");
+        item.append(swatch, node("span", "", label));
+        return item;
+      }));
+    };
+
+    const drawRows = () => {
+      clearDetail();
+      tbody.replaceChildren();
+      for (const stage of milestones) {
+        const row = node("tr");
+        const rowHead = node("th", "matrix-row-head", stage.name || `阶段 ${stage.stage}`);
+        rowHead.scope = "row";
+        row.append(rowHead);
+        for (const check of stage.checkpoints || []) {
+          const verdict = mode === "history"
+            ? (check.history_verified === true ? "passed" : "not_covered")
+            : check.current_result;
+          const statusText = mode === "history"
+            ? (check.history_verified === true ? `历史曾验收：${check.verified_in || "版本详情未记录"}` : "尚无完整历史验收记录")
+            : (verdictLabels[verdict] || "未覆盖");
+          const button = node("button", `matrix-cell matrix-${verdict || "not_covered"}`);
+          button.type = "button";
+          button.setAttribute("aria-controls", detail.id);
+          button.setAttribute("aria-expanded", "false");
+          button.setAttribute("aria-label", `${stage.name}，${check.name}；${statusText}`);
+          button.title = `${check.name}：${statusText}`;
+          const symbol = verdict === "passed" ? "✓" : verdict === "partial" ? "−" : verdict === "regressed" ? "!" : "";
+          if (symbol) {
+            const icon = node("span", "matrix-symbol", symbol);
+            icon.setAttribute("aria-hidden", "true");
+            button.append(icon);
+          }
+          button.addEventListener("click", () => showDetail(check, stage, button));
+          const cell = node("td", "matrix-cell-wrap");
+          cell.append(button);
+          row.append(cell);
+        }
+        tbody.append(row);
+      }
+      table.replaceChildren(thead, tbody);
+      updateSummary();
+    };
+
+    currentButton.addEventListener("click", () => {
+      mode = "current";
+      currentButton.classList.add("is-selected");
+      historyButton.classList.remove("is-selected");
+      currentButton.setAttribute("aria-pressed", "true");
+      historyButton.setAttribute("aria-pressed", "false");
+      title.textContent = `40 项固定验收 · ${data.runningCandidate || "当前版本"} 本轮结果`;
+      drawRows();
+    });
+    historyButton.addEventListener("click", () => {
+      mode = "history";
+      historyButton.classList.add("is-selected");
+      currentButton.classList.remove("is-selected");
+      historyButton.setAttribute("aria-pressed", "true");
+      currentButton.setAttribute("aria-pressed", "false");
+      title.textContent = "40 项固定验收 · 历史曾验收";
+      drawRows();
+    });
+
+    target.replaceChildren(heading, summary, legend, scroll, detail);
+    scroll.append(table);
+    drawRows();
+  }
+
+  function renderMilestones() {
+    const list = $("#milestone-list");
+    const items = Array.isArray(data?.milestones) ? data.milestones : [];
+    const workflow = currentWorkflow();
+    if (!items.length) {
+      list.append(node("li", "empty-state", "当前没有可显示的里程碑记录。"));
+      return;
+    }
+
+    for (const milestone of items) {
+      const tone = verdictTones[milestone.current_result] || milestone.status_tone || "pending";
+      const item = node("li", `milestone-item tone-${tone}`);
+      item.id = `stage-${milestone.stage}`;
+      item.dataset.verified = String(milestone.current_result === "passed");
+      item.dataset.pending = String(milestone.has_pending_work !== false);
+      item.dataset.currentResult = milestone.current_result || "";
+      item.append(node("span", "stage-node"));
+
+      const details = node("details", "milestone-card");
+      details.open = Boolean(workflow && stageKey(workflow.primaryStage) === stageKey(milestone.stage));
+      const summary = node("summary", "milestone-summary");
+      summary.append(node("span", "stage-number", String(milestone.stage).padStart(2, "0")));
+      const copy = node("div", "summary-copy");
+      copy.append(node("strong", "", milestone.name || "未命名阶段"));
+      const summaryBadges = node("span", "stage-statuses");
+      const checks = milestone.checkpoints || [];
+      if (checks.length) {
+        const currentCounts = acceptanceCounts(checks);
+        summaryBadges.append(chip(`本轮通过 ${currentCounts.passed}/${currentCounts.total}`, currentCounts.passed ? "success" : "pending"));
+      }
+      const currentVerdict = verdictLabels[milestone.current_result] || milestone.current_result_label || milestone.status;
+      summaryBadges.append(chip(currentVerdict, tone));
+      copy.append(summaryBadges);
+      const brief = node("div", "stage-brief");
+      brief.append(node("p", "", milestone.stage_brief || milestone.current_result_label || milestone.status || "本轮摘要待更新"));
+      copy.append(brief);
+      summary.append(copy, node("span", "disclosure-chevron"));
+      details.append(summary);
+      if (checks.length) {
+        const proof = node("div", "stage-proof");
+        proof.append(acceptanceBar(checks, `本轮实测通过 ${acceptanceCounts(checks).passed} / ${checks.length}`));
+        const checklist = node("details", "checkpoint-details");
+        checklist.append(node("summary", "", "查看固定验收清单 · 5 项"));
+        const entries = node("ul", "checkpoint-list");
+        for (const check of checks) {
+          const entry = node("li", "checkpoint-item");
+          const name = node("div", "checkpoint-title");
+          const passed = check.current_result === "passed";
+          name.append(node("span", passed ? "checkpoint-verified" : "checkpoint-open", passed ? "✓" : "○"), node("strong", "", check.name));
+          const current = node("div", "checkpoint-current");
+          current.append(chip(verdictLabels[check.current_result], verdictTones[check.current_result]), node("span", "", check.current_detail));
+          entry.append(name, current); entries.append(entry);
+        }
+        checklist.append(entries); proof.append(checklist); details.append(proof);
+      }
+
+      const body = node("dl", "milestone-details");
+      const fields = [
+        ["本轮实测", milestone.current_summary, "current_summary"],
+        ["当前缺口", milestone.unfinished_summary, "unfinished_summary"],
+        ["下一步验收", milestone.acceptance || "待补充验收条件", "acceptance"]
+      ];
+      for (const [label, value, field] of fields) {
+        if (!value) continue;
+        const row = node("div", "detail-row");
+        row.append(node("dt", "", label));
+        const description = node("dd", "", value);
+        description.dataset.field = field;
+        row.append(description);
+        body.append(row);
+      }
+      details.append(body);
+      item.append(details);
+      list.append(item);
+    }
+
+    const empty = node("li", "empty-state");
+    empty.id = "milestone-empty";
+    empty.hidden = true;
+    list.append(empty);
+  }
+
+  function applyFilter(filter) {
+    activeFilter = filter;
+    const items = [...document.querySelectorAll(".milestone-item")];
+    let visibleCount = 0;
+    for (const item of items) {
+      const verified = item.dataset.verified === "true";
+      const visible = filter === "all" ||
+        (filter === "verified" ? verified : filter === "regressed" ? item.dataset.currentResult === "regressed" : item.dataset.pending === "true");
+      item.hidden = !visible;
+      if (visible) visibleCount++;
+    }
+    document.querySelectorAll("[data-stage-filter]").forEach(button => {
+      const selected = button.dataset.stageFilter === filter;
+      button.setAttribute("aria-pressed", String(selected));
+      button.classList.toggle("is-selected", selected);
+    });
+    const empty = $("#milestone-empty");
+    if (empty) {
+      empty.hidden = visibleCount !== 0;
+      empty.textContent = filter === "verified" ? "本轮没有通过项。" : "目前没有待解决阶段。";
+    }
+    const summary = $("#filter-summary");
+    if (summary) summary.textContent = `显示 ${visibleCount} / ${items.length} 个阶段`;
+  }
+
+  function installMilestoneControls() {
+    document.querySelectorAll("[data-stage-filter]").forEach(button => {
+      if (button.dataset.stageFilter === "regressed") button.textContent = "本轮未通过";
+      if (button.dataset.stageFilter === "verified") button.textContent = "本轮通过";
+      button.addEventListener("click", () => applyFilter(button.dataset.stageFilter));
+    });
+    $("#expand-all")?.addEventListener("click", () => {
+      document.querySelectorAll(".milestone-card").forEach(details => { details.open = true; });
+    });
+    $("#collapse-all")?.addEventListener("click", () => {
+      document.querySelectorAll(".milestone-card").forEach(details => { details.open = false; });
+    });
+  }
+
+  function nextRecordState() {
+    return nextCandidateStatus();
+  }
+
+  function candidatePlaceholder(version, role) {
+    if (role === "next") {
+      const state = nextRecordState();
+      return {
+        id: "record-next-candidate",
+        version,
+        label: state.label,
+        state: state.state,
+        tone: state.tone,
+        date: "候选状态快照",
+        summary: `${state.subtitle || "候选状态待更新。"} 尚无该版本运行验收结果。`,
+        evidence: ["本地进度数据记录了候选版本与部署状态；该候选尚无版本级运行记录。"],
+        blockers: ["待完成该候选对应的运行验收。"],
+        next: ["补入实际部署、启动及功能验证证据。"]
+      };
+    }
+    return {
+      id: "record-current-candidate",
+      version,
+      label: "当前运行候选",
+      state: "运行记录待补充",
+      tone: "pending",
+      date: "候选状态快照",
+      summary: "本地进度数据标记此版本为当前运行候选；尚无匹配的版本级测试记录。",
+      evidence: ["当前运行版本来自本地项目进度数据。"],
+      blockers: ["版本级运行证据待补充。"],
+      next: ["记录该版本的加载状态、功能结果与待解决问题。"]
+    };
+  }
+
+  function recordForCandidate(version, role) {
+    const found = sourceRecords.find(record => record.version === version);
+    if (!found) return candidatePlaceholder(version, role);
+    const record = { ...found };
+    if (role === "current") {
+      record.label = "本轮运行记录";
+      record.tone = record.tone || statusTone(record.state);
+    } else {
+      const state = nextRecordState();
+      record.label = state.label;
+      record.state = state.state;
+      record.tone = state.tone;
+    }
+    return record;
+  }
+
+  function getRecordEntries() {
+    const entries = [];
+    const currentVersion = data?.runningCandidate;
+    const nextVersion = data?.nextCandidate;
+
+    if (currentVersion) {
+      const current = recordForCandidate(currentVersion, "current");
+      entries.push(current);
+    }
+    if (nextVersion && nextVersion !== currentVersion) {
+      const next = recordForCandidate(nextVersion, "next");
+      entries.push(next);
+    }
+    return entries;
+  }
+
+  function appendBulletBlock(parent, title, values, className) {
+    const block = node("section", `record-block ${className}`);
+    block.append(node("h4", "", title));
+    const list = node("ul");
+    for (const value of values || []) list.append(node("li", "", value));
+    if (!values?.length) list.append(node("li", "", "暂无记录"));
+    block.append(list);
+    parent.append(block);
+  }
+
+  function renderRecordJump(entries) {
+    const nav = $("#record-jump");
+    if (!nav) return;
+    nav.replaceChildren();
+    for (const entry of entries) {
+      const link = node("a");
+      link.href = `#${entry.id}`;
+      link.append(node("span", "record-jump-version", entry.version || "版本待补充"));
+      link.append(node("span", "", entry.label || "测试记录"));
+      nav.append(link);
+    }
+  }
+
+  function createRecordCard(record) {
+    const card = node("article", "record-card");
+    card.id = record.id;
+    const header = node("header", "record-header");
+    const heading = node("div");
+    const eyebrow = node("div", "record-eyebrow");
+    eyebrow.append(node("span", "", record.label || "测试记录"), chip(record.state, record.tone || statusTone(record.state)));
+    heading.append(eyebrow, node("h3", "", record.version || "版本待补充"));
+    header.append(heading, node("span", "record-date", record.date || "日期待补充"));
+    card.append(header, node("p", "record-summary", record.summary || "暂无摘要。"));
+
+    const columns = node("div", "record-columns");
+    appendBulletBlock(columns, "已完成与证据", record.evidence, "evidence");
+    appendBulletBlock(columns, "当前阻碍", record.blockers, "blockers");
+    card.append(columns);
+
+    const next = node("section", "record-next");
+    next.append(node("h4", "", "下一步验收"));
+    const tasks = node("ul", "record-block next");
+    for (const task of record.next || []) tasks.append(node("li", "", task));
+    if (!record.next?.length) tasks.append(node("li", "", "待补充验收事项。"));
+    next.append(tasks);
+    card.append(next, node("div", "record-footer", "阶段结论只依据已记录的实测证据。"));
+    return card;
+  }
+
+  function renderRecords(entries) {
+    const list = $("#record-list");
+    if (!list) return;
+    if (!entries.length) {
+      list.append(node("p", "empty-state", "测试记录将在证据确认后补充。"));
+      return;
+    }
+
+    for (const record of entries) list.append(createRecordCard(record));
+  }
+
+  function renderAcceptance() {
+    const list = $("#acceptance-list");
+    for (const milestone of data?.milestones || []) {
+      const link = node("a", "acceptance-link");
+      link.href = `#stage-${milestone.stage}`;
+      link.append(node("span", "acceptance-index", String(milestone.stage).padStart(2, "0")));
+      const copy = node("span", "acceptance-copy");
+      copy.append(node("strong", "", milestone.name || "未命名阶段"));
+      copy.append(node("span", "", milestone.acceptance || "验收条件待补充"));
+      link.append(copy, node("span", "acceptance-arrow", "↗"));
+      list.append(link);
+    }
+  }
+
+  function updateActiveNavigation() {
+    let hash = window.location.hash || "#overview";
+    let target = null;
+    if (/^#(?:stage-|record-)/.test(hash)) {
+      target = document.getElementById(hash.slice(1));
+      if (target?.closest(".milestone-item")) {
+        const milestone = target.closest(".milestone-item");
+        if (milestone.hidden) applyFilter("all");
+        const details = milestone.querySelector(".milestone-card");
+        if (details) details.open = true;
+      }
+      if (target) requestAnimationFrame(() => target.scrollIntoView({ block: "start" }));
+    }
+    const primaryHash = hash.startsWith("#stage-") ? "#milestones"
+      : hash.startsWith("#record-") ? "#test-records" : hash;
+    document.querySelectorAll(".primary-nav a").forEach(link => {
+      const active = link.getAttribute("href") === primaryHash;
+      link.classList.toggle("is-active", active);
+      if (active) link.setAttribute("aria-current", "location");
+      else link.removeAttribute("aria-current");
+    });
+    document.querySelectorAll(".stage-nav a").forEach(link => {
+      const active = link.getAttribute("href") === hash;
+      link.classList.toggle("is-active", active);
+      if (active) link.setAttribute("aria-current", "location");
+      else link.removeAttribute("aria-current");
+    });
+  }
+
+  function installHashNavigation() {
+    document.addEventListener("click", event => {
+      const stageLink = event.target.closest('a[href^="#stage-"]');
+      if (stageLink && activeFilter !== "all") applyFilter("all");
+    });
+    window.addEventListener("hashchange", updateActiveNavigation);
+    updateActiveNavigation();
+  }
+
+  renderHeader();
+  renderWorkflow();
+  renderTimeline();
+  renderProgress();
+  renderAcceptanceMatrix();
+  renderMilestones();
+  installMilestoneControls();
+  const recordEntries = getRecordEntries();
+  renderRecordJump(recordEntries);
+  renderRecords(recordEntries);
+  renderAcceptance();
+  applyFilter("all");
+  installHashNavigation();
+})();
+
+</script>
+</body>
+</html>

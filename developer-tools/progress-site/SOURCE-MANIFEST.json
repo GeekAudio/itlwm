@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "scope": "public-safe progress website source snapshot",
+  "files": [
+    {
+      "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
+      "snapshot_path": "dist/index.html",
+      "sha256": "38276cf10b5e8539721e2bc321d5f6093fd7e30997791cb5a2d0f71ec966057f"
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
+      "snapshot_path": "dist/milestones.html",
+      "sha256": "3dfdd52e37ea0bb84f95d519c9b733f4e6b368786bc3f7fc7db8d8d50f83e8e5"
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
+      "snapshot_path": "dist/data.js",
+      "sha256": "6f148a403117edb8f7b2d5875c5290389afe757e44570f0cd96dc6d8225f11d0"
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
+      "snapshot_path": "dist/assets/site.js",
+      "sha256": "2043ca6a6450b3b90a7cc97982e03fb49b1e609995030a55442e7d2f9b001ede"
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.css",
+      "snapshot_path": "dist/assets/site.css",
+      "sha256": "4348ea93c013b95d6d00aa729ddb230a630830b4220c9e6bfa1db19c59de6a99"
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
+      "snapshot_path": "dist/assets/test-records.js",
+      "sha256": "a8752bfa6e838e1b361ef8cd31859976d7ecd60ce1ebddb48bab02cb3da52da7"
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
+      "snapshot_path": "tools/refresh_data.py",
+      "sha256": "6cb167fbca5a6b58237f2dbc715489d35ff490ab9950ee739cb0ead333904e67"
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/progress-site/tools/publish_github_pages.py",
+      "snapshot_path": "tools/publish_github_pages.py",
+      "sha256": "7c05efb77487e503bacbb8056906822ea04569085bddc968699dd2bd7b3c6359"
+    }
+  ],
+  "excluded": [
+    "private runtime metadata",
+    "private update scripts",
+    "logs",
+    "screenshots",
+    "credentials"
+  ]
+}

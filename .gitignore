@@ -11,3 +11,6 @@ native/evidence/
 /research/
 *.pcap
 *.pcapng
+/developer-tools/**/research/
+/developer-tools/**/evidence/
+__pycache__/
