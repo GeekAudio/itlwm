@@ -1,0 +1,135 @@
+{
+  "schema_version": 1,
+  "snapshot": "Test079 host diagnostics source snapshot",
+  "source_repository": "https://github.com/GeekAudio/itlwm",
+  "source_branch": "codex/tahoe-test079",
+  "source_commit": "7d5fca0d7a2371ae142ce437e17c661d617c0745",
+  "created_at": "2026-10-29T18:35:24.563324+08:00",
+  "file_count": 16,
+  "files": [
+    {
+      "source_relative_path": "IntelWirelessNative/capture_test079_resident_data_once.py",
+      "snapshot_path": "capture_test079_resident_data_once.py",
+      "original_sha256": "fe56668c49f0fbeac2a95337404a2799f7269b892b71aa8ab250fc461596b0c1",
+      "snapshot_sha256": "fe56668c49f0fbeac2a95337404a2799f7269b892b71aa8ab250fc461596b0c1",
+      "change_note": "Copied byte-for-byte from the recorded source file."
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/probe_wifi_rate.py",
+      "snapshot_path": "probe_wifi_rate.py",
+      "original_sha256": "6e802a71ebeb5b9010ae0e0f7f0edd6f2782c51e50d8a5d566492c996efd9ca0",
+      "snapshot_sha256": "6e802a71ebeb5b9010ae0e0f7f0edd6f2782c51e50d8a5d566492c996efd9ca0",
+      "change_note": "Copied byte-for-byte from the recorded source file."
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/probe_p2p_result.py",
+      "snapshot_path": "probe_p2p_result.py",
+      "original_sha256": "7d41e4c5d236325e4cfe235717048030ab80d8f97392ac37307c9bf82603a732",
+      "snapshot_sha256": "7d41e4c5d236325e4cfe235717048030ab80d8f97392ac37307c9bf82603a732",
+      "change_note": "Copied byte-for-byte from the recorded source file."
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/tools/run_test079_router_observation_once.py",
+      "snapshot_path": "tools/run_test079_router_observation_once.py",
+      "original_sha256": "0ff325114d13deeff435c501021fc4a64f328b9a1f6cdd478cb00547c1bfa907",
+      "snapshot_sha256": "0ff325114d13deeff435c501021fc4a64f328b9a1f6cdd478cb00547c1bfa907",
+      "change_note": "Copied byte-for-byte from the recorded source file."
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/tools/awdl_ioreg_u32.py",
+      "snapshot_path": "tools/awdl_ioreg_u32.py",
+      "original_sha256": "4a4fef3e2ac9189ab53fe93a39a5f183c6081a1b10c69a5901d06b495f1d3ff3",
+      "snapshot_sha256": "4a4fef3e2ac9189ab53fe93a39a5f183c6081a1b10c69a5901d06b495f1d3ff3",
+      "change_note": "Copied byte-for-byte from the recorded source file."
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/tools/awdl_osdata_diagnostics.py",
+      "snapshot_path": "tools/awdl_osdata_diagnostics.py",
+      "original_sha256": "544edfe631e91f39e584a2e8f68c3f4bbeb880bdd5bf9a9e056eab48c075c7f2",
+      "snapshot_sha256": "544edfe631e91f39e584a2e8f68c3f4bbeb880bdd5bf9a9e056eab48c075c7f2",
+      "change_note": "Copied byte-for-byte from the recorded source file."
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/tools/iwx_link_state_trace_diagnostics.py",
+      "snapshot_path": "tools/iwx_link_state_trace_diagnostics.py",
+      "original_sha256": "4d2d83b715b23d586ec6cbd8173a80123eb2261072f0109ee68c5ccc3243e78f",
+      "snapshot_sha256": "4d2d83b715b23d586ec6cbd8173a80123eb2261072f0109ee68c5ccc3243e78f",
+      "change_note": "Copied byte-for-byte from the recorded source file."
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/tools/openwrt_capture_once.py",
+      "snapshot_path": "tools/openwrt_capture_once.py",
+      "original_sha256": "7c7b750604acf3c18372600084bcf6a899f3b8c2e0c364ebb6a1129d77dbeac2",
+      "snapshot_sha256": "7c7b750604acf3c18372600084bcf6a899f3b8c2e0c364ebb6a1129d77dbeac2",
+      "change_note": "Copied byte-for-byte from the recorded source file."
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/tools/test_awdl_osdata_diagnostics.py",
+      "snapshot_path": "tools/test_awdl_osdata_diagnostics.py",
+      "original_sha256": "d9cef1618d3dfae4cbd941735d58bdbc577233e05d2d96bab840d4fda45f0d79",
+      "snapshot_sha256": "d9cef1618d3dfae4cbd941735d58bdbc577233e05d2d96bab840d4fda45f0d79",
+      "change_note": "Copied byte-for-byte from the recorded source file."
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/tools/test_iwx_link_state_trace_diagnostics.py",
+      "snapshot_path": "tools/test_iwx_link_state_trace_diagnostics.py",
+      "original_sha256": "c4daec094de8bff126ee2c642fd47acb7fe0beea9c5ae3401e1dcdaa02340198",
+      "snapshot_sha256": "c4daec094de8bff126ee2c642fd47acb7fe0beea9c5ae3401e1dcdaa02340198",
+      "change_note": "Copied byte-for-byte from the recorded source file."
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/tools/test_capture_test079_resident_data_once.py",
+      "snapshot_path": "tools/test_capture_test079_resident_data_once.py",
+      "original_sha256": "00b2de1c3f415d1b30a804cd0e6369f404c6658a1b1837818b3cc06d1d021c83",
+      "snapshot_sha256": "3bbefc990b57641b193c720d53efe0903d5ad891d60c9f3f149217853c6fab9f",
+      "change_note": "Private fixture check skips explicitly when the excluded metadata is absent; all diagnostic safety gates remain unchanged."
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/tools/test_run_test079_router_observation_once.py",
+      "snapshot_path": "tools/test_run_test079_router_observation_once.py",
+      "original_sha256": "c7ee2543ffb54381b0e001007b6cf594b974d58761ce071168463f7e93d63413",
+      "snapshot_sha256": "c7ee2543ffb54381b0e001007b6cf594b974d58761ce071168463f7e93d63413",
+      "change_note": "Copied byte-for-byte from the recorded source file."
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/tools/test_openwrt_capture_once.py",
+      "snapshot_path": "tools/test_openwrt_capture_once.py",
+      "original_sha256": "b0784c533c06f3d6db0a930631a8f8a611fbb2f08cd20c58e5a5e135ca931bda",
+      "snapshot_sha256": "b0784c533c06f3d6db0a930631a8f8a611fbb2f08cd20c58e5a5e135ca931bda",
+      "change_note": "Copied byte-for-byte from the recorded source file."
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/tools/run_openwrt_capture_batch.py",
+      "snapshot_path": "tools/run_openwrt_capture_batch.py",
+      "original_sha256": "74289f30cad9654da1f52eea76380d2291839ed31ebf74dda96fac01c55bbb67",
+      "snapshot_sha256": "74289f30cad9654da1f52eea76380d2291839ed31ebf74dda96fac01c55bbb67",
+      "change_note": "Added passive multi-window tool; byte-identical author source, no runtime data."
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/tools/test_openwrt_capture_batch.py",
+      "snapshot_path": "tools/test_openwrt_capture_batch.py",
+      "original_sha256": "a92a0a60a3f9d614b61f023d7c5f99552d09fe6fe0e554006c1b1e0b3f966005",
+      "snapshot_sha256": "a92a0a60a3f9d614b61f023d7c5f99552d09fe6fe0e554006c1b1e0b3f966005",
+      "change_note": "Added passive multi-window tool; byte-identical author source, no runtime data."
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/tools/openwrt_capture_batch.md",
+      "snapshot_path": "tools/openwrt_capture_batch.md",
+      "original_sha256": "4d32a9d21fe62e650633934d241c774eaed5eb20621210b37f7c63befc9d67a5",
+      "snapshot_sha256": "4d32a9d21fe62e650633934d241c774eaed5eb20621210b37f7c63befc9d67a5",
+      "change_note": "Added passive multi-window tool; byte-identical author source, no runtime data."
+    }
+  ],
+  "content_rule": "For every file, original_sha256 identifies the captured source and snapshot_sha256 identifies the committed snapshot bytes; any difference is explained by change_note.",
+  "exclusions": [
+    "private runtime metadata",
+    "research logs",
+    "packet captures",
+    "credentials",
+    "Apple binaries",
+    "build products",
+    "site source"
+  ],
+  "updated_at": "2026-10-29T18:35:24.563365+08:00",
+  "source_context_note": "The Git commit identifies driver context at capture; author tool bytes originate in the separate runtime workspace and are identified by their recorded hashes."
+}

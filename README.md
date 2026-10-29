@@ -42,7 +42,7 @@ Intel AX201 的 macOS Tahoe 原生 Wi-Fi 驱动，基于 OpenIntelWireless/itlwm
 
 普通 Wi-Fi 可扫描和连接，支持私有地址。Test059 的发布复查曾记录一次发送超时并自动恢复；长期稳定性、睡眠恢复和即时热点不在该次验收范围内。
 
-Test059 不支持 AirDrop 或接力。AWDL 实验属于后续 Test078 开发源码。
+Test059 不支持 AirDrop 或接力。AWDL 实验属于后续开发源码。
 
 ## Release 下载与源码
 

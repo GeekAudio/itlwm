@@ -156,8 +156,8 @@ def main() -> None:
         if candidate is not None:
             candidate = safe_summary(candidate, "timeline", "candidate")
         steps = timeline.get("steps")
-        if not isinstance(steps, list) or not 1 <= len(steps) <= 24:
-            raise ValueError("Project timeline must contain 1 to 24 key steps")
+        if not isinstance(steps, list) or not 1 <= len(steps) <= 128:
+            raise ValueError("Project timeline must contain 1 to 128 key steps")
         clean_steps = []
         order = {"done": 0, "current": 1, "pending": 2}
         previous_order = -1
