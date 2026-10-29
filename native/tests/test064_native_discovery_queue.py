@@ -49,7 +49,7 @@ def main():
         "stale_or_cross_entry_snapshot_does_not_pop_head",
         "epoch_mismatch_closing_radio_off_inflight_expiry_and_empty_head_gates",
         "generation_transition_flushes_only_pretransition_queue_entries",
-        "non_qm_head_is_not_scanned_or_reordered",
+        "bounded_fifo_scan_selects_earliest_strict_qm_behind_other_without_reordering",
         "exact_once_mbuf_ownership_transfer",
         "concurrent_producer_peeker_consumer_ownership",
     ]

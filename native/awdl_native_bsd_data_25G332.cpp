@@ -76,7 +76,7 @@ uint64_t nowUs(){uint64_t t=0,n=0;clock_get_uptime(&t);absolutetime_to_nanosecon
 bool discoveryAgeCurrent(uint64_t born,uint64_t now) {
     return now>=born&&now-born<=2000000;
 }
-bool isStrictAirdropQm(const NativeAwdlData::TxObservation &observation) {
+bool isStrictContinuityQm(const NativeAwdlData::TxObservation &observation) {
     const auto &mdns=observation.mdnsQuery;
     return observation.ipv6PacketWellFormed&&
         observation.ipv6NextHeader==17&&
@@ -91,17 +91,17 @@ bool isStrictAirdropQm(const NativeAwdlData::TxObservation &observation) {
         mdns.targetPtrInQuestionCount==mdns.questionCount&&
         mdns.quQuestionMask==0;
 }
-bool strictAirdropQmBytes(const uint8_t *bytes,size_t length,
-                          const uint8_t ownAddress[6],
-                          EthernetView *viewOut,
-                          NativeAwdlData::MdnsQueryClass *classOut) {
+bool strictContinuityQmBytes(const uint8_t *bytes,size_t length,
+                             const uint8_t ownAddress[6],
+                             EthernetView *viewOut,
+                             NativeAwdlData::MdnsQueryClass *classOut) {
     EthernetView view{};
     if(!ethernetIpv6(bytes,length,ownAddress,&view))return false;
     const auto observation=NativeAwdlData::observeAwdlTxPacket(
         bytes,length,ownAddress);
     if(classOut)*classOut=observation.mdnsQuery.queryClass;
     if(viewOut)*viewOut=view;
-    return isStrictAirdropQm(observation);
+    return isStrictContinuityQm(observation);
 }
 bool snapshotMatches(const Tx &head,const DiscoveryTxSnapshot &expected) {
     return expected.eligible&&head.discoveryEligible&&
@@ -110,6 +110,24 @@ bool snapshotMatches(const Tx &head,const DiscoveryTxSnapshot &expected) {
         expected.queryClass==head.discoveryClass&&
         head.discoveryClass==static_cast<uint8_t>(
             NativeAwdlData::MdnsQueryClass::QmMulticast);
+}
+bool removeTxAt(size_t offset,Tx *removed) {
+    if(!removed||offset>=tx.count)return false;
+    const size_t selected=(tx.head+offset)%QueueDepth;
+    *removed=tx.values[selected];
+    // Stable bounded shift: retain FIFO order for every unselected mbuf.
+    // This is metadata/pointer movement only; no KPI, allocation, or release
+    // occurs while the caller holds IOSimpleLock.
+    for(size_t index=offset;index+1<tx.count;++index) {
+        const size_t destination=(tx.head+index)%QueueDepth;
+        const size_t source=(tx.head+index+1)%QueueDepth;
+        tx.values[destination]=tx.values[source];
+    }
+    const size_t last=(tx.head+tx.count-1)%QueueDepth;
+    tx.values[last]=Tx{};
+    tx.tail=last;
+    --tx.count;
+    return true;
 }
 void add(Counter c){__atomic_fetch_add(&counters[c],uint64_t(1),__ATOMIC_RELAXED);}
 void set(Counter c,uint64_t n){__atomic_store_n(&counters[c],n,__ATOMIC_RELEASE);}
@@ -176,7 +194,7 @@ errno_t output(void *,ifnet_t dev,protocol_family_t family,mbuf_t *packet) {
     const size_t finalizedLength=mbuf_pkthdr_len(*packet);
     if(finalizedLength==length&&finalizedLength<=sizeof(finalizedBytes)&&
        mbuf_copydata(*packet,0,finalizedLength,finalizedBytes)==0)
-        discoveryEligible=strictAirdropQmBytes(finalizedBytes,finalizedLength,
+        discoveryEligible=strictContinuityQmBytes(finalizedBytes,finalizedLength,
             own,&finalizedView,&discoveryClass);
     const uint64_t born=nowUs();
     auto irq=IOSimpleLockLockDisableInterrupt(lock);
@@ -414,18 +432,30 @@ mbuf_t nextTxImpl(uint16_t sequence,uint64_t *token,
     if(!bridgeLock()||!token||(expected&&!consumed))return nullptr;
     const bool discovery=expected!=nullptr;
     const uint64_t dequeueTime=nowUs();
-    Tx item{};uint32_t currentGeneration=0;
+    Tx item{};uint32_t currentGeneration=0;size_t selectedOffset=0;
     auto irq=IOSimpleLockLockDisableInterrupt(lock);
     bool have=interface&&!closing&&!detached&&radio&&
         __atomic_load_n(&closingRequested,__ATOMIC_ACQUIRE)==0&&
         !inFlightToken&&tx.count;
     if(have&&discovery) {
-        const Tx &head=tx.values[tx.head];
-        have=snapshotMatches(head,*expected)&&
-            expected->generation==radioGeneration&&
-            discoveryAgeCurrent(head.born,dequeueTime);
+        have=false;
+        if(expected->generation==radioGeneration) {
+            for(size_t offset=0;offset<tx.count;++offset) {
+                const size_t index=(tx.head+offset)%QueueDepth;
+                const Tx &candidate=tx.values[index];
+                if(snapshotMatches(candidate,*expected)&&
+                   discoveryAgeCurrent(candidate.born,dequeueTime)) {
+                    selectedOffset=offset;
+                    have=true;
+                    break;
+                }
+            }
+        }
     }
-    if(have)have=tx.pop(&item);
+    if(have) {
+        if(discovery)have=removeTxAt(selectedOffset,&item);
+        else have=tx.pop(&item);
+    }
     if(have){inFlightToken=item.token;currentGeneration=radioGeneration;}
     if(!discovery||have)set(TxPending,tx.count);
     IOSimpleLockUnlockEnableInterrupt(lock,irq);
@@ -483,7 +513,7 @@ mbuf_t nextTxImpl(uint16_t sequence,uint64_t *token,
         if(discovery) {
             valid=item.discoveryEligible&&snapshotMatches(item,*expected)&&
                 item.discoveryClass==static_cast<uint8_t>(mdns.queryClass)&&
-                isStrictAirdropQm(observation);
+                isStrictContinuityQm(observation);
             // A radio-generation/close transition after dequeue consumes this
             // token safely but must not submit an out-of-epoch MPDU.
             irq=IOSimpleLockLockDisableInterrupt(lock);
@@ -522,12 +552,21 @@ bool peekDiscoveryTx(uint32_t expectedPowerGeneration,
         __atomic_load_n(&closingRequested,__ATOMIC_ACQUIRE)==0&&
         radioGeneration==expectedPowerGeneration&&!inFlightToken&&tx.count;
     if(valid) {
-        const Tx &head=tx.values[tx.head];
-        valid=head.discoveryEligible&&
-            head.discoveryClass==static_cast<uint8_t>(
-                NativeAwdlData::MdnsQueryClass::QmMulticast);
-        if(valid)candidate=DiscoveryTxSnapshot{head.token,head.born,
-            head.generation,head.discoveryClass,head.discoveryEligible};
+        valid=false;
+        for(size_t offset=0;offset<tx.count;++offset) {
+            const size_t index=(tx.head+offset)%QueueDepth;
+            const Tx &entry=tx.values[index];
+            if(!entry.discoveryEligible||
+               entry.discoveryClass!=static_cast<uint8_t>(
+                   NativeAwdlData::MdnsQueryClass::QmMulticast)||
+               entry.generation!=expectedPowerGeneration||
+               !discoveryAgeCurrent(entry.born,now))
+                continue;
+            candidate=DiscoveryTxSnapshot{entry.token,entry.born,
+                entry.generation,entry.discoveryClass,entry.discoveryEligible};
+            valid=true;
+            break;
+        }
     }
     IOSimpleLockUnlockEnableInterrupt(lock,irq);
     if(!valid||candidate.generation!=expectedPowerGeneration||

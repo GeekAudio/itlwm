@@ -330,7 +330,9 @@ inline Decision validate(const Snapshot &snapshot, const QueueHead &head,
     return Decision::kReady;
 }
 
-// Host-testable transaction guard used around the existing exact-head dequeue.
+// Host-testable transaction guard around exact-candidate dequeue. QueueHead is
+// the historical capability name; it identifies the oldest eligible QM packet,
+// which need not be the physical FIFO head. All identity fields stay immutable.
 // It reserves no packet and proves no RF result; after one successful reserve,
 // no second call can authorize another dequeue in this diagnostic run.
 class OneShot {

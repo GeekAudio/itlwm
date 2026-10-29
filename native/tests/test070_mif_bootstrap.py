@@ -46,7 +46,7 @@ def verify_production_contract():
     assert "getMifSnapshot(" in source
     assert "refreshMifBootstrapCandidateInGate(" in source
     assert "evaluateMifBootstrapInGate(" in source
-    assert "!probe->mifBootstrapSelected" in source
+    assert "probe->mifBootstrapSelected" in source
     assert "NativeP2PAwdlMifBootstrapStatus" in source
     assert "NativeP2PAwdlMifBootstrapChecks" in source
     assert "nativeDataAttempts<4" in source
@@ -75,9 +75,9 @@ def verify_production_contract():
         source, "static IOReturn tahoeP2pSubmitActionInGate(")
     assert "evaluateMifBootstrapInGate(\n                    probe, finalSnapshot, finalDoorbellUs, true)" in submit
 
-    # A bootstrap is deliberately control-only: the old one-shot MIF does not
-    # itself authorize a QM dequeue. A later ordinary MIF needs a fresh paired
-    # transition claim and remains subject to the existing MIF gates.
+    # A bootstrap remains control-only. It cannot authorize a QM dequeue or
+    # data submission by itself; only a separately attempted and successfully
+    # completed normal paired MIF can open the existing data path.
     ordinary_mif = extract_function(
         source, "static bool tryPrepareMifAtPacingPoint(")
     assert "probe->mifBootstrapSelected" in ordinary_mif
@@ -102,15 +102,37 @@ def verify_production_contract():
         "probe->mifBootstrapPairClaimed && !bootstrapMifSubmit && "
         "!probe->mifBootstrapPairMifAttempted"
     ) in submit_contract
+    assert (
+        "if (mifFrame && probe->mifBootstrapSelected && "
+        "probe->mifBootstrapPairClaimed && !bootstrapMifSubmit && "
+        "!probe->mifBootstrapPairMifAttempted)"
+    ) in submit_contract
     assert "probe->mifBootstrapSubmitted = true" in submit
     worker = extract_function(source, "static int runTxProbeSession(")
     data_guard_start = worker.index("if(successfulStart")
     submit_data_start = worker.index("auto submitData", data_guard_start)
     data_guard = worker[data_guard_start:submit_data_start]
-    assert "!probe->mifBootstrapSelected" in data_guard
+    data_guard_contract = "".join(data_guard.split())
+    assert "probe->mifResultCaptured&&probe->mifTxSucceeded&&probe->nativeDataAttempts<4" in data_guard_contract
+    assert (
+        "&&(!probe->mifBootstrapSelected||"
+        "(probe->mifBootstrapPairMifCompleted&&"
+        "probe->mifBootstrapPairMifSucceeded))"
+    ) in data_guard_contract
+    assert "probe->mifBootstrapPairClaimed" not in data_guard_contract
     assert "takeDiscoveryPacket(" in worker[submit_data_start:]
-    assert worker.index("!probe->mifBootstrapSelected") < worker.index(
+    assert worker.index("mifBootstrapPairMifCompleted") < worker.index(
         "takeDiscoveryPacket(")
+    completion_start = worker.index("const auto mifCompletion = classifyMifCompletion(")
+    pair_completion = worker.index("probe->mifBootstrapPairMifCompleted = true;",
+                                   completion_start)
+    pair_completion_end = worker.index("probe->mifBootstrapPairDiagnosticsDirty = true;",
+                                       pair_completion)
+    pair_completion_contract = " ".join(
+        worker[pair_completion:pair_completion_end].split())
+    assert "if (probe->mifBootstrapSelected && probe->mifBootstrapPairMifAttempted)" in " ".join(
+        worker[completion_start:pair_completion].split())
+    assert "probe->mifBootstrapPairMifSucceeded = mifCompletion.txSucceeded;" in pair_completion_contract
     formal_completion = worker.index(
         "probe->discoveryOwnFirstMifCompletionUs =")
     completion_gate = worker[formal_completion - 500:formal_completion]

@@ -58,11 +58,21 @@ def caller_gate_audit(source: str) -> None:
         if required not in compact:
             raise RuntimeError(f"caller gate missing: {required}")
 
-    take_body = function_body(source, "static mbuf_t takeDiscoveryPacket(P2PProbeRun *run,")
-    next_tx = take_body.find("NativeAwdlBSD::nextDiscoveryTx(")
+    dispatch_body = function_body(
+        source, "static mbuf_t takeDiscoveryPacket(P2PProbeRun *run,")
+    psf_next_slot_body = function_body(
+        source, "static mbuf_t takeDiscoveryPacketPsfNextSlot(")
+    mif_current_body = function_body(
+        source, "static mbuf_t takeDiscoveryPacketMifCurrent(")
+    if "return takeDiscoveryPacketMifCurrent(" not in dispatch_body or \
+       "return takeDiscoveryPacketPsfNextSlot(" not in dispatch_body:
+        raise RuntimeError("discovery dispatcher must route to the selected production mode")
+    for mode_body in (psf_next_slot_body, mif_current_body):
+        if "NativeAwdlBSD::nextDiscoveryTx(" not in mode_body:
+            raise RuntimeError("each selected mode must use the exact BSD discovery dequeue")
     submit_start = source.find("const uint64_t gateUs = p2pProbeMonotonicNanoseconds() / 1000ULL;", trigger)
     submit = source.find("iwx_tahoe_p2p_action_tx_submit(", trigger)
-    if next_tx < 0 or submit_start < trigger or submit < submit_start:
+    if submit_start < trigger or submit < submit_start:
         raise RuntimeError("post-encode now check must follow queue encoding and precede submit")
     if "gateUs < run->discoveryTarget.earliestSubmitUs" not in source[submit_start:submit]:
         raise RuntimeError("post-encode lower time bound check missing")
@@ -107,7 +117,7 @@ def caller_gate_audit(source: str) -> None:
        "set(\"ExperimentalOnly\", 1);" not in source:
         raise RuntimeError("discovery publication proof flags changed unexpectedly")
 
-    call = source.find("const bool discoveryProfile = discoveryExperimentEnabled(self);", gate_start)
+    call = source.find("const bool discoveryProfile = run->discoveryModeSelected;", gate_start)
     fallback = source.find("if (!packet)\n                    packet = NativeAwdlBSD::nextTx(", call)
     profile_branch = source.find("if (discoveryProfile && !discoveryPacket) {", call)
     branch_end = source.find("if (peerBlockers && !discoveryPacket)", profile_branch)
@@ -118,9 +128,10 @@ def caller_gate_audit(source: str) -> None:
     profile_failure = source[profile_branch:branch_end]
     compact_profile_failure = re.sub(r"\s+", "", profile_failure)
     for required in (
-        "if(peer.validPeerCount&&!run->discoveryWindowClosed)",
+        "if(!mifCurrentMode&&peer.validPeerCount&&!run->discoveryWindowClosed)",
         "run->discoveryStatus=16;",
         "run->discoveryWindowClosed=true;",
+        "NativeAwdlBSD::gateObservation(",
         "returnkIOReturnNotReady;",
     ):
         if required not in compact_profile_failure:
@@ -133,6 +144,7 @@ HARNESS = r'''#include <assert.h>
 #include <string.h>
 #include <map>
 #include <string>
+#include "native/awdl_discovery_admitted_binding.hpp"
 #include "native/awdl_discovery_phase_experiment.hpp"
 #include "native/awdl_host_phase.hpp"
 
@@ -175,25 +187,69 @@ struct RuntimeEpochs {
 }
 namespace IntelAwdlPeerRuntime {
 constexpr uint8_t kPeerCapacity = 4;
+struct MifWitnessLite {
+    uint64_t peerIncarnation = 0, mifRevision = 0, rxMonotonicUs = 0;
+    uint64_t rxAgeUs = 0, contextGeneration = 0, powerGeneration = 0;
+    uint64_t stationGeneration = 0;
+    uint32_t rxGp2Us = 0, phyTxTimestampUs = 0, targetTxTimestampUs = 0;
+    uint16_t awCounter = 0, txDownCounterTu = 0, awPeriodTu = 0;
+    uint8_t presenceMode = 0;
+    uint16_t rxChannel = 0;
+    uint8_t canonicalSlots[16]{};
+    bool present = false, complete = false, syncConsistent = false;
+    bool fresh = false, rxGp2Present = false, presenceModePresent = false;
+    bool awCounterSemanticVerified = false, type18Present = false;
+    bool type18Valid = false;
+};
 struct PsfPeerSnapshot {
     uint64_t psfAgeUs;
     uint64_t contextGeneration, powerGeneration, stationGeneration;
     uint64_t psfRxMonotonicUs;
+    uint64_t peerIncarnation, psfRevision, mifRevision;
+    uint64_t mifRxMonotonicUs, mifAgeUs;
+    MifWitnessLite mif;
     uint32_t psfRxGp2TimestampUs, phyTxTimestampUs, targetTxTimestampUs;
-    uint16_t txDownCounterTu, awPeriodTu, nextAwSequence;
+    uint16_t txDownCounterTu, awPeriodTu, nextAwSequence, mifRxChannel;
     uint8_t rxChannel, channelSlots[16];
-    bool tracked, hasPsf, psfFresh, syncConsistent;
+    bool tracked, hasPsf, hasMif, psfFresh, syncConsistent;
     bool psfRxGp2TimestampPresent;
-    bool hasMif;
+    bool mifFresh, historyCompatible, mifSyncConsistent;
 };
 }
 
 struct Ieee80211Channel { uint8_t ieee; };
 struct Ieee80211Com { Ieee80211Channel ic_channels[4]; };
-struct Softc { Ieee80211Com sc_ic; };
+struct P2PRoc {
+    uint64_t token = 0;
+    uint32_t phase = 0;
+    Ieee80211Channel *roc_channel = nullptr;
+};
+struct Softc {
+    Ieee80211Com sc_ic;
+    uint32_t sc_flags = 0;
+    P2PRoc sc_p2p_roc;
+};
+static constexpr uint32_t IWX_FLAG_SHUTDOWN = 1u << 0;
+static constexpr uint32_t IWX_FLAG_HW_ERR = 1u << 1;
+static constexpr uint32_t IWX_SESSION_PROTECT_CONF_P2P_GO_NEGOTIATION = 1;
+static constexpr uint32_t IWX_P2P_ROC_SESSION_ACKED = 2;
 static uint8_t ieee80211_chan2ieee(Ieee80211Com *, Ieee80211Channel *channel) {
     return channel->ieee;
 }
+static bool isCurrentIeeeChannel6(Ieee80211Com *, Ieee80211Channel *channel) {
+    return channel && channel->ieee == 6;
+}
+
+struct RocSessionSnapshot {
+    uint32_t generation = 0, configuration = 0;
+    int commandResult = 0, startStatus = 0;
+    bool commandReturned = false, startSeen = false;
+    bool endSeen = false, outcomeUnknown = false;
+};
+struct RocEvents {
+    RocSessionSnapshot current;
+    RocSessionSnapshot snapshot() const { return current; }
+};
 
 struct PeerRuntime {
     IntelAwdlPeerRuntime::PsfPeerSnapshot selected{};
@@ -202,11 +258,14 @@ struct PeerRuntime {
     bool present = true;
     bool changeAtRecheck = false;
     bool getPsfSnapshot(uint8_t slot, const IntelAwdlPeer::RuntimeEpochs &,
-                       uint64_t, IntelAwdlPeerRuntime::PsfPeerSnapshot *out) {
+                       uint64_t nowUs,
+                       IntelAwdlPeerRuntime::PsfPeerSnapshot *out) {
         ++reads;
         if (!out || slot != 0 || !present)
             return false;
         *out = (changeAtRecheck && reads > 1) ? changedAtRecheck : selected;
+        out->psfAgeUs = nowUs >= out->psfRxMonotonicUs ?
+            nowUs - out->psfRxMonotonicUs : UINT64_MAX;
         return true;
     }
 };
@@ -216,6 +275,8 @@ struct ItlIwx {
     bool onMainGate = true;
     PeerRuntime tahoe_awdl_peer_runtime_;
     Softc com{};
+    RocEvents nativeP2pRocEvents_;
+    uint32_t nativeP2pProbeGeneration_ = 0;
     IOEthernetController *tahoeP2pController() { return controller; }
     bool tahoeP2pOnMainGate() const { return onMainGate; }
 };
@@ -242,14 +303,23 @@ struct P2PProbeRun {
     uint32_t nativeDataAttempts;
     uint32_t contextGeneration, powerGeneration, stationGeneration;
     uint32_t discoveryStatus, discoveryPhaseStatus, discoveryChecks;
+    uint32_t discoveryPrerequisiteBlockers, discoveryBindingFailureReason;
     uint32_t discoveryPublishVersion, discoveryLastPublishedStatus;
+    bool discoveryRequiresRuntimeMifBinding;
+    bool discoveryRuntimeMifRequirementSelected;
+    bool discoveryRuntimeMifBound;
+    bool discoveryBindingLocked;
+    bool canceled;
     uint64_t discoveryPacketToken, discoveryPsfObservedUs;
+    uint64_t discoveryPeerIncarnation, discoveryPsfRevision;
+    uint64_t discoveryMifRevision;
     uint64_t discoverySubmitCallStartUs, discoverySubmitCallEndUs;
     uint64_t discoveryCompletedBaseline, discoverySucceededBaseline;
     int discoverySubmitResult;
     NativeAwdlDiscoveryPhase::EstimatedTarget discoveryTarget;
     NativeAwdlDiscoveryPhase::PsfWitness discoveryPsfWitness;
     NativeAwdlBSD::DiscoveryTxSnapshot discoveryHead;
+    NativeAwdlDiscoveryBinding::OneShot discoveryBinding;
     RocCandidate psfCandidate;
     uint64_t mifPacingWindowEndUs;
 };
@@ -325,6 +395,8 @@ static void setup(P2PProbeRun &run, ItlIwx &owner,
     owner.com.sc_ic.ic_channels[1].ieee = 11;
     owner.tahoe_awdl_peer_runtime_.selected = {};
     auto &psf = owner.tahoe_awdl_peer_runtime_.selected;
+    psf.peerIncarnation = 77;
+    psf.psfRevision = 15;
     psf.contextGeneration = 11;
     psf.powerGeneration = 12;
     psf.stationGeneration = 13;
@@ -346,6 +418,13 @@ static void setup(P2PProbeRun &run, ItlIwx &owner,
     owner.tahoe_awdl_peer_runtime_.reads = 0;
     owner.tahoe_awdl_peer_runtime_.present = true;
     owner.tahoe_awdl_peer_runtime_.changeAtRecheck = false;
+    owner.nativeP2pProbeGeneration_ = 11;
+    owner.com.sc_p2p_roc.token = 11;
+    owner.com.sc_p2p_roc.phase = IWX_P2P_ROC_SESSION_ACKED;
+    owner.com.sc_p2p_roc.roc_channel = &owner.com.sc_ic.ic_channels[0];
+    owner.nativeP2pRocEvents_.current = {
+        11, IWX_SESSION_PROTECT_CONF_P2P_GO_NEGOTIATION, 0, 1,
+        true, true, false, false};
 
     run = {};
     run.owner = &owner;
@@ -710,12 +789,32 @@ def main() -> int:
         "static bool discoveryNumber(IOEthernetController *controller,",
         "static bool discoveryAnchor(P2PProbeRun *run,",
         "static NativeAwdlDiscoveryPhase::PsfWitness discoveryPsf(",
+        "static NativeAwdlDiscoveryPhase::PsfWitness discoveryPsfHistory(",
+        "static NativeAwdlDiscoveryBinding::Snapshot discoveryBindingSnapshot(",
         "static bool configureMifPacingWindow(P2PProbeRun *probe)",
-        "static mbuf_t takeDiscoveryPacket(P2PProbeRun *run,",
+        "static mbuf_t takeDiscoveryPacketPsfNextSlot(P2PProbeRun *run,",
     )
     extracted = "\n\n".join(function_body(source, signature) for signature in signatures)
+    extracted += r'''
+
+// The dynamic legacy cases exercise the actual PSF-next-slot production
+// helper. The wrapper only pins its already-supported optional-binding mode;
+// mode dispatch and MIF-current behavior are source-audited and covered by
+// their dedicated current-generation tests.
+static mbuf_t takeDiscoveryPacket(P2PProbeRun *run,
+    const IntelAwdlPeer::RuntimeEpochs &epochs, uint16_t sequence,
+    uint64_t *token)
+{
+    return takeDiscoveryPacketPsfNextSlot(
+        run, epochs, sequence, token, false);
+}
+'''
     # The GP2 anchor read path must consume only published scalar properties.
     anchor_body = function_body(source, signatures[2])
+    psf_next_slot_body = function_body(
+        source, "static mbuf_t takeDiscoveryPacketPsfNextSlot(")
+    configure_body = function_body(
+        source, "static bool configureMifPacingWindow(P2PProbeRun *probe)")
     for forbidden in ("iwx_read_prph", "readBracketedGp2", "acquireClockNic",
                       "IOSimpleLock", "readGp2"):
         if forbidden in anchor_body:
@@ -726,19 +825,67 @@ def main() -> int:
                      "NativeP2PGp2StationGeneration"):
         if required not in anchor_body:
             raise RuntimeError(f"immutable pre-ROC witness key missing: {required}")
-    if "NativeP2PGp2Post" in anchor_body or "NativeP2PGp2Post" in function_body(source, signatures[4]):
+    if "NativeP2PGp2Post" in anchor_body or \
+       "NativeP2PGp2Post" in configure_body or \
+       "NativeP2PGp2Post" in psf_next_slot_body:
         raise RuntimeError("the discovery path must not read post/active-ROC GP2 values")
 
-    # Strict QM/multicast classification belongs to the actual BSD queue. Make
-    # sure the probe consumes that one eligible FIFO head and never drains it.
+    # Strict QM/multicast classification belongs to the actual BSD queue.
+    # Selection is a bounded scan for one current strict-QM candidate; the
+    # exact snapshot is revalidated before removing only that packet, while
+    # unrelated queued packets retain their order.
     queue = (ROOT / "native/awdl_native_bsd_data_25G332.cpp").read_text()
+    strict_qm_body = function_body(
+        queue, "bool isStrictContinuityQm(const NativeAwdlData::TxObservation &observation)")
     peek_body = function_body(queue, "bool peekDiscoveryTx(uint32_t expectedPowerGeneration,")
     dequeue_body = function_body(queue, "mbuf_t nextDiscoveryTx(uint16_t sequence,")
     impl_body = function_body(queue, "mbuf_t nextTxImpl(uint16_t sequence,uint64_t *token,")
-    if "MdnsQueryClass::QmMulticast" not in peek_body or "nextTxImpl(sequence,token,&expected,consumed)" not in dequeue_body or "snapshotMatches" not in impl_body:
-        raise RuntimeError("queue head must be strict AirDrop QM and revalidated before dequeue")
-    if "tx.head" not in impl_body or "snapshotMatches(head,*expected)" not in impl_body:
-        raise RuntimeError("discovery path must consume a single exact FIFO head")
+    snapshot_body = function_body(
+        queue, "bool snapshotMatches(const Tx &head,const DiscoveryTxSnapshot &expected)")
+    remove_body = function_body(queue, "bool removeTxAt(size_t offset,Tx *removed)")
+    strict_compact = re.sub(r"\s+", "", strict_qm_body)
+    peek_compact = re.sub(r"\s+", "", peek_body)
+    impl_compact = re.sub(r"\s+", "", impl_body)
+    snapshot_compact = re.sub(r"\s+", "", snapshot_body)
+    remove_compact = re.sub(r"\s+", "", remove_body)
+    if "MdnsQueryClass::QmMulticast" not in strict_qm_body or \
+       "mdns.targetPtrInQuestionCount==mdns.questionCount" not in strict_compact or \
+       "mdns.quQuestionMask==0" not in strict_compact:
+        raise RuntimeError("strict QM admission must require all supported questions and no QU bit")
+    if "nextTxImpl(sequence,token,&expected,consumed)" not in dequeue_body:
+        raise RuntimeError("discovery dequeue must pass the selected snapshot to the production worker")
+    for required in (
+        "for(size_toffset=0;offset<tx.count;++offset)",
+        "entry.discoveryClass!=static_cast<uint8_t>(NativeAwdlData::MdnsQueryClass::QmMulticast)",
+        "candidate=DiscoveryTxSnapshot{entry.token,entry.born,entry.generation,entry.discoveryClass,entry.discoveryEligible}",
+    ):
+        if required not in peek_compact:
+            raise RuntimeError(f"bounded candidate selection contract missing: {required}")
+    for required in (
+        "expected->generation==radioGeneration",
+        "snapshotMatches(candidate,*expected)",
+        "discoveryAgeCurrent(candidate.born,dequeueTime)",
+        "removeTxAt(selectedOffset,&item)",
+        "snapshotMatches(item,*expected)",
+        "isStrictContinuityQm(observation)",
+    ):
+        if required not in impl_compact:
+            raise RuntimeError(f"selected packet revalidation contract missing: {required}")
+    for required in (
+        "expected.token==head.token",
+        "expected.bornUs==head.born",
+        "expected.generation==head.generation",
+        "expected.queryClass==head.discoveryClass",
+        "expected.eligible&&head.discoveryEligible",
+    ):
+        if required not in snapshot_compact:
+            raise RuntimeError(f"exact queue snapshot field missing: {required}")
+    if "for(size_tindex=offset;index+1<tx.count;++index)" not in remove_compact or \
+       "tx.values[destination]=tx.values[source]" not in remove_compact:
+        raise RuntimeError("bounded selection must preserve unselected queue order")
+    if "if(discovery)have=removeTxAt(selectedOffset,&item)" not in impl_compact or \
+       "elsehave=tx.pop(&item)" not in impl_compact:
+        raise RuntimeError("discovery removal must remain separate from ordinary FIFO dequeue")
 
     body_marker = "// PRODUCTION_FUNCTIONS_INSERTION_POINT\n"
     if body_marker not in HARNESS:
@@ -796,7 +943,7 @@ def main() -> int:
                 "-I", str(ROOT), *defines, str(macro_cpp), "-o", str(macro_binary),
             ], check=True)
             subprocess.run([str(macro_binary)], check=True)
-    print("PASS: production call-site gates, post-encode time check, strict QM head, and pre-ROC-only anchor audit")
+    print("PASS: production call-site gates, post-encode time check, bounded strict-QM candidate revalidation, and pre-ROC-only anchor audit")
     return 0
 
 

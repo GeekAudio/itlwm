@@ -103,6 +103,17 @@ inline bool parseMdnsQuestionName(const uint8_t *dns, size_t dnsLength,
     return false;
 }
 
+inline bool mdnsNameEquals(const uint8_t *name, size_t length,
+                           const uint8_t *expected, size_t expectedLength)
+{
+    if (!name || !expected || length != expectedLength)
+        return false;
+    uint8_t difference = 0;
+    for (size_t i = 0; i < expectedLength; ++i)
+        difference |= name[i] ^ expected[i];
+    return difference == 0;
+}
+
 inline bool isAirdropPtrInName(const uint8_t *name, size_t length)
 {
     static const uint8_t expected[] = {
@@ -110,15 +121,37 @@ inline bool isAirdropPtrInName(const uint8_t *name, size_t length)
         4, '_','t','c','p',
         5, 'l','o','c','a','l', 0
     };
-    if (length != sizeof(expected))
-        return false;
-    uint8_t difference = 0;
-    for (size_t i = 0; i < sizeof(expected); ++i)
-        difference |= name[i] ^ expected[i];
-    return difference == 0;
+    return mdnsNameEquals(name, length, expected, sizeof(expected));
 }
 
-inline MdnsQueryObservation observeMdnsAirdropQuery(
+inline bool isCompanionLinkPtrInName(const uint8_t *name, size_t length)
+{
+    static const uint8_t expected[] = {
+        15, '_','c','o','m','p','a','n','i','o','n','-','l','i','n','k',
+        4, '_','t','c','p',
+        5, 'l','o','c','a','l', 0
+    };
+    return mdnsNameEquals(name, length, expected, sizeof(expected));
+}
+
+inline bool isAsquicPtrInName(const uint8_t *name, size_t length)
+{
+    static const uint8_t expected[] = {
+        7, '_','a','s','q','u','i','c',
+        4, '_','u','d','p',
+        5, 'l','o','c','a','l', 0
+    };
+    return mdnsNameEquals(name, length, expected, sizeof(expected));
+}
+
+inline bool isSupportedDnsSdPtrInName(const uint8_t *name, size_t length)
+{
+    return isAirdropPtrInName(name, length) ||
+        isCompanionLinkPtrInName(name, length) ||
+        isAsquicPtrInName(name, length);
+}
+
+inline MdnsQueryObservation observeMdnsSupportedServiceQuery(
     const uint8_t *ipv6, const uint8_t *udp, size_t udpLength,
     UdpChecksumStatus checksumStatus)
 {
@@ -185,7 +218,7 @@ inline MdnsQueryObservation observeMdnsAirdropQuery(
             mixedQu = true;
         }
         const bool target = type == 12 && (qclass & 0x7fffu) == 1 &&
-            isAirdropPtrInName(name, nameLength);
+            isSupportedDnsSdPtrInName(name, nameLength);
         if (target)
             ++result.targetPtrInQuestionCount;
         else
@@ -209,6 +242,16 @@ inline MdnsQueryObservation observeMdnsAirdropQuery(
         result.queryClass = MdnsQueryClass::Other;
     }
     return result;
+}
+
+// Compatibility entry point retained for existing callers. Classification
+// now covers the bounded DNS-SD service allowlist, not arbitrary DNS names.
+inline MdnsQueryObservation observeMdnsAirdropQuery(
+    const uint8_t *ipv6, const uint8_t *udp, size_t udpLength,
+    UdpChecksumStatus checksumStatus)
+{
+    return observeMdnsSupportedServiceQuery(
+        ipv6, udp, udpLength, checksumStatus);
 }
 
 // Numeric-only facts from the actual BSD Ethernet packet immediately before
@@ -365,7 +408,7 @@ inline TxObservation observeAwdlTxPacket(const uint8_t *ethernet,
     result.udpChecksumStatus = checksum != 0 &&
             txObservationChecksumValid(ipv6, udp, udpLength)
         ? UdpChecksumStatus::Valid : UdpChecksumStatus::Invalid;
-    result.mdnsQuery = observeMdnsAirdropQuery(
+    result.mdnsQuery = observeMdnsSupportedServiceQuery(
         ipv6, udp, udpLength, result.udpChecksumStatus);
     result.ipv6DestinationIsAirdropMdnsGroup =
         result.mdnsQuery.destinationIsFf02Fb;

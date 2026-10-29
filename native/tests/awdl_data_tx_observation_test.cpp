@@ -196,15 +196,46 @@ constexpr uint8_t kAirdropName[] = {
     8, '_','a','i','r','d','r','o','p', 4, '_','t','c','p',
     5, 'l','o','c','a','l', 0
 };
+constexpr uint8_t kCompanionLinkName[] = {
+    15, '_','c','o','m','p','a','n','i','o','n','-','l','i','n','k',
+    4, '_','t','c','p', 5, 'l','o','c','a','l', 0
+};
+constexpr uint8_t kAsquicName[] = {
+    7, '_','a','s','q','u','i','c', 4, '_','u','d','p',
+    5, 'l','o','c','a','l', 0
+};
+constexpr uint8_t kUnknownNearMatchName[] = {
+    17, '_','c','o','m','p','a','n','i','o','n','-','l','i','n','k','e','r',
+    4, '_','t','c','p', 5, 'l','o','c','a','l', 0
+};
+constexpr uint8_t kCompanionWrongTransportName[] = {
+    15, '_','c','o','m','p','a','n','i','o','n','-','l','i','n','k',
+    4, '_','u','d','p', 5, 'l','o','c','a','l', 0
+};
+constexpr uint8_t kAsquicWrongTransportName[] = {
+    7, '_','a','s','q','u','i','c', 4, '_','t','c','p',
+    5, 'l','o','c','a','l', 0
+};
+constexpr uint8_t kAsquicTrailingLabelName[] = {
+    7, '_','a','s','q','u','i','c', 4, '_','u','d','p',
+    5, 'l','o','c','a','l', 4, 'e','v','i','l', 0
+};
+
+size_t appendQuestionRecord(uint8_t *dns, size_t offset, const uint8_t *name,
+                            size_t nameLength, uint16_t type,
+                            uint16_t qclass)
+{
+    memcpy(dns + offset, name, nameLength);
+    offset += nameLength;
+    putBe16(dns + offset, type);
+    putBe16(dns + offset + 2, qclass);
+    return offset + 4;
+}
 
 size_t appendQuestion(uint8_t *dns, size_t offset, const uint8_t *name,
                       size_t nameLength, uint16_t qclass)
 {
-    memcpy(dns + offset, name, nameLength);
-    offset += nameLength;
-    putBe16(dns + offset, 12); // PTR
-    putBe16(dns + offset + 2, qclass);
-    return offset + 4;
+    return appendQuestionRecord(dns, offset, name, nameLength, 12, qclass);
 }
 
 size_t makeDnsPacket(uint8_t *packet, const uint8_t *questions,
@@ -248,23 +279,34 @@ size_t makeDnsPacket(uint8_t *packet, const uint8_t *questions,
     return ethernetLength;
 }
 
-NativeAwdlData::TxObservation observeDns(
-    uint8_t *packet, size_t length, uint16_t sourcePort,
+NativeAwdlData::TxObservation observeDnsName(
+    uint8_t *packet, size_t packetCapacity, const uint8_t *name,
+    size_t nameLength, uint16_t type, uint16_t sourcePort,
     uint16_t destinationPort, uint16_t questionClass = 1,
     uint16_t dnsFlags = 0)
 {
     uint8_t question[64]{};
-    const size_t bytes = appendQuestion(question, 0, kAirdropName,
-        sizeof(kAirdropName), questionClass);
+    const size_t bytes = appendQuestionRecord(question, 0, name,
+        nameLength, type, questionClass);
     const size_t lengthOut = makeDnsPacket(packet, question, bytes, 1,
         dnsFlags, sourcePort, destinationPort);
-    assert(length >= lengthOut);
+    assert(packetCapacity >= lengthOut);
     return NativeAwdlData::observeAwdlTxPacket(packet, lengthOut, kOwnMac);
+}
+
+NativeAwdlData::TxObservation observeDns(
+    uint8_t *packet, size_t packetCapacity, uint16_t sourcePort,
+    uint16_t destinationPort, uint16_t questionClass = 1,
+    uint16_t dnsFlags = 0)
+{
+    return observeDnsName(packet, packetCapacity, kAirdropName,
+        sizeof(kAirdropName), 12, sourcePort, destinationPort,
+        questionClass, dnsFlags);
 }
 
 void testMdnsAirdropQueryClassification()
 {
-    uint8_t packet[14 + 40 + 8 + 12 + 2 * (sizeof(kAirdropName) + 4)]{};
+    uint8_t packet[256]{};
     auto result = observeDns(packet, sizeof(packet), 49152, 5353);
     assert(result.mdnsQuery.queryClass ==
            NativeAwdlData::MdnsQueryClass::LegacyUnicastReply);
@@ -363,6 +405,125 @@ void testMdnsAirdropQueryClassification()
     assert(result.mdnsQuery.destinationIsFf02Fb == 0);
 }
 
+void testSupportedDnsSdServiceQueries()
+{
+    uint8_t packet[256]{};
+    auto result = observeDnsName(packet, sizeof(packet), kCompanionLinkName,
+        sizeof(kCompanionLinkName), 12, 5353, 5353, 1);
+    assert(result.udpChecksumStatus ==
+           NativeAwdlData::UdpChecksumStatus::Valid);
+    assert(result.mdnsQuery.queryClass ==
+           NativeAwdlData::MdnsQueryClass::QmMulticast);
+    assert(result.mdnsQuery.questionCount == 1);
+    assert(result.mdnsQuery.targetPtrInQuestionCount == 1);
+
+    result = observeDnsName(packet, sizeof(packet), kCompanionLinkName,
+        sizeof(kCompanionLinkName), 12, 5353, 5353, 0x8001);
+    assert(result.mdnsQuery.queryClass ==
+           NativeAwdlData::MdnsQueryClass::QuUnicastPreferred);
+    assert(result.mdnsQuery.quQuestionMask == 1);
+    assert(result.mdnsQuery.targetPtrInQuestionCount == 1);
+
+    // The _udp service is deliberately supported as an exact peer-discovery
+    // target and follows the same multicast question-class rules.
+    result = observeDnsName(packet, sizeof(packet), kAsquicName,
+        sizeof(kAsquicName), 12, 5353, 5353, 1);
+    assert(result.mdnsQuery.queryClass ==
+           NativeAwdlData::MdnsQueryClass::QmMulticast);
+    assert(result.mdnsQuery.targetPtrInQuestionCount == 1);
+
+    // A multi-question packet may mix the supported service names when every
+    // question remains PTR/IN and uses the same QM/QU class.
+    uint8_t multi[sizeof(kCompanionLinkName) + sizeof(kAsquicName) + 8]{};
+    size_t multiLength = appendQuestion(multi, 0, kCompanionLinkName,
+        sizeof(kCompanionLinkName), 1);
+    multiLength = appendQuestion(multi, multiLength, kAsquicName,
+        sizeof(kAsquicName), 1);
+    const size_t multiPacketLength = makeDnsPacket(packet, multi,
+        multiLength, 2, 0, 5353, 5353);
+    result = NativeAwdlData::observeAwdlTxPacket(
+        packet, multiPacketLength, kOwnMac);
+    assert(result.mdnsQuery.queryClass ==
+           NativeAwdlData::MdnsQueryClass::QmMulticast);
+    assert(result.mdnsQuery.questionCount == 2);
+    assert(result.mdnsQuery.targetPtrInQuestionCount == 2);
+    assert(result.mdnsQuery.quQuestionMask == 0);
+
+    // Existing QM/QU separation still applies to mixed supported names.
+    multi[multiLength - 2] = 0x80;
+    multi[multiLength - 1] = 0x01;
+    const size_t mixedClassLength = makeDnsPacket(packet, multi,
+        multiLength, 2, 0, 5353, 5353);
+    result = NativeAwdlData::observeAwdlTxPacket(
+        packet, mixedClassLength, kOwnMac);
+    assert(result.mdnsQuery.queryClass == NativeAwdlData::MdnsQueryClass::Other);
+    assert(result.mdnsQuery.targetPtrInQuestionCount == 2);
+    assert(result.mdnsQuery.quQuestionMask == 2);
+
+    // One unsupported question prevents a mixed packet from becoming a
+    // supported-service sample, while the supported question count remains
+    // available in the existing generic target counter.
+    uint8_t mixedNames[sizeof(kCompanionLinkName) + sizeof(kUnknownNearMatchName) + 8]{};
+    size_t mixedNamesLength = appendQuestion(mixedNames, 0,
+        kCompanionLinkName, sizeof(kCompanionLinkName), 1);
+    mixedNamesLength = appendQuestion(mixedNames, mixedNamesLength,
+        kUnknownNearMatchName, sizeof(kUnknownNearMatchName), 1);
+    const size_t mixedNamesPacketLength = makeDnsPacket(packet, mixedNames,
+        mixedNamesLength, 2, 0, 5353, 5353);
+    result = NativeAwdlData::observeAwdlTxPacket(
+        packet, mixedNamesPacketLength, kOwnMac);
+    assert(result.mdnsQuery.queryClass == NativeAwdlData::MdnsQueryClass::Other);
+    assert(result.mdnsQuery.targetPtrInQuestionCount == 1);
+
+    // The allowlist is exact: wrong service labels, wrong transport labels,
+    // and suffix extension lookalikes remain unrelated valid mDNS queries.
+    const struct {
+        const uint8_t *name;
+        size_t length;
+    } nearMatches[] = {
+        {kUnknownNearMatchName, sizeof(kUnknownNearMatchName)},
+        {kCompanionWrongTransportName, sizeof(kCompanionWrongTransportName)},
+        {kAsquicWrongTransportName, sizeof(kAsquicWrongTransportName)},
+        {kAsquicTrailingLabelName, sizeof(kAsquicTrailingLabelName)},
+    };
+    for (const auto &nearMatch : nearMatches) {
+        result = observeDnsName(packet, sizeof(packet), nearMatch.name,
+            nearMatch.length, 12, 5353, 5353, 1);
+        assert(result.udpChecksumStatus ==
+               NativeAwdlData::UdpChecksumStatus::Valid);
+        assert(result.mdnsQuery.queryClass == NativeAwdlData::MdnsQueryClass::Other);
+        assert(result.mdnsQuery.targetPtrInQuestionCount == 0);
+    }
+
+    // Type and class stay strict even when a supported owner name is used.
+    result = observeDnsName(packet, sizeof(packet), kCompanionLinkName,
+        sizeof(kCompanionLinkName), 1, 5353, 5353, 1);
+    assert(result.mdnsQuery.queryClass == NativeAwdlData::MdnsQueryClass::Other);
+    assert(result.mdnsQuery.targetPtrInQuestionCount == 0);
+    result = observeDnsName(packet, sizeof(packet), kAsquicName,
+        sizeof(kAsquicName), 12, 5353, 5353, 3);
+    assert(result.mdnsQuery.queryClass == NativeAwdlData::MdnsQueryClass::Other);
+    assert(result.mdnsQuery.targetPtrInQuestionCount == 0);
+
+    // No port broadening: an mDNS-port packet sent to a unicast UDP port
+    // cannot enter the QM/QU classes.
+    result = observeDnsName(packet, sizeof(packet), kAsquicName,
+        sizeof(kAsquicName), 12, 5353, 5352, 1);
+    assert(result.mdnsQuery.queryClass == NativeAwdlData::MdnsQueryClass::Other);
+
+    // Checksum validation remains before classification for newly supported
+    // targets; parsing facts may remain, but a bad packet is never QM/QU.
+    result = observeDnsName(packet, sizeof(packet), kAsquicName,
+        sizeof(kAsquicName), 12, 5353, 5353, 1);
+    const size_t packetLength = 14 + 40 + 8 + 12 + sizeof(kAsquicName) + 4;
+    packet[14 + 40 + 6] ^= 1;
+    result = NativeAwdlData::observeAwdlTxPacket(packet, packetLength, kOwnMac);
+    assert(result.udpChecksumStatus ==
+           NativeAwdlData::UdpChecksumStatus::Invalid);
+    assert(result.mdnsQuery.queryClass == NativeAwdlData::MdnsQueryClass::Unknown);
+    assert(result.mdnsQuery.targetPtrInQuestionCount == 1);
+}
+
 void testMdnsInvalidTransportAndRcodeClassification()
 {
     uint8_t packet[14 + 40 + 8 + 12 + sizeof(kAirdropName) + 4]{};
@@ -407,5 +568,6 @@ int main()
     testCandidateClassification();
     testPacketObservation();
     testMdnsAirdropQueryClassification();
+    testSupportedDnsSdServiceQueries();
     testMdnsInvalidTransportAndRcodeClassification();
 }

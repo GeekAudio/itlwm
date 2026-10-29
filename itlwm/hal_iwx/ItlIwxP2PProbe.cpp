@@ -3073,8 +3073,8 @@ static uint32_t mifCurrentDecisionBlocker(
 }
 
 #if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
-// Record only after the BSD bridge confirms that the exact immutable FIFO
-// head was consumed. `bornUs` is the queue's enqueue timestamp; the returned
+// Record only after the BSD bridge confirms that the exact selected QM
+// candidate was consumed. `bornUs` is its enqueue timestamp; the returned
 // token may be zero when encoding failed, so the snapshot token remains the
 // authoritative identity for that outcome. This recorder is observational:
 // status never changes packet ownership, admission, or retry behavior.
@@ -3152,7 +3152,7 @@ static mbuf_t takeDiscoveryPacketPsfNextSlot(P2PProbeRun *run,
     ++run->discoveryChecks;
     NativeAwdlBSD::DiscoveryTxSnapshot head{};
     if (!NativeAwdlBSD::peekDiscoveryTx(run->powerGeneration, &head)) {
-        run->discoveryStatus = 3; // No eligible actual QM at FIFO head.
+        run->discoveryStatus = 3; // No current eligible QM candidate in the queue.
         if (run->discoveryCandidateLocked)
             run->discoveryWindowClosed = true;
         publishDiscoveryExperiment(run);
@@ -3923,7 +3923,7 @@ static mbuf_t takeDiscoveryPacketMifCurrent(P2PProbeRun *run,
         }
         // Pin the selected peer and QM head only after a real current-slot
         // candidate exists and OneShot accepted the exact same-entry MIF,
-        // PSF history, epoch, and queue head.
+        // PSF history, epoch, and selected queue candidate.
         run->discoveryCandidateLocked = true;
         run->discoveryPeerSlot = selectedSlot;
         run->discoveryPeerIncarnation = current.peerIncarnation;
@@ -3941,7 +3941,7 @@ static mbuf_t takeDiscoveryPacketMifCurrent(P2PProbeRun *run,
     }
 
     // Revalidate the full same-entry MIF witness, source epochs, current ROC,
-    // strict FIFO QM head, ring idleness, and the identical phase window at
+    // strict selected QM candidate, ring idleness, and identical phase window at
     // the actual ownership transfer point.
     const uint64_t finalNowUs =
         p2pProbeMonotonicNanoseconds() / 1000ULL;

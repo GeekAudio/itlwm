@@ -36,7 +36,7 @@ enum Counter : unsigned {
     TxMdnsLastQuQuestionMask, TxMdnsLastAttemptToken, Count
 };
 struct Snapshot {uint64_t value[Count];};
-// Numeric-only capability for the exact eligible queue head. This snapshot
+// Numeric-only capability for the exact selected eligible QM packet. This snapshot
 // exposes no mbuf, address, or payload and is revalidated before dequeue.
 struct DiscoveryTxSnapshot {
     uint64_t token;
@@ -64,8 +64,11 @@ bool address(uint32_t expectedPowerGeneration, uint8_t out[6]);
 void poll(bool radioReady,uint32_t powerGeneration);
 CaptureResult capture(const uint8_t *,size_t,bool protectedFrame,bool leaseCurrent,uint32_t powerGeneration);
 mbuf_t nextTx(uint16_t wifiSequence,uint64_t *token);
-// Reads only the current head's immutable metadata. A successful peek grants
-// no ownership; nextDiscoveryTx must match this exact head before consuming.
+// Reads bounded immutable queue metadata and returns the earliest current
+// strict-QM item, which may be behind unrelated FIFO entries. A successful
+// peek grants no ownership; nextDiscoveryTx must match this exact token,
+// generation, born time, and class before removing only that item. Skipped
+// entries retain their relative order.
 bool peekDiscoveryTx(uint32_t expectedPowerGeneration,
                      DiscoveryTxSnapshot *out);
 // nullptr + consumed=false leaves the queue untouched. nullptr + consumed=true

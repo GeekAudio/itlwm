@@ -28,6 +28,7 @@ HARNESS_PREFIX = r'''#include <cassert>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include "native/iwx_tx_completion_observation.hpp"
 
 enum {
     IWX_TX_CMD = 1,
@@ -40,7 +41,11 @@ enum {
 
 struct iwx_softc {};
 struct iwx_rx_data {};
-struct iwx_tx_resp { uint16_t tx_queue; };
+struct iwx_tx_resp {
+    uint16_t tx_queue;
+    uint16_t frame_count;
+    uint16_t ra_tid;
+};
 struct iwx_rx_packet {
     alignas(8) uint8_t data[16]{};
     size_t payloadLength = sizeof(iwx_tx_resp);
@@ -51,10 +56,52 @@ static int ordinaryCalls = 0;
 static int p2pCalls = 0;
 static int responseEvents = 0;
 static int consumedEvents = 0;
+static int completionEvents = 0;
+static uint32_t completionReason = IWX_TX_COMPLETION_TX_RSP_UNCLASSIFIED_EXIT;
 
 size_t iwx_rx_packet_payload_len(const iwx_rx_packet *pkt)
 {
     return pkt->payloadLength;
+}
+
+iwx_tx_completion_event_input txCompletionRxInput(
+    uint32_t kind, uint32_t stage, uint32_t reason,
+    const iwx_rx_packet *pkt)
+{
+    iwx_tx_completion_event_input event{};
+    event.kind = kind;
+    event.stage = stage;
+    event.terminal_reason = reason;
+    if (pkt) {
+        event.presence_flags |= IWX_TX_COMPLETION_HAS_PAYLOAD_LENGTH;
+        event.payload_length = static_cast<uint32_t>(
+            iwx_rx_packet_payload_len(pkt));
+    }
+    return event;
+}
+
+void txCompletionSetTxRspFacts(iwx_tx_completion_event_input *event,
+                               const iwx_rx_packet *pkt,
+                               size_t payloadLength)
+{
+    if (!event || !pkt) return;
+    const size_t frameCountEnd = offsetof(iwx_tx_resp, frame_count) +
+        sizeof(iwx_tx_resp::frame_count);
+    if (payloadLength >= frameCountEnd) {
+        iwx_tx_resp response{};
+        std::memcpy(&response, pkt->data,
+            payloadLength < sizeof(response) ? payloadLength : sizeof(response));
+        event->presence_flags |= IWX_TX_COMPLETION_HAS_FRAME_COUNT;
+        event->frame_count = response.frame_count;
+    }
+}
+
+void recordTxCompletionEvent(iwx_softc *sc,
+                             const iwx_tx_completion_event_input &event)
+{
+    (void)sc;
+    ++completionEvents;
+    completionReason = event.terminal_reason;
 }
 
 uint16_t le16toh(uint16_t value) { return value; }
@@ -123,18 +170,23 @@ int main(int argc, char **argv)
     std::memcpy(driver.packet.data + offsetof(iwx_tx_resp, tx_queue),
                 &qid, sizeof(qid));
     driver.dispatch();
-    std::printf("ordinary=%d p2p=%d response=%d consumed=%d\n",
-                ordinaryCalls, p2pCalls, responseEvents, consumedEvents);
+    std::printf("ordinary=%d p2p=%d response=%d consumed=%d completion=%d reason=%u\n",
+                ordinaryCalls, p2pCalls, responseEvents, consumedEvents,
+                completionEvents, completionReason);
 
 #ifdef AIRPORT_TAHOE
     if (p2pCalls != 1 || responseEvents != 1) return 10;
     if (driver.p2pResult) {
-        if (ordinaryCalls != 0 || consumedEvents != 1) return 11;
-    } else if (ordinaryCalls != 1 || consumedEvents != 0) {
+        if (ordinaryCalls != 0 || consumedEvents != 1 ||
+            completionEvents != 1 || completionReason !=
+                IWX_TX_COMPLETION_TX_RSP_P2P_OWNER_CONSUMED) return 11;
+    } else if (ordinaryCalls != 1 || consumedEvents != 0 ||
+               completionEvents != 0) {
         return 12;
     }
 #else
     if (p2pCalls != 0 || responseEvents != 0 || consumedEvents != 0 ||
+        completionEvents != 0 ||
         ordinaryCalls != 1) return 20;
 #endif
     return 0;
@@ -158,6 +210,7 @@ def compile_case(temp: Path, name: str, case: str, tahoe: bool) -> Path:
     source.write_text(HARNESS_PREFIX + case + HARNESS_SUFFIX)
     command = compiler_command() + [
         "-std=c++14", "-Wall", "-Wextra", "-Werror",
+        "-I", str(ROOT),
         str(source), "-o", str(binary),
     ]
     if tahoe:
@@ -198,22 +251,22 @@ def main() -> None:
 
         ordinary_fallback = run(tahoe, "0")
         assert ordinary_fallback.returncode == 0, ordinary_fallback.stdout + ordinary_fallback.stderr
-        assert "ordinary=1 p2p=1 response=1 consumed=0" in ordinary_fallback.stdout
+        assert "ordinary=1 p2p=1 response=1 consumed=0 completion=0" in ordinary_fallback.stdout
 
         p2p_consumed = run(tahoe, "1")
         assert p2p_consumed.returncode == 0, p2p_consumed.stdout + p2p_consumed.stderr
-        assert "ordinary=0 p2p=1 response=1 consumed=1" in p2p_consumed.stdout
+        assert "ordinary=0 p2p=1 response=1 consumed=1 completion=1 reason=0" in p2p_consumed.stdout
 
         non_tahoe_fallback = run(non_tahoe)
         assert non_tahoe_fallback.returncode == 0, non_tahoe_fallback.stdout + non_tahoe_fallback.stderr
-        assert "ordinary=1 p2p=0 response=0 consumed=0" in non_tahoe_fallback.stdout
+        assert "ordinary=1 p2p=0 response=0 consumed=0 completion=0" in non_tahoe_fallback.stdout
 
         old_behavior = run(old_tahoe, "0")
         assert old_behavior.returncode == 12, (
             "legacy Test072 did not reproduce the skipped ordinary handler: "
             + old_behavior.stdout + old_behavior.stderr
         )
-        assert "ordinary=0 p2p=1 response=1 consumed=0" in old_behavior.stdout
+        assert "ordinary=0 p2p=1 response=1 consumed=0 completion=0" in old_behavior.stdout
 
     print("PASS: production Tahoe fallback runs once after P2P false")
     print("PASS: production P2P true consumes and records consumed trace")

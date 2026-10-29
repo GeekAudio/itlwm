@@ -20,7 +20,7 @@ using namespace NativeAwdlBSD;
 const uint8_t own[6]={2,1,2,3,4,5};
 
 enum class QueryKind {
-    Qm,Qu,Legacy,Other,Unknown,Qr,Mixed,NonIN,WrongGroup,WrongMapping,
+    Qm,Qu,Legacy,Other,Unknown,UnknownService,Qr,Mixed,NonIN,WrongGroup,WrongMapping,
     WrongSource,WrongPort
 };
 
@@ -30,14 +30,20 @@ mbuf_t makeQuery(QueryKind kind=QueryKind::Qm,bool checksumPresent=false) {
     set16(dns+4,1);
     if(kind==QueryKind::Qr)set16(dns+2,0x8000);
     if(kind!=QueryKind::Unknown) {
-        const uint8_t name[]={8,'_','a','i','r','d','r','o','p',
+        const uint8_t airdropName[]={8,'_','a','i','r','d','r','o','p',
             4,'_','t','c','p',5,'l','o','c','a','l',0};
-        memcpy(dns+dnsLength,name,sizeof(name));dnsLength+=sizeof(name);
+        const uint8_t unknownServiceName[]={8,'_','n','o','t','a','i','r','d',
+            4,'_','u','d','p',5,'l','o','c','a','l',0};
+        const uint8_t *name=kind==QueryKind::UnknownService
+            ?unknownServiceName:airdropName;
+        const size_t nameLength=kind==QueryKind::UnknownService
+            ?sizeof(unknownServiceName):sizeof(airdropName);
+        memcpy(dns+dnsLength,name,nameLength);dnsLength+=nameLength;
         set16(dns+dnsLength,kind==QueryKind::Other?33:12);dnsLength+=2;
         set16(dns+dnsLength,kind==QueryKind::Qu?0x8001:
             (kind==QueryKind::NonIN?3:1));dnsLength+=2;
         if(kind==QueryKind::Mixed) {
-            memcpy(dns+dnsLength,name,sizeof(name));dnsLength+=sizeof(name);
+            memcpy(dns+dnsLength,name,nameLength);dnsLength+=nameLength;
             set16(dns+dnsLength,33);dnsLength+=2;
             set16(dns+dnsLength,1);dnsLength+=2;
             set16(dns+4,2);
@@ -103,7 +109,8 @@ int main(int argc,char **argv) {
         assert(token==0&&!consumed&&snapshot().value[TxPending]==0&&freed==2);
     } else if(which==2) {
         const QueryKind kinds[]={QueryKind::Qu,QueryKind::Legacy,QueryKind::Other,
-            QueryKind::Unknown,QueryKind::Qr,QueryKind::Mixed,QueryKind::WrongGroup,
+            QueryKind::Unknown,QueryKind::UnknownService,QueryKind::Qr,
+            QueryKind::Mixed,QueryKind::WrongGroup,
             QueryKind::NonIN,QueryKind::WrongMapping,QueryKind::WrongSource,
             QueryKind::WrongPort};
         uint16_t expectedSequence=0;
@@ -188,16 +195,19 @@ int main(int argc,char **argv) {
         assert(!nextDiscoveryTx(8,saved,&token,&consumed));
         assert(!consumed&&snapshot().value[TxPending]==0);
     } else if(which==11) {
-        enqueue(QueryKind::Other,false,true);enqueue(QueryKind::Qm,false,true);
-        DiscoveryTxSnapshot out{17,18,19,20,true};
-        assert(!peekDiscoveryTx(7,&out)&&out.token==17);
+        enqueue(QueryKind::Other,false,true);
+        enqueue(QueryKind::Qm,false,true);
+        DiscoveryTxSnapshot out{};
+        assert(peekDiscoveryTx(7,&out)&&out.token==2);
         uint64_t token=0;bool consumed=false;
-        assert(!nextDiscoveryTx(2,out,&token,&consumed));
-        assert(!consumed&&snapshot().value[TxPending]==2);
-        mbuf_t first=nextTx(2,&token);assert(first);finish(token,first);
-        DiscoveryTxSnapshot second=peek();assert(second.token==2);
-        mbuf_t encoded=nextDiscoveryTx(3,second,&token,&consumed);
-        assert(encoded&&consumed);finish(token,encoded);
+        mbuf_t encoded=nextDiscoveryTx(2,out,&token,&consumed);
+        assert(encoded&&consumed&&token==2&&decodeSequence(encoded)==0);
+        finish(token,encoded);
+        assert(snapshot().value[TxPending]==1);
+        mbuf_t first=nextTx(3,&token);
+        assert(first&&token==1&&decodeSequence(first)==1);
+        finish(token,first);
+        assert(snapshot().value[TxPending]==0);
     } else if(which==12) {
         mbuf_t oldPacket=enqueue(QueryKind::Qm,false,true);assert(oldPacket);
         test064PauseAfterUnlock.store(true,std::memory_order_release);

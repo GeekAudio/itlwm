@@ -9,7 +9,9 @@ text = (root / 'itlwm/hal_iwx/ItlIwx.cpp').read_text()
 header = (root / 'itlwm/hal_iwx/ItlIwx.hpp').read_text()
 assert 'device_timestamp = le32toh(desc->v3.gp2_on_air_rise);' in text
 assert 'device_timestamp = le32toh(desc->v1.gp2_on_air_rise);' in text
-assert 'device_timestamp, true);' in text
+# Keep the production LE decode and reorder-save/restore contracts covered;
+# the extracted iwx_rx_frame fixture below verifies the decoded GP2 value is
+# forwarded to the side tap.
 assert 'entries[index].device_timestamp = device_timestamp;' in text
 assert 'device_timestamp = entries[index].device_timestamp;' in text
 start = text.index('void ItlIwx::\niwx_rx_frame(')
@@ -19,6 +21,11 @@ while depth:
     depth += (text[end] == '{') - (text[end] == '}')
     end += 1
 method = text[start:end]
+assert ('device_timestamp, true, rxMacPhyIndex,\n'
+        '                      rxMacPhyIndexPresent);' in method)
+assert 'tahoe_awdl_rx_stage_counters_.record(' in method
+assert 'tahoe_awdl_rx_stage_counters_.recordData(' in method
+assert 'NativeAwdlData::isAwdlDataCandidate(' in method
 counter_start = header.index('struct TahoeAwdlRxStageCounters {')
 counter_end = header.index('\n};\n#endif', counter_start) + len('\n};')
 counter_struct = header[counter_start:counter_end]
@@ -26,6 +33,7 @@ fixture = r'''
 #include <cassert>
 #include <cstdint>
 #include <cstddef>
+#include <cstdlib>
 #include "native/awdl_data_frame.hpp"
 #define AIRPORT_TAHOE 1
 #define NBPFILTER 0
@@ -67,18 +75,25 @@ struct ItlIwx {
     unsigned taps=0; bool sawProtected=false,decapFails=false,tapDrops=false;
     uint16_t sawChannel=0;
     uint32_t sawGp2=0; bool sawGp2Present=false;
+    uint32_t sawRxMacPhyIndex=0; bool sawRxMacPhyIndexPresent=false;
     int iwx_ccmp_decap(iwx_softc*,mbuf_t m,ieee80211_node*,ieee80211_rxinfo*) {
         if(decapFails)return 1;
         m->bytes[1]&=~IEEE80211_FC1_PROTECTED;
         return 0;
     }
-    void tahoeP2pTapAction(iwx_softc*,const uint8_t*,size_t length,bool protectedFrame,uint16_t channel,uint32_t gp2,bool gp2Present) {
+    void tahoeP2pTapAction(iwx_softc*,const uint8_t*,size_t length,
+                           bool protectedFrame,uint16_t channel,uint32_t gp2,
+                           bool gp2Present,uint32_t rxMacPhyIndex,
+                           bool rxMacPhyIndexPresent) {
         assert(inputs==0&&length==64); ++taps; sawProtected=protectedFrame;sawChannel=channel;
         sawGp2=gp2;sawGp2Present=gp2Present;
+        sawRxMacPhyIndex=rxMacPhyIndex;
+        sawRxMacPhyIndexPresent=rxMacPhyIndexPresent;
         if(tapDrops)return; // A rejected/full side queue never owns the packet.
     }
     void iwx_rx_frame(iwx_softc*,mbuf_t,int,uint32_t,int,int,uint32_t,
-                      ieee80211_rxinfo*,mbuf_list*,uint32_t=0,uint8_t=0);
+                      ieee80211_rxinfo*,mbuf_list*,uint32_t=0,uint8_t=0,
+                      uint32_t=0,bool=false);
 };
 '''
 tests = r'''
@@ -88,7 +103,16 @@ int main() {
         inputs=releases=0;observedInput=nullptr;
         if(test==1||test==2) { packet.bytes[1]=IEEE80211_FC1_PROTECTED;info.rxi_flags=IEEE80211_RXI_HWDEC; }
         driver.decapFails=test==2;driver.tapDrops=test==4;
-        driver.iwx_rx_frame(&sc,&packet,test==3?-1:36,0,0,0,0x78563412,&info,&list);
+        const uint32_t ownerGeneration=test==0?0:77;
+        const uint8_t frameKind=test==3?
+            TahoeAwdlRxStageCounters::kMif:TahoeAwdlRxStageCounters::kPsf;
+        const uint32_t macPhyIndex=17+test;
+        const bool macPhyIndexPresent=test!=3;
+        if(ownerGeneration)
+            driver.tahoe_awdl_rx_stage_counters_.beginOwner(ownerGeneration);
+        driver.iwx_rx_frame(&sc,&packet,test==3?-1:36,0,0,0,0x78563412,
+            &info,&list,ownerGeneration,frameKind,macPhyIndex,
+            macPhyIndexPresent);
         if(test==2) {
             assert(driver.taps==0&&inputs==0&&packet.freed);
             assert(sc.sc_ic.stats.inputErrors==1);
@@ -97,7 +121,13 @@ int main() {
             assert(driver.sawProtected==(test==1));
             assert(driver.sawChannel==(test==3?6:36));
             assert(driver.sawGp2==0x78563412&&driver.sawGp2Present);
+            assert(driver.sawRxMacPhyIndex==macPhyIndex);
+            assert(driver.sawRxMacPhyIndexPresent==macPhyIndexPresent);
         }
+        const auto rxStages=driver.tahoe_awdl_rx_stage_counters_.snapshot();
+        const uint32_t expectedTapCount=ownerGeneration&&test!=2?1:0;
+        assert(rxStages.counts[TahoeAwdlRxStageCounters::kTap]
+                                [unsigned(frameKind)-1]==expectedTapCount);
         assert(releases==1);
     }
 }
