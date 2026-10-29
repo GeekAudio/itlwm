@@ -342,15 +342,18 @@
     passed: "success", regressed: "warning", partial: "working",
     not_covered: "pending", not_implemented: "pending"
   };
-  function acceptanceCounts(checks) {
+  function acceptanceCounts(checks, scope = "current") {
     const total = checks.length;
-    const passed = checks.filter(check => check.current_result === "passed").length;
+    const passed = scope === "history"
+      ? checks.filter(check => check.history_verified === true).length
+      : checks.filter(check => check.current_result === "passed").length;
     const percent = total ? Math.round(passed / total * 1000) / 10 : 0;
     return { total, passed, percent };
   }
-  function acceptanceBar(checks, label) {
-    const count = acceptanceCounts(checks);
-    const block = node("div", "acceptance-progress");
+  function acceptanceBar(checks, label, scope = "current") {
+    const count = acceptanceCounts(checks, scope);
+    const historical = scope === "history";
+    const block = node("div", `acceptance-progress ${historical ? "history-progress" : "current-progress"}`);
     const heading = node("div", "progress-heading");
     heading.append(node("span", "progress-caption", label),
       node("strong", "progress-value", `${count.percent}%`));
@@ -360,11 +363,16 @@
     track.setAttribute("aria-valuemin", "0");
     track.setAttribute("aria-valuemax", "100");
     track.setAttribute("aria-valuenow", String(count.percent));
-    track.setAttribute("aria-valuetext", `本轮实测通过 ${count.passed} / ${count.total} 项，${count.percent}%`);
+    track.setAttribute("aria-valuetext", historical
+      ? `历史曾验收 ${count.passed} / ${count.total} 项，历史证据覆盖 ${count.percent}%，不代表当前版本已复验`
+      : `${label} ${count.passed} / ${count.total} 项，${count.percent}%`);
     const fill = node("span", "progress-fill");
     fill.style.width = `${count.percent}%`;
     track.append(fill);
-    block.append(heading, track, node("div", "progress-count", `本轮实测通过 ${count.passed} / ${count.total} 项`));
+    const countText = historical
+      ? `历史曾验收 ${count.passed} / ${count.total} 项 · 仅表示历史证据覆盖`
+      : `本轮复验通过 ${count.passed} / ${count.total} 项`;
+    block.append(heading, track, node("div", "progress-count", countText));
     return block;
   }
   function renderProgress() {
@@ -372,9 +380,20 @@
     if (!target) return;
     const checks = (data?.milestones || []).flatMap(m => m.checkpoints || []);
     if (!checks.length) return;
-    target.append(node("div", "section-kicker", "CURRENT VALIDATION"),
-      acceptanceBar(checks, `本轮实测通过 ${acceptanceCounts(checks).passed} / ${checks.length}`));
-    target.append(node("p", "progress-explanation", "只统计当前这轮已通过的验收项；部分通过、未覆盖和未通过分别列出。"));
+    const currentCounts = acceptanceCounts(checks);
+    const history = acceptanceCounts(checks, "history");
+    target.append(node("div", "section-kicker", "EVIDENCE COVERAGE · CURRENT RETEST"));
+    const comparison = node("div", "progress-comparison");
+    comparison.append(
+      acceptanceBar(checks, "历史证据覆盖 · 历史曾验收", "history"),
+      acceptanceBar(checks, `${String(data?.runningCandidate || "本轮").split("-").pop()} · 本轮复验通过`)
+    );
+    target.append(comparison);
+    target.append(node("p", "progress-explanation", `历史曾验收 ${history.passed}/${history.total} 仅表示保留了历史证据，不代表当前版本复验，也不是项目完成率；本轮复验 ${currentCounts.passed}/${currentCounts.total} 只统计当前运行版本通过项。部分通过、未覆盖和未通过分别列出，未覆盖不代表失败。`));
+    const sequence = node("div", "progress-sequence");
+    sequence.append(node("span", "progress-sequence-label", "功能依赖顺序"),
+      node("span", "progress-sequence-flow", "Wi-Fi / 资源 → 控制与时序 → 数据收发 → IPv6 / 服务发现 → 文件传输"));
+    target.append(sequence);
     const current = node("div", "current-result-counts");
     current.append(node("span", "current-result-label", data?.validationLabel || `${data.runningCandidate} 本轮`));
     const countFor = keys => checks.filter(check => keys.includes(check.current_result)).length;
@@ -383,6 +402,179 @@
     current.append(chip(`本轮未通过 ${countFor(["regressed"])} 项`, verdictTones.regressed));
     current.append(chip(`未覆盖 ${countFor(["not_covered", "not_implemented"])} 项`, verdictTones.not_covered));
     target.append(current);
+  }
+
+  function renderAcceptanceMatrix() {
+    const target = $("#acceptance-matrix");
+    const milestones = [...(data?.milestones || [])].sort((a, b) => a.stage - b.stage);
+    const checks = milestones.flatMap(item => item.checkpoints || []);
+    if (!target || milestones.length !== 8 || checks.length !== 40) return;
+
+    let mode = "current";
+    let selected = null;
+    const heading = node("div", "matrix-heading");
+    const titleCopy = node("div", "matrix-title-copy");
+    titleCopy.append(node("div", "section-kicker", "FIXED ACCEPTANCE CHECKLIST"));
+    const title = node("h2", "", `40 项固定验收 · ${data.runningCandidate || "当前版本"} 本轮结果`);
+    titleCopy.append(title, node("p", "", "按 8 个阶段查看 40 项验收。点选方格可查看证据和待补条件。"));
+    const switcher = node("div", "matrix-switcher");
+    switcher.setAttribute("role", "group");
+    switcher.setAttribute("aria-label", "验收结果范围");
+    const currentButton = node("button", "matrix-mode is-selected");
+    currentButton.type = "button";
+    currentButton.textContent = `${data.runningCandidate || "本轮"} 本轮`;
+    currentButton.setAttribute("aria-pressed", "true");
+    const historyButton = node("button", "matrix-mode");
+    historyButton.type = "button";
+    historyButton.textContent = "历史曾验收";
+    historyButton.setAttribute("aria-pressed", "false");
+    switcher.append(currentButton, historyButton);
+    heading.append(titleCopy, switcher);
+
+    const summary = node("p", "matrix-summary");
+    summary.setAttribute("aria-live", "polite");
+    const legend = node("div", "matrix-legend");
+    const scroll = node("div", "matrix-scroll");
+    const table = node("table", "acceptance-matrix");
+    table.setAttribute("aria-label", "8 阶段 40 项固定验收表");
+    const thead = node("thead");
+    const headerRow = node("tr");
+    const firstHeader = node("th", "matrix-stage-head", "阶段");
+    firstHeader.scope = "col";
+    headerRow.append(firstHeader);
+    for (let index = 1; index <= 5; index++) {
+      const th = node("th", "matrix-col-head", `验收 ${index}`);
+      th.scope = "col";
+      headerRow.append(th);
+    }
+    thead.append(headerRow);
+    const tbody = node("tbody");
+    const detail = node("section", "matrix-detail");
+    detail.id = "acceptance-matrix-detail";
+    detail.hidden = true;
+    detail.setAttribute("aria-live", "polite");
+
+    const clearDetail = () => {
+      selected = null;
+      detail.hidden = true;
+      detail.replaceChildren();
+      table.querySelectorAll(".matrix-cell[aria-expanded='true']").forEach(button => button.setAttribute("aria-expanded", "false"));
+    };
+
+    const showDetail = (check, stage, button) => {
+      const key = `${stage.stage}:${check.id}`;
+      if (selected === key) {
+        clearDetail();
+        return;
+      }
+      table.querySelectorAll(".matrix-cell[aria-expanded='true']").forEach(item => item.setAttribute("aria-expanded", "false"));
+      selected = key;
+      button.setAttribute("aria-expanded", "true");
+      detail.hidden = false;
+      const currentStatus = verdictLabels[check.current_result] || "未覆盖";
+      detail.replaceChildren(
+        node("h3", "", check.name || "验收项"),
+        node("p", "matrix-detail-label", `${stage.name} · ${mode === "current" ? currentStatus : (check.history_verified === true ? "历史曾验收" : "尚无完整验收记录")}`)
+      );
+      if (mode === "current") {
+        detail.append(node("p", "", check.current_detail || "本轮证据待补充。"));
+        if (check.history_verified === true) {
+          detail.append(node("p", "matrix-detail-history", `历史曾验收：${check.verified_in || "历史版本记录"}。这不代表当前版本已复验。`));
+        }
+      } else {
+        detail.append(node("p", "", check.history_verified === true
+          ? `曾通过记录：${check.verified_in || "历史版本，详情待补充。"}`
+          : "尚无完整历史验收记录。"));
+        detail.append(node("p", "matrix-detail-current", `${data.runningCandidate || "本轮"} 当前结果：${currentStatus}。${check.current_detail || "本轮证据待补充。"}`));
+      }
+    };
+
+    const updateSummary = () => {
+      const counts = { passed: 0, partial: 0, regressed: 0, uncovered: 0 };
+      for (const check of checks) {
+        if (mode === "history") {
+          if (check.history_verified === true) counts.passed++;
+          else counts.uncovered++;
+        } else if (check.current_result === "passed") counts.passed++;
+        else if (check.current_result === "partial") counts.partial++;
+        else if (check.current_result === "regressed") counts.regressed++;
+        else counts.uncovered++;
+      }
+      summary.textContent = mode === "history"
+        ? `历史曾验收 ${counts.passed} · 尚无完整验收记录 ${counts.uncovered}（不代表当前版本已通过）`
+        : `${data.runningCandidate || "本轮"}：通过 ${counts.passed} · 部分通过 ${counts.partial} · 未通过 ${counts.regressed} · 未覆盖 ${counts.uncovered}（未覆盖不代表失败）`;
+      const legendItems = mode === "history"
+        ? [["passed", "✓", "历史曾验收"], ["not_covered", "", "尚无完整验收记录"]]
+        : [["passed", "✓", "本轮通过"], ["partial", "−", "部分通过"], ["regressed", "!", "本轮未通过"], ["not_covered", "", "未覆盖（不是失败）"]];
+      legend.replaceChildren(...legendItems.map(([status, symbol, label]) => {
+        const item = node("span", "matrix-legend-item");
+        const swatch = node("span", `matrix-swatch matrix-${status}`, symbol);
+        swatch.setAttribute("aria-hidden", "true");
+        item.append(swatch, node("span", "", label));
+        return item;
+      }));
+    };
+
+    const drawRows = () => {
+      clearDetail();
+      tbody.replaceChildren();
+      for (const stage of milestones) {
+        const row = node("tr");
+        const rowHead = node("th", "matrix-row-head", stage.name || `阶段 ${stage.stage}`);
+        rowHead.scope = "row";
+        row.append(rowHead);
+        for (const check of stage.checkpoints || []) {
+          const verdict = mode === "history"
+            ? (check.history_verified === true ? "passed" : "not_covered")
+            : check.current_result;
+          const statusText = mode === "history"
+            ? (check.history_verified === true ? `历史曾验收：${check.verified_in || "版本详情未记录"}` : "尚无完整历史验收记录")
+            : (verdictLabels[verdict] || "未覆盖");
+          const button = node("button", `matrix-cell matrix-${verdict || "not_covered"}`);
+          button.type = "button";
+          button.setAttribute("aria-controls", detail.id);
+          button.setAttribute("aria-expanded", "false");
+          button.setAttribute("aria-label", `${stage.name}，${check.name}；${statusText}`);
+          button.title = `${check.name}：${statusText}`;
+          const symbol = verdict === "passed" ? "✓" : verdict === "partial" ? "−" : verdict === "regressed" ? "!" : "";
+          if (symbol) {
+            const icon = node("span", "matrix-symbol", symbol);
+            icon.setAttribute("aria-hidden", "true");
+            button.append(icon);
+          }
+          button.addEventListener("click", () => showDetail(check, stage, button));
+          const cell = node("td", "matrix-cell-wrap");
+          cell.append(button);
+          row.append(cell);
+        }
+        tbody.append(row);
+      }
+      table.replaceChildren(thead, tbody);
+      updateSummary();
+    };
+
+    currentButton.addEventListener("click", () => {
+      mode = "current";
+      currentButton.classList.add("is-selected");
+      historyButton.classList.remove("is-selected");
+      currentButton.setAttribute("aria-pressed", "true");
+      historyButton.setAttribute("aria-pressed", "false");
+      title.textContent = `40 项固定验收 · ${data.runningCandidate || "当前版本"} 本轮结果`;
+      drawRows();
+    });
+    historyButton.addEventListener("click", () => {
+      mode = "history";
+      historyButton.classList.add("is-selected");
+      currentButton.classList.remove("is-selected");
+      historyButton.setAttribute("aria-pressed", "true");
+      currentButton.setAttribute("aria-pressed", "false");
+      title.textContent = "40 项固定验收 · 历史曾验收";
+      drawRows();
+    });
+
+    target.replaceChildren(heading, summary, legend, scroll, detail);
+    scroll.append(table);
+    drawRows();
   }
 
   function renderMilestones() {
@@ -688,6 +880,7 @@
   renderWorkflow();
   renderTimeline();
   renderProgress();
+  renderAcceptanceMatrix();
   renderMilestones();
   installMilestoneControls();
   const recordEntries = getRecordEntries();
