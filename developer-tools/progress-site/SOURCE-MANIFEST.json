@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "8e6963275b6ed2ce947ca2e0f1165ac8798cc7a29be80827be68b6d634d9c963"
+      "sha256": "27a0390c25917d3d35b88eac54139abc30fb4c41f36b832258e32e50801d848f"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "1e42f3956a9edc8bc5851419d5ee1785fbeeddcfa6058727b88e20e4c551f439"
+      "sha256": "13f3d915034344e0146606ae3721d2e84120b7bdca0e6bf0110e03dc636255b2"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -30,7 +30,7 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "11f148f813d1986e49ad02624f319fb4ff2638337ad71fab732dc4dcc7955f65"
+      "sha256": "7687ab01d74f97cdda1c23bb39b0d528d3cc902768229121d94d18fb2fbad0b9"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-30T04:03:13+08:00",
-  "runtime_scope": "Test080 loaded-boot runtime: Wi-Fi pre/post short windows passed; RX149 Prepare EOPNOTSUPP before Session Protection submission, no driver-receive/AirDrop proof."
+  "updated_at": "2026-10-30T04:44:45+08:00",
+  "runtime_scope": "Test080 is current runtime evidence; Test081 deployed pending reboot. Prepare trace/known-safe cleanup offline tests do not prove driver149 reception or AirDrop."
 }

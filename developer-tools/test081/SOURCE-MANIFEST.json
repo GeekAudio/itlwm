@@ -1,0 +1,97 @@
+{
+  "candidate": "25G332-Test081",
+  "created_at": "2026-10-30T04:42:43.485975+08:00",
+  "files": [
+    {
+      "role": "source",
+      "size_bytes": 47342,
+      "snapshot_path": "capture_test081_receive149_once.py",
+      "snapshot_sha256": "44707e8d49691f0b5f3e2f66f3e08c1659cdcbf00011b09c7d329ac37dba767a",
+      "source_relative_path": "IntelWirelessNative/capture_test081_receive149_once.py",
+      "source_sha256": "44707e8d49691f0b5f3e2f66f3e08c1659cdcbf00011b09c7d329ac37dba767a"
+    },
+    {
+      "role": "source",
+      "size_bytes": 5242,
+      "snapshot_path": "arm_p2p_rx149_test081.swift",
+      "snapshot_sha256": "37babcbf1c020eb14da35939c9bd6ec47be80e9bb53c3aba16c8f21defc3ded6",
+      "source_relative_path": "IntelWirelessNative/arm_p2p_rx149_test081.swift",
+      "source_sha256": "37babcbf1c020eb14da35939c9bd6ec47be80e9bb53c3aba16c8f21defc3ded6"
+    },
+    {
+      "role": "source",
+      "size_bytes": 20447,
+      "snapshot_path": "tools/run_test081_router_observation_once.py",
+      "snapshot_sha256": "dd42f1f745d62ef87dc38724b4960a313c65d51e70184293c219ba066eb5e3cc",
+      "source_relative_path": "IntelWirelessNative/tools/run_test081_router_observation_once.py",
+      "source_sha256": "dd42f1f745d62ef87dc38724b4960a313c65d51e70184293c219ba066eb5e3cc"
+    },
+    {
+      "role": "test",
+      "size_bytes": 16291,
+      "snapshot_path": "tools/test_test081_receive149_once.py",
+      "snapshot_sha256": "ed3d93d476816ea4fe0dce51814d40d371560017ff24cf680dae3ef91dabab17",
+      "source_relative_path": "IntelWirelessNative/tools/test_test081_receive149_once.py",
+      "source_sha256": "ed3d93d476816ea4fe0dce51814d40d371560017ff24cf680dae3ef91dabab17"
+    },
+    {
+      "role": "test",
+      "size_bytes": 5275,
+      "snapshot_path": "tools/test_run_test081_router_observation_once.py",
+      "snapshot_sha256": "846c9be2972387a81c6df151cf761239f6a3c54c6bc959213d573d77f72e6646",
+      "source_relative_path": "IntelWirelessNative/tools/test_run_test081_router_observation_once.py",
+      "source_sha256": "846c9be2972387a81c6df151cf761239f6a3c54c6bc959213d573d77f72e6646"
+    },
+    {
+      "role": "python_import_dependency",
+      "size_bytes": 174367,
+      "snapshot_path": "capture_test076_resident_data_once.py",
+      "snapshot_sha256": "ec718f504e2b0d092b69798e86bc55a458c6b9c4ce4925d5f3551a9d9862fa2b",
+      "source_relative_path": "IntelWirelessNative/capture_test076_resident_data_once.py",
+      "source_sha256": "ec718f504e2b0d092b69798e86bc55a458c6b9c4ce4925d5f3551a9d9862fa2b"
+    },
+    {
+      "role": "python_import_dependency",
+      "size_bytes": 26919,
+      "snapshot_path": "probe_p2p_result.py",
+      "snapshot_sha256": "7d41e4c5d236325e4cfe235717048030ab80d8f97392ac37307c9bf82603a732",
+      "source_relative_path": "IntelWirelessNative/probe_p2p_result.py",
+      "source_sha256": "7d41e4c5d236325e4cfe235717048030ab80d8f97392ac37307c9bf82603a732"
+    },
+    {
+      "role": "python_import_dependency",
+      "size_bytes": 5684,
+      "snapshot_path": "probe_wifi_rate.py",
+      "snapshot_sha256": "6e802a71ebeb5b9010ae0e0f7f0edd6f2782c51e50d8a5d566492c996efd9ca0",
+      "source_relative_path": "IntelWirelessNative/probe_wifi_rate.py",
+      "source_sha256": "6e802a71ebeb5b9010ae0e0f7f0edd6f2782c51e50d8a5d566492c996efd9ca0"
+    },
+    {
+      "role": "python_import_dependency",
+      "size_bytes": 10477,
+      "snapshot_path": "tools/awdl_ioreg_u32.py",
+      "snapshot_sha256": "4a4fef3e2ac9189ab53fe93a39a5f183c6081a1b10c69a5901d06b495f1d3ff3",
+      "source_relative_path": "IntelWirelessNative/tools/awdl_ioreg_u32.py",
+      "source_sha256": "4a4fef3e2ac9189ab53fe93a39a5f183c6081a1b10c69a5901d06b495f1d3ff3"
+    },
+    {
+      "role": "runtime_subprocess_dependency",
+      "size_bytes": 54243,
+      "snapshot_path": "tools/openwrt_capture_once.py",
+      "snapshot_sha256": "7c7b750604acf3c18372600084bcf6a899f3b8c2e0c364ebb6a1129d77dbeac2",
+      "source_relative_path": "IntelWirelessNative/tools/openwrt_capture_once.py",
+      "source_sha256": "7c7b750604acf3c18372600084bcf6a899f3b8c2e0c364ebb6a1129d77dbeac2"
+    }
+  ],
+  "excluded": [
+    "private build and next-boot metadata",
+    "build outputs and binaries",
+    "logs and crash reports",
+    "PCAP/PCAPNG captures",
+    "research/runtime evidence and private fixtures"
+  ],
+  "notes": [
+    "The checked-in tests contain synthetic fixture identities only, not live network or phone data.",
+    "Runtime requires separately verified private build/metadata and fresh native administrator/phone/receiver gates."
+  ]
+}
