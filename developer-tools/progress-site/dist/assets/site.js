@@ -5,6 +5,8 @@
   const sourceRecords = window.TEST_RECORDS || [];
   const $ = (selector, root = document) => root.querySelector(selector);
   let activeFilter = "all";
+  const referenceRuntime = String(data?.deploymentState || "").startsWith("brcm_reference_runtime");
+  const evidenceScope = referenceRuntime ? data?.evidenceScopeLabel : null;
 
   function node(tag, className, value) {
     const element = document.createElement(tag);
@@ -233,7 +235,7 @@
     const deployed = Boolean(next && /deployed.*waiting[_-]reboot|deployed_waiting_reboot/i.test(data?.deploymentState || ""));
     return {
       deployed,
-      label: deployed ? "已部署候选" : "下一候选",
+      label: referenceRuntime ? (data?.nextCandidateRole || "当前博通对照") : (deployed ? "已部署候选" : "下一候选"),
       state: data?.nextCandidateState || (deployed ? "待重启验收" : "候选待验收"),
       tone: deployed ? "pending" : "working",
       subtitle: data?.nextCandidateSummary || (deployed ? "候选已部署，等待下一启动验收。" : "候选验收状态见本轮记录。")
@@ -285,7 +287,7 @@
     const updated = $("#updated-at");
     const deployment = $("#deployment-label");
     const version = $("#current-version");
-    if (version) version.textContent = data?.runningCandidate || "当前版本待核对";
+    if (version) version.textContent = (referenceRuntime && data?.currentRuntimeLabel) || data?.runningCandidate || "当前版本待核对";
     if (data?.updatedAt) {
       const date = new Date(data.updatedAt);
       updated.dateTime = data.updatedAt;
@@ -311,7 +313,7 @@
       ? "本轮诊断完成"
       : currentRecord?.state || "运行状态待核验";
     const currentTop = node("div", "version-card-top");
-    currentTop.append(node("span", "", "当前运行"), node("span", `version-chip status-chip tone-${statusTone(currentState)}`, currentState));
+    currentTop.append(node("span", "", referenceRuntime ? (data?.currentRecordRole || "最近Intel实测") : "当前运行"), node("span", `version-chip status-chip tone-${statusTone(currentState)}`, currentState));
     current.append(currentTop);
     current.append(node("h2", "version-id", data?.runningCandidate || "版本待补充"));
     const currentSummary = data?.deploymentState === "test069_runtime_psf_anchor_missing"
@@ -386,10 +388,12 @@
     const comparison = node("div", "progress-comparison");
     comparison.append(
       acceptanceBar(checks, "历史证据覆盖 · 历史曾验收", "history"),
-      acceptanceBar(checks, `${String(data?.runningCandidate || "本轮").split("-").pop()} · 本轮复验通过`)
+      acceptanceBar(checks, evidenceScope || `${String(data?.runningCandidate || "本轮").split("-").pop()} · 本轮复验通过`)
     );
     target.append(comparison);
-    target.append(node("p", "progress-explanation", `历史曾验收 ${history.passed}/${history.total} 仅表示保留了历史证据，不代表当前版本复验，也不是项目完成率；本轮复验 ${currentCounts.passed}/${currentCounts.total} 只统计当前运行版本通过项。部分通过、未覆盖和未通过分别列出，未覆盖不代表失败。`));
+    target.append(node("p", "progress-explanation", referenceRuntime
+      ? `当前使用博通采集对照；40项表保留最近一次Intel Test078实测 ${currentCounts.passed}/${currentCounts.total}，本次博通成功不计入Intel通过项。历史覆盖也不代表项目完成率。`
+      : `历史曾验收 ${history.passed}/${history.total} 仅表示保留了历史证据，不代表当前版本复验，也不是项目完成率；本轮复验 ${currentCounts.passed}/${currentCounts.total} 只统计当前运行版本通过项。部分通过、未覆盖和未通过分别列出，未覆盖不代表失败。`));
     const sequence = node("div", "progress-sequence");
     sequence.append(node("span", "progress-sequence-label", "功能依赖顺序"),
       node("span", "progress-sequence-flow", "Wi-Fi / 资源 → 控制与时序 → 数据收发 → IPv6 / 服务发现 → 文件传输"));
@@ -415,14 +419,14 @@
     const heading = node("div", "matrix-heading");
     const titleCopy = node("div", "matrix-title-copy");
     titleCopy.append(node("div", "section-kicker", "FIXED ACCEPTANCE CHECKLIST"));
-    const title = node("h2", "", `40 项固定验收 · ${data.runningCandidate || "当前版本"} 本轮结果`);
+    const title = node("h2", "", `40 项固定验收 · ${evidenceScope || `${data.runningCandidate || "当前版本"} 本轮结果`}`);
     titleCopy.append(title, node("p", "", "按 8 个阶段查看 40 项验收。点选方格可查看证据和待补条件。"));
     const switcher = node("div", "matrix-switcher");
     switcher.setAttribute("role", "group");
     switcher.setAttribute("aria-label", "验收结果范围");
     const currentButton = node("button", "matrix-mode is-selected");
     currentButton.type = "button";
-    currentButton.textContent = `${data.runningCandidate || "本轮"} 本轮`;
+    currentButton.textContent = evidenceScope || `${data.runningCandidate || "本轮"} 本轮`;
     currentButton.setAttribute("aria-pressed", "true");
     const historyButton = node("button", "matrix-mode");
     historyButton.type = "button";
@@ -559,7 +563,7 @@
       historyButton.classList.remove("is-selected");
       currentButton.setAttribute("aria-pressed", "true");
       historyButton.setAttribute("aria-pressed", "false");
-      title.textContent = `40 项固定验收 · ${data.runningCandidate || "当前版本"} 本轮结果`;
+      title.textContent = `40 项固定验收 · ${evidenceScope || `${data.runningCandidate || "当前版本"} 本轮结果`}`;
       drawRows();
     });
     historyButton.addEventListener("click", () => {
@@ -703,6 +707,18 @@
   }
 
   function candidatePlaceholder(version, role) {
+    if (role === "next" && referenceRuntime) {
+      const state = nextRecordState();
+      const workflow = currentWorkflow();
+      return {
+        id: "record-broadcom-reference", version, label: state.label,
+        state: state.state, tone: state.tone, date: "本次博通实测",
+        summary: state.subtitle,
+        evidence: [workflow?.summary || "本次对照详情见流程摘要。", "博通结果不计入Intel的40项验收。"],
+        blockers: ["即时热点加入失败尚未在本次复现，间歇稳定性未通过。", workflow?.alert?.detail || "异常仍在定位。"],
+        next: [workflow?.nextAction || "继续对照日志。"]
+      };
+    }
     if (role === "next") {
       const state = nextRecordState();
       return {
@@ -737,7 +753,7 @@
     if (!found) return candidatePlaceholder(version, role);
     const record = { ...found };
     if (role === "current") {
-      record.label = "本轮运行记录";
+      record.label = referenceRuntime ? (data?.currentRecordRole || "最近Intel实测") : "本轮运行记录";
       record.tone = record.tone || statusTone(record.state);
     } else {
       const state = nextRecordState();

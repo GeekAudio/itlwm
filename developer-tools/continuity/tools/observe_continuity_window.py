@@ -249,7 +249,7 @@ def _start_log_stream(directory: Path):
     path = directory / "continuity.log.jsonl"
     fd = _new_private_file(path)
     output = os.fdopen(fd, "wb")
-    command = ["/usr/bin/log", "stream", "--style", "json", "--level", "info", "--predicate", LOG_PREDICATE]
+    command = ["/usr/bin/log", "stream", "--style", "ndjson", "--level", "info", "--predicate", LOG_PREDICATE]
     try:
         proc = subprocess.Popen(command, stdout=output, stderr=output, start_new_session=True)
     except OSError as exc:
@@ -260,6 +260,7 @@ def _start_log_stream(directory: Path):
     return proc, output, {
         "status": "running", "exit_code": None, "artifact": path.name,
         "process_filter": list(LOG_PROCESSES),
+        "format": "ndjson with possible command diagnostics; validate each record",
     }
 
 

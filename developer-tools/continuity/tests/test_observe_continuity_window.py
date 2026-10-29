@@ -103,6 +103,7 @@ class ObserveContinuityWindowTests(unittest.TestCase):
             command = popen.call_args.args[0]
             self.assertIn("info", command)
             self.assertIn("--level", command)
+            self.assertEqual(command[command.index("--style") + 1], "ndjson")
             output.close()
 
     def test_early_log_exit_is_not_reported_as_full_window(self):

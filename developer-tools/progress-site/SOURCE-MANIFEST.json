@@ -10,17 +10,17 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "362d0792341522623c99ce751603130030dbe3f2060ff9a498eeb5d67f5776a8"
+      "sha256": "5079501ba14147716d85ed00122b46de9266e94bd5cc21f777c2fb26d7beb3cd"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "92639693aa7d0290b1fe99c91bd4d609f49e8e697920bda14a4c032862d74cf2"
+      "sha256": "391eb305ac34f1869fa9933d1c7e141e2377343e9d1e7c3c525280ffaff8e4be"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
       "snapshot_path": "dist/assets/site.js",
-      "sha256": "2043ca6a6450b3b90a7cc97982e03fb49b1e609995030a55442e7d2f9b001ede"
+      "sha256": "db2af24f6b933e1eabc9f4ec0eebd90920ea21249ae164012f2b477759bb5a90"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.css",
@@ -35,7 +35,7 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
       "snapshot_path": "tools/refresh_data.py",
-      "sha256": "4a9e8cf27623d83a9acf580a31bf9f54f56630da3d46a1d260d398ea7b55e727"
+      "sha256": "ea4f078c9af87d625b7e368a3b681fea1f395deebbea14389ca2197acfb20aae"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/publish_github_pages.py",

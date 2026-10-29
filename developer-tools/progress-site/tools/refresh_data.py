@@ -106,7 +106,11 @@ def main() -> None:
     if "validation_label" in raw:
         data["validationLabel"] = safe_summary(raw["validation_label"], "project", "validation_label")
     for source, target in (("next_candidate_state", "nextCandidateState"),
-                           ("next_candidate_summary", "nextCandidateSummary")):
+                           ("next_candidate_summary", "nextCandidateSummary"),
+                           ("current_runtime_label", "currentRuntimeLabel"),
+                           ("current_record_role", "currentRecordRole"),
+                           ("next_candidate_role", "nextCandidateRole"),
+                           ("evidence_scope_label", "evidenceScopeLabel")):
         if source in raw:
             data[target] = safe_summary(raw[source], "project", source)
     if "workflow" in raw:
