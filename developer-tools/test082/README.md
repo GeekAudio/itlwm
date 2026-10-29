@@ -9,3 +9,5 @@ python3 -m unittest discover -s tools -p 'test_*.py'
 ```
 
 Test082 已通过离线构建、签名检查和 21 项工具测试，本目录只保存开发工具源码。快照保留 `NativeMCC` 与 `NativeStaTx` 的数值字段；地址类及其他非数值诊断字段会被过滤。离线测试不代表驱动已加载、无线接收成功或 AirDrop 可用。
+
+本轮 [RUNTIME-NOTE.md](RUNTIME-NOTE.md)
