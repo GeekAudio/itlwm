@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "95258480d1302f952799c1635067f9f6d8e2bb15b87d0718553d028fffde8b04"
+      "sha256": "a1260fa6eb8480bb497c48f3a463e9fc10ea710b0772319ee131eac21f1dbe60"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "362487e73f4b0bb547740d83f1badf281d5533963b876949357d0f48ee1d2e24"
+      "sha256": "d348a97dd8e81ff03f52ffef71560fe7f562c4e81ec73bba871413f24200ef52"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -30,7 +30,7 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "b43accb64d985b9b63d0c455258419e2088aad4a93d7b96bd00ae709e1a54c90"
+      "sha256": "b481e88d26fe6e9a2c70910d3a4e6027ee7bdaad1fd3b93333d19fad86d85250"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-30T00:25:37+08:00",
+  "updated_at": "2026-10-30T03:00:35+08:00",
   "runtime_scope": "Test079 loaded-boot evidence; current validation coverage is not end-to-end AirDrop support."
 }

@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Exercise the production admin-only manual arm boundary without driver IO."""
+"""Exercise production manual-arm dispatch without driver IO.
+
+The RX149 counter/quiescence helper is stubbed here; its source contract and
+helper predicates are covered by test080_rx149_observation.py.
+"""
 from pathlib import Path
 import subprocess,tempfile
 ROOT=Path(__file__).resolve().parents[2]
@@ -9,13 +13,21 @@ def function(path,marker):
   depth+=(text[end]=='{')-(text[end]=='}');end+=1
  return text[start:end]
 methods=[function('AirportItlwm/AirportItlwmV2.cpp','IOReturn AirportItlwm::setProperties('),
+ function('itlwm/hal_iwx/ItlIwxP2PProbe.cpp','static uint32_t manualProbeArmMode('),
+ function('itlwm/hal_iwx/ItlIwxP2PProbe.cpp','static bool rx149ArmModeSelected('),
+ function('itlwm/hal_iwx/ItlIwxP2PProbe.cpp','static bool rx149ObservationOnlyRequested('),
+ function('itlwm/hal_iwx/ItlIwxP2PProbe.cpp','static NativeP2PRx149Observation::ProfileInput rx149ProfileInput('),
+ function('itlwm/hal_iwx/ItlIwxP2PProbe.cpp','static NativeP2PRx149Observation::ProfileStatus rx149ProfileStatus('),
+ function('itlwm/hal_iwx/ItlIwxP2PProbe.cpp','static void publishRx149ProfileState('),
+ function('itlwm/hal_iwx/ItlIwxP2PProbe.cpp','static bool manualProbeGateOpen('),
  function('itlwm/hal_iwx/ItlIwxP2PProbe.cpp','static bool psfObservationProfileEnabled('),
  function('itlwm/hal_iwx/ItlIwxP2PProbe.cpp','static bool mifFollowupProfileEnabled('),
- function('itlwm/hal_iwx/ItlIwxP2PProbe.cpp','IOReturn ItlIwx::nativeP2pArmProbe('),
- function('itlwm/hal_iwx/ItlIwxP2PProbe.cpp','static bool manualProbeGateOpen('),
  function('itlwm/hal_iwx/ItlIwxP2PProbe.cpp','static bool probeEnabled('),
- function('itlwm/hal_iwx/ItlIwxP2PProbe.cpp','static bool txProbeEnabled(')]
+ function('itlwm/hal_iwx/ItlIwxP2PProbe.cpp','static bool txProbeEnabled('),
+ function('itlwm/hal_iwx/ItlIwxP2PProbe.cpp','IOReturn ItlIwx::nativeP2pArmProbe(')]
 shim=r"""
+#define ITL_NATIVE_AWDL_RX149_OBSERVATION_25G332 1
+#include "p2p_rx149_observation.hpp"
 #include <cassert>
 #include <cstdint>
 #include <map>
@@ -25,7 +37,7 @@ shim=r"""
 #include <vector>
 #include <cstdio>
 using IOReturn=int;
-constexpr int kIOReturnSuccess=0,kIOReturnUnsupported=1,kIOReturnBadArgument=2,kIOReturnNotReady=3,kIOReturnBusy=4;
+constexpr int kIOReturnSuccess=0,kIOReturnUnsupported=1,kIOReturnBadArgument=2,kIOReturnNotReady=3,kIOReturnBusy=4,kIOReturnNoMemory=5;
 struct OSObject { virtual ~OSObject()=default; };
 OSObject yes,no;
 OSObject* kOSBooleanTrue=&yes; OSObject* kOSBooleanFalse=&no;
@@ -35,12 +47,15 @@ static int privilegeResult=0;static int privilegeChecks=0;
 static void*current_task(){return reinterpret_cast<void*>(7);}
 constexpr const char*kIOClientPrivilegeAdministrator="root";
 struct IOUserClient {static int clientHasPrivilege(void*p,const char*k){assert(p==current_task());assert(std::string(k)=="root");++privilegeChecks;return privilegeResult;}};
-struct IOEthernetController {OSDictionary props; OSObject*getProperty(const char*k){return props.getObject(k);}};
-struct ItlIwx {uint32_t nativeP2pManualArmRequested_=0;IOEthernetController controller;IOEthernetController*getController(){return &controller;} IOReturn nativeP2pArmProbe();};
+struct IOEthernetController {OSDictionary props; OSObject*getProperty(const char*k){return props.getObject(k);} bool setProperty(const char*,uint32_t,unsigned){return true;}};
+struct ItlIwx {uint32_t nativeP2pManualArmRequested_=0;uint32_t nativeP2pProbeRunAllocationFailed_=0;IOEthernetController controller;IOEthernetController*getController(){return &controller;} IOEthernetController*tahoeP2pController(){return &controller;} IOReturn nativeP2pArmProbe();};
 struct Parent {static int calls;IOReturn setProperties(OSObject*){++calls;return 55;}};int Parent::calls=0;
 #define super Parent
-struct AirportItlwm:Parent {ItlIwx*fHalService=nullptr;IOReturn setProperties(OSObject*);};
+struct AirportItlwm:Parent {ItlIwx*fHalService=nullptr;IOReturn setProperties(OSObject*);OSObject*getProperty(const char*k){return fHalService?fHalService->controller.getProperty(k):nullptr;}};
 static void profile(ItlIwx&h){for(const char*k:{"NativeP2PManualTrigger","NativeP2PProbe","NativeP2PRocProbe","NativeP2PTxProbe"})h.controller.props.data[k]=kOSBooleanTrue;}
+static bool prearmReady=true;static unsigned prearmChecks=0;
+static bool initializeRx149PrearmCounters(ItlIwx*){++prearmChecks;return prearmReady;}
+static void receive149Profile(ItlIwx&h){h.controller.props.data["NativeP2PManualTrigger"]=kOSBooleanTrue;h.controller.props.data["NativeP2PProbe"]=kOSBooleanTrue;h.controller.props.data["NativeP2PRx149ObservationOnly"]=kOSBooleanTrue;}
 """
 tests=r"""
 int main(){
@@ -50,7 +65,7 @@ int main(){
  privilegeResult=99;assert(a.setProperties(&request)==99);assert(h.nativeP2pManualArmRequested_==0);assert(Parent::calls==0);
  privilegeResult=0;request.data["NativeP2PArmOnce"]=kOSBooleanFalse;assert(a.setProperties(&request)==kIOReturnBadArgument);
  request.data["NativeP2PArmOnce"]=kOSBooleanTrue;request.data["extra"]=kOSBooleanTrue;assert(a.setProperties(&request)==kIOReturnBadArgument);request.data.erase("extra");
- for(const char*k:{"NativeP2PManualTrigger","NativeP2PManualArmed","NativeP2PProbe","NativeP2PRocProbe","NativeP2PTxProbe","NativeP2PAwdlPsfObservationOnly","NativeP2PAwdlMifFollowup","NativeP2PGp2Observation"}){OSDictionary bypass;bypass.data[k]=kOSBooleanFalse;assert(a.setProperties(&bypass)==kIOReturnUnsupported);assert(h.nativeP2pManualArmRequested_==0);}
+ for(const char*k:{"NativeP2PManualTrigger","NativeP2PManualArmed","NativeP2PProbe","NativeP2PRocProbe","NativeP2PTxProbe","NativeP2PAwdlPsfObservationOnly","NativeP2PAwdlMifFollowup","NativeP2PGp2Observation","NativeP2PRx149ObservationOnly","NativeP2PRx149ProfileEnabled","NativeP2PRx149Selected","NativeP2PRx149HostTxBlocked","NativeP2PTxProbeEverDoorbelled","NativeP2PAwdlActionFramesSubmitted","NativeP2PAwdlPsfFrameSubmitted","NativeP2PAwdlMifFrameSubmitted","NativeP2PAwdlMifBootstrapSubmitted"}){OSDictionary bypass;bypass.data[k]=kOSBooleanFalse;assert(a.setProperties(&bypass)==kIOReturnUnsupported);assert(h.nativeP2pManualArmRequested_==0);}
  a.fHalService=nullptr;assert(a.setProperties(&request)==kIOReturnNotReady);a.fHalService=&h;
  for(const char*k:{"NativeP2PManualTrigger","NativeP2PProbe","NativeP2PRocProbe","NativeP2PTxProbe"}){h.controller.props.data[k]=kOSBooleanFalse;assert(a.setProperties(&request)==kIOReturnUnsupported);assert(h.nativeP2pManualArmRequested_==0);h.controller.props.data[k]=kOSBooleanTrue;}
  assert(a.setProperties(&request)==kIOReturnSuccess);assert(h.nativeP2pManualArmRequested_==1);assert(probeEnabled(&h,&h.controller)&&txProbeEnabled(&h,&h.controller));
@@ -101,10 +116,59 @@ int main(){
  assert(mifProfile.nativeP2pArmProbe()==kIOReturnSuccess);
  assert(probeEnabled(&mifProfile,&mifProfile.controller));
  assert(txProbeEnabled(&mifProfile,&mifProfile.controller));
+ // A legacy arm alias cannot select the RX149 receive-only profile.
+ ItlIwx rxLegacyAlias;receive149Profile(rxLegacyAlias);
+ AirportItlwm rxLegacyAliasClient;rxLegacyAliasClient.fHalService=&rxLegacyAlias;
+ OSDictionary legacyArm;legacyArm.data["NativeP2PArmOnce"]=kOSBooleanTrue;
+ assert(rxLegacyAliasClient.setProperties(&legacyArm)==kIOReturnUnsupported);
+ assert(rxLegacyAlias.nativeP2pManualArmRequested_==0);
+ assert(!probeEnabled(&rxLegacyAlias,&rxLegacyAlias.controller));
+ assert(!txProbeEnabled(&rxLegacyAlias,&rxLegacyAlias.controller));
+
+ // The RX149 alias selects immutable arm mode 2 only after a valid profile
+ // and the RX prearm callback accepts its real TX-quiescence preflight.
+ ItlIwx rx149;receive149Profile(rx149);
+ AirportItlwm rx149Client;rx149Client.fHalService=&rx149;
+ OSDictionary rxArm;rxArm.data["NativeP2PRx149ArmOnce"]=kOSBooleanTrue;
+ privilegeResult=99;
+ assert(rx149Client.setProperties(&rxArm)==99);
+ assert(rx149.nativeP2pManualArmRequested_==0);
+ privilegeResult=0;
+ rxArm.data["extra"]=kOSBooleanTrue;
+ assert(rx149Client.setProperties(&rxArm)==kIOReturnBadArgument);
+ assert(rx149.nativeP2pManualArmRequested_==0);
+ rxArm.data.erase("extra");
+ prearmReady=false;
+ assert(rx149Client.setProperties(&rxArm)==kIOReturnUnsupported);
+ assert(rx149.nativeP2pManualArmRequested_==0);
+ assert(!probeEnabled(&rx149,&rx149.controller));
+ assert(!txProbeEnabled(&rx149,&rx149.controller));
+ prearmReady=true;
+ assert(rx149Client.setProperties(&rxArm)==kIOReturnSuccess);
+ assert(rx149.nativeP2pManualArmRequested_==
+        NativeP2PRx149Observation::kRx149ArmMode);
+ assert(probeEnabled(&rx149,&rx149.controller));
+ assert(!txProbeEnabled(&rx149,&rx149.controller));
+ assert(rx149Client.setProperties(&rxArm)==kIOReturnUnsupported);
+ assert(rx149.nativeP2pManualArmRequested_==
+        NativeP2PRx149Observation::kRx149ArmMode);
+ // A post-arm property mutation cannot downgrade mode 2 into generic/TX.
+ rx149.controller.props.data["NativeP2PRx149ObservationOnly"]=
+     kOSBooleanFalse;
+ assert(!probeEnabled(&rx149,&rx149.controller));
+ assert(!txProbeEnabled(&rx149,&rx149.controller));
+ // A mixed profile is rejected before consuming the one-shot RX arm latch.
+ ItlIwx rxMixed;receive149Profile(rxMixed);
+ rxMixed.controller.props.data["NativeP2PRocProbe"]=kOSBooleanTrue;
+ AirportItlwm rxMixedClient;rxMixedClient.fHalService=&rxMixed;
+ assert(rxMixedClient.setProperties(&rxArm)==kIOReturnUnsupported);
+ assert(rxMixed.nativeP2pManualArmRequested_==0);
+ assert(!probeEnabled(&rxMixed,&rxMixed.controller));
+ assert(!txProbeEnabled(&rxMixed,&rxMixed.controller));
  puts("PASS: production manual-arm privilege, profile, no-bypass, and one-shot concurrency boundaries");
 }
 """
 with tempfile.TemporaryDirectory(prefix='itl-manual-arm-') as d:
  p=Path(d);(p/'test.cpp').write_text(shim+'\n'+'\n'.join(methods)+'\n'+tests)
- subprocess.run(['xcrun','clang++','-std=c++17','-fsanitize=address,undefined','-pthread',str(p/'test.cpp'),'-o',str(p/'test')],check=True)
+ subprocess.run(['xcrun','clang++','-std=c++17','-fsanitize=address,undefined','-pthread','-I',str(ROOT/'native'),str(p/'test.cpp'),'-o',str(p/'test')],check=True)
  subprocess.run([str(p/'test')],check=True)

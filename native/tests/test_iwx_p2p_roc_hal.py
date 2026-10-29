@@ -26,7 +26,11 @@ shim = r"""
 #include <cstring>
 #include <vector>
 #define AIRPORT_TAHOE 1
+#define ITL_NATIVE_AWDL_RX149_OBSERVATION_25G332 1
+#include "itlwm/hal_iwx/tahoe_p2p_roc_observation_policy.hpp"
+#include "native/p2p_rx149_observation.hpp"
 #define htole32(x) static_cast<uint32_t>(x)
+#define nitems(x) (sizeof(x) / sizeof((x)[0]))
 #define isset(bits,bit) (((bits)[(bit)/8] & (1U<<((bit)%8))) != 0)
 enum {
  IWX_LONG_GROUP=1, IWX_MAC_CONF_GROUP=3,
@@ -91,12 +95,17 @@ struct iwx_p2p_context {
 };
 struct iwx_p2p_roc_state {
  uint32_t token=0,fw_generation=0; int32_t session_submit_result=0;
+ uint32_t station_epoch=0; void *station_bss=nullptr;
  uint32_t binding_raw_status=0; uint8_t phase=0,phy_id=0,phy_color=0;
+ uint8_t station_phy_id=0; uint16_t station_phy_color=0;
  uint8_t session_conf_id=0,session_submit_seen=0,binding_status_valid=0,binding_rejected=0;
+ ieee80211_channel *station_phy_channel=nullptr;
  ieee80211_channel *original_phy_channel=nullptr,*roc_channel=nullptr;
+ uint8_t receive_observation_only=0;
 };
 struct iwx_softc {
  int sc_generation=7,sc_flags=IWX_FLAG_MAC_ACTIVE|IWX_FLAG_BINDING_ACTIVE;
+ uint32_t sc_tx_rate_generation=0;
  int sc_capaflags=IWX_UCODE_TLV_FLAGS_P2P; uint8_t sc_enabled_capa[8]{};
  iwx_p2p_context sc_p2p{};iwx_p2p_roc_state sc_p2p_roc{};
  iwx_phy_ctxt sc_phyctxt[IWX_NUM_PHY_CTX]{};ieee80211com sc_ic{};
@@ -121,6 +130,7 @@ static uint32_t iwx_cmd_id(uint8_t op,uint8_t group,uint8_t version) {
  return op+(group<<8)+(version<<16);
 }
 #define IEEE80211_IS_CHAN_2GHZ(c) ((c)->is2g)
+#define IEEE80211_IS_CHAN_5GHZ(c) (!((c)->is2g) && (((c)->ic_flags & IEEE80211_CHAN_5GHZ) != 0))
 struct ItlIwx {
  iwx_softc com{}; bool allowed=true;
  unsigned macVer=5,phyVer=3,bindingVer=2,bindingNotif=1,sessionVer=1,sessionNotif=2;
@@ -128,6 +138,7 @@ struct ItlIwx {
  unsigned pduSends=0,statusSends=0; std::vector<uint32_t> pduIds;
  std::vector<unsigned> pduLens; std::vector<std::vector<uint8_t>> pduPayloads;
  bool armed=false; unsigned armCalls=0;
+ bool changeStationEpochOnBindingRemove=false;
  bool nativeP2pCommandAllowed() const {return allowed;}
  uint8_t iwx_lookup_cmd_ver(iwx_softc*,uint8_t group,uint8_t cmd) {
   if(group==IWX_LONG_GROUP&&cmd==IWX_MAC_CONTEXT_CMD)return macVer;
@@ -150,18 +161,25 @@ struct ItlIwx {
   if(pduFailAt==static_cast<int>(pduSends))return ETIMEDOUT;
   return pduDefault;
  }
- int iwx_send_cmd_pdu_status(iwx_softc*,uint32_t id,uint16_t len,const void *data,uint32_t *out) {
+ int iwx_send_cmd_pdu_status(iwx_softc *sc,uint32_t id,uint16_t len,const void *data,uint32_t *out) {
   ++statusSends;pduIds.push_back(id);pduLens.push_back(len);
   const auto *bytes=static_cast<const uint8_t*>(data);
   pduPayloads.emplace_back(bytes,bytes+len);
-  if(statusResult)return statusResult;*out=status;return 0;
+  if(statusResult)return statusResult;*out=status;
+  if(changeStationEpochOnBindingRemove&&id==IWX_BINDING_CONTEXT_CMD&&
+     len>=sizeof(iwx_binding_cmd)) {
+   const auto *binding=static_cast<const iwx_binding_cmd*>(data);
+   if(binding->action==IWX_FW_CTXT_ACTION_REMOVE)
+    ++sc->sc_tx_rate_generation;
+  }
+  return 0;
  }
  int iwx_p2p_phy_lease(iwx_softc*,uint8_t*);
  int iwx_p2p_phy_release(iwx_softc*);
  int iwx_p2p_binding_add(iwx_softc*);
  int iwx_p2p_binding_remove(iwx_softc*);
  int iwx_p2p_context_reset_after_fw_reset(iwx_softc*,uint32_t);
- int tahoeP2pRocPrepare(iwx_softc*,ieee80211_channel*,uint32_t,uint32_t);
+ int tahoeP2pRocPrepare(iwx_softc*,ieee80211_channel*,uint32_t,uint32_t,bool=false);
  int tahoeP2pRocSubmit(iwx_softc*,uint32_t,uint32_t,uint32_t,TahoeP2pRocArmTracker,void*);
  int tahoeP2pRocCleanup(iwx_softc*,uint32_t,uint32_t,bool);
  int tahoeP2pRocAbortPrepared(iwx_softc*,uint32_t,uint32_t,bool);
@@ -169,6 +187,8 @@ struct ItlIwx {
 """
 
 actual = "\n".join([
+    extract("itlwm/hal_iwx/ItlIwxP2PRoc.cpp", "static bool\ntahoeP2pRocIsReceiveObservationOnly("),
+    extract("itlwm/hal_iwx/ItlIwxP2PRoc.cpp", "static void\ntahoeP2pRocResetState("),
     extract("itlwm/hal_iwx/ItlIwx.cpp", "static int\niwx_p2p_check_fw_contract("),
     extract("itlwm/hal_iwx/ItlIwx.cpp", "int ItlIwx::\niwx_p2p_phy_lease("),
     extract("itlwm/hal_iwx/ItlIwx.cpp", "int ItlIwx::\niwx_p2p_phy_release("),
@@ -184,6 +204,11 @@ actual = "\n".join([
     extract("itlwm/hal_iwx/ItlIwxP2PRoc.cpp", "static bool\ntahoeP2pRocSocialChannel6Allowed("),
     extract("itlwm/hal_iwx/ItlIwxP2PRoc.cpp", "static bool\ntahoeP2pRocOffChannelAllowed("),
     extract("itlwm/hal_iwx/ItlIwxP2PRoc.cpp", "static bool\ntahoeP2pRocLongSocialTxAllowed("),
+    extract("itlwm/hal_iwx/ItlIwxP2PRoc.cpp", "static TahoeP2PRocObservationPolicy::Channel\ntahoeP2pRocObservationChannel("),
+    extract("itlwm/hal_iwx/ItlIwxP2PRoc.cpp", "static bool\ntahoeP2pRocObservation149PrepareAllowed("),
+    extract("itlwm/hal_iwx/ItlIwxP2PRoc.cpp", "static bool\ntahoeP2pRocObservation149SubmitAllowed("),
+    extract("itlwm/hal_iwx/ItlIwxP2PRoc.cpp", "static bool\ntahoeP2pRocObservationOwnerValid("),
+    extract("itlwm/hal_iwx/ItlIwxP2PProbe.cpp", "static bool rx149ActualRocChannel("),
     extract("itlwm/hal_iwx/ItlIwxP2PRoc.cpp", "int ItlIwx::\ntahoeP2pRocPrepare("),
     extract("itlwm/hal_iwx/ItlIwxP2PRoc.cpp", "int ItlIwx::\ntahoeP2pRocSubmit("),
     extract("itlwm/hal_iwx/ItlIwxP2PRoc.cpp", "int ItlIwx::\ntahoeP2pRocCleanup("),
@@ -205,6 +230,11 @@ static ieee80211_channel *tableChannel(ItlIwx &h, const ieee80211_channel &sourc
 static ieee80211_channel *liveSocial6(ItlIwx &h) {
  auto *channel=currentChannel(h,6);
  *channel=ieee80211_channel{6,true};
+ return channel;
+}
+static ieee80211_channel *liveObservation149(ItlIwx &h) {
+ auto *channel=currentChannel(h,149);
+ *channel=ieee80211_channel{149,false};
  return channel;
 }
 static bool arm(void *context,uint32_t generation,uint32_t idColor,uint32_t conf) {
@@ -232,9 +262,28 @@ static void setup(ItlIwx &h,ieee80211_channel &staChan,ieee80211_channel &initia
       1U<<(IWX_UCODE_TLV_CAPA_SESSION_PROT_CMD%8);
 }
 int main() {
+ // Compile the production RX149 table check against the C API's const
+ // contract: mutable ieee80211com pointer and const channel pointer.
+ {
+  iwx_softc sc;
+  assert(!rx149ActualRocChannel(&sc));
+  sc.sc_p2p_roc.roc_channel=&sc.sc_ic.ic_channels[149];
+  assert(rx149ActualRocChannel(&sc));
+  sc.sc_p2p_roc.roc_channel=&sc.sc_ic.ic_channels[6];
+  assert(!rx149ActualRocChannel(&sc));
+ }
  static_assert(sizeof(iwx_phy_context_cmd)==32,"actual PHY payload size");
  static_assert(sizeof(iwx_binding_cmd)==28,"actual binding payload size");
  static_assert(sizeof(iwx_session_prot_cmd)==24,"actual session payload size");
+ // The pure policy fails closed when the build flag is absent, and does not
+ // affect the legacy non-observation request path.
+ {
+  const TahoeP2PRocObservationPolicy::Channel legal{
+      149,5745,true,false,true,false,false};
+  assert(!TahoeP2PRocObservationPolicy::prepareAllowed(false,true,true,legal));
+  assert(TahoeP2PRocObservationPolicy::prepareAllowed(false,false,false,legal));
+  assert(!TahoeP2PRocObservationPolicy::submitAllowed(true,true,true,900,legal));
+ }
  // The normal path changes only the spare PHY, binds it, arms the tracker,
  // submits a 100ms session, and leaves cleanup gated on END observation.
  {
@@ -470,6 +519,121 @@ int main() {
   assert(channelLookupCalls==lookupsBefore);
  }
 
+ // RX-only channel 149 is available solely through the explicit compiled
+ // Device Discovery request, uses 100 ms, and retains strict END cleanup.
+ {
+  ItlIwx h;ieee80211_channel staChan{36,false},initial{1,true};setup(h,staChan,initial);
+  auto *sc=&h.com;auto *channel=liveObservation149(h);
+  assert(h.tahoeP2pRocPrepare(sc,channel,91,2,true)==0);
+  assert(sc->sc_p2p_roc.receive_observation_only==1&&
+         sc->sc_p2p_roc.roc_channel==channel&&sc->sc_phyctxt[1].channel==channel);
+  assert(h.tahoeP2pRocSubmit(sc,91,3,100,arm,&h)==EBUSY);
+  assert(h.tahoeP2pRocSubmit(sc,91,2,900,arm,&h)==EOPNOTSUPP);
+  assert(h.armCalls==0&&h.pduSends==2);
+  expectedConfiguration=2;
+  h.pduFailAt=3;
+  assert(h.tahoeP2pRocSubmit(sc,91,2,100,arm,&h)==ETIMEDOUT);
+  assert(sc->sc_p2p_roc.phase==IWX_P2P_ROC_SESSION_SUBMIT_UNKNOWN);
+  const unsigned beforeCleanup=h.pduSends+h.statusSends;
+  assert(h.tahoeP2pRocCleanup(sc,91,2,false)==EBUSY);
+  assert(h.pduSends+h.statusSends==beforeCleanup&&sc->sc_p2p.phy_leased);
+  assert(h.tahoeP2pRocCleanup(sc,91,2,true)==0);
+  assert(sc->sc_p2p_roc.phase==IWX_P2P_ROC_COMPLETE&&
+         sc->sc_phyctxt[1].channel==currentChannel(h,initial.channel));
+ }
+
+ // The only accepted receive observation submission is 100 ms discovery.
+ {
+  ItlIwx h;ieee80211_channel staChan{36,false},initial{1,true};setup(h,staChan,initial);
+  auto *channel=liveObservation149(h);
+  assert(h.tahoeP2pRocPrepare(&h.com,channel,96,2,true)==0);
+  assert(h.tahoeP2pRocSubmit(&h.com,96,2,100,arm,&h)==0);
+  const auto *session=reinterpret_cast<const iwx_session_prot_cmd*>(
+      h.pduPayloads.back().data());
+  assert(session->conf_id==IWX_SESSION_PROTECT_CONF_P2P_DEVICE_DISCOV&&
+         session->duration_tu==97);
+  const unsigned before=h.pduSends+h.statusSends;
+  assert(h.tahoeP2pRocCleanup(&h.com,96,2,false)==EBUSY&&
+         h.pduSends+h.statusSends==before);
+  assert(h.tahoeP2pRocCleanup(&h.com,96,2,true)==0);
+  assert(h.com.sc_p2p_roc.phase==IWX_P2P_ROC_COMPLETE&&
+         h.com.sc_phyctxt[1].channel==currentChannel(h,initial.channel));
+ }
+
+ // A clean RX149 END cannot restore the borrowed PHY after station or P2P
+ // ownership changes; the lease is left quarantined for recovery/reset.
+ for (unsigned ownerChange=0;ownerChange<2;++ownerChange) {
+  ItlIwx h;ieee80211_channel staChan{36,false},initial{1,true};setup(h,staChan,initial);
+  auto *channel=liveObservation149(h);
+  assert(h.tahoeP2pRocPrepare(&h.com,channel,94,2,true)==0);
+  assert(h.tahoeP2pRocSubmit(&h.com,94,2,100,arm,&h)==0);
+  if (ownerChange==0) ++h.com.sc_tx_rate_generation;
+  else ++h.com.sc_phyctxt[1].color;
+  const unsigned before=h.pduSends+h.statusSends;
+  assert(h.tahoeP2pRocCleanup(&h.com,94,2,true)==EBUSY);
+  assert(h.pduSends+h.statusSends==before&&
+         h.com.sc_p2p_roc.phase==IWX_P2P_ROC_QUARANTINED&&
+         h.com.sc_p2p.binding_state==IWX_P2P_RESOURCE_ACTIVE&&
+         h.com.sc_p2p.phy_leased&&h.com.sc_phyctxt[1].channel==channel);
+ }
+
+ // A station/power epoch change immediately after binding removal is caught
+ // by the second ownership check, before restoring the old PHY channel.
+ {
+  ItlIwx h;ieee80211_channel staChan{36,false},initial{1,true};setup(h,staChan,initial);
+  auto *channel=liveObservation149(h);
+  assert(h.tahoeP2pRocPrepare(&h.com,channel,95,2,true)==0);
+  assert(h.tahoeP2pRocSubmit(&h.com,95,2,100,arm,&h)==0);
+  h.changeStationEpochOnBindingRemove=true;
+  const unsigned before=h.pduSends+h.statusSends;
+  assert(h.tahoeP2pRocCleanup(&h.com,95,2,true)==EBUSY);
+  assert(h.pduSends+h.statusSends==before+1&&
+         h.com.sc_p2p_roc.phase==IWX_P2P_ROC_QUARANTINED&&
+         h.com.sc_p2p.binding_state==IWX_P2P_RESOURCE_ABSENT&&
+         h.com.sc_p2p.phy_leased&&h.com.sc_phyctxt[1].channel==channel);
+ }
+
+ // Foreign objects and malformed live table entries never reach PHY/FW IO.
+ for (unsigned invalid=0;invalid<8;++invalid) {
+  ItlIwx h;ieee80211_channel staChan{36,false},initial{1,true};setup(h,staChan,initial);
+  auto *channel=liveObservation149(h);
+  if (invalid==0) {
+   ieee80211_channel foreign{149,false};
+   assert(h.tahoeP2pRocPrepare(&h.com,&foreign,92,2,true)==EOPNOTSUPP);
+  } else {
+   if (invalid==1) channel->ic_freq=5740;
+   if (invalid==2) channel->ic_flags=0;
+   if (invalid==3) channel->ic_flags|=IEEE80211_CHAN_PASSIVE;
+   if (invalid==4) channel->ic_flags|=IEEE80211_CHAN_DFS;
+   if (invalid==5) channel->ic_flags &= ~IEEE80211_CHAN_5GHZ;
+   if (invalid==6) channel->is2g=true;
+   if (invalid==7) {
+    assert(h.tahoeP2pRocPrepare(&h.com,channel,92,
+      IWX_SESSION_PROTECT_CONF_P2P_GO_NEGOTIATION,true)==EOPNOTSUPP);
+    assert(h.pduSends==0);
+    continue;
+   }
+   assert(h.tahoeP2pRocPrepare(&h.com,channel,92,2,true)==EOPNOTSUPP);
+  }
+  assert(h.pduSends==0&&h.statusSends==0&&
+         h.com.sc_p2p_roc.phase==IWX_P2P_ROC_IDLE);
+ }
+
+ // Submission revalidates the live channel and duration after Prepare.
+ for (unsigned invalid=0;invalid<4;++invalid) {
+  ItlIwx h;ieee80211_channel staChan{36,false},initial{1,true};setup(h,staChan,initial);
+  auto *channel=liveObservation149(h);
+  assert(h.tahoeP2pRocPrepare(&h.com,channel,93,2,true)==0);
+  uint32_t duration=100,configuration=2;
+  if (invalid==0) duration=900;
+  if (invalid==1) configuration=3;
+  if (invalid==2) channel->ic_freq=5740;
+  if (invalid==3) channel->ic_flags|=IEEE80211_CHAN_PASSIVE;
+  assert(h.tahoeP2pRocSubmit(&h.com,93,configuration,duration,arm,&h)==
+         (invalid==1?EBUSY:EOPNOTSUPP));
+  assert(h.armCalls==0&&h.pduSends==2&&h.com.sc_p2p.phy_leased);
+ }
+
  // No session was ever submitted: a verified no-TX cleanup may restore the
  // prepared PHY/binding without fabricating an END notification.
  {
@@ -518,6 +682,7 @@ with tempfile.TemporaryDirectory(prefix="itlwm-p2p-roc-hal-") as directory:
         "xcrun", "clang++", "-std=c++14", "-O1", "-Wall", "-Wextra",
         "-Werror", "-Wno-unused-parameter", "-Wno-sign-compare",
         "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
+        "-I", str(root),
         str(cpp), "-o", str(exe),
     ], check=True)
     subprocess.run([str(exe)], check=True)

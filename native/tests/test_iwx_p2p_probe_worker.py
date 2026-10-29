@@ -67,7 +67,7 @@ def verify_receive_pump_contract():
     event_action = " ".join(extract(
         PROBE, "IOReturn ItlIwx::tahoeP2pRocEventAction("
     ).split())
-    assert "if (action->consumeRxAfterRead && action->txSnapshotValid)" in event_action
+    assert "else if (action->consumeRxAfterRead && action->txSnapshotValid)" in event_action
     assert "const bool rxLeaseCurrent = rxLease.active &&" in event_action
     assert "const bool activeAckedRoc = session.commandReturned &&" in event_action
     assert "const bool p2pOwnerCurrent = probe->leaseValue &&" in event_action
@@ -176,6 +176,7 @@ struct TestPsfWitness { uint64_t startObservedUs = 1000; };
 struct TestPsfCandidate { uint8_t bytes[4]{}; size_t length = 0; uint32_t blockers = 0; };
 struct P2PProbeRun {
     ItlIwx *owner = nullptr;
+    bool rx149ObservationOnly = false;
     uint32_t contextGeneration = 77;
     uint32_t powerGeneration = 88;
     uint32_t stationGeneration = 99;

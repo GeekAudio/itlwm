@@ -240,6 +240,7 @@ struct iwx_p2p_context {
     uint8_t mac_id, mac_color;
     uint32_t fw_generation;
 };
+struct iwx_p2p_roc_state { uint8_t receive_observation_only = 0; };
 struct ieee80211com { int ic_opmode = 1; };
 struct iwx_softc {
     int sc_generation = 41;
@@ -251,6 +252,7 @@ struct iwx_softc {
     uint8_t sc_ucode_api[8]{};
     uint8_t sc_enabled_capa[8]{};
     iwx_p2p_context sc_p2p{};
+    iwx_p2p_roc_state sc_p2p_roc{};
     ieee80211com sc_ic{};
     iwx_tid_data sc_tid_data[9]{};
     iwx_tx_ring *txq = nullptr;
@@ -725,6 +727,30 @@ int main() {
     static_assert(sizeof(iwx_tx_queue_cfg_rsp) == 8, "TVQM response ABI");
     static_assert(sizeof(iwx_tx_queue_cfg_cmd) == 24,
                   "legacy LONG_GROUP/SCD_QUEUE_CFG v2 ABI");
+
+    // RX149 observation never creates a TX station/queue or submits a TX
+    // descriptor. This does not block teardown paths for pre-existing state.
+    {
+        ItlIwx owner; TahoeP2PStationLease station{};
+        TahoeP2PTxQueueLease queue{}; setupSc(owner, station, queue);
+        configureLegacyFirmware(owner);
+        owner.com.sc_p2p_roc.receive_observation_only = 1;
+        uint16_t qid = 99; bool mayExist = true;
+        assert(iwx_tahoe_p2p_add_broadcast_station(
+            &owner, &owner.com, &station, 3, &mayExist) == EBUSY);
+        assert(!mayExist && owner.stationCount == 0 && owner.removeCount == 0);
+        mayExist = true;
+        assert(allocate(owner, station, queue, &qid, &mayExist, 8) == EBUSY);
+        assert(!mayExist && qid == 0 && owner.sendCount == 0 &&
+               owner.removeCount == 0 && gDmaLive == 0 && gMapLive == 0);
+        iwx_tx_ring *ring = nullptr; uint16_t descriptor = 0;
+        assert(iwx_tahoe_p2p_tvqm_begin_tx(
+            &owner.com, &queue, &ring, &descriptor) == EBUSY);
+        assert(ring == nullptr && descriptor == 0);
+        assert(iwx_tahoe_p2p_tvqm_mark_doorbell(
+            &owner.com, &queue, &owner.com.txq[2], 0) == EBUSY);
+        assert(!queue.everDoorbelled && !queue.submissionBusy);
+    }
 
     // Refuse a firmware that advertises DATA_PATH/0x17 until a separately
     // validated modern adapter exists. It must not allocate DMA or issue a
