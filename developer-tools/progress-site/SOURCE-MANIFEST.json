@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "3a346b3597f321f0091e153bb21b17ae2f7c35a22afb82a6882617a381aa5ad6"
+      "sha256": "d84647d95dc7578db70806dc1854009637ae42075e5ca0a1905b55f1e60a88d9"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "81ad2901728da5166f48bc32046c32c22b144623ffe2c8b46406e0c29e754138"
+      "sha256": "613f66cbef499cf97e99b6c75d30f793efa95e6545c6e6b84612f4e487793b9d"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -30,7 +30,7 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "151dc9d60969af18145f9a1b33d2d33e777abd329600f296f093c604b9ba3a64"
+      "sha256": "35d14fa575266eb7db721599f057f0eaddb12caf2cf5b05ed05e9ea17cb8fd4a"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-30T06:13:02.698281+08:00",
-  "runtime_scope": "Test081 is measured runtime evidence; Test082 merged offline verification passed, awaiting native administrator authorization for EFI deployment. No Test082 runtime or AirDrop proof."
+  "updated_at": "2026-10-30T06:14:15.184868+08:00",
+  "runtime_scope": "Test081 is measured runtime evidence; Test082 has passed merged offline verification and full-backup EFI deployment, awaiting reboot. No Test082 boot, stability, radio receive or AirDrop success is established."
 }
