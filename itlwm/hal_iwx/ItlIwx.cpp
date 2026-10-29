@@ -16112,11 +16112,13 @@ static bool tahoeFirmwareReadErrorTableWords(
 
     IWX_WRITE(sc, IWX_HBUS_TARG_MEM_RADDR, tableAddress);
     const size_t wordCount = byteLength / sizeof(uint32_t);
-    uint32_t *words = static_cast<uint32_t *>(table);
+    uint8_t *bytes = static_cast<uint8_t *>(table);
     for (size_t index = 0; index < wordCount; ++index) {
         if (tahoeFirmwareErrorDeadlineExpired(deadlineNs))
             return false;
-        words[index] = le32toh(IWX_READ(sc, IWX_HBUS_TARG_MEM_RDAT));
+        const uint32_t word = le32toh(
+            IWX_READ(sc, IWX_HBUS_TARG_MEM_RDAT));
+        memcpy(bytes + index * sizeof(word), &word, sizeof(word));
         ++*totalWordsRead;
         ++*tableWordsRead;
         // A single MMIO access cannot be interrupted by this software budget.
