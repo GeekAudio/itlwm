@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "26f296bbf39be3651589b654bdade89ff7fe22dcbe6b4a5be2335e055b1cf64d"
+      "sha256": "3a346b3597f321f0091e153bb21b17ae2f7c35a22afb82a6882617a381aa5ad6"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "a6efa7c6c48101ec8f10ef5badf2e01e8356dc82bfaaf9cac9ec3be8b08145dd"
+      "sha256": "81ad2901728da5166f48bc32046c32c22b144623ffe2c8b46406e0c29e754138"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-30T06:12:34.615444+08:00",
+  "updated_at": "2026-10-30T06:13:02.698281+08:00",
   "runtime_scope": "Test081 is measured runtime evidence; Test082 merged offline verification passed, awaiting native administrator authorization for EFI deployment. No Test082 runtime or AirDrop proof."
 }
