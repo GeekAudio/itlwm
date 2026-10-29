@@ -1486,6 +1486,13 @@ bool ItlIwx::attach(IOPCIDevice *device)
     __atomic_store_n(&com.sc_tx_output_kick_serial, 0U, __ATOMIC_RELEASE);
     __atomic_store_n(&com.sc_tx_timer_trace_lock, 0U, __ATOMIC_RELEASE);
     __atomic_store_n(&com.sc_tx_timer_trace_dropped, 0U, __ATOMIC_RELEASE);
+    __atomic_store_n(&com.sc_tx_timer_arm_output_epoch, 0U, __ATOMIC_RELAXED);
+    __atomic_store_n(&com.sc_tx_timer_arm_sequence, 0U, __ATOMIC_RELAXED);
+    __atomic_store_n(&com.sc_tx_timer_arm_monotonic_ns, 0ULL, __ATOMIC_RELAXED);
+    __atomic_store_n(&com.sc_tx_timer_clear_output_epoch, 0U, __ATOMIC_RELAXED);
+    __atomic_store_n(&com.sc_tx_timer_clear_sequence, 0U, __ATOMIC_RELAXED);
+    __atomic_store_n(&com.sc_tx_timer_clear_reason, 0U, __ATOMIC_RELAXED);
+    __atomic_store_n(&com.sc_tx_timer_clear_monotonic_ns, 0ULL, __ATOMIC_RELAXED);
     IwxTxProgressObservation::reset(&com.sc_tx_progress_observation);
     IwxTxCompletionObservation::reset(&com.sc_tx_completion_observation);
     IwxTxQueueObservation::initialize(&com.sc_tx_queue_observation);
