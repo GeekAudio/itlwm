@@ -5954,7 +5954,7 @@ static int readRocState(P2PProbeRun *probe, RocEventRun *event,
     return 0;
 }
 
-static bool rx149ActualRocChannel(const struct iwx_softc *sc)
+static bool rx149ActualRocChannel(struct iwx_softc *sc)
 {
     if (!sc || sc->sc_p2p_roc.roc_channel == nullptr ||
         nitems(sc->sc_ic.ic_channels) <=

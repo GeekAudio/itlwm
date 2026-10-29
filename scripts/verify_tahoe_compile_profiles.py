@@ -41,11 +41,25 @@ def verify(project, log_path, output_path):
     for unit, arguments in commands.items():
         cleaned = []
         skip = False
+        source_prefix_header = False
         for argument in arguments:
+            if source_prefix_header:
+                # The just-built .gch embeds this artifact's feature macros.
+                # Reparse the source header for each compatibility profile.
+                header = project / 'itlwm/PrivateSPI.pch'
+                if not header.is_file():
+                    raise RuntimeError('Source prefix header is missing')
+                cleaned.append(str(header))
+                source_prefix_header = False
+                continue
             if skip:
                 skip = False
                 continue
-            if argument in ('-o', '-MF', '-MT', '-MQ', '-serialize-diagnostics'):
+            if argument == '-include':
+                cleaned.append(argument)
+                source_prefix_header = True
+                continue
+            if argument in ('-o', '-MF', '-MT', '-MQ', '-serialize-diagnostics', '--serialize-diagnostics'):
                 skip = True
                 continue
             if argument in ('-c', '-MMD', '-MD', '-MP'):
