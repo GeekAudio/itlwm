@@ -135,6 +135,8 @@ static_assert(__atomic_always_lock_free(sizeof(uint64_t), nullptr),
               "Tahoe TX rate snapshot must use a lock-free 64-bit access");
 static_assert(__atomic_always_lock_free(sizeof(uint64_t), nullptr),
               "Tahoe deferred output token must use a lock-free 64-bit access");
+static_assert(__atomic_always_lock_free(sizeof(uint64_t), nullptr),
+              "Tahoe firmware metadata timestamp must be lock-free");
 static_assert(IwxTxRate::kFormatMask == IWX_RATE_MCS_MOD_TYPE_MSK,
               "TX rate helper format mask must match Intel firmware flags");
 static_assert(IwxTxRate::kV1HtMask == IWX_RATE_MCS_HT_MSK_V1 &&
@@ -1257,6 +1259,57 @@ void ItlIwx::tahoeRecordInitTaskTrigger(
     nativeResetTrace_.recordInitTaskTrigger(trigger);
 }
 
+void ItlIwx::tahoeRecordFirmwareMetadata(
+    struct iwx_softc *sc, IwxFirmwareDiagnostics::Entry entry)
+{
+    if (!sc)
+        return;
+    entry.monotonic_ns = tahoeMonotonicNs();
+    entry.driver_generation = static_cast<uint32_t>(sc->sc_generation);
+    const uint32_t aliveGeneration = __atomic_load_n(
+        &nativeFwDiagnosticAliveGeneration_, __ATOMIC_ACQUIRE);
+    entry.firmware_generation =
+        aliveGeneration == entry.driver_generation
+            ? entry.driver_generation : 0U;
+    if (entry.firmware_generation != 0)
+        entry.flags |= IwxFirmwareDiagnostics::kFirmwareStateKnown;
+    (void)IwxFirmwareDiagnostics::record(&nativeFwDiagnosticTrace_, entry);
+}
+
+void ItlIwx::tahoeFreezeFirmwareMetadata(
+    struct iwx_softc *sc, uint32_t watchdogSequence)
+{
+    if (!sc || !tahoeP2pOnMainGate())
+        return;
+    (void)IwxFirmwareDiagnostics::snapshot(&nativeFwDiagnosticTrace_,
+                                           &nativeFwDiagnosticPendingTrace_);
+    nativeFwDiagnosticPendingTraceGeneration_ =
+        static_cast<uint32_t>(sc->sc_generation);
+    nativeFwDiagnosticPendingWatchdogSequence_ = watchdogSequence;
+    nativeFwDiagnosticPendingTrace_.owner_generation =
+        nativeFwDiagnosticPendingTraceGeneration_;
+    nativeFwDiagnosticPendingTrace_.owner_watchdog_sequence = watchdogSequence;
+    nativeFwDiagnosticPendingTrace_.owner_watchdog_sequence_present =
+        watchdogSequence != 0 ? 1U : 0U;
+    nativeFwDiagnosticPendingTracePresent_ = 1;
+    nativeFwDiagnosticTraceFrozen_ = 1;
+}
+
+void ItlIwx::tahoeRecordFirmwareErrorInterrupt(
+    struct iwx_softc *sc, uint32_t interruptStatus,
+    uint32_t detailStatus)
+{
+    IwxFirmwareDiagnostics::Entry entry{};
+    entry.phase = static_cast<uint32_t>(
+        IwxFirmwareDiagnostics::Phase::FirmwareErrorInterrupt);
+    entry.source = static_cast<uint32_t>(
+        IwxFirmwareDiagnostics::Source::FirmwareInterrupt);
+    entry.result = interruptStatus;
+    entry.result_detail = detailStatus;
+    entry.flags = IwxFirmwareDiagnostics::kSourceIsHintOnly;
+    tahoeRecordFirmwareMetadata(sc, entry);
+}
+
 void ItlIwx::tahoeRecordTxWatchdogSnapshot(struct iwx_softc *sc,
                                            uint32_t countdownAtExpiry)
 {
@@ -1280,6 +1333,7 @@ void ItlIwx::tahoeRecordTxWatchdogSnapshot(struct iwx_softc *sc,
     const uint32_t sequence = nativeResetTrace_.recordTxWatchdog(sample);
     __atomic_store_n(&nativeLinkTransitionWatchdogSequence_, sequence,
                      __ATOMIC_RELEASE);
+    tahoeFreezeFirmwareMetadata(sc, sequence);
     // Keep expiry work to a fixed numeric copy. The 100+ IORegistry writes
     // are deferred until the existing main-gate periodic publisher runs,
     // after watchdog recovery has been enqueued.
@@ -1502,6 +1556,45 @@ bool ItlIwx::attach(IOPCIDevice *device)
     com.sc_sta_tx_pending_watchdog_sequence = 0;
     com.sc_sta_tx_pending_generation = 0;
     com.sc_sta_tx_pending_present = 0;
+    IwxFirmwareDiagnostics::initialize(&nativeFwDiagnosticTrace_);
+    nativeFwDiagnosticPendingTrace_ = {};
+    nativeFwErrorSnapshot_ = {};
+    nativeFwDiagnosticPendingTraceGeneration_ = 0;
+    nativeFwDiagnosticPendingWatchdogSequence_ = 0;
+    nativeFwDiagnosticPendingTracePresent_ = 0;
+    nativeFwDiagnosticTraceFrozen_ = 0;
+    nativeFwDiagnosticTraceManualLatched_ = 0;
+    nativeFwDiagnosticTraceLastSampleNs_ = 0;
+    __atomic_store_n(&nativeFwDiagnosticAliveGeneration_, 0U,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&nativeFwDiagnosticTlvGeneration_, 0U,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&nativeFwDiagnosticExpectedLmacTable_[0], 0U,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&nativeFwDiagnosticExpectedLmacTable_[1], 0U,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&nativeFwDiagnosticExpectedUmacTable_, 0U,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&nativeFwDiagnosticCaptureStatus_, 0U, __ATOMIC_RELAXED);
+    __atomic_store_n(&nativeFwDiagnosticCaptureGeneration_, 0U, __ATOMIC_RELAXED);
+    __atomic_store_n(&nativeFwDiagnosticCaptureSerial_, 0U, __ATOMIC_RELAXED);
+    __atomic_store_n(&nativeFwDiagnosticCaptureResetSequence_, 0U,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&nativeFwDiagnosticCaptureWatchdogSequence_, 0U,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&nativeFwDiagnosticCaptureWatchdogPresent_, 0U,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&nativeFwDiagnosticCaptureResetReason_, 0U,
+                     __ATOMIC_RELAXED);
+    nativeFwDiagnosticPublishRevision_ = 0;
+    nativeHcmdRxTracePublishRevision_ = 0;
+    nativeFwDiagnosticLastPublishedCaptureSerial_ = 0;
+    nativeFwDiagnosticLastPublishedTraceSerial_ = 0;
+    nativeFwDiagnosticLastPublishedAttemptStatus_ = 0;
+    nativeFwDiagnosticLastPublishedAttemptSerial_ = 0;
+    nativeFwDiagnosticLastPublishedTraceFingerprint_ = 0;
+    nativeFwDiagnosticLastPublishedErrorFingerprint_ = 0;
+    nativeFirmwareIdentityPublishedGeneration_ = 0;
     com.sc_tx_queue_pending = {};
     com.sc_tx_queue_publish_version = 0;
     com.sc_tx_completion_pending = {};
@@ -2929,6 +3022,17 @@ iwx_read_firmware(struct iwx_softc *sc)
     
     if (fw->fw_status == IWX_FW_STATUS_DONE)
         return 0;
+
+#ifdef AIRPORT_TAHOE
+    __atomic_store_n(&nativeFwDiagnosticTlvGeneration_, 0U,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&nativeFwDiagnosticExpectedLmacTable_[0], 0U,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&nativeFwDiagnosticExpectedLmacTable_[1], 0U,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&nativeFwDiagnosticExpectedUmacTable_, 0U,
+                     __ATOMIC_RELEASE);
+#endif
     
     while (fw->fw_status == IWX_FW_STATUS_INPROGRESS)
         tsleep_nsec(&sc->sc_fw, 0, "iwxfwp", INFSLP);
@@ -3236,6 +3340,12 @@ iwx_read_firmware(struct iwx_softc *sc)
                 sc->sc_uc.uc_umac_error_event_table =
                 le32toh(dbg_ptrs->error_info_addr) &
                 ~IWX_FW_ADDR_CACHE_CONTROL;
+#ifdef AIRPORT_TAHOE
+                __atomic_store_n(&nativeFwDiagnosticExpectedUmacTable_,
+                    le32toh(dbg_ptrs->error_info_addr) &
+                        ~IWX_FW_ADDR_CACHE_CONTROL,
+                    __ATOMIC_RELEASE);
+#endif
                 sc->sc_uc.error_event_table_tlv_status |=
                 IWX_ERROR_EVENT_TABLE_UMAC;
                 break;
@@ -3254,6 +3364,12 @@ iwx_read_firmware(struct iwx_softc *sc)
                 sc->sc_uc.uc_lmac_error_event_table[0] =
                 le32toh(dbg_ptrs->error_event_table_ptr) &
                 ~IWX_FW_ADDR_CACHE_CONTROL;
+#ifdef AIRPORT_TAHOE
+                __atomic_store_n(&nativeFwDiagnosticExpectedLmacTable_[0],
+                    le32toh(dbg_ptrs->error_event_table_ptr) &
+                        ~IWX_FW_ADDR_CACHE_CONTROL,
+                    __ATOMIC_RELEASE);
+#endif
                 sc->sc_uc.error_event_table_tlv_status |=
                 IWX_ERROR_EVENT_TABLE_LMAC1;
                 break;
@@ -3378,6 +3494,11 @@ out:
             iwx_fw_info_free(fw);
     } else
         fw->fw_status = IWX_FW_STATUS_DONE;
+#ifdef AIRPORT_TAHOE
+    if (!err && sc->sc_device_family >= IWX_DEVICE_FAMILY_22000)
+        __atomic_store_n(&nativeFwDiagnosticTlvGeneration_,
+            static_cast<uint32_t>(sc->sc_generation), __ATOMIC_RELEASE);
+#endif
     wakeupOn(&sc->sc_fw);
 
     OSSafeReleaseNULL(fwData);
@@ -5371,13 +5492,13 @@ iwx_protect_session(struct iwx_softc *sc, struct iwx_node *in,
 
 int ItlIwx::
 iwx_schedule_protect_session(struct iwx_softc *sc, struct iwx_node *in,
-                    uint32_t duration)
+                    uint32_t duration_tu)
 {
     struct iwx_session_prot_cmd cmd = {
         .id_and_color =
             htole32(IWX_FW_CMD_ID_AND_COLOR(in->in_id, in->in_color)),
         .action = htole32(IWX_FW_CTXT_ACTION_ADD),
-        .duration_tu = htole32(duration * IEEE80211_DUR_TU),
+        .duration_tu = htole32(duration_tu),
     };
     int err;
     
@@ -6639,6 +6760,14 @@ iwx_load_ucode_wait_alive(struct iwx_softc *sc)
     err = iwx_read_firmware(sc);
     if (err)
         return err;
+#ifdef AIRPORT_TAHOE
+    // Firmware TLV pointers remain tied to the currently starting driver
+    // generation even when the already-parsed image is reused by init.
+    __atomic_store_n(&nativeFwDiagnosticTlvGeneration_,
+        sc->sc_device_family >= IWX_DEVICE_FAMILY_22000
+            ? static_cast<uint32_t>(sc->sc_generation) : 0U,
+        __ATOMIC_RELEASE);
+#endif
     
     err = iwx_start_fw(sc);
     if (err)
@@ -9489,6 +9618,29 @@ iwx_send_cmd(struct iwx_softc *sc, struct iwx_host_cmd *hcmd)
     ring->queued++;
     ring->cur = (ring->cur + 1) % getTxQueueSize();
     IWX_WRITE(sc, IWX_HBUS_TARG_WRPTR, ring->qid << 16 | ring->cur);
+
+#ifdef AIRPORT_TAHOE
+    IwxFirmwareDiagnostics::Entry diagnosticEntry{};
+    diagnosticEntry.phase = static_cast<uint32_t>(
+        IwxFirmwareDiagnostics::Phase::CommandSubmitted);
+    diagnosticEntry.source = static_cast<uint32_t>(
+        IwxFirmwareDiagnostics::Source::HostCommand);
+    diagnosticEntry.command_id = cmd->hdr_wide.cmd;
+    diagnosticEntry.group_id = cmd->hdr_wide.group_id;
+    diagnosticEntry.version = cmd->hdr_wide.version;
+    diagnosticEntry.qid = cmd->hdr_wide.qid;
+    diagnosticEntry.index = cmd->hdr_wide.idx;
+    diagnosticEntry.header_sequence =
+        (uint32_t(diagnosticEntry.qid) << 8) | diagnosticEntry.index;
+    diagnosticEntry.flags = IwxFirmwareDiagnostics::kHeaderFieldsPresent |
+        IwxFirmwareDiagnostics::kHeaderVersionPresent |
+        (async ? IwxFirmwareDiagnostics::kAsync : 0U) |
+        ((hcmd->flags & IWX_CMD_WANT_RESP)
+            ? IwxFirmwareDiagnostics::kWantResponse : 0U);
+    diagnosticEntry.packet_length = static_cast<uint32_t>(hdrlen + paylen);
+    diagnosticEntry.payload_length = static_cast<uint32_t>(paylen);
+    tahoeRecordFirmwareMetadata(sc, diagnosticEntry);
+#endif
     
     if (!async) {
         err = tsleep_nsec(desc, PCATCH, "iwxcmd", SEC_TO_NSEC(1));
@@ -9509,6 +9661,28 @@ iwx_send_cmd(struct iwx_softc *sc, struct iwx_host_cmd *hcmd)
     }
 out:
     splx(s);
+
+#ifdef AIRPORT_TAHOE
+    if (!async) {
+        IwxFirmwareDiagnostics::Entry diagnosticEntry{};
+        diagnosticEntry.phase = static_cast<uint32_t>(
+            IwxFirmwareDiagnostics::Phase::CommandWaitReturned);
+        diagnosticEntry.source = static_cast<uint32_t>(
+            IwxFirmwareDiagnostics::Source::HostCommand);
+        diagnosticEntry.command_id = iwx_cmd_opcode(code);
+        diagnosticEntry.group_id = iwx_cmd_groupid(code);
+        diagnosticEntry.qid = ring->qid;
+        diagnosticEntry.index = idx;
+        diagnosticEntry.header_sequence =
+            (uint32_t(diagnosticEntry.qid) << 8) | diagnosticEntry.index;
+        diagnosticEntry.flags = IwxFirmwareDiagnostics::kHeaderFieldsPresent |
+            IwxFirmwareDiagnostics::kSourceIsHintOnly |
+            ((hcmd->flags & IWX_CMD_WANT_RESP)
+                ? IwxFirmwareDiagnostics::kWantResponse : 0U);
+        diagnosticEntry.result = static_cast<uint32_t>(err);
+        tahoeRecordFirmwareMetadata(sc, diagnosticEntry);
+    }
+#endif
     
     return err;
 }
@@ -9589,6 +9763,23 @@ iwx_cmd_done(struct iwx_softc *sc, int qid, int idx, int code)
     if (qid != IWX_DQA_CMD_QUEUE) {
         return;    /* Not a command ack. */
     }
+
+#ifdef AIRPORT_TAHOE
+    IwxFirmwareDiagnostics::Entry diagnosticEntry{};
+    diagnosticEntry.phase = static_cast<uint32_t>(
+        IwxFirmwareDiagnostics::Phase::CommandRetired);
+    diagnosticEntry.source = static_cast<uint32_t>(
+        IwxFirmwareDiagnostics::Source::CommandResponseQueue);
+    diagnosticEntry.command_id = static_cast<uint32_t>(code) & 0xffU;
+    diagnosticEntry.group_id = (static_cast<uint32_t>(code) >> 8) & 0xffU;
+    diagnosticEntry.qid = static_cast<uint32_t>(qid);
+    diagnosticEntry.index = static_cast<uint32_t>(idx);
+    diagnosticEntry.header_sequence =
+        (static_cast<uint32_t>(qid) << 8) | static_cast<uint32_t>(idx);
+    diagnosticEntry.flags = IwxFirmwareDiagnostics::kHeaderFieldsPresent |
+        IwxFirmwareDiagnostics::kSourceIsHintOnly;
+    tahoeRecordFirmwareMetadata(sc, diagnosticEntry);
+#endif
     
     data = &ring->data[idx];
     
@@ -13536,7 +13727,8 @@ iwx_auth(struct iwx_softc *sc)
     XYLog("%s\n", __FUNCTION__);
     struct ieee80211com *ic = &sc->sc_ic;
     struct iwx_node *in = (struct iwx_node *)ic->ic_bss;
-    uint32_t duration;
+    uint32_t duration_tu;
+    bool sessionProtectionSupported = false;
     int generation = sc->sc_generation, err = 0;
     
     splassert(IPL_NET);
@@ -13608,10 +13800,13 @@ iwx_auth(struct iwx_softc *sc)
      * Prevent the FW from wandering off channel during association
      * by "protecting" the session with a time event.
      */
+    sessionProtectionSupported = isset(sc->sc_enabled_capa,
+        IWX_UCODE_TLV_CAPA_SESSION_PROT_CMD);
     if (in->in_ni.ni_intval)
-        duration = in->in_ni.ni_intval * 2;
+        duration_tu = in->in_ni.ni_intval *
+            (sessionProtectionSupported ? 9U : 2U);
     else
-        duration = IEEE80211_DUR_TU;
+        duration_tu = sessionProtectionSupported ? 900U : IEEE80211_DUR_TU;
     
     /* Try really hard to protect the session and hear a beacon
      * The new session protection command allows us to protect the
@@ -13622,10 +13817,11 @@ iwx_auth(struct iwx_softc *sc)
      * will have a slightly lower priority, but more importantly, can be
      * fragmented so that it'll allow other activities to run.
      */
-    if (isset(sc->sc_enabled_capa, IWX_UCODE_TLV_CAPA_SESSION_PROT_CMD))
-        err = iwx_schedule_protect_session(sc, in, duration);
+    if (sessionProtectionSupported)
+        err = iwx_schedule_protect_session(sc, in, duration_tu);
     else
-        iwx_protect_session(sc, in, duration, in->in_ni.ni_intval / 2);
+        iwx_protect_session(sc, in, duration_tu,
+                            in->in_ni.ni_intval / 2);
     
     return err;
     
@@ -14949,6 +15145,10 @@ iwx_init(struct _ifnet *ifp)
 
     generation = ++sc->sc_generation;
 #ifdef AIRPORT_TAHOE
+    __atomic_store_n(&nativeFwDiagnosticAliveGeneration_, 0U,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&nativeFwDiagnosticTlvGeneration_, 0U,
+                     __ATOMIC_RELEASE);
     __atomic_store_n(&sc->sc_tx_output_epoch,
                      static_cast<uint32_t>(generation), __ATOMIC_RELEASE);
     IwxOutputKick::clearOlderEpoch(&sc->sc_tx_output_kick_tag,
@@ -15388,6 +15588,8 @@ iwx_stop(struct _ifnet *ifp, IwxResetTrace::ResetReason reason)
     const uint32_t linkResetOldState = static_cast<uint32_t>(ic->ic_state);
     const uint32_t linkResetReason = static_cast<uint32_t>(reason);
     const uint32_t linkResetSequence = tahoeRecordReset(reason, sc);
+    tahoeCapturePreResetFirmwareErrorSnapshot(sc, reason,
+                                               linkResetSequence);
     tahoeDriverEvent(ITL_TAHOE_EVT_RESET_BEGIN);
     tahoeScanOnline(false);
 #endif
@@ -15608,6 +15810,8 @@ IOReturn ItlIwx::_iwx_watchdog_task(OSObject *, void *arg0, void *arg1,
 
     // No ring reclamation is inferred from unavailable queue data.
     that->tahoePublishLinkTransitionTrace(that->getController());
+    (void)that->tahoePublishFirmwareDiagnostics(
+        that->getController(), sc, false);
     return kIOReturnSuccess;
 }
 #endif
@@ -15842,8 +16046,878 @@ struct iwx_umac_error_event_table {
     uint32_t nic_isr_pref;    /* ISR status register */
 } __packed;
 
+#ifdef AIRPORT_TAHOE
+static_assert(sizeof(iwx_error_event_table) == 152,
+              "supported LMAC error-table layout changed");
+static_assert(sizeof(iwx_umac_error_event_table) == 60,
+              "supported UMAC error-table layout changed");
+
+struct TahoeFirmwareErrorCaptureRequest {
+    uint32_t captureSerial;
+    uint32_t driverGeneration;
+    uint32_t resetSequence;
+    uint32_t watchdogSequence;
+    uint32_t watchdogSequencePresent;
+    uint32_t resetReason;
+};
+
+static uint32_t tahoeFirmwareErrorPointerStatus(
+    bool tlvPresent, uint32_t expected, uint32_t alive, size_t byteLength)
+{
+    using IwxFirmwareDiagnostics::TableStatus;
+    if (!tlvPresent || expected == 0 || alive == 0)
+        return static_cast<uint32_t>(TableStatus::MissingPointer);
+    if (expected != alive)
+        return static_cast<uint32_t>(TableStatus::PointerMismatch);
+    // Preserve the driver's existing low-address rejection while validating
+    // the runtime TLV/ALIVE identity, alignment, and addition before HBUS.
+    if (expected < 0x400000U)
+        return static_cast<uint32_t>(TableStatus::InvalidPointer);
+    if ((expected & 3U) != 0)
+        return static_cast<uint32_t>(TableStatus::MisalignedPointer);
+    const uint64_t end = uint64_t(expected) + byteLength;
+    if (byteLength == 0 || end > (uint64_t(UINT32_MAX) + 1U))
+        return static_cast<uint32_t>(TableStatus::RangeUnproven);
+    return static_cast<uint32_t>(TableStatus::NotAttempted);
+}
+
+static bool tahoeFirmwareErrorTableWasRead(uint32_t status)
+{
+    using IwxFirmwareDiagnostics::TableStatus;
+    return status == static_cast<uint32_t>(TableStatus::Captured) ||
+        status == static_cast<uint32_t>(TableStatus::Empty);
+}
+
+static bool tahoeFirmwareErrorTableValidIsSuspect(uint32_t valid)
+{
+    return valid == UINT32_MAX ||
+        (valid & ~0x0fU) == 0xa5a5a5a0U ||
+        (valid & ~0x0fU) == 0x5a5a5a50U;
+}
+
+static bool tahoeFirmwareErrorDeadlineExpired(uint64_t deadlineNs)
+{
+    return tahoeMonotonicNs() >= deadlineNs;
+}
+
+static bool tahoeFirmwareReadErrorTableWords(
+    struct iwx_softc *sc, uint32_t tableAddress, void *table,
+    size_t byteLength, uint64_t deadlineNs, uint32_t *totalWordsRead,
+    uint32_t *tableWordsRead)
+{
+    if (!sc || !table || byteLength == 0 || (byteLength % sizeof(uint32_t)) != 0 ||
+        !totalWordsRead || !tableWordsRead ||
+        tahoeFirmwareErrorDeadlineExpired(deadlineNs))
+        return false;
+
+    IWX_WRITE(sc, IWX_HBUS_TARG_MEM_RADDR, tableAddress);
+    const size_t wordCount = byteLength / sizeof(uint32_t);
+    uint32_t *words = static_cast<uint32_t *>(table);
+    for (size_t index = 0; index < wordCount; ++index) {
+        if (tahoeFirmwareErrorDeadlineExpired(deadlineNs))
+            return false;
+        words[index] = le32toh(IWX_READ(sc, IWX_HBUS_TARG_MEM_RDAT));
+        ++*totalWordsRead;
+        ++*tableWordsRead;
+        // A single MMIO access cannot be interrupted by this software budget.
+        // Check immediately afterward and classify the row incomplete if it
+        // returned after the deadline.
+        if (tahoeFirmwareErrorDeadlineExpired(deadlineNs))
+            return false;
+    }
+    return true;
+}
+
+static void tahoeSetUnreadTableStatus(
+    IwxFirmwareDiagnostics::FirmwareErrorSnapshot *snapshot,
+    uint32_t status)
+{
+    using IwxFirmwareDiagnostics::TableStatus;
+    if (!snapshot)
+        return;
+    if (snapshot->lmac_status ==
+        static_cast<uint32_t>(TableStatus::NotAttempted))
+        snapshot->lmac_status = status;
+    if (snapshot->umac_status ==
+        static_cast<uint32_t>(TableStatus::NotAttempted))
+        snapshot->umac_status = status;
+}
+#endif
+
 #define ERROR_START_OFFSET  (1 * sizeof(uint32_t))
 #define ERROR_ELEM_SIZE     (7 * sizeof(uint32_t))
+
+#ifdef AIRPORT_TAHOE
+IOReturn ItlIwx::_tahoe_fw_error_snapshot_action(
+    OSObject *, void *ownerArg, void *scArg, void *requestArg, void *)
+{
+    auto *owner = static_cast<ItlIwx *>(ownerArg);
+    auto *sc = static_cast<struct iwx_softc *>(scArg);
+    auto *request = static_cast<TahoeFirmwareErrorCaptureRequest *>(requestArg);
+    if (!owner || !sc || sc != &owner->com || !request ||
+        !owner->tahoeP2pOnMainGate())
+        return kIOReturnBadArgument;
+
+    using IwxFirmwareDiagnostics::CaptureStatus;
+    using IwxFirmwareDiagnostics::FirmwareErrorSnapshot;
+    using IwxFirmwareDiagnostics::TableStatus;
+
+    FirmwareErrorSnapshot snapshot{};
+    snapshot.schema = IwxFirmwareDiagnostics::kSchemaVersion;
+    snapshot.capture_serial = request->captureSerial;
+    snapshot.driver_generation = request->driverGeneration;
+    snapshot.reset_sequence = request->resetSequence;
+    snapshot.watchdog_sequence = request->watchdogSequence;
+    snapshot.watchdog_sequence_present = request->watchdogSequencePresent;
+    snapshot.reset_reason = request->resetReason;
+    snapshot.lmac_status = static_cast<uint32_t>(TableStatus::NotAttempted);
+    snapshot.umac_status = static_cast<uint32_t>(TableStatus::NotAttempted);
+
+    const auto finish = [&](CaptureStatus captureStatus) {
+        snapshot.capture_status = static_cast<uint32_t>(captureStatus);
+        snapshot.monotonic_ns = tahoeMonotonicNs();
+        owner->nativeFwErrorSnapshot_ = snapshot;
+        __atomic_store_n(&owner->nativeFwDiagnosticCaptureStatus_,
+                         snapshot.capture_status, __ATOMIC_RELEASE);
+        __atomic_store_n(&owner->nativeFwDiagnosticCaptureGeneration_,
+                         request->driverGeneration, __ATOMIC_RELEASE);
+        return kIOReturnSuccess;
+    };
+
+    if (request->driverGeneration !=
+        static_cast<uint32_t>(sc->sc_generation)) {
+        tahoeSetUnreadTableStatus(&snapshot,
+            static_cast<uint32_t>(TableStatus::StaleGeneration));
+        return finish(CaptureStatus::StaleGeneration);
+    }
+
+    const uint32_t aliveGeneration = __atomic_load_n(
+        &owner->nativeFwDiagnosticAliveGeneration_, __ATOMIC_ACQUIRE);
+    const uint32_t tlvGeneration = __atomic_load_n(
+        &owner->nativeFwDiagnosticTlvGeneration_, __ATOMIC_ACQUIRE);
+    snapshot.firmware_generation = aliveGeneration;
+    if (!sc->sc_uc.uc_ok || aliveGeneration != request->driverGeneration) {
+        tahoeSetUnreadTableStatus(&snapshot,
+            static_cast<uint32_t>(TableStatus::FirmwareNotAlive));
+        return finish(CaptureStatus::FirmwareNotAlive);
+    }
+    if (tlvGeneration != request->driverGeneration) {
+        tahoeSetUnreadTableStatus(&snapshot,
+            static_cast<uint32_t>(TableStatus::StaleGeneration));
+        return finish(CaptureStatus::StaleGeneration);
+    }
+
+    IwxResetTrace::Snapshot resetSnapshot{};
+    if (owner->nativeResetTrace_.read(&resetSnapshot)) {
+        snapshot.latest_init_trigger = resetSnapshot.lastInitTaskTrigger;
+        snapshot.latest_init_trigger_sequence =
+            resetSnapshot.lastInitTaskTriggerSequence;
+    }
+
+    const bool hasLmacTlv =
+        (sc->sc_uc.error_event_table_tlv_status &
+         IWX_ERROR_EVENT_TABLE_LMAC1) != 0;
+    const bool hasUmacTlv =
+        (sc->sc_uc.error_event_table_tlv_status &
+         IWX_ERROR_EVENT_TABLE_UMAC) != 0;
+    const uint32_t lmacExpected = __atomic_load_n(
+        &owner->nativeFwDiagnosticExpectedLmacTable_[0], __ATOMIC_ACQUIRE);
+    // Core66 canonicalizes the UMAC ALIVE pointer by clearing the cache-mode
+    // bits; its LMAC ALIVE pointer remains the raw little-endian SRAM address.
+    const uint32_t lmacAlive = sc->sc_uc.uc_lmac_error_event_table[0];
+    const uint32_t umacExpected = __atomic_load_n(
+        &owner->nativeFwDiagnosticExpectedUmacTable_, __ATOMIC_ACQUIRE);
+    const uint32_t umacAlive = sc->sc_uc.uc_umac_error_event_table &
+        ~IWX_FW_ADDR_CACHE_CONTROL;
+    snapshot.lmac_status = tahoeFirmwareErrorPointerStatus(
+        hasLmacTlv, lmacExpected, lmacAlive, sizeof(iwx_error_event_table));
+    snapshot.umac_status = tahoeFirmwareErrorPointerStatus(
+        hasUmacTlv, umacExpected, umacAlive,
+        sizeof(iwx_umac_error_event_table));
+
+    const bool readLmac = snapshot.lmac_status ==
+        static_cast<uint32_t>(TableStatus::NotAttempted);
+    const bool readUmac = snapshot.umac_status ==
+        static_cast<uint32_t>(TableStatus::NotAttempted);
+    if (!readLmac && !readUmac)
+        return finish(CaptureStatus::Partial);
+
+    // This is a one-shot, try-only NIC lease. It uses the existing main-gate
+    // serialization, never calls iwx_nic_lock()/iwx_read_mem(), and never
+    // clears an ACCESS_REQ that was already present on entry.
+    if (sc->sc_nic_locks != 0) {
+        if (readLmac)
+            snapshot.lmac_status =
+                static_cast<uint32_t>(TableStatus::NicAccessBusy);
+        if (readUmac)
+            snapshot.umac_status =
+                static_cast<uint32_t>(TableStatus::NicAccessBusy);
+        return finish(CaptureStatus::NicAccessBusy);
+    }
+    constexpr uint64_t kReadBudgetNs = 5000000ULL;
+    snapshot.read_budget_ns = kReadBudgetNs;
+    const uint64_t readStartNs = tahoeMonotonicNs();
+    const uint64_t readDeadlineNs = readStartNs > UINT64_MAX - kReadBudgetNs
+        ? UINT64_MAX : readStartNs + kReadBudgetNs;
+    bool budgetExceeded =
+        tahoeFirmwareErrorDeadlineExpired(readDeadlineNs);
+    if (budgetExceeded) {
+        if (readLmac)
+            snapshot.lmac_status = static_cast<uint32_t>(
+                TableStatus::ReadBudgetExceeded);
+        if (readUmac)
+            snapshot.umac_status = static_cast<uint32_t>(
+                TableStatus::ReadBudgetExceeded);
+        snapshot.read_elapsed_ns = tahoeMonotonicNs() - readStartNs;
+        return finish(CaptureStatus::ReadBudgetExceeded);
+    }
+
+    const uint32_t gpBefore = IWX_READ(sc, IWX_CSR_GP_CNTRL);
+    if (gpBefore == UINT32_MAX || gpBefore == 0xa5a5a5a0U ||
+        (gpBefore & IWX_CSR_GP_CNTRL_REG_FLAG_GOING_TO_SLEEP) != 0) {
+        if (readLmac)
+            snapshot.lmac_status = static_cast<uint32_t>(
+                TableStatus::NicAccessUnavailable);
+        if (readUmac)
+            snapshot.umac_status = static_cast<uint32_t>(
+                TableStatus::NicAccessUnavailable);
+        snapshot.read_elapsed_ns = tahoeMonotonicNs() - readStartNs;
+        return finish(CaptureStatus::NicAccessUnavailable);
+    }
+    if ((gpBefore & IWX_CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ) != 0) {
+        if (readLmac)
+            snapshot.lmac_status =
+                static_cast<uint32_t>(TableStatus::NicAccessBusy);
+        if (readUmac)
+            snapshot.umac_status =
+                static_cast<uint32_t>(TableStatus::NicAccessBusy);
+        snapshot.read_elapsed_ns = tahoeMonotonicNs() - readStartNs;
+        return finish(CaptureStatus::NicAccessBusy);
+    }
+    if (tahoeFirmwareErrorDeadlineExpired(readDeadlineNs)) {
+        if (readLmac)
+            snapshot.lmac_status = static_cast<uint32_t>(
+                TableStatus::ReadBudgetExceeded);
+        if (readUmac)
+            snapshot.umac_status = static_cast<uint32_t>(
+                TableStatus::ReadBudgetExceeded);
+        snapshot.read_elapsed_ns = tahoeMonotonicNs() - readStartNs;
+        return finish(CaptureStatus::ReadBudgetExceeded);
+    }
+
+    IWX_WRITE(sc, IWX_CSR_GP_CNTRL,
+              gpBefore | IWX_CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ);
+    DELAY(2);
+    const uint32_t gpGranted = IWX_READ(sc, IWX_CSR_GP_CNTRL);
+    if (gpGranted != UINT32_MAX && gpGranted != 0xa5a5a5a0U &&
+        (gpGranted & IWX_CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ) != 0 &&
+        (gpGranted & (IWX_CSR_GP_CNTRL_REG_FLAG_MAC_CLOCK_READY |
+                      IWX_CSR_GP_CNTRL_REG_FLAG_GOING_TO_SLEEP)) ==
+            IWX_CSR_GP_CNTRL_REG_FLAG_MAC_CLOCK_READY) {
+        sc->sc_nic_locks = 1;
+    } else {
+        if (gpGranted != UINT32_MAX && gpGranted != 0xa5a5a5a0U &&
+            (gpGranted & IWX_CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ) != 0)
+            IWX_WRITE(sc, IWX_CSR_GP_CNTRL,
+                gpGranted & ~IWX_CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ);
+        if (readLmac)
+            snapshot.lmac_status = static_cast<uint32_t>(
+                TableStatus::NicAccessUnavailable);
+        if (readUmac)
+            snapshot.umac_status = static_cast<uint32_t>(
+                TableStatus::NicAccessUnavailable);
+        snapshot.read_elapsed_ns = tahoeMonotonicNs() - readStartNs;
+        return finish(CaptureStatus::NicAccessUnavailable);
+    }
+
+    iwx_error_event_table lmacTable{};
+    iwx_umac_error_event_table umacTable{};
+    bool lmacReadComplete = false;
+    bool umacReadComplete = false;
+    if (readLmac) {
+        lmacReadComplete = tahoeFirmwareReadErrorTableWords(sc, lmacExpected,
+            &lmacTable, sizeof(lmacTable), readDeadlineNs,
+            &snapshot.read_word_count, &snapshot.lmac_read_word_count);
+        if (!lmacReadComplete) {
+            budgetExceeded = true;
+            snapshot.lmac_status = static_cast<uint32_t>(
+                TableStatus::ReadBudgetExceeded);
+        }
+    }
+    if (readUmac && !budgetExceeded) {
+        umacReadComplete = tahoeFirmwareReadErrorTableWords(sc, umacExpected,
+            &umacTable, sizeof(umacTable), readDeadlineNs,
+            &snapshot.read_word_count, &snapshot.umac_read_word_count);
+        if (!umacReadComplete) {
+            budgetExceeded = true;
+            snapshot.umac_status = static_cast<uint32_t>(
+                TableStatus::ReadBudgetExceeded);
+        }
+    } else if (readUmac && budgetExceeded) {
+        snapshot.umac_status = static_cast<uint32_t>(
+            TableStatus::ReadBudgetExceeded);
+    }
+
+    // Preserve only the two leading status scalars when a timed read stopped
+    // early. Presence bits distinguish a real zero from an unread word.
+    if (snapshot.lmac_read_word_count >= 1U) {
+        snapshot.lmac_valid_present = 1;
+        snapshot.lmac_valid = lmacTable.valid;
+    }
+    if (snapshot.lmac_read_word_count >= 2U) {
+        snapshot.lmac_error_id_present = 1;
+        snapshot.lmac_error_id = lmacTable.error_id;
+    }
+    if (lmacReadComplete) {
+        snapshot.lmac_trm_status0 = lmacTable.trm_hw_status0;
+        snapshot.lmac_trm_status1 = lmacTable.trm_hw_status1;
+        snapshot.lmac_beacon_time = lmacTable.bcon_time;
+        snapshot.lmac_tsf_low = lmacTable.tsf_low;
+        snapshot.lmac_tsf_high = lmacTable.tsf_hi;
+        snapshot.lmac_gp1 = lmacTable.gp1;
+        snapshot.lmac_gp2 = lmacTable.gp2;
+        snapshot.lmac_fw_revision_type = lmacTable.fw_rev_type;
+        snapshot.lmac_fw_major = lmacTable.major;
+        snapshot.lmac_fw_minor = lmacTable.minor;
+        snapshot.lmac_hw_version = lmacTable.hw_ver;
+        snapshot.lmac_board_version = lmacTable.brd_ver;
+        snapshot.lmac_host_command_header = lmacTable.hcmd;
+        snapshot.lmac_isr0 = lmacTable.isr0;
+        snapshot.lmac_isr1 = lmacTable.isr1;
+        snapshot.lmac_isr2 = lmacTable.isr2;
+        snapshot.lmac_isr3 = lmacTable.isr3;
+        snapshot.lmac_isr4 = lmacTable.isr4;
+        snapshot.lmac_last_command_id = lmacTable.last_cmd_id;
+        snapshot.lmac_l2p_control = lmacTable.l2p_control;
+        snapshot.lmac_l2p_duration = lmacTable.l2p_duration;
+        snapshot.lmac_l2p_valid = lmacTable.l2p_mhvalid;
+        snapshot.lmac_power_management = lmacTable.lmpm_pmg_sel;
+        snapshot.lmac_timestamp = lmacTable.u_timestamp;
+        snapshot.lmac_flow_handler = lmacTable.flow_handler;
+        snapshot.lmac_status = tahoeFirmwareErrorTableValidIsSuspect(
+            lmacTable.valid)
+            ? static_cast<uint32_t>(TableStatus::SuspectContents)
+            : (lmacTable.valid
+                ? static_cast<uint32_t>(TableStatus::Captured)
+                : static_cast<uint32_t>(TableStatus::Empty));
+    }
+    if (snapshot.umac_read_word_count >= 1U) {
+        snapshot.umac_valid_present = 1;
+        snapshot.umac_valid = umacTable.valid;
+    }
+    if (snapshot.umac_read_word_count >= 2U) {
+        snapshot.umac_error_id_present = 1;
+        snapshot.umac_error_id = umacTable.error_id;
+    }
+    if (umacReadComplete) {
+        snapshot.umac_major = umacTable.umac_major;
+        snapshot.umac_minor = umacTable.umac_minor;
+        snapshot.umac_command_header = umacTable.cmd_header;
+        snapshot.umac_isr_status = umacTable.nic_isr_pref;
+        snapshot.umac_status = tahoeFirmwareErrorTableValidIsSuspect(
+            umacTable.valid)
+            ? static_cast<uint32_t>(TableStatus::SuspectContents)
+            : (umacTable.valid
+                ? static_cast<uint32_t>(TableStatus::Captured)
+                : static_cast<uint32_t>(TableStatus::Empty));
+    }
+
+    // Always leave through the same release path after acquiring our own
+    // ACCESS_REQ. The subsequent read checks the hardware-visible outcome;
+    // a stalled MMIO operation cannot be interrupted by the software budget.
+    IWX_CLRBITS(sc, IWX_CSR_GP_CNTRL,
+                IWX_CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ);
+    const uint32_t gpReleased = IWX_READ(sc, IWX_CSR_GP_CNTRL);
+    const bool accessReleased = gpReleased != UINT32_MAX &&
+        gpReleased != 0xa5a5a5a0U &&
+        (gpReleased & IWX_CSR_GP_CNTRL_REG_FLAG_MAC_ACCESS_REQ) == 0;
+    sc->sc_nic_locks = 0;
+
+    snapshot.read_elapsed_ns = tahoeMonotonicNs() - readStartNs;
+    if (snapshot.read_elapsed_ns >= kReadBudgetNs)
+        budgetExceeded = true;
+
+    // The firmware or driver can invalidate this table while MMIO is in
+    // flight. Only retain a complete capture if all identity inputs still
+    // match the entry snapshot after release.
+    const uint32_t aliveGenerationEnd = __atomic_load_n(
+        &owner->nativeFwDiagnosticAliveGeneration_, __ATOMIC_ACQUIRE);
+    const uint32_t tlvGenerationEnd = __atomic_load_n(
+        &owner->nativeFwDiagnosticTlvGeneration_, __ATOMIC_ACQUIRE);
+    const uint32_t expectedLmacEnd = __atomic_load_n(
+        &owner->nativeFwDiagnosticExpectedLmacTable_[0], __ATOMIC_ACQUIRE);
+    const uint32_t expectedUmacEnd = __atomic_load_n(
+        &owner->nativeFwDiagnosticExpectedUmacTable_, __ATOMIC_ACQUIRE);
+    const uint32_t aliveLmacEnd = sc->sc_uc.uc_lmac_error_event_table[0];
+    const uint32_t aliveUmacEnd = sc->sc_uc.uc_umac_error_event_table &
+        ~IWX_FW_ADDR_CACHE_CONTROL;
+    const bool staleAfterRead =
+        static_cast<uint32_t>(sc->sc_generation) != request->driverGeneration ||
+        !sc->sc_uc.uc_ok || aliveGenerationEnd != aliveGeneration ||
+        tlvGenerationEnd != tlvGeneration ||
+        expectedLmacEnd != lmacExpected || expectedUmacEnd != umacExpected ||
+        aliveLmacEnd != lmacAlive || aliveUmacEnd != umacAlive;
+    if (staleAfterRead) {
+        if (readLmac)
+            snapshot.lmac_status = static_cast<uint32_t>(
+                TableStatus::StaleGeneration);
+        if (readUmac)
+            snapshot.umac_status = static_cast<uint32_t>(
+                TableStatus::StaleGeneration);
+    }
+    if (!accessReleased) {
+        if (snapshot.lmac_read_word_count != 0)
+            snapshot.lmac_status = static_cast<uint32_t>(
+                TableStatus::AccessReleaseFailed);
+        if (snapshot.umac_read_word_count != 0)
+            snapshot.umac_status = static_cast<uint32_t>(
+                TableStatus::AccessReleaseFailed);
+    }
+    snapshot.snapshot_complete = !staleAfterRead && accessReleased &&
+        !budgetExceeded &&
+        tahoeFirmwareErrorTableWasRead(snapshot.lmac_status) &&
+        tahoeFirmwareErrorTableWasRead(snapshot.umac_status) ? 1U : 0U;
+    const CaptureStatus status = staleAfterRead
+        ? CaptureStatus::StaleGeneration
+        : (!accessReleased ? CaptureStatus::AccessReleaseFailed
+            : (budgetExceeded ? CaptureStatus::ReadBudgetExceeded
+                : (snapshot.snapshot_complete ? CaptureStatus::Captured
+                                               : CaptureStatus::Partial)));
+    const auto result = finish(status);
+
+    IwxFirmwareDiagnostics::Entry entry{};
+    entry.phase = static_cast<uint32_t>(
+        IwxFirmwareDiagnostics::Phase::FirmwareErrorTableCapture);
+    entry.source = static_cast<uint32_t>(
+        IwxFirmwareDiagnostics::Source::DriverRecovery);
+    entry.driver_generation = request->driverGeneration;
+    entry.firmware_generation = snapshot.firmware_generation;
+    entry.result = snapshot.capture_status;
+    entry.result_detail = ((snapshot.lmac_status & 0xffffU) << 16) |
+        (snapshot.umac_status & 0xffffU);
+    entry.flags = IwxFirmwareDiagnostics::kFirmwareStateKnown;
+    owner->tahoeRecordFirmwareMetadata(sc, entry);
+    return result;
+}
+
+void ItlIwx::tahoeCapturePreResetFirmwareErrorSnapshot(
+    struct iwx_softc *sc, IwxResetTrace::ResetReason reason,
+    uint32_t resetSequence)
+{
+    if (!sc || (reason != IwxResetTrace::ResetReason::kInitTaskRunningRecovery &&
+                reason != IwxResetTrace::ResetReason::kInitTaskNotRunningRecovery))
+        return;
+
+    uint32_t serial = __atomic_add_fetch(
+        &nativeFwDiagnosticCaptureSerial_, 1U, __ATOMIC_ACQ_REL);
+    if (serial == 0) {
+        __atomic_store_n(&nativeFwDiagnosticCaptureStatus_,
+            static_cast<uint32_t>(IwxFirmwareDiagnostics::CaptureStatus::SerialExhausted),
+            __ATOMIC_RELEASE);
+        return;
+    }
+    const uint32_t generation = static_cast<uint32_t>(sc->sc_generation);
+    IwxResetTrace::Snapshot resetSnapshot{};
+    const bool haveResetSnapshot = nativeResetTrace_.read(&resetSnapshot);
+    const bool watchdogPresent = haveResetSnapshot &&
+        resetSnapshot.txWatchdogSequence != 0 &&
+        resetSnapshot.txWatchdogGeneration == generation;
+    TahoeFirmwareErrorCaptureRequest request {
+        serial, generation, resetSequence,
+        watchdogPresent ? resetSnapshot.txWatchdogSequence : 0U,
+        watchdogPresent ? 1U : 0U, static_cast<uint32_t>(reason)
+    };
+    __atomic_store_n(&nativeFwDiagnosticCaptureGeneration_, generation,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&nativeFwDiagnosticCaptureResetSequence_, resetSequence,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&nativeFwDiagnosticCaptureWatchdogSequence_,
+                     request.watchdogSequence, __ATOMIC_RELEASE);
+    __atomic_store_n(&nativeFwDiagnosticCaptureWatchdogPresent_,
+                     request.watchdogSequencePresent, __ATOMIC_RELEASE);
+    __atomic_store_n(&nativeFwDiagnosticCaptureResetReason_,
+                     request.resetReason, __ATOMIC_RELEASE);
+    __atomic_store_n(&nativeFwDiagnosticCaptureStatus_,
+        static_cast<uint32_t>(IwxFirmwareDiagnostics::CaptureStatus::Pending),
+        __ATOMIC_RELEASE);
+
+    IOReturn result = kIOReturnNotReady;
+    if (tahoeP2pOnMainGate()) {
+        result = _tahoe_fw_error_snapshot_action(
+            nullptr, this, sc, &request, nullptr);
+    } else if (IOCommandGate *gate = getMainCommandGate()) {
+        result = gate->attemptAction(_tahoe_fw_error_snapshot_action,
+            this, sc, &request, nullptr);
+    }
+    if (result != kIOReturnSuccess &&
+        __atomic_load_n(&nativeFwDiagnosticCaptureSerial_,
+                        __ATOMIC_ACQUIRE) == serial) {
+        __atomic_store_n(&nativeFwDiagnosticCaptureStatus_,
+            static_cast<uint32_t>(IwxFirmwareDiagnostics::CaptureStatus::GateUnavailable),
+            __ATOMIC_RELEASE);
+    }
+}
+
+static uint64_t tahoeTraceFingerprint(
+    const IwxFirmwareDiagnostics::TraceSnapshot &snapshot)
+{
+    uint64_t hash = 14695981039346656037ULL;
+    const auto mix = [&hash](uint64_t value) {
+        hash ^= value;
+        hash *= 1099511628211ULL;
+    };
+    mix(snapshot.schema);
+    mix(snapshot.version_begin);
+    mix(snapshot.version_end);
+    mix(snapshot.owner_generation);
+    mix(snapshot.owner_watchdog_sequence);
+    mix(snapshot.owner_watchdog_sequence_present);
+    mix(snapshot.row_count);
+    mix(snapshot.dropped_count);
+    mix(snapshot.overwritten_count);
+    mix(snapshot.gap_count);
+    mix(snapshot.window_start_serial);
+    mix(snapshot.window_end_serial);
+    mix(snapshot.stable);
+    mix(snapshot.complete);
+    for (uint32_t index = 0; index < snapshot.row_count; ++index) {
+        const IwxFirmwareDiagnostics::Entry &row = snapshot.rows[index];
+        mix(row.serial);
+        mix(row.monotonic_ns);
+        mix(row.driver_generation);
+        mix(row.firmware_generation);
+        mix(row.phase);
+        mix(row.source);
+        mix(row.command_id);
+        mix(row.group_id);
+        mix(row.version);
+        mix(row.qid);
+        mix(row.index);
+        mix(row.header_sequence);
+        mix(row.flags);
+        mix(row.result);
+        mix(row.result_detail);
+        mix(row.packet_length);
+        mix(row.payload_length);
+    }
+    return hash;
+}
+
+IOReturn ItlIwx::_tahoe_fw_diagnostics_publish_action(
+    OSObject *, void *ownerArg, void *controllerArg, void *scArg,
+    void *forceArg)
+{
+    auto *owner = static_cast<ItlIwx *>(ownerArg);
+    auto *controller = static_cast<IOEthernetController *>(controllerArg);
+    auto *sc = static_cast<struct iwx_softc *>(scArg);
+    const bool forceTraceSample = forceArg &&
+        *static_cast<const bool *>(forceArg);
+    if (!owner || !controller || !sc || sc != &owner->com ||
+        !owner->tahoeP2pOnMainGate())
+        return kIOReturnBadArgument;
+    return owner->tahoePublishFirmwareDiagnostics(
+        controller, sc, forceTraceSample) ? kIOReturnSuccess : kIOReturnError;
+}
+
+bool ItlIwx::tahoePublishFirmwareDiagnostics(
+    IOEthernetController *controller, struct iwx_softc *sc,
+    bool forceTraceSample)
+{
+    if (!controller || !sc || sc != &com)
+        return false;
+    if (!tahoeP2pOnMainGate()) {
+        IOCommandGate *gate = getMainCommandGate();
+        if (!gate)
+            return false;
+        return gate->attemptAction(_tahoe_fw_diagnostics_publish_action,
+            this, controller, sc, &forceTraceSample) == kIOReturnSuccess;
+    }
+
+    const uint64_t now = tahoeMonotonicNs();
+    constexpr uint64_t kLiveSampleIntervalNs = 5ULL * 1000000000ULL;
+    if (!nativeFwDiagnosticTraceFrozen_ &&
+        (forceTraceSample || (!nativeFwDiagnosticTraceManualLatched_ &&
+         (!nativeFwDiagnosticPendingTracePresent_ ||
+         nativeFwDiagnosticTraceLastSampleNs_ == 0 ||
+         now - nativeFwDiagnosticTraceLastSampleNs_ >=
+             kLiveSampleIntervalNs)))) {
+        (void)IwxFirmwareDiagnostics::snapshot(&nativeFwDiagnosticTrace_,
+                                               &nativeFwDiagnosticPendingTrace_);
+        nativeFwDiagnosticPendingTraceGeneration_ =
+            static_cast<uint32_t>(sc->sc_generation);
+        nativeFwDiagnosticPendingWatchdogSequence_ = 0;
+        nativeFwDiagnosticPendingTrace_.owner_generation =
+            nativeFwDiagnosticPendingTraceGeneration_;
+        nativeFwDiagnosticPendingTrace_.owner_watchdog_sequence = 0;
+        nativeFwDiagnosticPendingTrace_.owner_watchdog_sequence_present = 0;
+        nativeFwDiagnosticPendingTracePresent_ = 1;
+        nativeFwDiagnosticTraceLastSampleNs_ = now;
+        if (forceTraceSample)
+            nativeFwDiagnosticTraceManualLatched_ = 1;
+    }
+
+    bool okay = true;
+    if (nativeFwDiagnosticPendingTracePresent_) {
+        const uint64_t fingerprint =
+            tahoeTraceFingerprint(nativeFwDiagnosticPendingTrace_);
+        if (fingerprint != nativeFwDiagnosticLastPublishedTraceFingerprint_) {
+            if (!IwxFirmwareDiagnostics::encodeWire(
+                    nativeFwDiagnosticPendingTrace_,
+                    &nativeFwDiagnosticWireBuffer_))
+                return false;
+            OSData *payload = OSData::withBytes(
+                nativeFwDiagnosticWireBuffer_.bytes,
+                nativeFwDiagnosticWireBuffer_.length);
+            if (!payload)
+                return false;
+
+            uint32_t evenRevision = nativeHcmdRxTracePublishRevision_;
+            if (evenRevision & 1U)
+                ++evenRevision;
+            if (evenRevision > UINT32_MAX - 2U)
+                evenRevision = 0;
+            const uint32_t oddRevision = evenRevision + 1U;
+            const uint32_t finalRevision = evenRevision + 2U;
+            okay = controller->setProperty(
+                "NativeHcmdRxTracePublishRevisionBegin", oddRevision, 32);
+            const auto set32 = [controller](const char *suffix,
+                                             uint32_t value) {
+                char key[96];
+                const int length = snprintf(key, sizeof(key),
+                    "NativeHcmdRxTrace%s", suffix);
+                return length > 0 && static_cast<size_t>(length) < sizeof(key) &&
+                    controller->setProperty(key, value, 32);
+            };
+            const auto set64 = [controller](const char *suffix,
+                                             uint64_t value) {
+                char key[96];
+                const int length = snprintf(key, sizeof(key),
+                    "NativeHcmdRxTrace%s", suffix);
+                return length > 0 && static_cast<size_t>(length) < sizeof(key) &&
+                    controller->setProperty(key, value, 64);
+            };
+            if (okay)
+                okay = controller->setProperty("NativeHcmdRxTrace", payload);
+            payload->release();
+            if (okay)
+                okay = set32("Schema", nativeFwDiagnosticPendingTrace_.schema) &&
+                    set32("BlobLength", nativeFwDiagnosticWireBuffer_.length) &&
+                    set64("VersionBegin",
+                        nativeFwDiagnosticPendingTrace_.version_begin) &&
+                    set64("VersionEnd",
+                        nativeFwDiagnosticPendingTrace_.version_end) &&
+                    set64("WindowStartSerial",
+                        nativeFwDiagnosticPendingTrace_.window_start_serial) &&
+                    set64("WindowEndSerial",
+                        nativeFwDiagnosticPendingTrace_.window_end_serial) &&
+                    set32("OwnerGeneration",
+                        nativeFwDiagnosticPendingTrace_.owner_generation) &&
+                    set32("OwnerWatchdogSequence",
+                        nativeFwDiagnosticPendingTrace_.owner_watchdog_sequence) &&
+                    set32("OwnerWatchdogSequencePresent",
+                        nativeFwDiagnosticPendingTrace_.owner_watchdog_sequence_present) &&
+                    set32("RowCount",
+                        nativeFwDiagnosticPendingTrace_.row_count) &&
+                    set32("DroppedCount",
+                        nativeFwDiagnosticPendingTrace_.dropped_count) &&
+                    set32("OverwrittenCount",
+                        nativeFwDiagnosticPendingTrace_.overwritten_count) &&
+                    set32("GapCount",
+                        nativeFwDiagnosticPendingTrace_.gap_count) &&
+                    set32("SnapshotStable",
+                        nativeFwDiagnosticPendingTrace_.stable) &&
+                    set32("SnapshotComplete",
+                        nativeFwDiagnosticPendingTrace_.complete) &&
+                    controller->setProperty(
+                        "NativeHcmdRxTracePublishRevisionEnd",
+                        finalRevision, 32) &&
+                    controller->setProperty(
+                        "NativeHcmdRxTracePublishRevisionBegin",
+                        finalRevision, 32);
+            if (okay) {
+                nativeHcmdRxTracePublishRevision_ = finalRevision;
+                nativeFwDiagnosticLastPublishedTraceFingerprint_ = fingerprint;
+                nativeFwDiagnosticLastPublishedTraceSerial_ =
+                    nativeFwDiagnosticPendingTrace_.version_end;
+            } else {
+                return false;
+            }
+        }
+    }
+
+    const IwxFirmwareDiagnostics::FirmwareErrorSnapshot &errorSnapshot =
+        nativeFwErrorSnapshot_;
+    const uint32_t attemptSerial = __atomic_load_n(
+        &nativeFwDiagnosticCaptureSerial_, __ATOMIC_ACQUIRE);
+    const uint32_t attemptStatus = __atomic_load_n(
+        &nativeFwDiagnosticCaptureStatus_, __ATOMIC_ACQUIRE);
+    const uint64_t errorFingerprint =
+        (uint64_t(errorSnapshot.capture_serial) << 32) ^
+        (uint64_t(errorSnapshot.capture_status) << 16) ^
+        (uint64_t(attemptSerial) << 1) ^ attemptStatus;
+    if ((errorSnapshot.capture_serial != 0 || attemptSerial != 0) &&
+        errorFingerprint != nativeFwDiagnosticLastPublishedErrorFingerprint_) {
+        uint32_t evenRevision = nativeFwDiagnosticPublishRevision_;
+        if (evenRevision & 1U)
+            ++evenRevision;
+        if (evenRevision > UINT32_MAX - 2U)
+            evenRevision = 0;
+        const uint32_t oddRevision = evenRevision + 1U;
+        const uint32_t finalRevision = evenRevision + 2U;
+        const auto set32 = [controller](const char *suffix,
+                                         uint32_t value) {
+            char key[128];
+            const int length = snprintf(key, sizeof(key),
+                "NativeFwErrorSnapshot%s", suffix);
+            return length > 0 && static_cast<size_t>(length) < sizeof(key) &&
+                controller->setProperty(key, value, 32);
+        };
+        const auto set64 = [controller](const char *suffix,
+                                         uint64_t value) {
+            char key[128];
+            const int length = snprintf(key, sizeof(key),
+                "NativeFwErrorSnapshot%s", suffix);
+            return length > 0 && static_cast<size_t>(length) < sizeof(key) &&
+                controller->setProperty(key, value, 64);
+        };
+        okay = controller->setProperty(
+            "NativeFwErrorSnapshotPublishRevisionBegin", oddRevision, 32);
+        if (okay)
+            okay = set32("Schema", errorSnapshot.schema) &&
+                set32("CaptureStatus", errorSnapshot.capture_status) &&
+                set32("SnapshotComplete", errorSnapshot.snapshot_complete) &&
+                set32("CaptureSerial", errorSnapshot.capture_serial) &&
+                set32("DriverGeneration", errorSnapshot.driver_generation) &&
+                set32("FirmwareGeneration", errorSnapshot.firmware_generation) &&
+                set32("ResetSequence", errorSnapshot.reset_sequence) &&
+                set32("WatchdogSequence", errorSnapshot.watchdog_sequence) &&
+                set32("WatchdogSequencePresent",
+                    errorSnapshot.watchdog_sequence_present) &&
+                set32("ResetReason", errorSnapshot.reset_reason) &&
+                set32("LatestInitTrigger", errorSnapshot.latest_init_trigger) &&
+                set32("LatestInitTriggerSequence",
+                    errorSnapshot.latest_init_trigger_sequence) &&
+                set64("MonotonicNs", errorSnapshot.monotonic_ns) &&
+                set64("ReadBudgetNs", errorSnapshot.read_budget_ns) &&
+                set64("ReadElapsedNs", errorSnapshot.read_elapsed_ns) &&
+                set32("ReadWordCount", errorSnapshot.read_word_count) &&
+                set32("LmacReadWordCount",
+                    errorSnapshot.lmac_read_word_count) &&
+                set32("UmacReadWordCount",
+                    errorSnapshot.umac_read_word_count) &&
+                set32("LmacValidPresent",
+                    errorSnapshot.lmac_valid_present) &&
+                set32("LmacErrorIdPresent",
+                    errorSnapshot.lmac_error_id_present) &&
+                set32("UmacValidPresent",
+                    errorSnapshot.umac_valid_present) &&
+                set32("UmacErrorIdPresent",
+                    errorSnapshot.umac_error_id_present) &&
+                set32("LastAttemptStatus", attemptStatus) &&
+                set32("LastAttemptSerial", attemptSerial) &&
+                set32("LastAttemptDriverGeneration",
+                    __atomic_load_n(&nativeFwDiagnosticCaptureGeneration_,
+                                    __ATOMIC_ACQUIRE)) &&
+                set32("LastAttemptResetSequence",
+                    __atomic_load_n(&nativeFwDiagnosticCaptureResetSequence_,
+                                    __ATOMIC_ACQUIRE)) &&
+                set32("LastAttemptWatchdogSequence",
+                    __atomic_load_n(&nativeFwDiagnosticCaptureWatchdogSequence_,
+                                    __ATOMIC_ACQUIRE)) &&
+                set32("LastAttemptWatchdogPresent",
+                    __atomic_load_n(&nativeFwDiagnosticCaptureWatchdogPresent_,
+                                    __ATOMIC_ACQUIRE)) &&
+                set32("LastAttemptResetReason",
+                    __atomic_load_n(&nativeFwDiagnosticCaptureResetReason_,
+                                    __ATOMIC_ACQUIRE));
+#define TAHOE_PUBLISH_LMAC(field, suffix) \
+        okay = okay && set32("Lmac" suffix, errorSnapshot.field)
+#define TAHOE_PUBLISH_UMAC(field, suffix) \
+        okay = okay && set32("Umac" suffix, errorSnapshot.field)
+        TAHOE_PUBLISH_LMAC(lmac_status, "Status");
+        TAHOE_PUBLISH_LMAC(lmac_valid, "Valid");
+        TAHOE_PUBLISH_LMAC(lmac_error_id, "ErrorId");
+        TAHOE_PUBLISH_LMAC(lmac_trm_status0, "TrmStatus0");
+        TAHOE_PUBLISH_LMAC(lmac_trm_status1, "TrmStatus1");
+        TAHOE_PUBLISH_LMAC(lmac_beacon_time, "BeaconTime");
+        TAHOE_PUBLISH_LMAC(lmac_tsf_low, "TsfLow");
+        TAHOE_PUBLISH_LMAC(lmac_tsf_high, "TsfHigh");
+        TAHOE_PUBLISH_LMAC(lmac_gp1, "Gp1");
+        TAHOE_PUBLISH_LMAC(lmac_gp2, "Gp2");
+        TAHOE_PUBLISH_LMAC(lmac_fw_revision_type, "FirmwareRevisionType");
+        TAHOE_PUBLISH_LMAC(lmac_fw_major, "FirmwareMajor");
+        TAHOE_PUBLISH_LMAC(lmac_fw_minor, "FirmwareMinor");
+        TAHOE_PUBLISH_LMAC(lmac_hw_version, "HardwareVersion");
+        TAHOE_PUBLISH_LMAC(lmac_board_version, "BoardVersion");
+        TAHOE_PUBLISH_LMAC(lmac_host_command_header, "HostCommandHeader");
+        TAHOE_PUBLISH_LMAC(lmac_isr0, "Isr0");
+        TAHOE_PUBLISH_LMAC(lmac_isr1, "Isr1");
+        TAHOE_PUBLISH_LMAC(lmac_isr2, "Isr2");
+        TAHOE_PUBLISH_LMAC(lmac_isr3, "Isr3");
+        TAHOE_PUBLISH_LMAC(lmac_isr4, "Isr4");
+        TAHOE_PUBLISH_LMAC(lmac_last_command_id, "LastCommandId");
+        TAHOE_PUBLISH_LMAC(lmac_l2p_control, "L2pControl");
+        TAHOE_PUBLISH_LMAC(lmac_l2p_duration, "L2pDuration");
+        TAHOE_PUBLISH_LMAC(lmac_l2p_valid, "L2pValid");
+        TAHOE_PUBLISH_LMAC(lmac_power_management, "PowerManagement");
+        TAHOE_PUBLISH_LMAC(lmac_timestamp, "Timestamp");
+        TAHOE_PUBLISH_LMAC(lmac_flow_handler, "FlowHandler");
+        TAHOE_PUBLISH_UMAC(umac_status, "Status");
+        TAHOE_PUBLISH_UMAC(umac_valid, "Valid");
+        TAHOE_PUBLISH_UMAC(umac_error_id, "ErrorId");
+        TAHOE_PUBLISH_UMAC(umac_major, "Major");
+        TAHOE_PUBLISH_UMAC(umac_minor, "Minor");
+        TAHOE_PUBLISH_UMAC(umac_command_header, "CommandHeader");
+        TAHOE_PUBLISH_UMAC(umac_isr_status, "IsrStatus");
+#undef TAHOE_PUBLISH_LMAC
+#undef TAHOE_PUBLISH_UMAC
+        if (okay)
+            okay = controller->setProperty(
+                "NativeFwErrorSnapshotPublishRevisionEnd", finalRevision, 32) &&
+                controller->setProperty(
+                    "NativeFwErrorSnapshotPublishRevisionBegin",
+                    finalRevision, 32);
+        if (!okay)
+            return false;
+        nativeFwDiagnosticPublishRevision_ = finalRevision;
+        nativeFwDiagnosticLastPublishedCaptureSerial_ =
+            errorSnapshot.capture_serial;
+        nativeFwDiagnosticLastPublishedAttemptSerial_ = attemptSerial;
+        nativeFwDiagnosticLastPublishedAttemptStatus_ = attemptStatus;
+        nativeFwDiagnosticLastPublishedErrorFingerprint_ = errorFingerprint;
+    }
+
+    const uint32_t firmwareIdentityGeneration =
+        static_cast<uint32_t>(sc->sc_generation);
+    if (firmwareIdentityGeneration != 0 &&
+        nativeFirmwareIdentityPublishedGeneration_ !=
+            firmwareIdentityGeneration && sc->sc_fwname && sc->sc_fwver) {
+        OSString *name = OSString::withCString(sc->sc_fwname);
+        OSString *version = OSString::withCString(sc->sc_fwver);
+        if (!name || !version) {
+            if (name)
+                name->release();
+            if (version)
+                version->release();
+            return false;
+        }
+        const bool identityOkay =
+            controller->setProperty("NativeFirmwareIdentityName", name) &&
+            controller->setProperty("NativeFirmwareIdentityVersion", version) &&
+            controller->setProperty("NativeFirmwareIdentityDriverGeneration",
+                                    firmwareIdentityGeneration, 32) &&
+            controller->setProperty("NativeFirmwareIdentityDeviceFamily",
+                                    static_cast<uint32_t>(sc->sc_device_family), 32);
+        name->release();
+        version->release();
+        if (!identityOkay)
+            return false;
+        nativeFirmwareIdentityPublishedGeneration_ = firmwareIdentityGeneration;
+    }
+    return true;
+}
+#endif
+#endif
 
 void ItlIwx::
 iwx_nic_umac_error(struct iwx_softc *sc)
@@ -16087,6 +17161,21 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
 #endif
         if (!iwx_rx_pkt_valid(pkt)) {
 #ifdef AIRPORT_TAHOE
+            IwxFirmwareDiagnostics::Entry diagnosticEntry{};
+            diagnosticEntry.phase = static_cast<uint32_t>(
+                IwxFirmwareDiagnostics::Phase::RxDescriptorRejected);
+            diagnosticEntry.source = static_cast<uint32_t>((qid & 0x80)
+                ? IwxFirmwareDiagnostics::Source::UnsolicitedFirmwareNotification
+                : IwxFirmwareDiagnostics::Source::CommandResponseQueue);
+            diagnosticEntry.command_id = pkt->hdr.cmd;
+            diagnosticEntry.group_id = pkt->hdr.group_id;
+            diagnosticEntry.qid = qid;
+            diagnosticEntry.index = idx;
+            diagnosticEntry.header_sequence =
+                (uint32_t(qid) << 8) | static_cast<uint32_t>(idx);
+            diagnosticEntry.flags = IwxFirmwareDiagnostics::kHeaderFieldsPresent |
+                IwxFirmwareDiagnostics::kSourceIsHintOnly;
+            tahoeRecordFirmwareMetadata(sc, diagnosticEntry);
             rxParseStop.setReason(IWX_TX_COMPLETION_RX_DESCRIPTOR_INVALID);
 #endif
             break;
@@ -16108,12 +17197,48 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
         len = sizeof(pkt->len_n_flags) + iwx_rx_packet_len(pkt);
         if (len < minsz || len > (IWX_RBUF_SIZE - offset)) {
 #ifdef AIRPORT_TAHOE
+            IwxFirmwareDiagnostics::Entry diagnosticEntry{};
+            diagnosticEntry.phase = static_cast<uint32_t>(
+                IwxFirmwareDiagnostics::Phase::RxLengthRejected);
+            diagnosticEntry.source = static_cast<uint32_t>((qid & 0x80)
+                ? IwxFirmwareDiagnostics::Source::UnsolicitedFirmwareNotification
+                : IwxFirmwareDiagnostics::Source::CommandResponseQueue);
+            diagnosticEntry.command_id = pkt->hdr.cmd;
+            diagnosticEntry.group_id = pkt->hdr.group_id;
+            diagnosticEntry.qid = qid;
+            diagnosticEntry.index = idx;
+            diagnosticEntry.header_sequence =
+                (uint32_t(qid) << 8) | static_cast<uint32_t>(idx);
+            diagnosticEntry.flags = IwxFirmwareDiagnostics::kHeaderFieldsPresent |
+                IwxFirmwareDiagnostics::kPacketLengthPresent |
+                IwxFirmwareDiagnostics::kSourceIsHintOnly;
+            diagnosticEntry.packet_length = iwx_rx_packet_len(pkt);
+            diagnosticEntry.result = len > (IWX_RBUF_SIZE - offset) ? 2U : 1U;
+            tahoeRecordFirmwareMetadata(sc, diagnosticEntry);
             rxParseStop.setReason(
                 IWX_TX_COMPLETION_RX_PACKET_LENGTH_INVALID);
 #endif
             break;
         }
 #ifdef AIRPORT_TAHOE
+        IwxFirmwareDiagnostics::Entry diagnosticEntry{};
+        diagnosticEntry.phase = static_cast<uint32_t>(
+            IwxFirmwareDiagnostics::Phase::RxValidated);
+        diagnosticEntry.source = static_cast<uint32_t>((qid & 0x80)
+            ? IwxFirmwareDiagnostics::Source::UnsolicitedFirmwareNotification
+            : IwxFirmwareDiagnostics::Source::CommandResponseQueue);
+        diagnosticEntry.command_id = pkt->hdr.cmd;
+        diagnosticEntry.group_id = pkt->hdr.group_id;
+        diagnosticEntry.qid = qid;
+        diagnosticEntry.index = idx;
+        diagnosticEntry.header_sequence =
+            (uint32_t(qid) << 8) | static_cast<uint32_t>(idx);
+        diagnosticEntry.flags = IwxFirmwareDiagnostics::kHeaderFieldsPresent |
+            IwxFirmwareDiagnostics::kPacketLengthPresent |
+            IwxFirmwareDiagnostics::kSourceIsHintOnly;
+        diagnosticEntry.packet_length = iwx_rx_packet_len(pkt);
+        diagnosticEntry.payload_length = iwx_rx_packet_payload_len(pkt);
+        tahoeRecordFirmwareMetadata(sc, diagnosticEntry);
         rxParseStop.dismiss();
 #endif
 
@@ -16271,6 +17396,12 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
                 }
                 
                 sc->sc_uc.uc_intr = 1;
+#ifdef AIRPORT_TAHOE
+                __atomic_store_n(&nativeFwDiagnosticAliveGeneration_,
+                    sc->sc_uc.uc_ok
+                        ? static_cast<uint32_t>(sc->sc_generation) : 0U,
+                    __ATOMIC_RELEASE);
+#endif
                 wakeupOn(&sc->sc_uc);
                 break;
             }
@@ -16340,8 +17471,28 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
             case IWX_SCD_QUEUE_CFG: {
                 size_t pkt_len;
                 
-                if (sc->sc_cmd_resp_pkt[idx] == NULL)
+                if (sc->sc_cmd_resp_pkt[idx] == NULL) {
+#ifdef AIRPORT_TAHOE
+                    IwxFirmwareDiagnostics::Entry diagnosticEntry{};
+                    diagnosticEntry.phase = static_cast<uint32_t>(
+                        IwxFirmwareDiagnostics::Phase::RxResponseNoBuffer);
+                    diagnosticEntry.source = static_cast<uint32_t>(
+                        IwxFirmwareDiagnostics::Source::CommandResponseQueue);
+                    diagnosticEntry.command_id = pkt->hdr.cmd;
+                    diagnosticEntry.group_id = pkt->hdr.group_id;
+                    diagnosticEntry.qid = qid;
+                    diagnosticEntry.index = idx;
+                    diagnosticEntry.header_sequence =
+                        (uint32_t(qid) << 8) | static_cast<uint32_t>(idx);
+                    diagnosticEntry.flags = IwxFirmwareDiagnostics::kHeaderFieldsPresent |
+                        IwxFirmwareDiagnostics::kPacketLengthPresent |
+                        IwxFirmwareDiagnostics::kSourceIsHintOnly;
+                    diagnosticEntry.packet_length = iwx_rx_packet_len(pkt);
+                    diagnosticEntry.payload_length = iwx_rx_packet_payload_len(pkt);
+                    tahoeRecordFirmwareMetadata(sc, diagnosticEntry);
+#endif
                     break;
+                }
                 
                 //            bus_dmamap_sync(sc->sc_dmat, data->map, 0,
                 //                sizeof(*pkt), BUS_DMASYNC_POSTREAD);
@@ -16352,6 +17503,29 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
                 if ((pkt->hdr.group_id & IWX_CMD_FAILED_MSK) ||
                     pkt_len < sizeof(*pkt) ||
                     pkt_len > sc->sc_cmd_resp_len[idx]) {
+#ifdef AIRPORT_TAHOE
+                    IwxFirmwareDiagnostics::Entry diagnosticEntry{};
+                    diagnosticEntry.phase = static_cast<uint32_t>(
+                        IwxFirmwareDiagnostics::Phase::RxResponseRejected);
+                    diagnosticEntry.source = static_cast<uint32_t>(
+                        IwxFirmwareDiagnostics::Source::CommandResponseQueue);
+                    diagnosticEntry.command_id = pkt->hdr.cmd;
+                    diagnosticEntry.group_id = pkt->hdr.group_id;
+                    diagnosticEntry.qid = qid;
+                    diagnosticEntry.index = idx;
+                    diagnosticEntry.header_sequence =
+                        (uint32_t(qid) << 8) | static_cast<uint32_t>(idx);
+                    diagnosticEntry.flags = IwxFirmwareDiagnostics::kHeaderFieldsPresent |
+                        IwxFirmwareDiagnostics::kPacketLengthPresent |
+                        IwxFirmwareDiagnostics::kResponseBufferPresent |
+                        IwxFirmwareDiagnostics::kSourceIsHintOnly;
+                    diagnosticEntry.packet_length = static_cast<uint32_t>(pkt_len);
+                    diagnosticEntry.result =
+                        ((pkt->hdr.group_id & IWX_CMD_FAILED_MSK) ? 1U : 0U) |
+                        ((pkt_len < sizeof(*pkt)) ? 2U : 0U) |
+                        ((pkt_len > sc->sc_cmd_resp_len[idx]) ? 4U : 0U);
+                    tahoeRecordFirmwareMetadata(sc, diagnosticEntry);
+#endif
                     ::free(sc->sc_cmd_resp_pkt[idx]);
                     sc->sc_cmd_resp_pkt[idx] = NULL;
                     break;
@@ -16360,6 +17534,26 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
                 //            bus_dmamap_sync(sc->sc_dmat, data->map, sizeof(*pkt),
                 //                pkt_len - sizeof(*pkt), BUS_DMASYNC_POSTREAD);
                 memcpy(sc->sc_cmd_resp_pkt[idx], pkt, pkt_len);
+#ifdef AIRPORT_TAHOE
+                IwxFirmwareDiagnostics::Entry diagnosticEntry{};
+                diagnosticEntry.phase = static_cast<uint32_t>(
+                    IwxFirmwareDiagnostics::Phase::RxResponseCopied);
+                diagnosticEntry.source = static_cast<uint32_t>(
+                    IwxFirmwareDiagnostics::Source::CommandResponseQueue);
+                diagnosticEntry.command_id = pkt->hdr.cmd;
+                diagnosticEntry.group_id = pkt->hdr.group_id;
+                diagnosticEntry.qid = qid;
+                diagnosticEntry.index = idx;
+                diagnosticEntry.header_sequence =
+                    (uint32_t(qid) << 8) | static_cast<uint32_t>(idx);
+                diagnosticEntry.flags = IwxFirmwareDiagnostics::kHeaderFieldsPresent |
+                    IwxFirmwareDiagnostics::kPacketLengthPresent |
+                    IwxFirmwareDiagnostics::kResponseBufferPresent |
+                    IwxFirmwareDiagnostics::kSourceIsHintOnly;
+                diagnosticEntry.packet_length = static_cast<uint32_t>(pkt_len);
+                diagnosticEntry.payload_length = iwx_rx_packet_payload_len(pkt);
+                tahoeRecordFirmwareMetadata(sc, diagnosticEntry);
+#endif
                 break;
             }
                 
@@ -16558,6 +17752,28 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
                       (qid & ~0x80), idx);
                 break;
         }
+
+#ifdef AIRPORT_TAHOE
+        IwxFirmwareDiagnostics::Entry dispatchEntry{};
+        dispatchEntry.phase = static_cast<uint32_t>(
+            IwxFirmwareDiagnostics::Phase::RxDispatchCompleted);
+        dispatchEntry.source = static_cast<uint32_t>((qid & 0x80)
+            ? IwxFirmwareDiagnostics::Source::UnsolicitedFirmwareNotification
+            : IwxFirmwareDiagnostics::Source::CommandResponseQueue);
+        dispatchEntry.command_id = pkt->hdr.cmd;
+        dispatchEntry.group_id = pkt->hdr.group_id;
+        dispatchEntry.qid = qid;
+        dispatchEntry.index = idx;
+        dispatchEntry.header_sequence =
+            (uint32_t(qid) << 8) | static_cast<uint32_t>(idx);
+        dispatchEntry.flags = IwxFirmwareDiagnostics::kHeaderFieldsPresent |
+            IwxFirmwareDiagnostics::kPacketLengthPresent |
+            IwxFirmwareDiagnostics::kSourceIsHintOnly;
+        dispatchEntry.packet_length = iwx_rx_packet_len(pkt);
+        dispatchEntry.payload_length = iwx_rx_packet_payload_len(pkt);
+        dispatchEntry.result = handled ? 1U : 0U;
+        tahoeRecordFirmwareMetadata(sc, dispatchEntry);
+#endif
         
         /*
          * uCode sets bit 0x80 when it originates the notification,
@@ -16685,6 +17901,11 @@ iwx_intr(OSObject *object, IOInterruptEventSource* sender, int count)
     }
     
     if (r1 & IWX_CSR_INT_BIT_SW_ERR) {
+#ifdef AIRPORT_TAHOE
+        // An interrupt must never poll the NIC or walk the firmware error
+        // table. The bounded pre-reset reader runs later in recovery.
+        that->tahoeRecordFirmwareErrorInterrupt(sc, r1);
+#else
 #if 1 /* usually #ifdef IWX_DEBUG but always enabled for now */
         int i;
         
@@ -16701,6 +17922,7 @@ iwx_intr(OSObject *object, IOInterruptEventSource* sender, int count)
         XYLog("  rx ring: cur=%d\n", sc->rxq.cur);
         XYLog("  802.11 state %s\n",
               ieee80211_state_name[sc->sc_ic.ic_state]);
+#endif
 #endif
         
         XYLog("%s: fatal firmware error\n", DEVNAME(sc));
@@ -16806,6 +18028,11 @@ iwx_intr_msix(OSObject *object, IOInterruptEventSource* sender, int count)
     if ((inta_fh & IWX_MSIX_FH_INT_CAUSES_FH_ERR) ||
         (inta_hw & IWX_MSIX_HW_INT_CAUSES_REG_SW_ERR) ||
         (inta_hw & IWX_MSIX_HW_INT_CAUSES_REG_SW_ERR_V2)) {
+#ifdef AIRPORT_TAHOE
+        // Preserve interrupt cause scalars; do table reads only from the
+        // pre-reset, bounded recovery action.
+        that->tahoeRecordFirmwareErrorInterrupt(sc, inta_hw, inta_fh);
+#else
 #if 1 /* usually #ifdef IWX_DEBUG but always enabled for now */
         int i;
         
@@ -16822,6 +18049,7 @@ iwx_intr_msix(OSObject *object, IOInterruptEventSource* sender, int count)
         XYLog("  rx ring: cur=%d\n", sc->rxq.cur);
         XYLog("  802.11 state %s\n",
               ieee80211_state_name[sc->sc_ic.ic_state]);
+#endif
 #endif
         
         XYLog("%s: fatal firmware error\n", DEVNAME(sc));
@@ -18596,6 +19824,8 @@ iwx_init_task(void *arg1)
             IwxResetTrace::ResetReason::kInitTaskNotRunningRecovery;
         const uint32_t linkResetSequence = that->tahoeRecordReset(
             resetReason, sc);
+        that->tahoeCapturePreResetFirmwareErrorSnapshot(
+            sc, resetReason, linkResetSequence);
         that->tahoeDriverEvent(ITL_TAHOE_EVT_RESET_BEGIN);
         // This branch records an init-recovery attempt without calling
         // iwx_stop(). Close the trace explicitly so a later stop cannot be
@@ -18623,6 +19853,10 @@ iwx_init_task(void *arg1)
     
     //    rw_exit(&sc->ioctl_rwl);
     splx(s);
+#ifdef AIRPORT_TAHOE
+    (void)that->tahoePublishFirmwareDiagnostics(
+        that->getController(), sc, false);
+#endif
 }
 
 int ItlIwx::

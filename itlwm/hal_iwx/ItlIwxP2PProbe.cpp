@@ -7273,6 +7273,12 @@ IOReturn ItlIwx::tahoeP2pRocEventAction(OSObject *, void *opaque,
             txStillQuiescent;
         if (auto *controller = owner->tahoeP2pController())
             owner->tahoeP2pPublishRxEventTimeline(controller);
+        // A bounded live command/RX trace snapshot at the existing ROC close
+        // boundary captures sub-second diagnostics without opening or
+        // extending the radio window. A watchdog-frozen trace always wins.
+        if (auto *controller = owner->tahoeP2pController())
+            (void)owner->tahoePublishFirmwareDiagnostics(
+                controller, &owner->com, true);
         if (!action->rxDrainComplete)
             return kIOReturnNotReady;
     } else if (action->operation == kRocRead) {

@@ -157,6 +157,7 @@
 #include "../../native/iwx_reset_trace.hpp"
 #include "../../native/iwx_link_state_trace.hpp"
 #include "../../native/iwx_mcc_refresh_policy.hpp"
+#include "../../native/iwx_fw_diagnostics.hpp"
 #include "ItlIwxP2PTx.hpp"
 #include "ItlIwxP2PAction.hpp"
 #endif
@@ -377,6 +378,40 @@ public:
     uint64_t nativeLifecycleStopRejectFingerprint_ {0};
     IwxResetTrace::Trace nativeResetTrace_ {};
     IwxLinkStateTrace::Trace nativeLinkTransitionTrace_ {};
+    IwxFirmwareDiagnostics::TraceRing nativeFwDiagnosticTrace_ {};
+    IwxFirmwareDiagnostics::TraceSnapshot nativeFwDiagnosticPendingTrace_ {};
+    IwxFirmwareDiagnostics::TraceWireBuffer nativeFwDiagnosticWireBuffer_ {};
+    IwxFirmwareDiagnostics::FirmwareErrorSnapshot nativeFwErrorSnapshot_ {};
+    // Pending trace/error snapshots and all publication fingerprints are
+    // owned by the main command gate. The lock-free HCMD/RX producers touch
+    // only nativeFwDiagnosticTrace_; generation/status handoff words below
+    // are atomic because those producers and the command gate cross threads.
+    uint32_t nativeFwDiagnosticPendingTraceGeneration_ {0};
+    uint32_t nativeFwDiagnosticPendingWatchdogSequence_ {0};
+    uint32_t nativeFwDiagnosticPendingTracePresent_ {0};
+    uint32_t nativeFwDiagnosticTraceFrozen_ {0};
+    uint32_t nativeFwDiagnosticTraceManualLatched_ {0};
+    uint64_t nativeFwDiagnosticTraceLastSampleNs_ {0};
+    uint32_t nativeFwDiagnosticAliveGeneration_ {0};
+    uint32_t nativeFwDiagnosticTlvGeneration_ {0};
+    uint32_t nativeFwDiagnosticExpectedLmacTable_[2] {};
+    uint32_t nativeFwDiagnosticExpectedUmacTable_ {0};
+    uint32_t nativeFwDiagnosticCaptureStatus_ {0};
+    uint32_t nativeFwDiagnosticCaptureGeneration_ {0};
+    uint32_t nativeFwDiagnosticCaptureSerial_ {0};
+    uint32_t nativeFwDiagnosticCaptureResetSequence_ {0};
+    uint32_t nativeFwDiagnosticCaptureWatchdogSequence_ {0};
+    uint32_t nativeFwDiagnosticCaptureWatchdogPresent_ {0};
+    uint32_t nativeFwDiagnosticCaptureResetReason_ {0};
+    uint32_t nativeFwDiagnosticPublishRevision_ {0};
+    uint32_t nativeHcmdRxTracePublishRevision_ {0};
+    uint32_t nativeFwDiagnosticLastPublishedCaptureSerial_ {0};
+    uint64_t nativeFwDiagnosticLastPublishedTraceSerial_ {0};
+    uint32_t nativeFwDiagnosticLastPublishedAttemptStatus_ {0};
+    uint32_t nativeFwDiagnosticLastPublishedAttemptSerial_ {0};
+    uint64_t nativeFwDiagnosticLastPublishedTraceFingerprint_ {0};
+    uint64_t nativeFwDiagnosticLastPublishedErrorFingerprint_ {0};
+    uint32_t nativeFirmwareIdentityPublishedGeneration_ {0};
     uint32_t nativeResetTracePublishedSequence_ {UINT32_MAX};
     uint32_t nativeResetTracePublishedTriggerSequence_ {UINT32_MAX};
     uint32_t nativeResetTracePublishedTriggerRevision_ {UINT32_MAX};
@@ -393,6 +428,22 @@ public:
         uint32_t resetSequence = UINT32_MAX,
         bool resetSequenceValid = false);
     bool tahoePublishLinkTransitionTrace(IOEthernetController *);
+    void tahoeRecordFirmwareMetadata(
+        struct iwx_softc *, IwxFirmwareDiagnostics::Entry);
+    void tahoeFreezeFirmwareMetadata(
+        struct iwx_softc *, uint32_t watchdogSequence);
+    void tahoeRecordFirmwareErrorInterrupt(
+        struct iwx_softc *, uint32_t interruptStatus,
+        uint32_t detailStatus = 0);
+    void tahoeCapturePreResetFirmwareErrorSnapshot(
+        struct iwx_softc *, IwxResetTrace::ResetReason, uint32_t resetSequence);
+    bool tahoePublishFirmwareDiagnostics(IOEthernetController *,
+                                         struct iwx_softc *,
+                                         bool forceTraceSample = false);
+    static IOReturn _tahoe_fw_error_snapshot_action(
+        OSObject *, void *, void *, void *, void *);
+    static IOReturn _tahoe_fw_diagnostics_publish_action(
+        OSObject *, void *, void *, void *, void *);
     bool tahoeTryLifecycleFence();
     bool tahoeReleaseLifecycleFence(bool flushDeferredTasks = true);
     void tahoeDeferLifecycleTasks(uint32_t);

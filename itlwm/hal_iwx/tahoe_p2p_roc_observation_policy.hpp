@@ -17,9 +17,11 @@ struct Channel {
 
 constexpr bool channel149ReceiveOnlyAllowed(const Channel &channel)
 {
+    /* PASSIVE is retained as a regulatory restriction; it is not a reason to
+     * reject this separately gated receive-only session. This policy only
+     * reads the channel entry and never changes its flags. */
     return channel.index == 149 && channel.frequencyMHz == 5745 &&
-        channel.is5GHz && !channel.is2GHz && channel.hasFlags && !channel.isDfs &&
-        !channel.isPassive;
+        channel.is5GHz && !channel.is2GHz && channel.hasFlags && !channel.isDfs;
 }
 
 /* Ordinary requests retain the existing policy; only an explicit request
