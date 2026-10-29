@@ -428,13 +428,13 @@
     "developer-tools/continuity/tests/test_observe_continuity_window.py": "fc41200a8c4221de7396c4a8e93dc128dbe5d4872cefcb3154343d25d14c790f",
     "developer-tools/continuity/tools/observe_continuity_window.py": "24aaa6dc89c8ecff0f009850cf36d74b20fb6be483db46853040cb74d12d4007",
     "developer-tools/progress-site/README.md": "bc45538986622364e2891a85a6e93e297967229d5305032cd91e187287ad04b2",
-    "developer-tools/progress-site/SOURCE-MANIFEST.json": "28932ad5ab08be2735fa8b5d524a23523623ea7beeeee932110587e8c4165bd6",
+    "developer-tools/progress-site/SOURCE-MANIFEST.json": "5b85e68965dd61e264e66e4eca9f175bb569a423b8e86f18fe3c10d01db04f3d",
     "developer-tools/progress-site/dist/assets/site.css": "4348ea93c013b95d6d00aa729ddb230a630830b4220c9e6bfa1db19c59de6a99",
     "developer-tools/progress-site/dist/assets/site.js": "db2af24f6b933e1eabc9f4ec0eebd90920ea21249ae164012f2b477759bb5a90",
-    "developer-tools/progress-site/dist/assets/test-records.js": "b481e88d26fe6e9a2c70910d3a4e6027ee7bdaad1fd3b93333d19fad86d85250",
-    "developer-tools/progress-site/dist/data.js": "d348a97dd8e81ff03f52ffef71560fe7f562c4e81ec73bba871413f24200ef52",
+    "developer-tools/progress-site/dist/assets/test-records.js": "11f148f813d1986e49ad02624f319fb4ff2638337ad71fab732dc4dcc7955f65",
+    "developer-tools/progress-site/dist/data.js": "1e42f3956a9edc8bc5851419d5ee1785fbeeddcfa6058727b88e20e4c551f439",
     "developer-tools/progress-site/dist/index.html": "38276cf10b5e8539721e2bc321d5f6093fd7e30997791cb5a2d0f71ec966057f",
-    "developer-tools/progress-site/dist/milestones.html": "a1260fa6eb8480bb497c48f3a463e9fc10ea710b0772319ee131eac21f1dbe60",
+    "developer-tools/progress-site/dist/milestones.html": "8e6963275b6ed2ce947ca2e0f1165ac8798cc7a29be80827be68b6d634d9c963",
     "developer-tools/progress-site/tools/publish_github_pages.py": "7c05efb77487e503bacbb8056906822ea04569085bddc968699dd2bd7b3c6359",
     "developer-tools/progress-site/tools/refresh_data.py": "b00856ca206585daba1883e08fb6ecc4738dada058635c559dd6b62ac9f9feef",
     "developer-tools/rx-stimulus/README.md": "b889968fe61dd6967053e6582bd3a701dd507de4a1ec9d4ec1f80618a040e8ce",
@@ -1077,17 +1077,17 @@
     "full_build_passed": true,
     "strict_signature_passed": true,
     "runtime_verified": false,
-    "boot_loaded_verified": false,
+    "boot_loaded_verified": true,
     "peer_return_verified": false,
     "airdrop_verified": false,
-    "runtime_verification_scope": "Offline validation and internal EFI deployment completed. Test080 boot, firmware/RX149 acceptance, stability, peer return and AirDrop unverified."
+    "runtime_verification_scope": "Test080 loaded with matching archived UUID. Wi-Fi passive307s/pre and95s/post plus3 interface-bound HTTP200 requests passed. RX149 Prepare returned EOPNOTSUPP102 before session submission; no driver149 RX or native data/AirDrop acceptance."
   },
   "notes": [
     "Test080 production/ABI/build inputs match the signed full-build freeze. Tests and host tools are recorded separately by exact hashes.",
     "The receive observation uses its own manual mode and disables host experimental management/data TX; firmware/ordinary STA absolute RF silence is not established.",
     "Private runtime data, Apple analysis binaries, machine configuration, credentials and packet captures are excluded.",
     "The existing binary Release remains Test059; this commit preserves Test080 development source and reviewed tool snapshots.",
-    "The website separates the running Test079 runtime record from deployed Test080 pending reboot. No Test080 hardware acceptance is claimed."
+    "The website shows Test080 runtime only: 6 passed, 4 partial, 29 not covered, and1 failed new149 START experiment; external40 MIFs decoded offline are not Intel driver acceptance."
   ],
   "baseline": "25G332-Test079",
   "build_production_commit": "e3a365b07a6b9aa98083c88525b61eb71e6ac48d"
