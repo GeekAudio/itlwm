@@ -2,10 +2,13 @@
  * Tahoe Intel P2P ROC firmware resource adapter.
  *
  * Sessions default to 100 ms / 20 MHz. A single 900 ms management-TX window
- * is allowed only on a legally bound social channel 6 P2P PHY. Same-channel
- * sessions remain supported; other off-channel targets fail closed.
+ * is allowed only on a legally bound social channel 6 P2P PHY. The opt-in
+ * 149 observation session is 100 ms, Device Discovery only, and TX guarded.
+ * Same-channel sessions remain supported; other off-channel targets fail closed.
  */
 #include "ItlIwx.hpp"
+#include "tahoe_p2p_roc_observation_policy.hpp"
+#include <stddef.h>
 
 #ifdef AIRPORT_TAHOE
 
@@ -13,6 +16,20 @@ namespace {
 
 static const uint32_t kTahoeRocDurationMs = 100;
 static const uint32_t kTahoeSocialTxRocDurationMs = 900;
+
+static bool
+tahoeP2pRocIsReceiveObservationOnly(const struct iwx_p2p_roc_state &roc)
+{
+    return __atomic_load_n(&roc.receive_observation_only, __ATOMIC_ACQUIRE) != 0;
+}
+
+static void
+tahoeP2pRocResetState(struct iwx_p2p_roc_state &roc)
+{
+    memset(&roc, 0, offsetof(struct iwx_p2p_roc_state,
+                             receive_observation_only));
+    __atomic_store_n(&roc.receive_observation_only, 0, __ATOMIC_RELEASE);
+}
 
 static uint8_t
 tahoeP2pRocAntennaCount(uint8_t mask)
@@ -186,12 +203,111 @@ tahoeP2pRocLongSocialTxAllowed(struct iwx_softc *sc,
         phy->channel == roc.roc_channel;
 }
 
+static TahoeP2PRocObservationPolicy::Channel
+tahoeP2pRocObservationChannel(struct ieee80211_channel *channel,
+                              u_int channelIndex)
+{
+    TahoeP2PRocObservationPolicy::Channel policyChannel = {};
+    policyChannel.index = channelIndex;
+    policyChannel.frequencyMHz = channel != NULL ? channel->ic_freq : 0;
+    policyChannel.is5GHz = channel != NULL &&
+        IEEE80211_IS_CHAN_5GHZ(channel);
+    policyChannel.is2GHz = channel != NULL &&
+        IEEE80211_IS_CHAN_2GHZ(channel);
+    policyChannel.hasFlags = channel != NULL && channel->ic_flags != 0;
+    policyChannel.isDfs = channel != NULL &&
+        (channel->ic_flags & IEEE80211_CHAN_DFS) != 0;
+    policyChannel.isPassive = channel != NULL &&
+        (channel->ic_flags & IEEE80211_CHAN_PASSIVE) != 0;
+    return policyChannel;
+}
+
+static bool
+tahoeP2pRocObservation149PrepareAllowed(
+    struct ieee80211_channel *channel, u_int channelIndex,
+    uint32_t configuration, bool requested)
+{
+#if defined(ITL_NATIVE_AWDL_RX149_OBSERVATION_25G332)
+    const bool featureCompiled = true;
+#else
+    const bool featureCompiled = false;
+#endif
+    return TahoeP2PRocObservationPolicy::prepareAllowed(
+        featureCompiled, requested,
+        configuration == IWX_SESSION_PROTECT_CONF_P2P_DEVICE_DISCOV,
+        tahoeP2pRocObservationChannel(channel, channelIndex));
+}
+
+static bool
+tahoeP2pRocObservation149SubmitAllowed(
+    const struct iwx_p2p_roc_state &roc, uint32_t configuration,
+    uint32_t durationMs, u_int channelIndex)
+{
+#if defined(ITL_NATIVE_AWDL_RX149_OBSERVATION_25G332)
+    const bool featureCompiled = true;
+#else
+    const bool featureCompiled = false;
+#endif
+    return TahoeP2PRocObservationPolicy::submitAllowed(
+        featureCompiled, tahoeP2pRocIsReceiveObservationOnly(roc),
+        configuration == IWX_SESSION_PROTECT_CONF_P2P_DEVICE_DISCOV,
+        durationMs,
+        tahoeP2pRocObservationChannel(roc.roc_channel, channelIndex));
+}
+
+static bool
+tahoeP2pRocObservationOwnerValid(struct iwx_softc *sc,
+                                const struct iwx_p2p_roc_state &roc,
+                                uint8_t expectedBindingState)
+{
+    if (sc == NULL || !tahoeP2pRocIsReceiveObservationOnly(roc))
+        return false;
+#if defined(ITL_NATIVE_AWDL_RX149_OBSERVATION_25G332)
+    if (roc.fw_generation != static_cast<uint32_t>(sc->sc_generation) ||
+        roc.station_epoch != __atomic_load_n(&sc->sc_tx_rate_generation,
+                                             __ATOMIC_ACQUIRE) ||
+        sc->sc_ic.ic_state != IEEE80211_S_RUN || sc->sc_ic.ic_bss == NULL ||
+        static_cast<void *>(sc->sc_ic.ic_bss) != roc.station_bss ||
+        roc.station_phy_id != 0 || roc.station_phy_id >= IWX_NUM_PHY_CTX ||
+        roc.station_phy_channel == NULL || roc.phy_id != 1 ||
+        roc.phy_id >= IWX_NUM_PHY_CTX || roc.roc_channel == NULL)
+        return false;
+
+    const struct iwx_node *station =
+        reinterpret_cast<const struct iwx_node *>(sc->sc_ic.ic_bss);
+    const struct iwx_phy_ctxt *stationPhy = &sc->sc_phyctxt[0];
+    const struct iwx_phy_ctxt *p2pPhy = &sc->sc_phyctxt[roc.phy_id];
+    return station->in_phyctxt == stationPhy &&
+        station->in_phyctxt->id == roc.station_phy_id &&
+        station->in_phyctxt->color == roc.station_phy_color &&
+        station->in_ni.ni_chan == roc.station_phy_channel &&
+        stationPhy->id == roc.station_phy_id &&
+        stationPhy->color == roc.station_phy_color &&
+        stationPhy->channel == roc.station_phy_channel &&
+        sc->sc_p2p.initialized &&
+        sc->sc_p2p.fw_generation == roc.fw_generation &&
+        sc->sc_p2p.mac_state == IWX_P2P_RESOURCE_ACTIVE &&
+        sc->sc_p2p.mac_id == 1 && sc->sc_p2p.phy_leased &&
+        sc->sc_p2p.phy_id == roc.phy_id &&
+        sc->sc_p2p.binding_id == roc.phy_id &&
+        sc->sc_p2p.phy_color == roc.phy_color &&
+        sc->sc_p2p.binding_color == roc.phy_color &&
+        sc->sc_p2p.binding_state == expectedBindingState &&
+        p2pPhy->id == roc.phy_id && p2pPhy->color == roc.phy_color &&
+        p2pPhy->channel == roc.roc_channel;
+#else
+    (void)expectedBindingState;
+    return false;
+#endif
+}
+
 } // namespace
 
 int ItlIwx::
 tahoeP2pRocPrepare(struct iwx_softc *sc,
                     struct ieee80211_channel *channel,
-                    uint32_t token, uint32_t configuration)
+                    uint32_t token, uint32_t configuration,
+                    bool receiveObservation149)
 {
     if (sc == NULL || sc != &com || channel == NULL)
         return EINVAL;
@@ -202,6 +318,9 @@ tahoeP2pRocPrepare(struct iwx_softc *sc,
                                         &channelIndex))
         return EOPNOTSUPP;
     if (!tahoeP2pRocConfigurationSupported(configuration))
+        return EOPNOTSUPP;
+    if (!tahoeP2pRocObservation149PrepareAllowed(
+            channel, channelIndex, configuration, receiveObservation149))
         return EOPNOTSUPP;
     if (!nativeP2pCommandAllowed())
         return EBUSY;
@@ -231,7 +350,7 @@ tahoeP2pRocPrepare(struct iwx_softc *sc,
     if (channelIndex == 6 &&
         !tahoeP2pRocSocialChannel6Allowed(&sc->sc_ic, channel))
         return EOPNOTSUPP;
-    if (sta->in_ni.ni_chan != channel &&
+    if (!receiveObservation149 && sta->in_ni.ni_chan != channel &&
         !tahoeP2pRocOffChannelAllowed(&sc->sc_ic, channel, configuration))
         return EOPNOTSUPP;
     if (isset(sc->sc_enabled_capa, IWX_UCODE_TLV_CAPA_SESSION_PROT_CMD) == 0 ||
@@ -247,20 +366,31 @@ tahoeP2pRocPrepare(struct iwx_softc *sc,
         return EOPNOTSUPP;
 
     struct iwx_p2p_roc_state &roc = sc->sc_p2p_roc;
-    memset(&roc, 0, sizeof(roc));
+    tahoeP2pRocResetState(roc);
     roc.token = token;
     roc.fw_generation = static_cast<uint32_t>(sc->sc_generation);
     roc.session_conf_id = static_cast<uint8_t>(configuration);
     roc.session_submit_result = EINPROGRESS;
     roc.phy_id = 0xff;
+    __atomic_store_n(&roc.receive_observation_only,
+                     receiveObservation149 ? 1 : 0, __ATOMIC_RELEASE);
 
     uint8_t phyId = 0xff;
     int error = iwx_p2p_phy_lease(sc, &phyId);
-    if (error)
+    if (error) {
+        if (receiveObservation149)
+            tahoeP2pRocResetState(roc);
         return error;
+    }
     if (phyId != 1 || phyId >= IWX_NUM_PHY_CTX ||
         sc->sc_phyctxt[phyId].channel == NULL) {
-        (void)iwx_p2p_phy_release(sc);
+        const int releaseError = iwx_p2p_phy_release(sc);
+        if (receiveObservation149 && releaseError) {
+            roc.phase = IWX_P2P_ROC_QUARANTINED;
+            return releaseError;
+        }
+        if (receiveObservation149)
+            tahoeP2pRocResetState(roc);
         return EOPNOTSUPP;
     }
 
@@ -268,6 +398,14 @@ tahoeP2pRocPrepare(struct iwx_softc *sc,
     roc.phy_color = static_cast<uint8_t>(sc->sc_phyctxt[phyId].color);
     roc.original_phy_channel = sc->sc_phyctxt[phyId].channel;
     roc.roc_channel = channel;
+    if (receiveObservation149) {
+        roc.station_bss = static_cast<void *>(sc->sc_ic.ic_bss);
+        roc.station_epoch = __atomic_load_n(&sc->sc_tx_rate_generation,
+                                             __ATOMIC_ACQUIRE);
+        roc.station_phy_id = static_cast<uint8_t>(sta->in_phyctxt->id);
+        roc.station_phy_color = sta->in_phyctxt->color;
+        roc.station_phy_channel = sta->in_ni.ni_chan;
+    }
 
     roc.phase = IWX_P2P_ROC_PHY_REMOVE_UNKNOWN;
     error = tahoeP2pRocPhyCommand(this, sc, &sc->sc_phyctxt[phyId],
@@ -293,6 +431,12 @@ tahoeP2pRocPrepare(struct iwx_softc *sc,
     if (error) {
         /* Only a decoded nonzero command status proves that ADD was rejected. */
         if (sc->sc_p2p.binding_state == IWX_P2P_RESOURCE_ABSENT) {
+            if (tahoeP2pRocIsReceiveObservationOnly(roc) &&
+                !tahoeP2pRocObservationOwnerValid(
+                    sc, roc, IWX_P2P_RESOURCE_ABSENT)) {
+                roc.phase = IWX_P2P_ROC_QUARANTINED;
+                return error;
+            }
             const int restoreError = tahoeP2pRocRestorePhy(this, sc);
             if (restoreError) {
                 roc.phase = IWX_P2P_ROC_QUARANTINED;
@@ -326,11 +470,24 @@ tahoeP2pRocSubmit(struct iwx_softc *sc, uint32_t token,
         return EOPNOTSUPP;
     if (roc.session_conf_id != configuration)
         return EBUSY;
+    u_int channelIndex = 0;
+    if (tahoeP2pRocIsReceiveObservationOnly(roc) &&
+        (!tahoeP2pRocCurrentChannelIndex(&sc->sc_ic, roc.roc_channel,
+                                         &channelIndex) ||
+         !tahoeP2pRocObservation149SubmitAllowed(
+             roc, configuration, durationMs, channelIndex)))
+        return EOPNOTSUPP;
     if (sc->sc_p2p.mac_state != IWX_P2P_RESOURCE_ACTIVE ||
         sc->sc_p2p.binding_state != IWX_P2P_RESOURCE_ACTIVE ||
         !sc->sc_p2p.phy_leased ||
         sc->sc_p2p.mac_id != 1 || sc->sc_p2p.phy_id != 1)
         return EBUSY;
+    if (tahoeP2pRocIsReceiveObservationOnly(roc) &&
+        !tahoeP2pRocObservationOwnerValid(
+            sc, roc, IWX_P2P_RESOURCE_ACTIVE)) {
+        roc.phase = IWX_P2P_ROC_QUARANTINED;
+        return EBUSY;
+    }
     if (durationMs != kTahoeRocDurationMs &&
         (durationMs != kTahoeSocialTxRocDurationMs ||
          !tahoeP2pRocLongSocialTxAllowed(sc, roc, configuration)))
@@ -392,12 +549,24 @@ tahoeP2pRocAbortPrepared(struct iwx_softc *sc, uint32_t token,
         !sc->sc_p2p.phy_leased || sc->sc_p2p.mac_id != 1 ||
         sc->sc_p2p.phy_id != roc.phy_id || roc.phy_id != 1)
         return EBUSY;
+            if (tahoeP2pRocIsReceiveObservationOnly(roc) &&
+        !tahoeP2pRocObservationOwnerValid(
+            sc, roc, IWX_P2P_RESOURCE_ACTIVE)) {
+        roc.phase = IWX_P2P_ROC_QUARANTINED;
+        return EBUSY;
+    }
 
     roc.phase = IWX_P2P_ROC_BINDING_REMOVE_UNKNOWN;
     int error = iwx_p2p_binding_remove(sc);
     if (error) {
         roc.phase = IWX_P2P_ROC_QUARANTINED;
         return error;
+    }
+    if (tahoeP2pRocIsReceiveObservationOnly(roc) &&
+        !tahoeP2pRocObservationOwnerValid(
+            sc, roc, IWX_P2P_RESOURCE_ABSENT)) {
+        roc.phase = IWX_P2P_ROC_QUARANTINED;
+        return EBUSY;
     }
     if (roc.fw_generation != static_cast<uint32_t>(sc->sc_generation)) {
         roc.phase = IWX_P2P_ROC_QUARANTINED;
@@ -432,6 +601,12 @@ tahoeP2pRocCleanup(struct iwx_softc *sc, uint32_t token,
         !sc->sc_p2p.phy_leased || sc->sc_p2p.mac_state !=
             IWX_P2P_RESOURCE_ACTIVE)
         return EBUSY;
+    if (tahoeP2pRocIsReceiveObservationOnly(roc) &&
+        !tahoeP2pRocObservationOwnerValid(
+            sc, roc, IWX_P2P_RESOURCE_ACTIVE)) {
+        roc.phase = IWX_P2P_ROC_QUARANTINED;
+        return EBUSY;
+    }
 
     roc.phase = IWX_P2P_ROC_END_CONFIRMED;
     roc.phase = IWX_P2P_ROC_BINDING_REMOVE_UNKNOWN;
@@ -439,6 +614,13 @@ tahoeP2pRocCleanup(struct iwx_softc *sc, uint32_t token,
     if (error) {
         roc.phase = IWX_P2P_ROC_QUARANTINED;
         return error;
+    }
+
+    if (tahoeP2pRocIsReceiveObservationOnly(roc) &&
+        !tahoeP2pRocObservationOwnerValid(
+            sc, roc, IWX_P2P_RESOURCE_ABSENT)) {
+        roc.phase = IWX_P2P_ROC_QUARANTINED;
+        return EBUSY;
     }
 
     error = tahoeP2pRocRestorePhy(this, sc);

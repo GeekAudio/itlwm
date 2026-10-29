@@ -794,7 +794,8 @@ public:
     int iwx_p2p_binding_remove(struct iwx_softc *);
     int iwx_p2p_context_reset_after_fw_reset(struct iwx_softc *, uint32_t);
     int tahoeP2pRocPrepare(struct iwx_softc *, struct ieee80211_channel *,
-                           uint32_t, uint32_t);
+                           uint32_t, uint32_t,
+                           bool receiveObservation149 = false);
     int tahoeP2pRocSubmit(struct iwx_softc *, uint32_t, uint32_t, uint32_t,
                           TahoeP2pRocArmTracker, void *);
     int tahoeP2pRocCleanup(struct iwx_softc *, uint32_t, uint32_t, bool);

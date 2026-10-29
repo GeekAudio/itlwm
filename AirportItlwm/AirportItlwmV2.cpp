@@ -231,20 +231,32 @@ IOReturn AirportItlwm::setProperties(OSObject *properties)
                     request->getObject("NativeP2PAwdlPsfObservationOnly") ||
                     request->getObject("NativeP2PAwdlMifFollowup") ||
                     request->getObject("NativeP2PGp2Observation") ||
+                    request->getObject("NativeP2PRx149ObservationOnly") ||
+                    request->getObject("NativeP2PRx149ProfileEnabled") ||
+                    request->getObject("NativeP2PRx149Selected") ||
+                    request->getObject("NativeP2PRx149HostTxBlocked") ||
+                    request->getObject("NativeP2PTxProbeEverDoorbelled") ||
+                    request->getObject("NativeP2PAwdlActionFramesSubmitted") ||
+                    request->getObject("NativeP2PAwdlPsfFrameSubmitted") ||
+                    request->getObject("NativeP2PAwdlMifFrameSubmitted") ||
+                    request->getObject("NativeP2PAwdlMifBootstrapSubmitted") ||
                     request->getObject("NativeAwdlInitObservationOnly") ||
                     request->getObject("NativeAwdlInitObservationCompiled") ||
                     request->getObject("NativeAwdlLifecycleObservationOnly") ||
                     request->getObject("NativeAwdlLifecycleCompiled") ||
                     request->getObject("NativeAwdlTxEvidenceEnabled") ||
                     request->getObject("NativeAwdlDiscoveryExperimentEnabled") ||
+                    request->getObject("NativeAwdlDiscoveryMifCurrentSlotEnabled") ||
                     request->getObject("NativeAwdlDiscoveryCurrentAwFallbackEnabled") ||
                     request->getObject("NativeAwdlResidentEnabled") ||
                     request->getObject("NativeAwdlResidentCompiled")))
         return kIOReturnUnsupported;
     OSObject *arm = request ? request->getObject("NativeP2PArmOnce") : nullptr;
-    if (!arm)
+    OSObject *rxArm = request ? request->getObject("NativeP2PRx149ArmOnce") : nullptr;
+    if (!arm && !rxArm)
         return super::setProperties(properties);
-    if (request->getCount() != 1 || arm != kOSBooleanTrue)
+    if (request->getCount() != 1 ||
+        (rxArm ? rxArm : arm) != kOSBooleanTrue)
         return kIOReturnBadArgument;
     IOReturn privilege = IOUserClient::clientHasPrivilege(
         current_task(), kIOClientPrivilegeAdministrator);
@@ -252,7 +264,20 @@ IOReturn AirportItlwm::setProperties(OSObject *properties)
         return privilege;
     if (!fHalService)
         return kIOReturnNotReady;
+    const bool receive149Profile =
+        getProperty("NativeP2PRx149ObservationOnly") == kOSBooleanTrue;
+    if (rxArm) {
+#if defined(ITL_NATIVE_AWDL_RX149_OBSERVATION_25G332)
+        if (!receive149Profile)
+            return kIOReturnUnsupported;
+#else
+        return kIOReturnUnsupported;
+#endif
+    } else if (receive149Profile) {
+        return kIOReturnUnsupported; // A legacy helper cannot arm this profile.
+    }
     // Arm only: the existing watchdog and admission gates submit the probe.
+    // The HAL latches legacy vs RX149 mode before the worker is queued.
     // This call never resets the radio, releases DMA, or retries a probe.
     return fHalService->nativeP2pArmProbe();
 }

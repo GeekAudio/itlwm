@@ -14,6 +14,58 @@ from pathlib import Path
 PROJECT = Path(__file__).resolve().parents[1]
 
 
+def receive149_profile_errors(args):
+    if not args.native_awdl_rx149_observation_only:
+        return []
+    errors = []
+    if not (args.p2p_probe and args.p2p_manual_trigger and args.native_awdl_resident_data):
+        errors.append('RX149 requires the manual probe and resident interface')
+    incompatible = ('p2p_roc_probe', 'p2p_tx_probe', 'p2p_awdl_psf_observation_only',
+                    'p2p_awdl_mif_followup', 'p2p_gp2_observation',
+                    'native_awdl_init_observation_only', 'native_awdl_lifecycle_observation_only',
+                    'native_awdl_tx_evidence', 'native_awdl_discovery_experiment',
+                    'native_awdl_discovery_mif_current_slot',
+                    'native_awdl_discovery_current_aw_fallback')
+    if any(getattr(args, name) for name in incompatible):
+        errors.append('RX149 excludes legacy ROC, TX, GP2 and discovery profiles')
+    return errors
+
+
+def resident_build_flags(args):
+    flags = ('OTHER_CPLUSPLUSFLAGS=$(inherited) '
+             '-DITL_NATIVE_AWDL_LIFECYCLE_25G332=1 '
+             '-DITL_NATIVE_AWDL_RESIDENT_25G332=1')
+    # Keep the existing implementations compiled for compatibility checks;
+    # their runtime switches are all disabled in this distinct receive profile.
+    if args.native_awdl_tx_evidence or args.native_awdl_rx149_observation_only:
+        flags += ' -DITL_NATIVE_AWDL_TX_EVIDENCE_25G332=1'
+    if args.native_awdl_discovery_experiment or args.native_awdl_rx149_observation_only:
+        flags += ' -DITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332=1'
+    if args.native_awdl_rx149_observation_only:
+        flags += ' -DITL_NATIVE_AWDL_RX149_OBSERVATION_25G332=1'
+    return flags
+
+
+def apply_artifact_profile(personality, args):
+    personality.update({
+        'NativeP2PProbe': bool(args.p2p_probe or args.p2p_roc_probe or args.p2p_tx_probe),
+        'NativeP2PRocProbe': bool(args.p2p_roc_probe or args.p2p_tx_probe),
+        'NativeP2PTxProbe': bool(args.p2p_tx_probe),
+        'NativeP2PManualTrigger': bool(args.p2p_manual_trigger),
+        'NativeP2PAwdlPsfObservationOnly': bool(args.p2p_awdl_psf_observation_only),
+        'NativeP2PAwdlMifFollowup': bool(args.p2p_awdl_mif_followup),
+        'NativeP2PGp2Observation': bool(args.p2p_gp2_observation),
+        'NativeAwdlInitObservationOnly': bool(args.native_awdl_init_observation_only),
+        'NativeAwdlLifecycleObservationOnly': bool(args.native_awdl_lifecycle_observation_only),
+        'NativeAwdlResidentEnabled': bool(args.native_awdl_resident_data),
+        'NativeAwdlTxEvidenceEnabled': bool(args.native_awdl_tx_evidence),
+        'NativeAwdlDiscoveryExperimentEnabled': bool(args.native_awdl_discovery_experiment),
+        'NativeAwdlDiscoveryMifCurrentSlotEnabled': bool(args.native_awdl_discovery_mif_current_slot),
+        'NativeAwdlDiscoveryCurrentAwFallbackEnabled': bool(args.native_awdl_discovery_current_aw_fallback),
+        'NativeP2PRx149ObservationOnly': bool(args.native_awdl_rx149_observation_only),
+    })
+
+
 def run(command, log):
     result = subprocess.run(command, cwd=PROJECT, stdout=log,
                             stderr=subprocess.STDOUT, check=False)
@@ -26,6 +78,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', required=True, type=Path)
     parser.add_argument('--configuration', choices=('Debug', 'Release'), default='Release')
+    parser.add_argument('--verify-legacy-profiles', action='store_true',
+                        help='Syntax-check changed Tahoe units in ordinary/resident/discovery profiles before packaging')
     parser.add_argument('--p2p-probe', action='store_true',
                         help='Enable the one-shot MAC-context probe in this test artifact only')
     parser.add_argument('--p2p-roc-probe', action='store_true',
@@ -54,7 +108,11 @@ def main():
                         help='Test066: use a same-peer MIF current-slot estimate and bounded early MIF preparation')
     parser.add_argument('--native-awdl-discovery-current-aw-fallback', action='store_true',
                         help='Test077: try the current AW only after the original next-AW planner reports an empty conservative window')
+    parser.add_argument('--native-awdl-rx149-observation-only', action='store_true',
+                        help='Test080: one manual 100ms channel149 receive observation; no host management/data TX')
     args = parser.parse_args()
+    for error in receive149_profile_errors(args):
+        parser.error(error)
     if args.native_awdl_discovery_current_aw_fallback and not args.native_awdl_discovery_mif_current_slot:
         parser.error('Current-AW fallback requires the manual MIF current-slot discovery profile')
     if args.native_awdl_discovery_mif_current_slot and not args.native_awdl_discovery_experiment:
@@ -69,7 +127,9 @@ def main():
             args.p2p_awdl_psf_observation_only and args.p2p_awdl_mif_followup):
         parser.error('TX time evidence requires resident data with manual PSF/MIF')
     if args.native_awdl_resident_data and not (
-            args.p2p_manual_trigger and args.p2p_tx_probe and args.p2p_awdl_mif_followup and
+            args.p2p_manual_trigger and
+            (args.native_awdl_rx149_observation_only or
+             (args.p2p_tx_probe and args.p2p_awdl_mif_followup)) and
             not args.native_awdl_init_observation_only and not args.native_awdl_lifecycle_observation_only):
         parser.error('Resident data requires manual PSF/MIF and excludes observation-only lifecycle profiles')
     if args.native_awdl_lifecycle_observation_only and not (
@@ -78,7 +138,7 @@ def main():
             not args.p2p_awdl_psf_observation_only and
             not args.p2p_awdl_mif_followup and not args.p2p_gp2_observation):
         parser.error('Native lifecycle requires manual control and no init-only/RF observation profile')
-    if args.p2p_manual_trigger and not args.p2p_tx_probe:
+    if args.p2p_manual_trigger and not (args.p2p_tx_probe or args.native_awdl_rx149_observation_only):
         parser.error('--p2p-manual-trigger requires --p2p-tx-probe')
     if args.p2p_awdl_psf_observation_only and not (
             args.p2p_tx_probe and args.p2p_manual_trigger):
@@ -108,13 +168,11 @@ def main():
             if args.native_awdl_lifecycle_observation_only:
                 build_command.append('OTHER_CPLUSPLUSFLAGS=$(inherited) -DITL_NATIVE_AWDL_LIFECYCLE_25G332=1')
             if args.native_awdl_resident_data:
-                flags = 'OTHER_CPLUSPLUSFLAGS=$(inherited) -DITL_NATIVE_AWDL_LIFECYCLE_25G332=1 -DITL_NATIVE_AWDL_RESIDENT_25G332=1'
-                if args.native_awdl_tx_evidence:
-                    flags += ' -DITL_NATIVE_AWDL_TX_EVIDENCE_25G332=1'
-                if args.native_awdl_discovery_experiment:
-                    flags += ' -DITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332=1'
-                build_command.append(flags)
+                build_command.append(resident_build_flags(args))
             run(build_command + ['build'], log)
+            if args.verify_legacy_profiles:
+                from verify_tahoe_compile_profiles import verify
+                verify(PROJECT, log_path, output.with_suffix('.profiles.json'))
             bundle = derived / 'Build/Products' / args.configuration / 'Tahoe/AirportItlwm.kext'
             if not bundle.is_dir():
                 raise RuntimeError('Expected Tahoe build product is missing')
@@ -127,23 +185,7 @@ def main():
             # Every artifact gets an explicit profile. A normal Wi-Fi build
             # must not inherit experimental firmware probes from a prior plist.
             personality = probe_info['IOKitPersonalities']['NetworkController']
-            personality['NativeP2PProbe'] = bool(
-                args.p2p_probe or args.p2p_roc_probe or args.p2p_tx_probe)
-            personality['NativeP2PRocProbe'] = bool(
-                args.p2p_roc_probe or args.p2p_tx_probe)
-            personality['NativeP2PTxProbe'] = bool(args.p2p_tx_probe)
-            personality['NativeP2PManualTrigger'] = bool(args.p2p_manual_trigger)
-            personality['NativeP2PAwdlPsfObservationOnly'] = bool(
-                args.p2p_awdl_psf_observation_only)
-            personality['NativeP2PAwdlMifFollowup'] = bool(args.p2p_awdl_mif_followup)
-            personality['NativeP2PGp2Observation'] = bool(args.p2p_gp2_observation)
-            personality['NativeAwdlInitObservationOnly'] = bool(args.native_awdl_init_observation_only)
-            personality['NativeAwdlLifecycleObservationOnly'] = bool(args.native_awdl_lifecycle_observation_only)
-            personality['NativeAwdlResidentEnabled'] = bool(args.native_awdl_resident_data)
-            personality['NativeAwdlTxEvidenceEnabled'] = bool(args.native_awdl_tx_evidence)
-            personality['NativeAwdlDiscoveryExperimentEnabled'] = bool(args.native_awdl_discovery_experiment)
-            personality['NativeAwdlDiscoveryMifCurrentSlotEnabled'] = bool(args.native_awdl_discovery_mif_current_slot)
-            personality['NativeAwdlDiscoveryCurrentAwFallbackEnabled'] = bool(args.native_awdl_discovery_current_aw_fallback)
+            apply_artifact_profile(personality, args)
             info_path.write_bytes(plistlib.dumps(probe_info, sort_keys=False))
             run(['/usr/bin/codesign', '--force', '--sign', '-', '--timestamp=none', str(bundle)], log)
             run(['/usr/bin/codesign', '--verify', '--strict', str(bundle)], log)
@@ -190,6 +232,7 @@ def main():
                           'native_awdl_discovery_experiment': args.native_awdl_discovery_experiment,
                           'native_awdl_discovery_mif_current_slot': args.native_awdl_discovery_mif_current_slot,
                           'native_awdl_discovery_current_aw_fallback': args.native_awdl_discovery_current_aw_fallback,
+                          'native_awdl_rx149_observation_only': args.native_awdl_rx149_observation_only,
                           'test_build': build_tag, 'mach_o_uuid': match.group(1),
                           'log': str(log_path)}, ensure_ascii=False))
 

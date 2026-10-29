@@ -513,8 +513,14 @@ struct iwx_p2p_roc_state {
 	uint8_t session_submit_seen;
 	uint8_t binding_status_valid;
 	uint8_t binding_rejected;
+	uint8_t station_phy_id;
+	uint16_t station_phy_color;
+	uint32_t station_epoch;
+	void *station_bss;
+	struct ieee80211_channel *station_phy_channel;
 	struct ieee80211_channel *original_phy_channel;
 	struct ieee80211_channel *roc_channel;
+	uint8_t receive_observation_only;
 };
 
 struct iwx_bf_data {

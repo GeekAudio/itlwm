@@ -1088,6 +1088,9 @@ int iwx_tahoe_p2p_add_broadcast_station(ItlIwx *owner, struct iwx_softc *sc,
 {
     if (resourceMayExist)
         *resourceMayExist = false;
+    if (owner && sc == &owner->com && __atomic_load_n(
+            &sc->sc_p2p_roc.receive_observation_only, __ATOMIC_ACQUIRE))
+        return EBUSY;
     if (!owner || !sc || sc != &owner->com || !lease || !resourceMayExist ||
         !owner->nativeP2pCommandAllowed() || !p2pMacReady(sc))
         return EBUSY;
@@ -1237,6 +1240,9 @@ int iwx_tahoe_p2p_tvqm_allocate(ItlIwx *owner, struct iwx_softc *sc,
         *queueId = 0;
     if (resourceMayExist)
         *resourceMayExist = false;
+    if (owner && sc == &owner->com && __atomic_load_n(
+            &sc->sc_p2p_roc.receive_observation_only, __ATOMIC_ACQUIRE))
+        return EBUSY;
     IOEthernetController *controller = owner ? owner->tahoeP2pController() : nullptr;
     if (controller) {
         controller->setProperty("NativeP2PTxPlaceholderCaptured",
@@ -2203,6 +2209,9 @@ int iwx_tahoe_p2p_tvqm_begin_tx(struct iwx_softc *sc,
         *descriptorIndex = 0;
     if (!sc || !lease || !ring || !descriptorIndex)
         return EINVAL;
+    if (__atomic_load_n(&sc->sc_p2p_roc.receive_observation_only,
+                        __ATOMIC_ACQUIRE))
+        return EBUSY;
     IOInterruptState interruptState;
     if (!lockQueueLease(lease, &interruptState))
         return EBUSY;
@@ -2244,6 +2253,9 @@ int iwx_tahoe_p2p_tvqm_mark_doorbell(
 {
     if (!sc || !lease || !ring)
         return EINVAL;
+    if (__atomic_load_n(&sc->sc_p2p_roc.receive_observation_only,
+                        __ATOMIC_ACQUIRE))
+        return EBUSY;
     IOInterruptState interruptState;
     if (!lockQueueLease(lease, &interruptState))
         return EBUSY;

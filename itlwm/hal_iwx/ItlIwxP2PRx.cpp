@@ -1,8 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "ItlIwx.hpp"
 
+#include "../../native/p2p_rx149_observation.hpp"
+
 #ifdef AIRPORT_TAHOE
 #include <kern/clock.h>
+#include <libkern/c++/OSBoolean.h>
+#include <libkern/c++/OSNumber.h>
 #if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
 #include "../../native/awdl_native_bsd_data_25G332.hpp"
 #endif
@@ -181,6 +185,150 @@ bool setNativeP2PRxTraceNamedProperty(IOEthernetController *controller,
     if (length <= 0 || static_cast<size_t>(length) >= sizeof(suffix))
         return false;
     return setNativeP2PRxTraceProperty(controller, suffix, value, bits);
+}
+
+bool rx149PropertyIsOne(IOEthernetController *controller, const char *name)
+{
+    if (!controller || !name)
+        return false;
+    OSNumber *value = OSDynamicCast(OSNumber,
+                                    controller->getProperty(name));
+    return value && value->unsigned32BitValue() == 1u;
+}
+
+bool rx149StationAndPhyOwnerCurrent(const struct iwx_softc *sc)
+{
+    if (!sc || sc->sc_ic.ic_state != IEEE80211_S_RUN ||
+        (sc->sc_flags & (IWX_FLAG_SHUTDOWN | IWX_FLAG_HW_ERR |
+                         IWX_FLAG_RFKILL)) != 0 ||
+        sc->sc_ic.ic_bss == nullptr)
+        return false;
+    const auto &roc = sc->sc_p2p_roc;
+    const uint32_t currentStationEpoch = __atomic_load_n(
+        &sc->sc_tx_rate_generation, __ATOMIC_ACQUIRE);
+    if (roc.fw_generation != static_cast<uint32_t>(sc->sc_generation) ||
+        roc.station_epoch != currentStationEpoch ||
+        static_cast<void *>(sc->sc_ic.ic_bss) != roc.station_bss ||
+        roc.station_phy_id != 0 ||
+        roc.station_phy_id >= IWX_NUM_PHY_CTX ||
+        roc.station_phy_channel == nullptr || roc.phy_id != 1 ||
+        roc.phy_id >= IWX_NUM_PHY_CTX || roc.roc_channel == nullptr)
+        return false;
+    const auto *station = reinterpret_cast<const struct iwx_node *>(
+        sc->sc_ic.ic_bss);
+    const auto *stationPhy = &sc->sc_phyctxt[roc.station_phy_id];
+    const auto *p2pPhy = &sc->sc_phyctxt[roc.phy_id];
+    return station->in_phyctxt == stationPhy &&
+        station->in_phyctxt->id == roc.station_phy_id &&
+        station->in_phyctxt->color == roc.station_phy_color &&
+        station->in_ni.ni_chan == roc.station_phy_channel &&
+        stationPhy->id == roc.station_phy_id &&
+        stationPhy->color == roc.station_phy_color &&
+        stationPhy->channel == roc.station_phy_channel &&
+        sc->sc_p2p.initialized &&
+        sc->sc_p2p.fw_generation == roc.fw_generation &&
+        sc->sc_p2p.mac_state == IWX_P2P_RESOURCE_ACTIVE &&
+        sc->sc_p2p.mac_id == 1 && sc->sc_p2p.phy_leased &&
+        sc->sc_p2p.phy_id == roc.phy_id &&
+        sc->sc_p2p.binding_id == roc.phy_id &&
+        sc->sc_p2p.phy_color == roc.phy_color &&
+        sc->sc_p2p.binding_color == roc.phy_color &&
+        p2pPhy->id == roc.phy_id && p2pPhy->color == roc.phy_color &&
+        p2pPhy->channel == roc.roc_channel;
+}
+
+NativeP2PRx149Observation::RocEvidence currentRx149ActionEvidence(
+    ItlIwx *owner, struct iwx_softc *sc,
+    const IntelP2PRx::LeaseSnapshot &lease,
+    uint16_t channelIndex, const IntelROCEvent::SessionSnapshot &session,
+    const NativeAwdlRxTrace::Snapshot &traceOwner)
+{
+    NativeP2PRx149Observation::RocEvidence evidence{};
+    if (!owner || !sc)
+        return evidence;
+    auto *controller = owner->getController();
+    const uint32_t armMode = __atomic_load_n(
+        &owner->nativeP2pManualArmRequested_, __ATOMIC_ACQUIRE);
+    const uint32_t generation = __atomic_load_n(
+        &owner->nativeP2pRocGeneration_, __ATOMIC_ACQUIRE);
+    const uint32_t currentPower = uint32_t(sc->sc_generation);
+    const uint32_t currentStation = __atomic_load_n(
+        &sc->sc_tx_rate_generation, __ATOMIC_ACQUIRE);
+    const bool channelInRange =
+        channelIndex < nitems(sc->sc_ic.ic_channels);
+    const bool channel149 = channelInRange &&
+        ieee80211_chan2ieee(&sc->sc_ic,
+            &sc->sc_ic.ic_channels[channelIndex]) ==
+                NativeP2PRx149Observation::kIeeeChannel;
+    const bool rocChannel149 = sc->sc_p2p_roc.roc_channel != nullptr &&
+        nitems(sc->sc_ic.ic_channels) >
+            NativeP2PRx149Observation::kIeeeChannel &&
+        sc->sc_p2p_roc.roc_channel ==
+            &sc->sc_ic.ic_channels[
+                NativeP2PRx149Observation::kIeeeChannel] &&
+        ieee80211_chan2ieee(&sc->sc_ic, sc->sc_p2p_roc.roc_channel) ==
+            NativeP2PRx149Observation::kIeeeChannel;
+    const bool traceMatches = owner->nativeAwdlRxEventOwnerSerial_ != 0 &&
+        traceOwner.ownerPresent && traceOwner.active &&
+        !traceOwner.producerClosed &&
+        traceOwner.ownerSerial == owner->nativeAwdlRxEventOwnerSerial_ &&
+        traceOwner.epochs.contextGeneration == lease.contextGeneration &&
+        traceOwner.epochs.powerGeneration == lease.powerGeneration &&
+        traceOwner.epochs.stationGeneration == lease.stationGeneration &&
+        traceOwner.epochs.rocGeneration == generation;
+    evidence.profileSelected =
+        armMode == NativeP2PRx149Observation::kRx149ArmMode &&
+        controller && controller->getProperty(
+            "NativeP2PRx149ObservationOnly") == kOSBooleanTrue &&
+        rx149PropertyIsOne(controller, "NativeP2PRx149ProfileEnabled") &&
+        rx149PropertyIsOne(controller, "NativeP2PRx149Selected") &&
+        rx149PropertyIsOne(controller, "NativeP2PRx149HostTxBlocked");
+    evidence.receiveObservationOnly = __atomic_load_n(
+        &sc->sc_p2p_roc.receive_observation_only, __ATOMIC_ACQUIRE) != 0;
+    evidence.requestedChannel149 = __atomic_load_n(
+        &owner->nativeP2pRocChannel_, __ATOMIC_ACQUIRE) ==
+            NativeP2PRx149Observation::kIeeeChannel &&
+        __atomic_load_n(&owner->nativeP2pRocDurationMs_,
+                        __ATOMIC_ACQUIRE) ==
+            NativeP2PRx149Observation::kSessionDurationMs;
+    evidence.actualRocChannel149 = rocChannel149;
+    evidence.rxChannel149 = channel149;
+    evidence.leaseActive = lease.active && sc->sc_p2p.initialized &&
+        sc->sc_p2p.mac_state == IWX_P2P_RESOURCE_ACTIVE &&
+        sc->sc_p2p.binding_state == IWX_P2P_RESOURCE_ACTIVE &&
+        sc->sc_p2p.phy_leased && sc->sc_p2p.mac_id == 1 &&
+        sc->sc_p2p.phy_id == sc->sc_p2p_roc.phy_id &&
+        sc->sc_p2p.binding_id == sc->sc_p2p_roc.phy_id;
+    evidence.ownerCurrent = owner->nativeP2pBusy() &&
+        __atomic_load_n(&owner->nativeP2pProbeOwner_, __ATOMIC_ACQUIRE) !=
+            nullptr && owner->nativeP2pProbeGeneration_ ==
+                lease.contextGeneration;
+    evidence.epochsMatch = lease.contextGeneration != 0 &&
+        lease.contextGeneration == lease.currentContextGeneration &&
+        lease.contextGeneration == owner->nativeP2pProbeGeneration_ &&
+        lease.powerGeneration == lease.currentPowerGeneration &&
+        lease.powerGeneration == currentPower &&
+        lease.stationGeneration == lease.currentStationGeneration &&
+        lease.stationGeneration == currentStation && traceMatches &&
+        rx149StationAndPhyOwnerCurrent(sc);
+    evidence.tokenMatches = generation != 0 &&
+        generation == lease.contextGeneration &&
+        session.generation == generation &&
+        sc->sc_p2p_roc.token == generation;
+    evidence.commandReturned = session.commandReturned;
+    evidence.commandSucceeded = session.commandReturned &&
+        session.commandResult == 0;
+    evidence.deviceDiscoveryConfiguration = session.configuration ==
+        IWX_SESSION_PROTECT_CONF_P2P_DEVICE_DISCOV;
+    evidence.startSeen = session.startSeen;
+    evidence.startSucceeded = session.startSeen && session.startStatus == 1;
+    evidence.endSeen = session.endSeen;
+    evidence.endConfirmed = session.endSeen && session.cleanupAllowed &&
+        session.endStatus == 1 && !session.outcomeUnknown;
+    evidence.outcomeUnknown = session.outcomeUnknown;
+    if (sc->sc_p2p_roc.phase != IWX_P2P_ROC_SESSION_ACKED)
+        evidence.leaseActive = false;
+    return evidence;
 }
 
 uint32_t tahoeP2pReadLe32(const uint8_t *bytes)
@@ -817,6 +965,23 @@ void ItlIwx::tahoeP2pTapAction(struct iwx_softc *sc, const uint8_t *frame,
         traceOwner.ownerPresent &&
         traceOwner.ownerSerial == nativeAwdlRxEventOwnerSerial_ &&
         NativeAwdlRxTrace::sameEpochs(traceOwner.epochs, traceEpochs);
+    IOEthernetController *controller = getController();
+    const uint32_t armMode = __atomic_load_n(
+        &nativeP2pManualArmRequested_, __ATOMIC_ACQUIRE);
+    const bool receiveObservationOnly = __atomic_load_n(
+        &sc->sc_p2p_roc.receive_observation_only, __ATOMIC_ACQUIRE) != 0;
+    const bool rx149ProfilePath = armMode ==
+            NativeP2PRx149Observation::kRx149ArmMode ||
+        (controller && controller->getProperty(
+            "NativeP2PRx149ObservationOnly") == kOSBooleanTrue) ||
+        receiveObservationOnly;
+    if (rx149ProfilePath) {
+        const auto session = nativeP2pRocEvents_.snapshot();
+        const auto evidence = currentRx149ActionEvidence(
+            this, sc, lease, channel, session, traceOwner);
+        if (!NativeP2PRx149Observation::mayConsumeManagementAction(evidence))
+            return; // Never queue pre-START, stale-owner, or non-149 Actions.
+    }
     if (traceOwnerMatches && frame && length >= 2) {
         NativeAwdlRxTrace::ActionTap tap{};
         const uint64_t hostUs = tahoeP2pRxMonotonicUs();
@@ -854,7 +1019,9 @@ void ItlIwx::tahoeP2pTapAction(struct iwx_softc *sc, const uint8_t *frame,
     // an AWDL vendor body or from the infrastructure BSSID.
 #if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
     const auto session=nativeP2pRocEvents_.snapshot();
-    const bool current=lease.contextGeneration==lease.currentContextGeneration&&
+    const bool current=NativeP2PRx149Observation::nativeDataPathAllowed(
+            rx149ProfilePath) &&
+        lease.contextGeneration==lease.currentContextGeneration&&
         lease.powerGeneration==lease.currentPowerGeneration&&
         lease.stationGeneration==lease.currentStationGeneration&&
         session.commandReturned&&session.commandResult==0&&session.startStatus==1&&
