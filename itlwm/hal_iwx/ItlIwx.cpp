@@ -15812,8 +15812,13 @@ IOReturn ItlIwx::_iwx_watchdog_task(OSObject *, void *arg0, void *arg1,
 
     // No ring reclamation is inferred from unavailable queue data.
     that->tahoePublishLinkTransitionTrace(that->getController());
-    (void)that->tahoePublishFirmwareDiagnostics(
-        that->getController(), sc, false);
+    // Expiry already queued recovery and froze the in-memory trace. Leave
+    // OSData/IORegistry publication to init_task or a later ordinary tick so
+    // it cannot extend this watchdog gate hold before recovery can acquire it.
+    // An early recovery return does not clear the frozen pending snapshot.
+    if (!result->timedOut)
+        (void)that->tahoePublishFirmwareDiagnostics(
+            that->getController(), sc, false);
     return kIOReturnSuccess;
 }
 #endif
