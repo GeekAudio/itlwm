@@ -11858,11 +11858,11 @@ IOReturn ItlIwx::iwx_native_mcc_capture_action(
     sc->sc_native_mcc_request_notice_generation = generationBefore;
     sc->sc_native_mcc_request_firmware_generation =
         static_cast<uint32_t>(sc->sc_generation);
-    sc->sc_native_mcc_command_version = iwx_lookup_cmd_ver(
+    sc->sc_native_mcc_command_version = owner->iwx_lookup_cmd_ver(
         sc, IWX_LONG_GROUP, IWX_MCC_UPDATE_CMD);
     sc->sc_native_mcc_command_version_present =
         sc->sc_native_mcc_command_version != IWX_FW_CMD_VER_UNKNOWN;
-    sc->sc_native_mcc_notification_version = iwx_lookup_notif_ver(
+    sc->sc_native_mcc_notification_version = owner->iwx_lookup_notif_ver(
         sc, IWX_LONG_GROUP, IWX_MCC_UPDATE_CMD);
     sc->sc_native_mcc_notification_version_present =
         sc->sc_native_mcc_notification_version != IWX_FW_CMD_VER_UNKNOWN;
