@@ -2,11 +2,10 @@
   "schema_version": 1,
   "snapshot": "Test078 host diagnostics source snapshot",
   "source_repository": "https://github.com/GeekAudio/itlwm",
-  "source_branch": "codex/tahoe-test078",
-  "source_commit": "a98d788",
-  "source_worktree_dirty": true,
+  "source_branch": "codex/tahoe-rx-data-path",
+  "source_commit": "6feef6576e2d4e9859cdb892e0382b35af60ec97",
   "created_at": "2026-10-29T16:52:28+08:00",
-  "file_count": 13,
+  "file_count": 16,
   "files": [
     {
       "source_relative_path": "IntelWirelessNative/capture_test078_resident_data_once.py",
@@ -98,6 +97,27 @@
       "original_sha256": "b0784c533c06f3d6db0a930631a8f8a611fbb2f08cd20c58e5a5e135ca931bda",
       "snapshot_sha256": "b0784c533c06f3d6db0a930631a8f8a611fbb2f08cd20c58e5a5e135ca931bda",
       "change_note": "Copied byte-for-byte from the recorded source file."
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/tools/run_openwrt_capture_batch.py",
+      "snapshot_path": "tools/run_openwrt_capture_batch.py",
+      "original_sha256": "74289f30cad9654da1f52eea76380d2291839ed31ebf74dda96fac01c55bbb67",
+      "snapshot_sha256": "74289f30cad9654da1f52eea76380d2291839ed31ebf74dda96fac01c55bbb67",
+      "change_note": "Added passive multi-window tool; byte-identical author source, no runtime data."
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/tools/test_openwrt_capture_batch.py",
+      "snapshot_path": "tools/test_openwrt_capture_batch.py",
+      "original_sha256": "a92a0a60a3f9d614b61f023d7c5f99552d09fe6fe0e554006c1b1e0b3f966005",
+      "snapshot_sha256": "a92a0a60a3f9d614b61f023d7c5f99552d09fe6fe0e554006c1b1e0b3f966005",
+      "change_note": "Added passive multi-window tool; byte-identical author source, no runtime data."
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/tools/openwrt_capture_batch.md",
+      "snapshot_path": "tools/openwrt_capture_batch.md",
+      "original_sha256": "4d32a9d21fe62e650633934d241c774eaed5eb20621210b37f7c63befc9d67a5",
+      "snapshot_sha256": "4d32a9d21fe62e650633934d241c774eaed5eb20621210b37f7c63befc9d67a5",
+      "change_note": "Added passive multi-window tool; byte-identical author source, no runtime data."
     }
   ],
   "content_rule": "For every file, original_sha256 identifies the captured source and snapshot_sha256 identifies the committed snapshot bytes; any difference is explained by change_note.",
@@ -110,5 +130,6 @@
     "build products",
     "site source"
   ],
-  "updated_at": "2026-10-29T16:57:26+08:00"
+  "updated_at": "2026-10-29T17:34:10+08:00",
+  "source_context_note": "The Git commit identifies driver context at capture; author tool bytes originate in the separate runtime workspace and are identified by their recorded hashes."
 }
