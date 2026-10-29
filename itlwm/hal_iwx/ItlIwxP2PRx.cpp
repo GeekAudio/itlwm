@@ -246,7 +246,7 @@ NativeP2PRx149Observation::RocEvidence currentRx149ActionEvidence(
     NativeP2PRx149Observation::RocEvidence evidence{};
     if (!owner || !sc)
         return evidence;
-    auto *controller = owner->getController();
+    auto *controller = owner->tahoeP2pController();
     const uint32_t armMode = __atomic_load_n(
         &owner->nativeP2pManualArmRequested_, __ATOMIC_ACQUIRE);
     const uint32_t generation = __atomic_load_n(
