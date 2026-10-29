@@ -9620,6 +9620,7 @@ iwx_send_cmd(struct iwx_softc *sc, struct iwx_host_cmd *hcmd)
     IWX_WRITE(sc, IWX_HBUS_TARG_WRPTR, ring->qid << 16 | ring->cur);
 
 #ifdef AIRPORT_TAHOE
+    {
     IwxFirmwareDiagnostics::Entry diagnosticEntry{};
     diagnosticEntry.phase = static_cast<uint32_t>(
         IwxFirmwareDiagnostics::Phase::CommandSubmitted);
@@ -9640,6 +9641,7 @@ iwx_send_cmd(struct iwx_softc *sc, struct iwx_host_cmd *hcmd)
     diagnosticEntry.packet_length = static_cast<uint32_t>(hdrlen + paylen);
     diagnosticEntry.payload_length = static_cast<uint32_t>(paylen);
     tahoeRecordFirmwareMetadata(sc, diagnosticEntry);
+    }
 #endif
     
     if (!async) {
@@ -16889,11 +16891,12 @@ bool ItlIwx::tahoePublishFirmwareDiagnostics(
         nativeFwDiagnosticLastPublishedErrorFingerprint_ = errorFingerprint;
     }
 
-    const uint32_t firmwareIdentityGeneration =
-        static_cast<uint32_t>(sc->sc_generation);
+    const uint32_t firmwareIdentityGeneration = __atomic_load_n(
+        &nativeFwDiagnosticAliveGeneration_, __ATOMIC_ACQUIRE);
     if (firmwareIdentityGeneration != 0 &&
+        firmwareIdentityGeneration == static_cast<uint32_t>(sc->sc_generation) &&
         nativeFirmwareIdentityPublishedGeneration_ !=
-            firmwareIdentityGeneration && sc->sc_fwname && sc->sc_fwver) {
+            firmwareIdentityGeneration && sc->sc_fwname && sc->sc_fwver[0]) {
         OSString *name = OSString::withCString(sc->sc_fwname);
         OSString *version = OSString::withCString(sc->sc_fwver);
         if (!name || !version) {
@@ -16918,7 +16921,6 @@ bool ItlIwx::tahoePublishFirmwareDiagnostics(
     }
     return true;
 }
-#endif
 #endif
 
 void ItlIwx::
