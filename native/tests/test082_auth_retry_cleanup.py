@@ -9,13 +9,21 @@ production flag commit, rm_binding cleanup, and retry decision stay intact.
 from __future__ import annotations
 
 from pathlib import Path
+import re
 import shutil
 import subprocess
+import sys
 import tempfile
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from test083_session_protection import numeric_constants
 
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "itlwm/hal_iwx/ItlIwx.cpp"
+REG = ROOT / "itlwm/hal_iwx/if_iwxreg.h"
+VAR = ROOT / "itlwm/hal_iwx/if_iwxvar.h"
+IEEE = ROOT / "itl80211/openbsd/net80211/ieee80211.h"
 
 
 def production_function(source: str, marker: str) -> str:
@@ -92,47 +100,47 @@ constexpr uint32_t IEEE80211_NODE_VHT = 1u << 4;
 constexpr uint32_t IEEE80211_NODE_VHT_SGI80 = 1u << 5;
 constexpr uint32_t IEEE80211_NODE_VHT_SGI160 = 1u << 6;
 constexpr uint32_t IEEE80211_NODE_HE = 1u << 7;
-constexpr int IEEE80211_DUR_TU = 100;
-constexpr uint32_t IWX_FLAG_STA_ACTIVE = 1u << 0;
-constexpr uint32_t IWX_FLAG_BINDING_ACTIVE = 1u << 1;
-constexpr uint32_t IWX_FLAG_MAC_ACTIVE = 1u << 2;
-constexpr uint32_t IWX_STATION_ID = 0;
-constexpr uint32_t IWX_MONITOR_STA_ID = 2;
-constexpr uint32_t IWX_STA_GENERAL_PURPOSE = 1;
-constexpr uint32_t IWX_STA_LINK = 2;
-constexpr uint32_t IWX_STA_FLG_FAT_EN_MSK = 1u << 0;
-constexpr uint32_t IWX_STA_FLG_MIMO_EN_MSK = 1u << 1;
-constexpr uint32_t IWX_STA_FLG_MAX_AGG_SIZE_MSK = 1u << 2;
-constexpr uint32_t IWX_STA_FLG_AGG_MPDU_DENS_MSK = 1u << 3;
-constexpr uint32_t IWX_STA_FLG_FAT_EN_160MHZ = 1u << 4;
-constexpr uint32_t IWX_STA_FLG_FAT_EN_80MHZ = 1u << 5;
-constexpr uint32_t IWX_STA_FLG_FAT_EN_40MHZ = 1u << 6;
-constexpr uint32_t IWX_STA_FLG_FAT_EN_20MHZ = 1u << 7;
-constexpr uint32_t IWX_STA_FLG_MIMO_EN_MIMO2 = 1u << 8;
-constexpr uint32_t IWX_STA_FLG_MIMO_EN_SISO = 1u << 9;
-constexpr uint32_t IWX_STA_FLG_MAX_AGG_SIZE_SHIFT = 12;
-constexpr uint32_t IWX_STA_FLG_MAX_AGG_SIZE_4M = 9u << IWX_STA_FLG_MAX_AGG_SIZE_SHIFT;
-constexpr uint32_t IWX_STA_FLG_MAX_AGG_SIZE_64K = 3u << IWX_STA_FLG_MAX_AGG_SIZE_SHIFT;
-constexpr uint32_t IWX_STA_FLG_AGG_MPDU_DENS_2US = 1u << 13;
-constexpr uint32_t IWX_STA_FLG_AGG_MPDU_DENS_4US = 2u << 13;
-constexpr uint32_t IWX_STA_FLG_AGG_MPDU_DENS_8US = 3u << 13;
-constexpr uint32_t IWX_STA_FLG_AGG_MPDU_DENS_16US = 4u << 13;
-constexpr uint32_t IEEE80211_VHTCAP_MAX_A_MPDU_LENGTH_EXPONENT_MASK = 0x3;
-constexpr uint32_t IEEE80211_VHTCAP_MAX_A_MPDU_LENGTH_EXPONENT_SHIFT = 0;
-constexpr uint32_t IEEE80211_HE_MAC_CAP3_MAX_AMPDU_LEN_EXP_MASK = 0x3;
-constexpr int IEEE80211_AMPDU_PARAM_SS = 0x3;
-constexpr int IEEE80211_AMPDU_PARAM_SS_2 = 1;
-constexpr int IEEE80211_AMPDU_PARAM_SS_4 = 2;
-constexpr int IEEE80211_AMPDU_PARAM_SS_8 = 3;
-constexpr int IEEE80211_AMPDU_PARAM_SS_16 = 4;
-constexpr int IWX_ADD_STA = 10;
-constexpr uint32_t IWX_ADD_STA_SUCCESS = 0;
-constexpr uint32_t IWX_ADD_STA_STATUS_MASK = 0xff;
-constexpr uint32_t IWX_FW_CTXT_ACTION_ADD = 1;
-constexpr uint32_t IWX_FW_CTXT_ACTION_REMOVE = 2;
-constexpr uint32_t IWX_UCODE_TLV_CAPA_SESSION_PROT_CMD = 1u << 0;
-constexpr int IWX_DQA_INJECT_MONITOR_QUEUE = 1;
-constexpr int IWX_MGMT_TID = 0;
+constexpr int IEEE80211_DUR_TU = @@IEEE80211_DUR_TU@@;
+constexpr uint32_t IWX_FLAG_STA_ACTIVE = @@IWX_FLAG_STA_ACTIVE@@u;
+constexpr uint32_t IWX_FLAG_BINDING_ACTIVE = @@IWX_FLAG_BINDING_ACTIVE@@u;
+constexpr uint32_t IWX_FLAG_MAC_ACTIVE = @@IWX_FLAG_MAC_ACTIVE@@u;
+constexpr uint32_t IWX_STATION_ID = @@IWX_STATION_ID@@u;
+constexpr uint32_t IWX_MONITOR_STA_ID = @@IWX_MONITOR_STA_ID@@u;
+constexpr uint32_t IWX_STA_GENERAL_PURPOSE = @@IWX_STA_GENERAL_PURPOSE@@u;
+constexpr uint32_t IWX_STA_LINK = @@IWX_STA_LINK@@u;
+constexpr uint32_t IWX_STA_FLG_FAT_EN_MSK = @@IWX_STA_FLG_FAT_EN_MSK@@u;
+constexpr uint32_t IWX_STA_FLG_MIMO_EN_MSK = @@IWX_STA_FLG_MIMO_EN_MSK@@u;
+constexpr uint32_t IWX_STA_FLG_MAX_AGG_SIZE_MSK = @@IWX_STA_FLG_MAX_AGG_SIZE_MSK@@u;
+constexpr uint32_t IWX_STA_FLG_AGG_MPDU_DENS_MSK = @@IWX_STA_FLG_AGG_MPDU_DENS_MSK@@u;
+constexpr uint32_t IWX_STA_FLG_FAT_EN_160MHZ = @@IWX_STA_FLG_FAT_EN_160MHZ@@u;
+constexpr uint32_t IWX_STA_FLG_FAT_EN_80MHZ = @@IWX_STA_FLG_FAT_EN_80MHZ@@u;
+constexpr uint32_t IWX_STA_FLG_FAT_EN_40MHZ = @@IWX_STA_FLG_FAT_EN_40MHZ@@u;
+constexpr uint32_t IWX_STA_FLG_FAT_EN_20MHZ = @@IWX_STA_FLG_FAT_EN_20MHZ@@u;
+constexpr uint32_t IWX_STA_FLG_MIMO_EN_MIMO2 = @@IWX_STA_FLG_MIMO_EN_MIMO2@@u;
+constexpr uint32_t IWX_STA_FLG_MIMO_EN_SISO = @@IWX_STA_FLG_MIMO_EN_SISO@@u;
+constexpr uint32_t IWX_STA_FLG_MAX_AGG_SIZE_SHIFT = @@IWX_STA_FLG_MAX_AGG_SIZE_SHIFT@@u;
+constexpr uint32_t IWX_STA_FLG_MAX_AGG_SIZE_4M = @@IWX_STA_FLG_MAX_AGG_SIZE_4M@@u;
+constexpr uint32_t IWX_STA_FLG_MAX_AGG_SIZE_64K = @@IWX_STA_FLG_MAX_AGG_SIZE_64K@@u;
+constexpr uint32_t IWX_STA_FLG_AGG_MPDU_DENS_2US = @@IWX_STA_FLG_AGG_MPDU_DENS_2US@@u;
+constexpr uint32_t IWX_STA_FLG_AGG_MPDU_DENS_4US = @@IWX_STA_FLG_AGG_MPDU_DENS_4US@@u;
+constexpr uint32_t IWX_STA_FLG_AGG_MPDU_DENS_8US = @@IWX_STA_FLG_AGG_MPDU_DENS_8US@@u;
+constexpr uint32_t IWX_STA_FLG_AGG_MPDU_DENS_16US = @@IWX_STA_FLG_AGG_MPDU_DENS_16US@@u;
+constexpr uint32_t IEEE80211_VHTCAP_MAX_A_MPDU_LENGTH_EXPONENT_MASK = @@IEEE80211_VHTCAP_MAX_A_MPDU_LENGTH_EXPONENT_MASK@@u;
+constexpr uint32_t IEEE80211_VHTCAP_MAX_A_MPDU_LENGTH_EXPONENT_SHIFT = @@IEEE80211_VHTCAP_MAX_A_MPDU_LENGTH_EXPONENT_SHIFT@@u;
+constexpr uint32_t IEEE80211_HE_MAC_CAP3_MAX_AMPDU_LEN_EXP_MASK = @@IEEE80211_HE_MAC_CAP3_MAX_AMPDU_LEN_EXP_MASK@@u;
+constexpr int IEEE80211_AMPDU_PARAM_SS = @@IEEE80211_AMPDU_PARAM_SS@@;
+constexpr int IEEE80211_AMPDU_PARAM_SS_2 = @@IEEE80211_AMPDU_PARAM_SS_2@@;
+constexpr int IEEE80211_AMPDU_PARAM_SS_4 = @@IEEE80211_AMPDU_PARAM_SS_4@@;
+constexpr int IEEE80211_AMPDU_PARAM_SS_8 = @@IEEE80211_AMPDU_PARAM_SS_8@@;
+constexpr int IEEE80211_AMPDU_PARAM_SS_16 = @@IEEE80211_AMPDU_PARAM_SS_16@@;
+constexpr int IWX_ADD_STA = @@IWX_ADD_STA@@;
+constexpr uint32_t IWX_ADD_STA_SUCCESS = @@IWX_ADD_STA_SUCCESS@@u;
+constexpr uint32_t IWX_ADD_STA_STATUS_MASK = @@IWX_ADD_STA_STATUS_MASK@@u;
+constexpr uint32_t IWX_FW_CTXT_ACTION_ADD = @@IWX_FW_CTXT_ACTION_ADD@@u;
+constexpr uint32_t IWX_FW_CTXT_ACTION_REMOVE = @@IWX_FW_CTXT_ACTION_REMOVE@@u;
+constexpr uint32_t IWX_UCODE_TLV_CAPA_SESSION_PROT_CMD = @@IWX_UCODE_TLV_CAPA_SESSION_PROT_CMD@@u;
+constexpr int IWX_DQA_INJECT_MONITOR_QUEUE = @@IWX_DQA_INJECT_MONITOR_QUEUE@@;
+constexpr int IWX_MGMT_TID = @@IWX_MGMT_TID@@;
 
 #define XYLog(...) ((void)0)
 #define DEVNAME(sc) "test"
@@ -149,6 +157,8 @@ static unsigned gStaCommandCount = 0;
 static unsigned gBindingAddCount = 0, gBindingRemoveCount = 0;
 static unsigned gMacAddCount = 0, gMacRemoveCount = 0;
 static unsigned gRmStaCount = 0, gMgmtQueueCount = 0, gStatsCount = 0;
+static unsigned gScheduleProtectionCount = 0, gLegacyProtectionCount = 0;
+static uint32_t gLegacyProtectionDuration = 0, gLegacyProtectionDelay = 0;
 static int gTransportError = 0;
 static uint32_t gFirmwareStatus = IWX_ADD_STA_SUCCESS;
 
@@ -180,9 +190,9 @@ struct ieee80211com {
 struct iwx_softc {
     uint32_t sc_flags = 0;
     int sc_generation = 7;
-    uint32_t sc_enabled_capa[1]{};
+    uint8_t sc_enabled_capa[16]{};
     iwx_phy_ctxt sc_phyctxt[1]{};
-    iwx_tx_ring txq[2]{};
+    iwx_tx_ring txq[4]{};
     ieee80211com sc_ic{};
 };
 struct iwx_add_sta_cmd {
@@ -196,7 +206,8 @@ struct iwx_add_sta_cmd {
 
 static uint32_t u8_get_bits(uint8_t value, uint32_t mask) { return value & mask; }
 static bool iwx_mimo_enabled(iwx_softc *) { return false; }
-static bool isset(const uint32_t *, uint32_t) { return false; }
+static bool isset(const uint8_t *bits, uint32_t bit)
+{ return (bits[bit / 8] & (1u << (bit % 8))) != 0; }
 static int iwx_send_cmd_pdu_status(iwx_softc *, uint32_t, size_t,
                                    const void *, uint32_t *status)
 {
@@ -216,8 +227,16 @@ struct ItlIwx {
     int iwx_enable_txq(iwx_softc *, int, int, int, size_t) { return 0; }
     int iwx_enable_mgmt_queue(iwx_softc *) { ++gMgmtQueueCount; return 0; }
     int iwx_clear_statistics(iwx_softc *) { ++gStatsCount; return 0; }
-    int iwx_schedule_protect_session(iwx_softc *, iwx_node *, uint32_t) { return 0; }
-    int iwx_protect_session(iwx_softc *, iwx_node *, uint32_t, uint32_t) { return 0; }
+    int iwx_schedule_protect_session(iwx_softc *, iwx_node *, uint32_t)
+    { ++gScheduleProtectionCount; return 0; }
+    int iwx_protect_session(iwx_softc *, iwx_node *, uint32_t duration,
+                            uint32_t delay)
+    {
+        ++gLegacyProtectionCount;
+        gLegacyProtectionDuration = duration;
+        gLegacyProtectionDelay = delay;
+        return 0;
+    }
 };
 """
 
@@ -246,6 +265,8 @@ static void resetCounters()
     gStaCommandCount = gBindingAddCount = gBindingRemoveCount = 0;
     gMacAddCount = gMacRemoveCount = gRmStaCount = 0;
     gMgmtQueueCount = gStatsCount = 0;
+    gScheduleProtectionCount = gLegacyProtectionCount = 0;
+    gLegacyProtectionDuration = gLegacyProtectionDelay = 0;
 }
 static void setup(iwx_softc &sc, iwx_node &node, ieee80211_channel &channel)
 {
@@ -283,6 +304,9 @@ int main()
     assert(gStaCommandCount == 2);
     assert((sc.sc_flags & IWX_FLAG_STA_ACTIVE) != 0);
     assert(gMgmtQueueCount == 1 && gStatsCount == 1);
+    assert(gScheduleProtectionCount == 0 && gLegacyProtectionCount == 1);
+    assert(gLegacyProtectionDuration == IEEE80211_DUR_TU);
+    assert(gLegacyProtectionDelay == 0);
 
     // A non-success status, including status bits outside the low byte, is a
     // firmware rejection. The failed AUTH path removes only resources whose
@@ -303,6 +327,9 @@ int main()
     assert(gStaCommandCount == 2);
     assert((sc.sc_flags & IWX_FLAG_STA_ACTIVE) != 0);
     assert(gMgmtQueueCount == 1 && gStatsCount == 1);
+    assert(gScheduleProtectionCount == 0 && gLegacyProtectionCount == 1);
+    assert(gLegacyProtectionDuration == IEEE80211_DUR_TU);
+    assert(gLegacyProtectionDelay == 0);
 
     // Updating an already-active station must preserve its previously valid
     // active bit when transport or firmware reports failure, while still
@@ -332,6 +359,17 @@ int main()
 
 def main() -> None:
     source = SOURCE.read_text(encoding="utf-8")
+    constants = numeric_constants(
+        REG.read_text(encoding="utf-8"),
+        VAR.read_text(encoding="utf-8"),
+        IEEE.read_text(encoding="utf-8"),
+    )
+    prefix = HARNESS_PREFIX
+    for name, value in constants.items():
+        prefix = prefix.replace(f"@@{name}@@", str(value))
+    unresolved = re.findall(r"@@([A-Z0-9_]+)@@", prefix)
+    if unresolved:
+        raise AssertionError(f"unresolved source constants: {unresolved}")
     auth = production_function(source, "int ItlIwx::\niwx_auth(")
     add_sta = production_function(source, "int ItlIwx::\niwx_add_sta_cmd(")
     compiler = shutil.which("clang++") or shutil.which("c++")
@@ -341,7 +379,7 @@ def main() -> None:
         harness = Path(directory) / "test082_auth_retry_cleanup.cpp"
         binary = Path(directory) / "test082_auth_retry_cleanup"
         harness.write_text(
-            HARNESS_PREFIX + "\n" + auth + "\n" + add_sta + "\n" + HARNESS_SUFFIX,
+            prefix + "\n" + auth + "\n" + add_sta + "\n" + HARNESS_SUFFIX,
             encoding="utf-8",
         )
         result = subprocess.run(

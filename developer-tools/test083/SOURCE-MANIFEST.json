@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "package": "Test083 developer tools source snapshot",
+  "artifact_status": "Verified offline experimental driver build; no binary included in this directory.",
+  "files": [
+    {
+      "role": "source",
+      "source_relative_path": "IntelWirelessNative/arm_p2p_rx149_test083.swift",
+      "snapshot_path": "arm_p2p_rx149_test083.swift",
+      "size_bytes": 5242,
+      "source_sha256": "c62d93ac4fd03584abd3742a9e88915a319ba16531d112cb2cb95e703ed7508a",
+      "snapshot_sha256": "c62d93ac4fd03584abd3742a9e88915a319ba16531d112cb2cb95e703ed7508a"
+    },
+    {
+      "role": "source",
+      "source_relative_path": "IntelWirelessNative/capture_test083_receive149_once.py",
+      "snapshot_path": "capture_test083_receive149_once.py",
+      "size_bytes": 65902,
+      "source_sha256": "8a0897f7920d821d853716c75761b9616f6473818152b54e95fe44b382d04a6c",
+      "snapshot_sha256": "8a0897f7920d821d853716c75761b9616f6473818152b54e95fe44b382d04a6c"
+    },
+    {
+      "role": "python_import_dependency",
+      "source_relative_path": "IntelWirelessNative/capture_test076_resident_data_once.py",
+      "snapshot_path": "capture_test076_resident_data_once.py",
+      "size_bytes": 174367,
+      "source_sha256": "ec718f504e2b0d092b69798e86bc55a458c6b9c4ce4925d5f3551a9d9862fa2b",
+      "snapshot_sha256": "ec718f504e2b0d092b69798e86bc55a458c6b9c4ce4925d5f3551a9d9862fa2b"
+    },
+    {
+      "role": "python_import_dependency",
+      "source_relative_path": "IntelWirelessNative/probe_p2p_result.py",
+      "snapshot_path": "probe_p2p_result.py",
+      "size_bytes": 26919,
+      "source_sha256": "7d41e4c5d236325e4cfe235717048030ab80d8f97392ac37307c9bf82603a732",
+      "snapshot_sha256": "7d41e4c5d236325e4cfe235717048030ab80d8f97392ac37307c9bf82603a732"
+    },
+    {
+      "role": "python_import_dependency",
+      "source_relative_path": "IntelWirelessNative/probe_wifi_rate.py",
+      "snapshot_path": "probe_wifi_rate.py",
+      "size_bytes": 5684,
+      "source_sha256": "6e802a71ebeb5b9010ae0e0f7f0edd6f2782c51e50d8a5d566492c996efd9ca0",
+      "snapshot_sha256": "6e802a71ebeb5b9010ae0e0f7f0edd6f2782c51e50d8a5d566492c996efd9ca0"
+    },
+    {
+      "role": "runtime_subprocess_dependency",
+      "source_relative_path": "IntelWirelessNative/tools/run_test083_router_observation_once.py",
+      "snapshot_path": "tools/run_test083_router_observation_once.py",
+      "size_bytes": 20447,
+      "source_sha256": "3a07dcc99c0636592592a155e65e999b5ad26d5a2c7cfba59071764b60475ce1",
+      "snapshot_sha256": "3a07dcc99c0636592592a155e65e999b5ad26d5a2c7cfba59071764b60475ce1"
+    },
+    {
+      "role": "runtime_subprocess_dependency",
+      "source_relative_path": "IntelWirelessNative/tools/openwrt_capture_once.py",
+      "snapshot_path": "tools/openwrt_capture_once.py",
+      "size_bytes": 54243,
+      "source_sha256": "7c7b750604acf3c18372600084bcf6a899f3b8c2e0c364ebb6a1129d77dbeac2",
+      "snapshot_sha256": "7c7b750604acf3c18372600084bcf6a899f3b8c2e0c364ebb6a1129d77dbeac2"
+    },
+    {
+      "role": "python_import_dependency",
+      "source_relative_path": "IntelWirelessNative/tools/awdl_ioreg_u32.py",
+      "snapshot_path": "tools/awdl_ioreg_u32.py",
+      "size_bytes": 10477,
+      "source_sha256": "4a4fef3e2ac9189ab53fe93a39a5f183c6081a1b10c69a5901d06b495f1d3ff3",
+      "snapshot_sha256": "4a4fef3e2ac9189ab53fe93a39a5f183c6081a1b10c69a5901d06b495f1d3ff3"
+    },
+    {
+      "role": "test",
+      "source_relative_path": "IntelWirelessNative/tools/test_test083_receive149_once.py",
+      "snapshot_path": "tools/test_test083_receive149_once.py",
+      "size_bytes": 31309,
+      "source_sha256": "5f38076b0420f9df92202c9b679a8c949227ed5f3eab1299594edc241211c665",
+      "snapshot_sha256": "db0518c0fe28f2bfb66a1c4e4b0ea002ba502f41c3c59e35e7bc11719ab823c9",
+      "sanitization": "Synthetic fixture address/token values replaced with neutral/generated test-only placeholders; test assertions retained."
+    },
+    {
+      "role": "test",
+      "source_relative_path": "IntelWirelessNative/tools/test_run_test083_router_observation_once.py",
+      "snapshot_path": "tools/test_run_test083_router_observation_once.py",
+      "size_bytes": 5277,
+      "source_sha256": "705781fbf96c147799091b2a81ac193811c3b5f5cbbba6d8bc2dbb58aff31ccc",
+      "snapshot_sha256": "44d89f8388eb887f3b77c96dbaac49d8667c7e23de8d4f6e9c7a42b1c1ef5331",
+      "sanitization": "Synthetic fixture address/token values replaced with neutral/generated test-only placeholders; test assertions retained."
+    }
+  ],
+  "excluded": [
+    "kexts, firmware, archives, and other build outputs",
+    "private build, boot, deployment, and runtime metadata",
+    "logs, crash reports, PCAP/PCAPNG captures, and evidence",
+    "router credentials, configuration, live addresses, and device identities",
+    "personal absolute paths and unrelated workspace files"
+  ],
+  "notes": [
+    "The snapshot contains the bounded NativeHcmdRxTrace decoder and its numeric alias checks.",
+    "28 offline mock tests passed from this snapshot; they do not prove runtime or RF behavior.",
+    "Fixture identifiers are synthetic; the snapshot does not contain real access tokens or peer addresses.",
+    "Trace rows are diagnostic evidence only and do not establish firmware ownership, peer receipt, or AirDrop success.",
+    "A complete ring window can coexist with truncated lifetime history; the collector exposes history_truncated separately and requires the post-window to cover a reported delta."
+  ],
+  "build_status": "Full build, strict signature verification and 15 compatibility compile cases passed; boot and RF remain untested.",
+  "build_production_commit": "d2217858e9136fe0cca3ac269b05ac2ae8be091c",
+  "artifact": {
+    "mach_o_uuid": "2AD6C97B-050E-3A9F-9A32-7C31632A330D",
+    "binary_sha256": "d9ceaa2ef28cecef7580f439d314e3001f4c6e116f4e96278b4d210d3778c2d7",
+    "archive_sha256": "a7fea3eac620f6f11a7b3d80ddf2cfc11c95a2be334dd0555be5d5c3696e16d9",
+    "profile": "native_awdl_rx149_observation_only"
+  }
+}

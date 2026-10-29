@@ -298,10 +298,23 @@ int main() {
  // affect the legacy non-observation request path.
  {
   const TahoeP2PRocObservationPolicy::Channel legal{
-      149,5745,true,false,true,false,false};
+      149,5745,true,false,true,false,true};
   assert(!TahoeP2PRocObservationPolicy::prepareAllowed(false,true,true,legal));
   assert(TahoeP2PRocObservationPolicy::prepareAllowed(false,false,false,legal));
+  assert(TahoeP2PRocObservationPolicy::prepareAllowed(true,true,true,legal));
+  assert(TahoeP2PRocObservationPolicy::submitAllowed(true,true,true,100,legal));
   assert(!TahoeP2PRocObservationPolicy::submitAllowed(true,true,true,900,legal));
+  assert(!TahoeP2PRocObservationPolicy::submitAllowed(true,true,false,100,legal));
+ }
+ // Ordinary off-channel ROC does not inherit the explicit RX149 exception.
+ {
+  ItlIwx h;ieee80211_channel staChan{36,false},initial{1,true};
+  setup(h,staChan,initial);
+  auto *channel=liveObservation149(h);
+  channel->ic_flags|=IEEE80211_CHAN_PASSIVE;
+  const uint32_t flags=channel->ic_flags;
+  assert(h.tahoeP2pRocPrepare(&h.com,channel,90,2)==EOPNOTSUPP);
+  assert(channel->ic_flags==flags&&h.pduSends==0&&h.statusSends==0);
  }
  // The normal path changes only the spare PHY, binds it, arms the tracker,
  // submits a 100ms session, and leaves cleanup gated on END observation.
@@ -650,8 +663,14 @@ int main() {
  {
   ItlIwx h;ieee80211_channel staChan{36,false},initial{1,true};setup(h,staChan,initial);
   auto *channel=liveObservation149(h);
+  channel->ic_flags|=IEEE80211_CHAN_PASSIVE;
+  const uint32_t passiveFlags=channel->ic_flags;
   assert(h.tahoeP2pRocPrepare(&h.com,channel,96,2,true)==0);
+  assert(channel->ic_flags==passiveFlags&&
+         (channel->ic_flags&IEEE80211_CHAN_PASSIVE)!=0);
   assert(h.tahoeP2pRocSubmit(&h.com,96,2,100,arm,&h)==0);
+  assert(channel->ic_flags==passiveFlags&&
+         (channel->ic_flags&IEEE80211_CHAN_PASSIVE)!=0);
   const auto *session=reinterpret_cast<const iwx_session_prot_cmd*>(
       h.pduPayloads.back().data());
   assert(session->conf_id==IWX_SESSION_PROTECT_CONF_P2P_DEVICE_DISCOV&&
@@ -661,7 +680,8 @@ int main() {
          h.pduSends+h.statusSends==before);
   assert(h.tahoeP2pRocCleanup(&h.com,96,2,true)==0);
   assert(h.com.sc_p2p_roc.phase==IWX_P2P_ROC_COMPLETE&&
-         h.com.sc_phyctxt[1].channel==currentChannel(h,initial.channel));
+         h.com.sc_phyctxt[1].channel==currentChannel(h,initial.channel)&&
+         channel->ic_flags==passiveFlags);
  }
 
  // A clean RX149 END cannot restore the borrowed PHY after station or P2P
@@ -681,6 +701,30 @@ int main() {
          h.com.sc_p2p.phy_leased&&h.com.sc_phyctxt[1].channel==channel);
  }
 
+ // Prepare captures the STA epoch and P2P PHY identity. If either owner
+ // changes before Submit, reject before arming or sending Session Protection.
+ for (unsigned ownerChange=0;ownerChange<2;++ownerChange) {
+  ItlIwx h;ieee80211_channel staChan{36,false},initial{1,true};setup(h,staChan,initial);
+  auto *channel=liveObservation149(h);
+  const uint32_t token=940+ownerChange;
+  assert(h.tahoeP2pRocPrepare(&h.com,channel,token,2,true)==0);
+  assert(h.com.sc_p2p_roc.phase==IWX_P2P_ROC_PREPARED&&
+         h.pduSends==2&&h.statusSends==1);
+  if (ownerChange==0)
+   __atomic_add_fetch(&h.com.sc_tx_rate_generation,1U,__ATOMIC_ACQ_REL);
+  else
+   ++h.com.sc_phyctxt[1].color;
+  assert(h.tahoeP2pRocSubmit(&h.com,token,2,100,arm,&h)==EBUSY);
+  assert(h.com.sc_p2p_roc.phase==IWX_P2P_ROC_QUARANTINED&&
+         h.com.sc_p2p.binding_state==IWX_P2P_RESOURCE_ACTIVE&&
+         h.com.sc_p2p.phy_leased&&h.armCalls==0&&
+         h.pduSends==2&&h.statusSends==1);
+  const uint32_t sessionId=iwx_cmd_id(
+      IWX_SESSION_PROTECTION_CMD,IWX_MAC_CONF_GROUP,0);
+  for (uint32_t sentId : h.pduIds)
+   assert(sentId!=sessionId);
+ }
+
  // A station/power epoch change immediately after binding removal is caught
  // by the second ownership check, before restoring the old PHY channel.
  {
@@ -698,7 +742,7 @@ int main() {
  }
 
  // Foreign objects and malformed live table entries never reach PHY/FW IO.
- for (unsigned invalid=0;invalid<8;++invalid) {
+ for (unsigned invalid=0;invalid<7;++invalid) {
   ItlIwx h;ieee80211_channel staChan{36,false},initial{1,true};setup(h,staChan,initial);
   auto *channel=liveObservation149(h);
   if (invalid==0) {
@@ -719,11 +763,10 @@ int main() {
   } else {
    if (invalid==1) channel->ic_freq=5740;
    if (invalid==2) channel->ic_flags=0;
-   if (invalid==3) channel->ic_flags|=IEEE80211_CHAN_PASSIVE;
-   if (invalid==4) channel->ic_flags|=IEEE80211_CHAN_DFS;
-   if (invalid==5) channel->ic_flags &= ~IEEE80211_CHAN_5GHZ;
-   if (invalid==6) channel->is2g=true;
-   if (invalid==7) {
+   if (invalid==3) channel->ic_flags|=IEEE80211_CHAN_DFS;
+   if (invalid==4) channel->ic_flags &= ~IEEE80211_CHAN_5GHZ;
+   if (invalid==5) channel->is2g=true;
+   if (invalid==6) {
     assert(h.tahoeP2pRocPrepare(&h.com,channel,92,
       IWX_SESSION_PROTECT_CONF_P2P_GO_NEGOTIATION,true)==EOPNOTSUPP);
     assert(h.pduSends==0);
@@ -750,7 +793,7 @@ int main() {
   if (invalid==0) duration=900;
   if (invalid==1) configuration=3;
   if (invalid==2) channel->ic_freq=5740;
-  if (invalid==3) channel->ic_flags|=IEEE80211_CHAN_PASSIVE;
+  if (invalid==3) channel->ic_flags|=IEEE80211_CHAN_DFS;
   assert(h.tahoeP2pRocSubmit(&h.com,93,configuration,duration,arm,&h)==
          (invalid==1?EBUSY:EOPNOTSUPP));
   assert(h.armCalls==0&&h.pduSends==2&&h.com.sc_p2p.phy_leased);
