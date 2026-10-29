@@ -1673,9 +1673,9 @@ static bool evaluateMifBootstrapPairTransition(
     uint64_t blockers = plan.blockers;
     if (plan.permitExistingNormalMifPath) {
         if (!probe->mifBootstrapPairClaimed) {
-            if (!allowClaim || probe->mifBootstrapPairMifAttempted) {
+            if (allowClaim && probe->mifBootstrapPairMifAttempted) {
                 blockers |= Test079BootstrapPairTransition::kAttemptAlreadyUsed;
-            } else {
+            } else if (allowClaim) {
                 probe->mifBootstrapPairClaimed = true;
                 probe->mifBootstrapPairSlot = peer.slot;
                 probe->mifBootstrapPairPeerIncarnation = peer.peerIncarnation;
@@ -1710,7 +1710,19 @@ static bool evaluateMifBootstrapPairTransition(
         probe->mifBootstrapPairBlockers != oldBlockers ||
         probe->mifBootstrapPairClaimed != wasClaimed)
         probe->mifBootstrapPairDiagnosticsDirty = true;
-    return false;
+    // An eligible, unclaimed preview is not yet a selection. The caller must
+    // wait for both pacing and burst-repeat preparation to become Ready before
+    // it may pin this peer snapshot.
+    return blockers == Test079BootstrapPairTransition::kNoBlocker;
+}
+
+static bool claimMifBootstrapPairAfterPreparation(
+    P2PProbeRun *probe, const MifPacingPeerView &peer,
+    bool pacingReady, bool repeatPrepareReady)
+{
+    if (!pacingReady || !repeatPrepareReady)
+        return false;
+    return evaluateMifBootstrapPairTransition(probe, peer, true);
 }
 
 static bool mifBootstrapPairSnapshotMatches(
@@ -4164,7 +4176,8 @@ static NativeAwdlProbe::MifPacingPlan refreshMifPacingAnchorInGate(
                 0, probe->mifPacingWindowEndUs, 0, 0};
 #if defined(ITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332)
     if (probe->mifBootstrapSelected &&
-        !evaluateMifBootstrapPairTransition(probe, read.view, false))
+        (!probe->mifBootstrapPairClaimed ||
+         !evaluateMifBootstrapPairTransition(probe, read.view, false)))
         return {NativeAwdlProbe::MifPacingDecision::Stop,
                 NativeAwdlProbe::MifPacingReason::PreparedFrameStale,
                 0, probe->mifPacingWindowEndUs, 0, 0};
@@ -4215,6 +4228,7 @@ static NativeAwdlProbe::MifPacingPlan finalCheckMifPacingAnchorInGate(
         read.probe = const_cast<P2PProbeRun *>(probe);
         if (readMifPacingPeerInGate(nullptr, &read, nullptr, nullptr, nullptr) !=
                 kIOReturnSuccess ||
+            !probe->mifBootstrapPairClaimed ||
             !evaluateMifBootstrapPairTransition(
                 const_cast<P2PProbeRun *>(probe), read.view, false))
             return {NativeAwdlProbe::MifPacingDecision::Stop,
@@ -4693,7 +4707,7 @@ static bool tryPrepareMifAtPacingPoint(
     }
 #if defined(ITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332)
     if (probe->mifBootstrapSelected &&
-        !evaluateMifBootstrapPairTransition(probe, peer, true)) {
+        !evaluateMifBootstrapPairTransition(probe, peer, false)) {
         if (probe->mifBootstrapPairClaimed ||
             (probe->mifBootstrapPairBlockers &
                 (Test079BootstrapPairTransition::kWindowExpired |
@@ -4736,6 +4750,7 @@ static bool tryPrepareMifAtPacingPoint(
     }
 
     const bool repeat = probe->mifBurstSubmittedFrames != 0;
+    bool repeatPrepareReady = !repeat;
     if (repeat) {
         const auto repeatPlan = NativeAwdlProbe::planMifBurstRepeat(
             mifBurstRepeatState(probe, session, tx, planNowUs, *frame == nullptr));
@@ -4748,6 +4763,34 @@ static bool tryPrepareMifAtPacingPoint(
         }
         if (repeatPlan.decision != NativeAwdlProbe::MifBurstDecision::Prepare)
             return false;
+        repeatPrepareReady = true;
+    }
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332)
+    if (probe->mifBootstrapSelected) {
+        const uint64_t claimNowUs =
+            p2pProbeMonotonicNanoseconds() / 1000ULL;
+        if (peer.sampleUs < claimNowUs)
+            peer.sampleUs = claimNowUs;
+        if (!claimMifBootstrapPairAfterPreparation(
+                probe, peer,
+                pacing.decision == NativeAwdlProbe::MifPacingDecision::Ready,
+                repeatPrepareReady)) {
+            if (probe->mifBootstrapPairClaimed ||
+                (probe->mifBootstrapPairBlockers &
+                    (Test079BootstrapPairTransition::kWindowExpired |
+                     kMifBootstrapPairPinnedSnapshotChanged)))
+                probe->mifBurstStopped = true;
+            probe->mifStatus = kMifProbeWaitingForPeerPsf;
+            probe->mifPacingReason = static_cast<uint32_t>(
+                NativeAwdlProbe::MifPacingReason::WaitingForFreshPsf);
+            probe->mifPacingEarliestUs = 0;
+            probe->mifPacingLatestUs = probe->mifPacingWindowEndUs;
+            publishMifProbeDetails(probe->owner, probe);
+            return false;
+        }
+    }
+#endif
+    if (repeat) {
         probe->mifBurstCandidateIsRepeat = true;
         resetMifFrameStateForRepeat(probe);
         if (!prepareMifCandidateAfterPreviousMif(

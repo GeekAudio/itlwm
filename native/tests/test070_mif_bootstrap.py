@@ -85,8 +85,13 @@ def verify_production_contract():
     submit_contract = " ".join(submit.split())
     assert (
         "if (probe->mifBootstrapSelected && "
-        "!evaluateMifBootstrapPairTransition(probe, peer, true))"
+        "!evaluateMifBootstrapPairTransition(probe, peer, false))"
     ) in ordinary_mif_contract
+    assert "claimMifBootstrapPairAfterPreparation(" in ordinary_mif
+    claim_helper = extract_function(
+        source, "static bool claimMifBootstrapPairAfterPreparation(")
+    assert "if (!pacingReady || !repeatPrepareReady)" in claim_helper
+    assert "evaluateMifBootstrapPairTransition(probe, peer, true)" in claim_helper
     assert "if (probe->mifBootstrapSelected) return false;" in ordinary_mif_contract
     assert (
         "const bool bootstrapMifSubmit = mifFrame && "
@@ -108,8 +113,11 @@ def verify_production_contract():
         "takeDiscoveryPacket(")
     formal_completion = worker.index(
         "probe->discoveryOwnFirstMifCompletionUs =")
-    assert "!probe->mifBootstrapCandidatePrepared" in worker[
-        formal_completion - 300:formal_completion]
+    completion_gate = worker[formal_completion - 500:formal_completion]
+    assert "const auto mifCompletion = classifyMifCompletion(" in worker[
+        worker.index("if (probe->awdlMifFollowupEnabled && probe->mifFrameSubmitted"):
+        formal_completion]
+    assert "mifCompletion.grantsOwnFirst" in completion_gate
     assert "getPsfSnapshot(" in source
     assert "struct MifPeerSnapshot" in table
     assert "if (!entry.used || !entry.hasMif" in TABLE_CPP.read_text(

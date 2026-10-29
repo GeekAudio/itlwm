@@ -67,49 +67,145 @@ def _extract_from(source: str, start: int, open_brace: int) -> str:
     raise ValueError("unclosed function body")
 
 
+def extract_terminated_declaration(source: str, marker: str) -> str:
+    start = source.index(marker)
+    end = source.index(";", start)
+    return source[start : end + 1]
+
+
+def check_prepare_claim_order(probe: str) -> None:
+    # This source-contract check complements the dynamic production-helper
+    # test below. It checks call order only; it does not claim to execute the
+    # full kernel worker or Apple's live P2P stack.
+    prepare = extract_function(
+        probe, "static bool tryPrepareMifAtPacingPoint("
+    )
+    preview = prepare.index(
+        "evaluateMifBootstrapPairTransition(probe, peer, false)"
+    )
+    pacing = prepare.index("const auto pacing = NativeAwdlProbe::planMifPacing(")
+    pacing_wait = prepare.index(
+        "if (pacing.decision != NativeAwdlProbe::MifPacingDecision::Ready)"
+    )
+    repeat = prepare.index("NativeAwdlProbe::planMifBurstRepeat(")
+    repeat_wait = prepare.index(
+        "repeatPlan.decision != NativeAwdlProbe::MifBurstDecision::Prepare"
+    )
+    claim = prepare.index("claimMifBootstrapPairAfterPreparation(")
+    reset = prepare.index("resetMifFrameStateForRepeat(")
+    frame_build = prepare.index("prepareMifCandidateAfterPreviousMif(")
+    assert preview < pacing < pacing_wait < repeat < repeat_wait < claim
+    assert claim < reset < frame_build
+    assert "evaluateMifBootstrapPairTransition(probe, peer, true)" not in prepare
+
+
 def main() -> None:
     probe = PROBE.read_text()
+    check_prepare_claim_order(probe)
     declarations = [
         extract_braced_declaration(probe, "struct P2PProbeTicketIdentity {") + ";",
         extract_braced_declaration(
             probe, "struct P2PMifCompletionClassification {") + ";",
         extract_braced_declaration(probe, "struct P2PTxDiagnosticSnapshot {") + ";",
+        extract_braced_declaration(probe, "enum MifBootstrapPairPhase : uint32_t {") + ";",
+        extract_terminated_declaration(
+            probe, "constexpr uint64_t kMifBootstrapPairPinnedSnapshotChanged"),
         extract_function(probe, "static P2PProbeTicketIdentity ticketIdentityFromSnapshot("),
         extract_function(probe, "static bool ticketIdentityFieldsMatch("),
         extract_function(probe, "static bool ticketIdentityMatches("),
         extract_function(probe, "static P2PMifCompletionClassification classifyMifCompletion("),
         extract_function(probe, "static bool mifBootstrapPairSnapshotMatches("),
+        extract_function(probe, "static Test079BootstrapPairTransition::Input makeMifBootstrapPairInput("),
+        extract_function(probe, "static bool evaluateMifBootstrapPairTransition("),
+        extract_function(probe, "static bool claimMifBootstrapPairAfterPreparation("),
     ]
     cpp = r"""
 #include <assert.h>
 #include <stdint.h>
+#include "native/awdl_bootstrap_pair_transition.hpp"
 
 enum class TahoeP2PActionTxState : uint32_t { kIdle = 0, kInFlight = 1 };
 
 namespace Test070MifBootstrap {
-struct Binding { uint64_t rocGeneration; };
+struct Binding {
+    uint64_t peerIncarnation;
+    uint64_t mifRevision;
+    uint64_t rxMonotonicUs;
+    uint64_t contextGeneration;
+    uint64_t powerGeneration;
+    uint64_t stationGeneration;
+    uint64_t rocGeneration;
+    uint16_t rxChannel;
+    uint8_t slot;
+};
 }
 
 struct MifPacingPeerView {
     uint64_t contextGeneration;
     uint64_t powerGeneration;
     uint64_t stationGeneration;
+    uint64_t rocGeneration;
+    uint64_t rxMonotonicUs;
+    uint64_t sampleUs;
     uint64_t peerIncarnation;
     uint64_t psfRevision;
     uint64_t mifRevision;
-    uint64_t rxMonotonicUs;
     uint64_t mifRxMonotonicUs;
-    uint64_t rocGeneration;
+    uint16_t rxChannelIndex;
+    uint16_t mifRxChannelIndex;
     uint16_t slot;
     bool ownerCurrent;
     bool rocActive;
     bool rocChannel6Confirmed;
+    bool endSeen;
+    bool outcomeUnknown;
+    bool complete;
+    bool syncConsistent;
+    bool fresh;
     bool rxChannel6Confirmed;
+    bool tracked;
+    bool hasPsf;
+    bool hasMif;
+    bool psfComplete;
+    bool mifComplete;
+    bool mifFresh;
+    bool mifSyncConsistent;
+    bool historyCompatible;
     bool mifRxChannel6Confirmed;
+    bool queueLeaseActive;
+    bool ticketReclaimed;
+    bool txRingEmpty;
+    bool ringIndicesConsistent;
+};
+
+struct PsfCandidate { uint64_t hardDeadlineUs; };
+
+struct BootstrapBinding {
+    uint64_t peerIncarnation;
+    uint64_t mifRevision;
+    uint64_t rxMonotonicUs;
+    uint64_t contextGeneration;
+    uint64_t powerGeneration;
+    uint64_t stationGeneration;
+    uint64_t rocGeneration;
+    uint16_t rxChannel;
+    uint8_t slot;
 };
 
 struct P2PProbeRun {
+    bool mifBootstrapSelected;
+    bool mifBootstrapSubmitted;
+    bool mifBootstrapSucceeded;
     bool mifBootstrapPairClaimed;
+    bool mifBootstrapPairMifAttempted;
+    bool mifBootstrapPairMifCompleted;
+    bool mifBootstrapPairMifSucceeded;
+    bool mifBootstrapPairDiagnosticsDirty;
+    uint32_t mifBootstrapPairChecks;
+    uint32_t mifBootstrapPairStatus;
+    uint64_t mifBootstrapPairBlockers;
+    uint64_t mifBootstrapCompletedUs;
+    uint64_t mifPacingWindowEndUs;
     uint8_t mifBootstrapPairSlot;
     uint64_t mifBootstrapPairPeerIncarnation;
     uint64_t mifBootstrapPairPsfRevision;
@@ -119,8 +215,12 @@ struct P2PProbeRun {
     uint64_t contextGeneration;
     uint64_t powerGeneration;
     uint64_t stationGeneration;
-    Test070MifBootstrap::Binding mifBootstrapBinding;
+    BootstrapBinding mifBootstrapBinding;
+    PsfCandidate psfCandidate;
 };
+
+static bool mifBootstrapPairSnapshotMatches(
+    const P2PProbeRun *, const MifPacingPeerView &);
 
 __DECLARATIONS__
 
@@ -160,6 +260,7 @@ MifPacingPeerView pairView()
     peer.mifRevision = 22;
     peer.rxMonotonicUs = 1001000;
     peer.mifRxMonotonicUs = 1000000;
+    peer.sampleUs = 1003000;
     peer.contextGeneration = 11;
     peer.powerGeneration = 12;
     peer.stationGeneration = 13;
@@ -167,9 +268,44 @@ MifPacingPeerView pairView()
     peer.ownerCurrent = true;
     peer.rocActive = true;
     peer.rocChannel6Confirmed = true;
+    peer.complete = true;
+    peer.syncConsistent = true;
+    peer.fresh = true;
     peer.rxChannel6Confirmed = true;
+    peer.tracked = true;
+    peer.hasPsf = true;
+    peer.hasMif = true;
+    peer.psfComplete = true;
+    peer.mifComplete = true;
+    peer.mifFresh = true;
+    peer.mifSyncConsistent = true;
+    peer.historyCompatible = true;
     peer.mifRxChannel6Confirmed = true;
+    peer.queueLeaseActive = true;
+    peer.ticketReclaimed = true;
+    peer.txRingEmpty = true;
+    peer.ringIndicesConsistent = true;
     return peer;
+}
+
+void prepareBootstrapRunForPairing(P2PProbeRun *run)
+{
+    run->mifBootstrapSelected = true;
+    run->mifBootstrapSubmitted = true;
+    run->mifBootstrapSucceeded = true;
+    run->mifBootstrapCompletedUs = 999000;
+    run->mifPacingWindowEndUs = 1050000;
+    run->psfCandidate.hardDeadlineUs = 1060000;
+    run->contextGeneration = 11;
+    run->powerGeneration = 12;
+    run->stationGeneration = 13;
+    run->mifBootstrapBinding.peerIncarnation = 77;
+    run->mifBootstrapBinding.mifRevision = 21;
+    run->mifBootstrapBinding.contextGeneration = 11;
+    run->mifBootstrapBinding.powerGeneration = 12;
+    run->mifBootstrapBinding.stationGeneration = 13;
+    run->mifBootstrapBinding.rocGeneration = 11;
+    run->mifBootstrapBinding.slot = 2;
 }
 
 int main()
@@ -318,6 +454,58 @@ int main()
         assert(!mifBootstrapPairSnapshotMatches(&changedRun, changedPeer));
     }
 
+    // An eligible early same-entry PSF/MIF pair is only a preview. If pacing
+    // or repeat preparation says Wait, the production claim helper must leave
+    // it unpinned; a later fresh revision from that same slot/incarnation can
+    // claim once both readiness gates are true.
+    P2PProbeRun availability{};
+    prepareBootstrapRunForPairing(&availability);
+    MifPacingPeerView earlyPair = pairView();
+    assert(evaluateMifBootstrapPairTransition(&availability, earlyPair,
+                                               false));
+    assert(!availability.mifBootstrapPairClaimed);
+    assert(!claimMifBootstrapPairAfterPreparation(
+        &availability, earlyPair, false, false));
+    assert(!availability.mifBootstrapPairClaimed);
+    assert(!claimMifBootstrapPairAfterPreparation(
+        &availability, earlyPair, true, false)); // Repeat planner returned Wait.
+    assert(!availability.mifBootstrapPairClaimed);
+
+    MifPacingPeerView laterPair = earlyPair;
+    ++laterPair.psfRevision;
+    ++laterPair.mifRevision;
+    ++laterPair.rxMonotonicUs;
+    ++laterPair.mifRxMonotonicUs;
+    ++laterPair.sampleUs;
+    assert(claimMifBootstrapPairAfterPreparation(
+        &availability, laterPair, true, true));
+    assert(availability.mifBootstrapPairClaimed);
+    assert(availability.mifBootstrapPairSlot == laterPair.slot);
+    assert(availability.mifBootstrapPairPeerIncarnation ==
+           laterPair.peerIncarnation);
+    assert(availability.mifBootstrapPairPsfRevision ==
+           laterPair.psfRevision);
+    assert(availability.mifBootstrapPairMifRevision ==
+           laterPair.mifRevision);
+    assert(availability.mifBootstrapPairPsfRxUs ==
+           laterPair.rxMonotonicUs);
+    assert(availability.mifBootstrapPairMifRxUs ==
+           laterPair.mifRxMonotonicUs);
+
+    MifPacingPeerView replacementPair = laterPair;
+    ++replacementPair.psfRevision;
+    ++replacementPair.mifRevision;
+    ++replacementPair.rxMonotonicUs;
+    ++replacementPair.mifRxMonotonicUs;
+    ++replacementPair.sampleUs;
+    assert(!evaluateMifBootstrapPairTransition(
+        &availability, replacementPair, false));
+    assert(availability.mifBootstrapPairClaimed);
+    assert(availability.mifBootstrapPairPsfRevision ==
+           laterPair.psfRevision);
+    assert(availability.mifBootstrapPairMifRevision ==
+           laterPair.mifRevision);
+
     return 0;
 }
 """
@@ -331,6 +519,7 @@ int main()
                 "xcrun", "clang++", "-std=c++14", "-O1", "-g", "-Wall",
                 "-Wextra", "-Werror", "-fsanitize=address,undefined",
                 "-fno-omit-frame-pointer", "-fno-sanitize-recover=all",
+                "-I", str(ROOT),
                 str(source), "-o", str(binary),
             ],
             cwd=ROOT,
@@ -339,8 +528,9 @@ int main()
         subprocess.run([str(binary)], cwd=ROOT, check=True)
     print(
         "PASS: extracted Test079 Probe helpers validate ticket identity, "
-        "completion classification, own-first eligibility, and pinned peer "
-        "epochs under ASan/UBSan"
+        "completion classification, readiness-gated pair claim, own-first "
+        "eligibility, and pinned peer epochs under ASan/UBSan; source contract "
+        "confirms claim order after pacing and repeat preparation"
     )
 
 
