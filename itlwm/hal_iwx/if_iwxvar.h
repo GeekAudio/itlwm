@@ -118,6 +118,7 @@
 #include "../../native/iwx_tx_progress_observation.hpp"
 #include "../../native/iwx_tx_completion_observation.hpp"
 #include "../../native/iwx_tx_queue_observation.hpp"
+#include "../../native/iwx_sta_tx_observation.hpp"
 #endif
 
 #define IWL_CFG_ANY (~0)
@@ -773,6 +774,63 @@ struct iwx_softc {
 	int n_cmd_versions;
     char sc_fw_mcc[3];
     uint16_t sc_fw_mcc_int;
+#ifdef AIRPORT_TAHOE
+    /* MCC notifications are hints; only a fresh MCC_UPDATE_CMD response is
+     * allowed to update the applied firmware country and channel profile. */
+    struct task sc_native_mcc_task;
+    uint32_t sc_native_mcc_notice_generation;
+    uint32_t sc_native_mcc_notice_code;
+    uint32_t sc_native_mcc_notice_source;
+    uint32_t sc_native_mcc_notice_valid;
+    uint32_t sc_native_mcc_pending;
+    uint32_t sc_native_mcc_request_sequence;
+    uint32_t sc_native_mcc_request_mcc;
+    uint32_t sc_native_mcc_request_notice_generation;
+    uint32_t sc_native_mcc_request_firmware_generation;
+    uint32_t sc_native_mcc_request_source;
+    uint32_t sc_native_mcc_request_origin;
+    uint32_t sc_native_mcc_command_version;
+    uint32_t sc_native_mcc_command_version_present;
+    uint32_t sc_native_mcc_notification_version;
+    uint32_t sc_native_mcc_notification_version_present;
+    uint32_t sc_native_mcc_response_format;
+    uint32_t sc_native_mcc_11ax_capability;
+    uint32_t sc_native_mcc_11ax_capability_present;
+    uint32_t sc_native_mcc_response_present;
+    uint32_t sc_native_mcc_response_notice_generation;
+    uint32_t sc_native_mcc_response_firmware_generation;
+    uint32_t sc_native_mcc_response_mcc;
+    uint32_t sc_native_mcc_response_source;
+    uint32_t sc_native_mcc_response_status;
+    uint32_t sc_native_mcc_response_capabilities;
+    uint32_t sc_native_mcc_response_time;
+    uint32_t sc_native_mcc_response_geo_info;
+    uint32_t sc_native_mcc_response_channel_count;
+    uint32_t sc_native_mcc_response_profile149_flags;
+    uint32_t sc_native_mcc_response_profile149_flags_present;
+    uint32_t sc_native_mcc_applied_notice_generation;
+    uint32_t sc_native_mcc_applied_firmware_generation;
+    uint32_t sc_native_mcc_applied_channel149_flags;
+    uint32_t sc_native_mcc_applied_channel149_flags_present;
+    uint32_t sc_native_mcc_applied_channel149_frequency;
+    uint32_t sc_native_mcc_applied_channel149_frequency_present;
+    uint32_t sc_native_mcc_nvm_firmware_generation;
+    uint32_t sc_native_mcc_nvm_profile149_flags;
+    uint32_t sc_native_mcc_nvm_profile149_flags_present;
+    uint32_t sc_native_mcc_nvm_channel149_flags;
+    uint32_t sc_native_mcc_nvm_channel149_flags_present;
+    uint32_t sc_native_mcc_nvm_channel149_frequency;
+    uint32_t sc_native_mcc_nvm_channel149_frequency_present;
+    uint32_t sc_native_mcc_profile149_index;
+    uint32_t sc_native_mcc_last_error;
+    uint32_t sc_native_mcc_failed_notice_generation;
+    uint32_t sc_native_mcc_failed_firmware_generation;
+    uint32_t sc_native_mcc_failed_request_sequence;
+    uint32_t sc_native_mcc_last_gate;
+    uint32_t sc_native_mcc_snapshot_revision;
+    uint64_t sc_native_mcc_published_fingerprint;
+    uint32_t sc_native_mcc_published_fingerprint_valid;
+#endif
 #define IWX_IML_MAX_LEN 2048*10
     uint32_t sc_iml_len;
     uint8_t sc_iml[IWX_IML_MAX_LEN];
@@ -823,6 +881,13 @@ struct iwx_softc {
 	iwx_tx_queue_observation_state sc_tx_queue_observation;
 	iwx_txq_obs_snapshot sc_tx_queue_pending;
 	uint32_t sc_tx_queue_publish_version;
+	/* Atomic latest STA submit/RSP/reclaim tuple, frozen on watchdog expiry. */
+	iwx_sta_tx_observation_state sc_sta_tx_observation;
+	iwx_sta_tx_observation_snapshot sc_sta_tx_pending;
+	uint32_t sc_sta_tx_publish_version;
+	uint32_t sc_sta_tx_pending_watchdog_sequence;
+	uint32_t sc_sta_tx_pending_generation;
+	uint32_t sc_sta_tx_pending_present;
 #endif
 
 //	struct rwlock ioctl_rwl;

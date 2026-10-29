@@ -1361,6 +1361,8 @@ enum iwx_msix_ivar_for_cause {
  * @IWX_UCODE_TLV_CAPA_LQM_SUPPORT: supports Link Quality Measurement
  * @IWX_UCODE_TLV_CAPA_LMAC_UPLOAD: supports upload mode in lmac (1=supported,
  *    0=no support)
+ * @IWX_UCODE_TLV_CAPA_MCC_UPDATE_11AX_SUPPORT: MCC_UPDATE_CMD returns the
+ *    11ax channel-profile response layout.
  *
  * @IWX_NUM_UCODE_TLV_CAPA: number of bits used
  */
@@ -1413,6 +1415,7 @@ enum iwx_msix_ivar_for_cause {
 #define IWX_UCODE_TLV_CAPA_EXTEND_SHARED_MEM_CFG    80
 #define IWX_UCODE_TLV_CAPA_LQM_SUPPORT            81
 #define IWX_UCODE_TLV_CAPA_LED_CMD_SUPPORT        88
+#define IWX_UCODE_TLV_CAPA_MCC_UPDATE_11AX_SUPPORT    89
 
 #define IWX_NUM_UCODE_TLV_CAPA 128
 

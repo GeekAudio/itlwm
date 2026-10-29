@@ -7905,12 +7905,17 @@ static bool nativeInitObservationHandled(IOEthernetController *controller)
 void ItlIwx::nativeP2pTick()
 {
     tahoeP2pRxDrain();
+    // A CHUB profile refresh blocked by an active/unknown ROC lease remains
+    // pending. Retry the inexpensive queue gate once per watchdog tick; the
+    // MCC worker itself never spins while a P2P resource is retained.
+    tahoeMccScheduleIfReady(&com);
 #if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
     NativeAwdlBSD::poll(com.sc_ic.ic_state==IEEE80211_S_RUN&&
         !(com.sc_flags&(IWX_FLAG_HW_ERR|IWX_FLAG_SHUTDOWN|IWX_FLAG_RFKILL)),uint32_t(com.sc_generation));
 #endif
 
     IOEthernetController *controller = getController();
+    tahoePublishMccSnapshot(controller);
     publishRx149ProfileAvailabilityOnce(this, controller);
     if (rx149ObservationOnlyRequested(controller))
         (void)initializeRx149PrearmCounters(this);

@@ -118,6 +118,7 @@
 #include <linux/kernel.h>
 #include <FwData.h>
 #include <crypto/sha1.h>
+#include <string.h>
 
 #include <IOKit/IOInterruptController.h>
 #include <IOKit/IOCommandGate.h>
@@ -829,6 +830,76 @@ static bool publishQueueSnapshot(IOEthernetController *controller,
             snapshot.complete && snapshot.snapshot_stable ? 1U : 0U) &&
         scalar("SnapshotVersionEnd", finish) && scalar("SnapshotVersionBegin", finish);
 }
+
+static bool publishStaTxSnapshot(IOEthernetController *controller,
+    uint32_t *versionStorage,
+    const iwx_sta_tx_observation_snapshot &snapshot,
+    uint32_t ownerSequence, uint32_t ownerGeneration)
+{
+    if (!controller || !versionStorage || (*versionStorage & 1U) != 0 ||
+        *versionStorage > UINT32_MAX - 2U)
+        return false;
+    const uint32_t finish = *versionStorage + 2U;
+    *versionStorage = finish;
+    const auto scalar = [&](const char *field, uint64_t value) {
+        char key[112];
+        const int length = snprintf(key, sizeof(key), "NativeStaTx%s", field);
+        return length > 0 && static_cast<size_t>(length) < sizeof(key) &&
+            controller->setProperty(key, value, 64);
+    };
+    if (!scalar("SnapshotVersionBegin", finish - 1U))
+        return false;
+    bool okay = scalar("Schema", IWX_STA_TX_OBS_SCHEMA) &&
+        scalar("SnapshotComplete", 0) &&
+        scalar("Available", snapshot.available) &&
+        scalar("Complete", snapshot.complete) &&
+        scalar("DroppedCount", snapshot.dropped_count) &&
+        scalar("NextSerial", snapshot.next_serial) &&
+        scalar("SubmitCount", snapshot.submit_count) &&
+        scalar("ResponseCount", snapshot.response_count) &&
+        scalar("ReclaimCount", snapshot.reclaim_count) &&
+        scalar("OwnerWatchdogSequence", ownerSequence) &&
+        scalar("OwnerGeneration", ownerGeneration) &&
+        scalar("FirmwareQueueOwnerProven", 0) &&
+        scalar("FirmwareDmaCompletionProven", 0) &&
+        scalar("PeerReceiptProven", 0);
+    const auto publishEvent = [&](const char *prefix,
+        const iwx_sta_tx_obs_event &event) {
+        char field[96];
+        const auto row = [&](const char *suffix, uint64_t value) {
+            const int length = snprintf(field, sizeof(field), "%s%s",
+                                        prefix, suffix);
+            return length > 0 && static_cast<size_t>(length) < sizeof(field) &&
+                scalar(field, value);
+        };
+        return row("Present", event.serial != 0) &&
+            row("Serial", event.serial) &&
+            row("TimeNs", event.monotonic_ns) &&
+            row("RelatedSerial", event.related_serial) &&
+            row("Kind", event.kind) &&
+            row("PresenceFlags", event.presence_flags) &&
+            row("DriverGeneration", event.driver_generation) &&
+            row("OutputEpoch", event.output_epoch) &&
+            row("Qid", event.qid) && row("Index", event.index) &&
+            row("RingCount", event.ring_count) &&
+            row("Queued", event.queued) && row("Cur", event.cur) &&
+            row("Tail", event.tail) &&
+            row("FrameControl", event.frame_control) &&
+            row("SequenceControl", event.sequence_control) &&
+            row("FrameCount", event.frame_count) &&
+            row("Status", event.status) && row("Ssn", event.ssn) &&
+            row("RaTid", event.ra_tid) &&
+            row("StationId", event.station_id) && row("Tid", event.tid) &&
+            row("MatchClass", event.match_class);
+    };
+    okay = okay && publishEvent("Submit", snapshot.last_submit) &&
+        publishEvent("Response", snapshot.last_response) &&
+        publishEvent("Reclaim", snapshot.last_reclaim);
+    return okay && scalar("SnapshotComplete",
+            snapshot.available && snapshot.complete ? 1U : 0U) &&
+        scalar("SnapshotVersionEnd", finish) &&
+        scalar("SnapshotVersionBegin", finish);
+}
 #endif
 
 #define super ItlHalService
@@ -855,8 +926,35 @@ enum : uint32_t {
     kTahoeLifecycleBaTask = 1u << 1,
     kTahoeLifecycleMacTask = 1u << 2,
     kTahoeLifecycleChanTask = 1u << 3,
-    kTahoeLifecycleScanAbortTask = 1u << 4
+    kTahoeLifecycleScanAbortTask = 1u << 4,
+    kTahoeLifecycleMccTask = 1u << 5
 };
+
+/* A CHUB notice belongs to the firmware generation that delivered it. Stop
+ * retires that pending work; the next init sends its separate GET_CURRENT
+ * baseline and waits for a fresh CHUB notice before applying another profile.
+ */
+static void tahoeRetireNativeMccNotice(struct iwx_softc *sc)
+{
+    if (!sc)
+        return;
+    const int s = splnet();
+    const uint32_t previous = __atomic_load_n(
+        &sc->sc_native_mcc_notice_generation, __ATOMIC_RELAXED) & ~1U;
+    uint32_t nextEven = previous + 2U;
+    if (nextEven < 2U)
+        nextEven = 2U;
+    const uint32_t nextOdd = nextEven - 1U;
+    __atomic_store_n(&sc->sc_native_mcc_notice_generation, nextOdd,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&sc->sc_native_mcc_notice_valid, 0U, __ATOMIC_RELAXED);
+    __atomic_store_n(&sc->sc_native_mcc_pending, 0U, __ATOMIC_RELEASE);
+    __atomic_store_n(&sc->sc_native_mcc_notice_generation, nextEven,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&sc->sc_native_mcc_last_gate,
+        IwxMccRefreshPolicy::kGateRetiredByStop, __ATOMIC_RELEASE);
+    splx(s);
+}
 
 /*
  * All acquisition is try-only: power actions may hold the main command gate
@@ -985,6 +1083,14 @@ void ItlIwx::tahoeFlushLifecycleTasks()
         task_add(systq, &com.chan_ctxt_task);
     if (pending & kTahoeLifecycleScanAbortTask)
         task_add(systq, &tahoe_scan_abort_task_);
+    if (pending & kTahoeLifecycleMccTask) {
+        int s = splnet();
+        if (com.sc_nswq && taskq_enter_unpaused(com.sc_nswq) == 0) {
+            task_add(com.sc_nswq, &com.sc_native_mcc_task);
+            taskq_leave(com.sc_nswq);
+        }
+        splx(s);
+    }
 }
 
 void ItlIwx::tahoeClearStopBlockState()
@@ -1187,6 +1293,12 @@ void ItlIwx::tahoeRecordTxWatchdogSnapshot(struct iwx_softc *sc,
     if (!IwxTxQueueObservation::snapshot(&sc->sc_tx_queue_observation,
             sample.expiryMonotonicNs, &sc->sc_tx_queue_pending))
         sc->sc_tx_queue_pending = {};
+    if (!IwxStaTxObservation::snapshot(&sc->sc_sta_tx_observation,
+            &sc->sc_sta_tx_pending))
+        sc->sc_sta_tx_pending = {};
+    sc->sc_sta_tx_pending_watchdog_sequence = sequence;
+    sc->sc_sta_tx_pending_generation = sample.generation;
+    sc->sc_sta_tx_pending_present = 1;
 }
 
 void ItlIwx::tahoePublishTxProgressSnapshot(
@@ -1209,8 +1321,20 @@ void ItlIwx::tahoePublishTxProgressSnapshot(
             sc->sc_tx_progress_pending_generation) &&
         publishQueueSnapshot(controller, &sc->sc_tx_queue_publish_version,
             sc->sc_tx_queue_pending, ownerSequence,
-            sc->sc_tx_progress_pending_generation))
+            sc->sc_tx_progress_pending_generation) &&
+        tahoePublishStaTxSnapshot(controller, sc))
         nativeResetTracePublishedTxProgressWatchdogSequence_ = ownerSequence;
+}
+
+bool ItlIwx::tahoePublishStaTxSnapshot(IOEthernetController *controller,
+                                      struct iwx_softc *sc)
+{
+    if (!controller || !sc || !tahoeP2pOnMainGate() ||
+        !sc->sc_sta_tx_pending_present)
+        return false;
+    return publishStaTxSnapshot(controller, &sc->sc_sta_tx_publish_version,
+        sc->sc_sta_tx_pending, sc->sc_sta_tx_pending_watchdog_sequence,
+        sc->sc_sta_tx_pending_generation);
 }
 
 uint32_t ItlIwx::tahoeRecordReset(IwxResetTrace::ResetReason reason,
@@ -1365,6 +1489,12 @@ bool ItlIwx::attach(IOPCIDevice *device)
     IwxTxProgressObservation::reset(&com.sc_tx_progress_observation);
     IwxTxCompletionObservation::reset(&com.sc_tx_completion_observation);
     IwxTxQueueObservation::initialize(&com.sc_tx_queue_observation);
+    IwxStaTxObservation::initialize(&com.sc_sta_tx_observation);
+    com.sc_sta_tx_pending = {};
+    com.sc_sta_tx_publish_version = 0;
+    com.sc_sta_tx_pending_watchdog_sequence = 0;
+    com.sc_sta_tx_pending_generation = 0;
+    com.sc_sta_tx_pending_present = 0;
     com.sc_tx_queue_pending = {};
     com.sc_tx_queue_publish_version = 0;
     com.sc_tx_completion_pending = {};
@@ -1375,6 +1505,59 @@ bool ItlIwx::attach(IOPCIDevice *device)
     com.sc_tx_progress_pending_watchdog_sequence = 0;
     com.sc_tx_progress_pending_generation = 0;
     com.sc_tx_progress_pending_present = 0;
+    __atomic_store_n(&com.sc_native_mcc_notice_generation, 0U,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&com.sc_native_mcc_notice_code, 0U, __ATOMIC_RELAXED);
+    __atomic_store_n(&com.sc_native_mcc_notice_source, 0U, __ATOMIC_RELAXED);
+    __atomic_store_n(&com.sc_native_mcc_notice_valid, 0U, __ATOMIC_RELAXED);
+    __atomic_store_n(&com.sc_native_mcc_pending, 0U, __ATOMIC_RELAXED);
+    com.sc_native_mcc_request_sequence = 0;
+    com.sc_native_mcc_request_mcc = 0;
+    com.sc_native_mcc_request_notice_generation = 0;
+    com.sc_native_mcc_request_firmware_generation = 0;
+    com.sc_native_mcc_request_source = 0;
+    com.sc_native_mcc_request_origin = 0;
+    com.sc_native_mcc_command_version = IWX_FW_CMD_VER_UNKNOWN;
+    com.sc_native_mcc_command_version_present = 0;
+    com.sc_native_mcc_notification_version = IWX_FW_CMD_VER_UNKNOWN;
+    com.sc_native_mcc_notification_version_present = 0;
+    com.sc_native_mcc_response_format = 0;
+    com.sc_native_mcc_11ax_capability = 0;
+    com.sc_native_mcc_11ax_capability_present = 0;
+    com.sc_native_mcc_response_present = 0;
+    com.sc_native_mcc_response_notice_generation = 0;
+    com.sc_native_mcc_response_firmware_generation = 0;
+    com.sc_native_mcc_response_mcc = 0;
+    com.sc_native_mcc_response_source = 0;
+    com.sc_native_mcc_response_status = 0;
+    com.sc_native_mcc_response_capabilities = 0;
+    com.sc_native_mcc_response_time = 0;
+    com.sc_native_mcc_response_geo_info = 0;
+    com.sc_native_mcc_response_channel_count = 0;
+    com.sc_native_mcc_response_profile149_flags = 0;
+    com.sc_native_mcc_response_profile149_flags_present = 0;
+    com.sc_native_mcc_applied_notice_generation = 0;
+    com.sc_native_mcc_applied_firmware_generation = 0;
+    com.sc_native_mcc_applied_channel149_flags = 0;
+    com.sc_native_mcc_applied_channel149_flags_present = 0;
+    com.sc_native_mcc_applied_channel149_frequency = 0;
+    com.sc_native_mcc_applied_channel149_frequency_present = 0;
+    com.sc_native_mcc_nvm_firmware_generation = 0;
+    com.sc_native_mcc_nvm_profile149_flags = 0;
+    com.sc_native_mcc_nvm_profile149_flags_present = 0;
+    com.sc_native_mcc_nvm_channel149_flags = 0;
+    com.sc_native_mcc_nvm_channel149_flags_present = 0;
+    com.sc_native_mcc_nvm_channel149_frequency = 0;
+    com.sc_native_mcc_nvm_channel149_frequency_present = 0;
+    com.sc_native_mcc_profile149_index = UINT32_MAX;
+    com.sc_native_mcc_last_error = 0;
+    com.sc_native_mcc_failed_notice_generation = 0;
+    com.sc_native_mcc_failed_firmware_generation = 0;
+    com.sc_native_mcc_failed_request_sequence = 0;
+    __atomic_store_n(&com.sc_native_mcc_last_gate, 0U, __ATOMIC_RELAXED);
+    com.sc_native_mcc_snapshot_revision = 0;
+    com.sc_native_mcc_published_fingerprint = 0;
+    com.sc_native_mcc_published_fingerprint_valid = 0;
     nativeResetTracePublishedTxProgressWatchdogSequence_ = UINT32_MAX;
 #endif
     if (!iwx_attach(&com, &pci)) {
@@ -1402,6 +1585,9 @@ detach(IOPCIDevice *device)
     __atomic_store_n(&nativeLifecycleTearingDown_, 1u, __ATOMIC_RELEASE);
     tahoeScanOnline(false);
     tahoeDriverEvent(ITL_TAHOE_EVT_DRIVER_STOPPED);
+    if (sc->sc_nswq)
+        iwx_del_task(sc, sc->sc_nswq, &sc->sc_native_mcc_task);
+    tahoeRetireNativeMccNotice(sc);
 #endif
 #ifdef AIRPORT_TAHOE
     if (nativeP2pTxQueue_.retainedRing) {
@@ -6245,6 +6431,34 @@ iwx_nvm_get(struct iwx_softc *sc)
         isset(sc->sc_enabled_capa, IWX_UCODE_TLV_CAPA_LAR_SUPPORT)) {
         nvm->lar_enabled = 1;
     }
+
+#ifdef AIRPORT_TAHOE
+    {
+        const uint8_t *channels = sc->sc_uhb_supported ?
+            iwx_nvm_channels_uhb : iwx_nvm_channels_8000;
+        const size_t channelCount = sc->sc_uhb_supported ?
+            nitems(iwx_nvm_channels_uhb) : nitems(iwx_nvm_channels_8000);
+        const int profileIndex = IwxMccRefreshPolicy::channelProfileIndex(
+            channels, channelCount, 149);
+        sc->sc_native_mcc_profile149_index = profileIndex < 0 ? UINT32_MAX :
+            static_cast<uint32_t>(profileIndex);
+        sc->sc_native_mcc_nvm_firmware_generation =
+            static_cast<uint32_t>(sc->sc_generation);
+        sc->sc_native_mcc_nvm_profile149_flags_present = 0;
+        if (profileIndex >= 0 && v4 &&
+            static_cast<size_t>(profileIndex) < IWX_NUM_CHANNELS) {
+            sc->sc_native_mcc_nvm_profile149_flags = le32toh(
+                rsp->regulatory.channel_profile[profileIndex]);
+            sc->sc_native_mcc_nvm_profile149_flags_present = 1;
+        } else if (profileIndex >= 0 && !v4 &&
+                   static_cast<size_t>(profileIndex) < IWX_NUM_CHANNELS_V1) {
+            rsp_v3 = (struct iwx_nvm_get_info_rsp_v3 *)rsp;
+            sc->sc_native_mcc_nvm_profile149_flags = le16toh(
+                rsp_v3->regulatory.channel_profile[profileIndex]);
+            sc->sc_native_mcc_nvm_profile149_flags_present = 1;
+        }
+    }
+#endif
     
     if (v4) {
         iwx_init_channel_map(sc, NULL,
@@ -6254,6 +6468,22 @@ iwx_nvm_get(struct iwx_softc *sc)
         iwx_init_channel_map(sc, rsp_v3->regulatory.channel_profile,
                              NULL, IWX_NUM_CHANNELS_V1);
     }
+#ifdef AIRPORT_TAHOE
+    {
+        const struct ieee80211_channel &channel149 =
+            sc->sc_ic.ic_channels[149];
+        sc->sc_native_mcc_nvm_channel149_flags = channel149.ic_flags;
+        sc->sc_native_mcc_nvm_channel149_flags_present = 1;
+        sc->sc_native_mcc_nvm_channel149_frequency = channel149.ic_freq;
+        sc->sc_native_mcc_nvm_channel149_frequency_present = 1;
+        sc->sc_native_mcc_applied_channel149_flags = channel149.ic_flags;
+        sc->sc_native_mcc_applied_channel149_flags_present = 1;
+        sc->sc_native_mcc_applied_channel149_frequency = channel149.ic_freq;
+        sc->sc_native_mcc_applied_channel149_frequency_present = 1;
+        sc->sc_native_mcc_applied_firmware_generation =
+            static_cast<uint32_t>(sc->sc_generation);
+    }
+#endif
 out:
     iwx_free_resp(sc, &hcmd);
     return err;
@@ -8126,6 +8356,87 @@ static bool iwx_tx_response_index(
     return true;
 }
 
+#ifdef AIRPORT_TAHOE
+static uint64_t recordStaTxResponse(
+    struct iwx_softc *sc, const struct iwx_tx_resp *response,
+    const struct iwx_tx_ring *ring, uint32_t queueId, uint32_t ssn,
+    bool hasIndex, uint32_t index)
+{
+    if (!sc || !response || !ring)
+        return 0;
+    iwx_sta_tx_obs_event event{};
+    event.kind = IWX_STA_TX_OBS_RESPONSE;
+    event.presence_flags = IWX_STA_TX_OBS_HAS_TIME |
+        IWX_STA_TX_OBS_HAS_DRIVER_GENERATION |
+        IWX_STA_TX_OBS_HAS_OUTPUT_EPOCH | IWX_STA_TX_OBS_HAS_QID |
+        IWX_STA_TX_OBS_HAS_RING_COUNT | IWX_STA_TX_OBS_HAS_QUEUED |
+        IWX_STA_TX_OBS_HAS_CUR | IWX_STA_TX_OBS_HAS_TAIL |
+        IWX_STA_TX_OBS_HAS_FRAME_CONTROL |
+        IWX_STA_TX_OBS_HAS_SEQUENCE_CONTROL |
+        IWX_STA_TX_OBS_HAS_FRAME_COUNT | IWX_STA_TX_OBS_HAS_STATUS |
+        IWX_STA_TX_OBS_HAS_SSN | IWX_STA_TX_OBS_HAS_RA_TID |
+        IWX_STA_TX_OBS_HAS_STATION_ID | IWX_STA_TX_OBS_HAS_TID;
+    if (hasIndex)
+        event.presence_flags |= IWX_STA_TX_OBS_HAS_INDEX;
+    event.monotonic_ns = tahoeMonotonicNs();
+    event.driver_generation = static_cast<uint32_t>(sc->sc_generation);
+    event.output_epoch = __atomic_load_n(&sc->sc_tx_output_epoch,
+                                         __ATOMIC_ACQUIRE);
+    event.qid = queueId;
+    event.index = index;
+    event.ring_count = ring->ring_count;
+    event.queued = ring->queued;
+    event.cur = ring->cur;
+    event.tail = ring->tail;
+    event.frame_control = le16toh(response->frame_ctrl);
+    event.sequence_control = le16toh(response->seq_ctl);
+    event.frame_count = response->frame_count;
+    event.status = le16toh(response->status.status);
+    event.ssn = ssn;
+    event.ra_tid = response->ra_tid;
+    event.station_id = (event.ra_tid >> 4) & 0x0fU;
+    event.tid = event.ra_tid & 0x0fU;
+    uint64_t serial = 0;
+    (void)IwxStaTxObservation::record(&sc->sc_sta_tx_observation,
+                                      &event, &serial);
+    return serial;
+}
+
+static void recordStaTxReclaim(
+    struct iwx_softc *sc, const struct iwx_tx_ring *ring, uint32_t qid,
+    uint32_t index, uint64_t responseSerial, uint32_t frameControl,
+    uint32_t sequenceControl)
+{
+    if (!sc || !ring)
+        return;
+    iwx_sta_tx_obs_event event{};
+    event.kind = IWX_STA_TX_OBS_RECLAIM;
+    event.presence_flags = IWX_STA_TX_OBS_HAS_TIME |
+        IWX_STA_TX_OBS_HAS_DRIVER_GENERATION |
+        IWX_STA_TX_OBS_HAS_OUTPUT_EPOCH | IWX_STA_TX_OBS_HAS_QID |
+        IWX_STA_TX_OBS_HAS_INDEX | IWX_STA_TX_OBS_HAS_RING_COUNT |
+        IWX_STA_TX_OBS_HAS_QUEUED | IWX_STA_TX_OBS_HAS_CUR |
+        IWX_STA_TX_OBS_HAS_TAIL | IWX_STA_TX_OBS_HAS_FRAME_CONTROL |
+        IWX_STA_TX_OBS_HAS_SEQUENCE_CONTROL;
+    if (responseSerial != 0)
+        event.presence_flags |= IWX_STA_TX_OBS_HAS_RELATED_SERIAL;
+    event.monotonic_ns = tahoeMonotonicNs();
+    event.related_serial = responseSerial;
+    event.driver_generation = static_cast<uint32_t>(sc->sc_generation);
+    event.output_epoch = __atomic_load_n(&sc->sc_tx_output_epoch,
+                                         __ATOMIC_ACQUIRE);
+    event.qid = qid;
+    event.index = index;
+    event.ring_count = ring->ring_count;
+    event.queued = ring->queued;
+    event.cur = ring->cur;
+    event.tail = ring->tail;
+    event.frame_control = frameControl;
+    event.sequence_control = sequenceControl;
+    (void)IwxStaTxObservation::record(&sc->sc_sta_tx_observation, &event);
+}
+#endif
+
 void ItlIwx::
 iwx_rx_tx_cmd(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
               struct iwx_rx_data *data)
@@ -8190,15 +8501,24 @@ iwx_rx_tx_cmd(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
 
     bus_dmamap_sync(sc->sc_dmat, data->map, 0, IWX_RBUF_SIZE,
                     BUS_DMASYNC_POSTREAD);
-    
-    IwxTxWatchdog::clear(&sc->sc_tx_timer);
-#ifdef AIRPORT_TAHOE
-    recordTxTimerClear(sc, __atomic_load_n(&sc->sc_tx_output_epoch,
-                                           __ATOMIC_ACQUIRE),
-                       kTxTimerClearFirmwareResponse);
-#endif
+
+    uint64_t staResponseSerial = 0;
 
     if (frameCount > 1) {
+        memcpy(&ssn, &tx_resp->status + frameCount, sizeof(ssn));
+        ssn = le32toh(ssn) & 0xfff;
+#ifdef AIRPORT_TAHOE
+        staResponseSerial = recordStaTxResponse(sc, tx_resp, ring, queueId,
+                                                ssn, false, 0);
+#endif
+        // Aggregated TX_RSP continues to count as firmware progress; the
+        // separate BA notification owns the later queue reclaim.
+        IwxTxWatchdog::clear(&sc->sc_tx_timer);
+#ifdef AIRPORT_TAHOE
+        recordTxTimerClear(sc, __atomic_load_n(&sc->sc_tx_output_epoch,
+                                               __ATOMIC_ACQUIRE),
+                           kTxTimerClearFirmwareResponse);
+#endif
         for (int i = 0; i < frameCount; i++) {
             uint16_t fstatus = le16_to_cpu((&tx_resp->status)[i].status);
 
@@ -8225,8 +8545,13 @@ iwx_rx_tx_cmd(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
         txRspCompletion.event().ssn = ssn;
 #endif
         const bool responseRingEmpty = ring->queued <= 0;
-        if (responseRingEmpty ||
-            !iwx_tx_response_index(queueId, ring, ssn, &checkedIndex)) {
+        const bool responseIndexValid = !responseRingEmpty &&
+            iwx_tx_response_index(queueId, ring, ssn, &checkedIndex);
+#ifdef AIRPORT_TAHOE
+        staResponseSerial = recordStaTxResponse(sc, tx_resp, ring, queueId,
+            ssn, responseIndexValid, checkedIndex);
+#endif
+        if (!responseIndexValid) {
 #ifdef AIRPORT_TAHOE
             txRspCompletion.setReason(responseRingEmpty ?
                 IWX_TX_COMPLETION_TX_RSP_SINGLE_RING_EMPTY :
@@ -8240,11 +8565,23 @@ iwx_rx_tx_cmd(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
             IWX_TX_COMPLETION_HAS_QUEUE_INDEX;
         txRspCompletion.event().queue_index = checkedIndex;
 #endif
+        // Do not discharge the shared TX watchdog for a response that cannot
+        // identify a live single-frame ring interval. This is deliberately
+        // after the existing qid/ring/SSN guards and before the same reclaim.
+        IwxTxWatchdog::clear(&sc->sc_tx_timer);
+#ifdef AIRPORT_TAHOE
+        recordTxTimerClear(sc, __atomic_load_n(&sc->sc_tx_output_epoch,
+                                               __ATOMIC_ACQUIRE),
+                           kTxTimerClearFirmwareResponse);
+#endif
         txd = &ring->data[idx];
         iwx_rx_tx_cmd_single(sc, pkt, txd);
         DPRINTFN(3, ("%s tid=%d ssn=%d idx=%d\n", __FUNCTION__, tid, ssn, idx));
         iwx_ampdu_txq_advance(sc, ring, idx);
 #ifdef AIRPORT_TAHOE
+        recordStaTxReclaim(sc, ring, queueId, static_cast<uint32_t>(idx),
+            staResponseSerial, le16toh(tx_resp->frame_ctrl),
+            le16toh(tx_resp->seq_ctl));
         recordTxProgressEvent(sc, IWX_TX_PROGRESS_ORDINARY_RECLAIM, 0,
             IWX_TX_PROGRESS_HAS_QID | IWX_TX_PROGRESS_HAS_INDEX |
                 IWX_TX_PROGRESS_HAS_RING_COUNT | IWX_TX_PROGRESS_HAS_QUEUED |
@@ -9669,6 +10006,32 @@ iwx_tx(struct iwx_softc *sc, mbuf_t m, struct ieee80211_node *ni, int ac
     observedPacket.descriptor_index = static_cast<uint32_t>(idx);
     const uint64_t observedSerial = IwxTxQueueObservation::recordSubmit(
         &sc->sc_tx_queue_observation, static_cast<uint32_t>(qid), &observedPacket);
+    iwx_sta_tx_obs_event staSubmit{};
+    staSubmit.kind = IWX_STA_TX_OBS_SUBMIT;
+    staSubmit.presence_flags = IWX_STA_TX_OBS_HAS_TIME |
+        IWX_STA_TX_OBS_HAS_DRIVER_GENERATION |
+        IWX_STA_TX_OBS_HAS_OUTPUT_EPOCH | IWX_STA_TX_OBS_HAS_QID |
+        IWX_STA_TX_OBS_HAS_INDEX | IWX_STA_TX_OBS_HAS_RING_COUNT |
+        IWX_STA_TX_OBS_HAS_QUEUED | IWX_STA_TX_OBS_HAS_CUR |
+        IWX_STA_TX_OBS_HAS_TAIL | IWX_STA_TX_OBS_HAS_FRAME_CONTROL;
+    if (observedPacket.presence_flags & IWX_TXQ_OBS_HAS_SEQUENCE_CONTROL)
+        staSubmit.presence_flags |= IWX_STA_TX_OBS_HAS_SEQUENCE_CONTROL;
+    if (observedSerial != 0)
+        staSubmit.presence_flags |= IWX_STA_TX_OBS_HAS_RELATED_SERIAL;
+    staSubmit.monotonic_ns = observedPacket.monotonic_ns;
+    staSubmit.related_serial = observedSerial;
+    staSubmit.driver_generation = static_cast<uint32_t>(sc->sc_generation);
+    staSubmit.output_epoch = observedPacket.output_epoch;
+    staSubmit.qid = static_cast<uint32_t>(qid);
+    staSubmit.index = static_cast<uint32_t>(idx);
+    staSubmit.ring_count = observedRingCount;
+    staSubmit.queued = observedQueued;
+    staSubmit.cur = observedCur;
+    staSubmit.tail = observedTail;
+    staSubmit.frame_control = observedPacket.frame_control;
+    staSubmit.sequence_control = observedPacket.sequence_control;
+    (void)IwxStaTxObservation::record(&sc->sc_sta_tx_observation,
+                                     &staSubmit);
     if (observedSubmitSerial)
         *observedSubmitSerial = observedSerial;
 #endif
@@ -10073,10 +10436,12 @@ iwx_add_sta_cmd(struct iwx_softc *sc, struct iwx_node *in, int update)
     status = IWX_ADD_STA_SUCCESS;
     err = iwx_send_cmd_pdu_status(sc, IWX_ADD_STA, sizeof(add_sta_cmd),
                                   &add_sta_cmd, &status);
-    if (!err && (status & IWX_ADD_STA_STATUS_MASK) != IWX_ADD_STA_SUCCESS)
-        err = EIO;
-    else
-        sc->sc_flags |= IWX_FLAG_STA_ACTIVE;
+    if (err == 0) {
+        if ((status & IWX_ADD_STA_STATUS_MASK) != IWX_ADD_STA_SUCCESS)
+            err = EIO;
+        else
+            sc->sc_flags |= IWX_FLAG_STA_ACTIVE;
+    }
 
     return err;
 }
@@ -11200,12 +11565,711 @@ iwx_umac_scan_v14(struct iwx_softc *sc, int bgscan,
     return err;
 }
 
+#ifdef AIRPORT_TAHOE
+namespace {
+struct NativeMccWork {
+    IwxMccRefreshPolicy::ProfileResponse profile;
+    uint32_t requestMcc;
+    uint32_t requestSource;
+    uint32_t requestOrigin;
+    uint32_t retryAfterStale;
+    int error;
+};
+
+static bool iwx_mcc_multi_source_supported(const struct iwx_softc *sc)
+{
+    return isset(sc->sc_ucode_api, IWX_UCODE_TLV_API_WIFI_MCC_UPDATE) ||
+        isset(sc->sc_enabled_capa, IWX_UCODE_TLV_CAPA_LAR_MULTI_MCC);
+}
+
+static const uint8_t *iwx_mcc_channel_list(const struct iwx_softc *sc,
+                                            size_t *count)
+{
+    if (!sc || !count)
+        return NULL;
+    if (sc->sc_uhb_supported) {
+        *count = nitems(iwx_nvm_channels_uhb);
+        return iwx_nvm_channels_uhb;
+    }
+    *count = nitems(iwx_nvm_channels_8000);
+    return iwx_nvm_channels_8000;
+}
+
+static uint32_t iwx_mcc_profile_149_index(const struct iwx_softc *sc)
+{
+    size_t count = 0;
+    const uint8_t *channels = iwx_mcc_channel_list(sc, &count);
+    const int index = IwxMccRefreshPolicy::channelProfileIndex(
+        channels, count, 149);
+    return index < 0 ? UINT32_MAX : static_cast<uint32_t>(index);
+}
+} // namespace
+
+void ItlIwx::tahoePublishMccSnapshot(IOEthernetController *controller)
+{
+    struct iwx_softc *sc = &com;
+    if (!controller || !tahoeP2pOnMainGate())
+        return;
+    if (!tahoeTryLifecycleFence())
+        return; // init/stop/command work owns the numeric snapshot fields
+
+    const uint32_t revision = sc->sc_native_mcc_snapshot_revision;
+    if ((revision & 1U) != 0 || revision > UINT32_MAX - 2U) {
+        tahoeReleaseLifecycleFence(false);
+        return;
+    }
+    const uint32_t finish = revision + 2U;
+    const uint32_t noticeGenerationBefore = __atomic_load_n(
+        &sc->sc_native_mcc_notice_generation, __ATOMIC_ACQUIRE);
+    const uint32_t noticeMcc = __atomic_load_n(
+        &sc->sc_native_mcc_notice_code, __ATOMIC_RELAXED);
+    const uint32_t noticeSource = __atomic_load_n(
+        &sc->sc_native_mcc_notice_source, __ATOMIC_RELAXED);
+    const uint32_t noticeValid = __atomic_load_n(
+        &sc->sc_native_mcc_notice_valid, __ATOMIC_RELAXED);
+    const uint32_t noticePending = __atomic_load_n(
+        &sc->sc_native_mcc_pending, __ATOMIC_RELAXED);
+    const uint32_t noticeGenerationAfter = __atomic_load_n(
+        &sc->sc_native_mcc_notice_generation, __ATOMIC_ACQUIRE);
+    const bool noNoticeYet = noticeGenerationBefore == 0 &&
+        noticeGenerationAfter == 0 && noticeValid == 0 && noticePending == 0;
+    const bool noticeSnapshotStable =
+        noticeGenerationBefore == noticeGenerationAfter &&
+        ((noticeGenerationBefore != 0 &&
+          (noticeGenerationBefore & 1U) == 0) || noNoticeYet);
+    const auto scalar = [&](const char *field, uint32_t value) {
+        char key[96];
+        const int length = snprintf(key, sizeof(key), "NativeMCC%s", field);
+        return length > 0 && static_cast<size_t>(length) < sizeof(key) &&
+            controller->setProperty(key, static_cast<uint64_t>(value), 32);
+    };
+
+    if (!noticeSnapshotStable) {
+        tahoeReleaseLifecycleFence(false);
+        return; // Retry from the next tick after the notice seqlock settles.
+    }
+
+    struct SnapshotProperty {
+        const char *name;
+        uint32_t value;
+    };
+    const SnapshotProperty properties[] = {
+        {"Schema", 1},
+        {"SnapshotRevision", finish},
+        {"SourceGeneration", static_cast<uint32_t>(sc->sc_generation)},
+        {"NoticeGeneration", noticeGenerationBefore},
+        {"NoticeMCC", noticeMcc},
+        {"NoticeMCCPresent", noticeValid},
+        {"NoticeSource", noticeSource},
+        {"NoticeSourcePresent", noticeValid},
+        {"Pending", noticePending},
+        {"RequestSequence", sc->sc_native_mcc_request_sequence},
+        {"RequestMCC", sc->sc_native_mcc_request_mcc},
+        {"RequestMCCPresent", sc->sc_native_mcc_request_sequence != 0},
+        {"RequestSource", sc->sc_native_mcc_request_source},
+        {"RequestSourcePresent", sc->sc_native_mcc_request_sequence != 0},
+        {"RequestOrigin", sc->sc_native_mcc_request_origin},
+        {"RequestNoticeGeneration",
+         sc->sc_native_mcc_request_notice_generation},
+        {"RequestFirmwareGeneration",
+         sc->sc_native_mcc_request_firmware_generation},
+        {"CommandVersion", sc->sc_native_mcc_command_version},
+        {"CommandVersionPresent",
+         sc->sc_native_mcc_command_version_present},
+        {"NotificationVersion", sc->sc_native_mcc_notification_version},
+        {"NotificationVersionPresent",
+         sc->sc_native_mcc_notification_version_present},
+        {"ResponseFormat", sc->sc_native_mcc_response_format},
+        {"Capability89", sc->sc_native_mcc_11ax_capability},
+        {"Capability89Present", sc->sc_native_mcc_11ax_capability_present},
+        {"ResponsePresent", sc->sc_native_mcc_response_present},
+        {"ResponseNoticeGeneration",
+         sc->sc_native_mcc_response_notice_generation},
+        {"ResponseFirmwareGeneration",
+         sc->sc_native_mcc_response_firmware_generation},
+        {"ResponseMCC", sc->sc_native_mcc_response_mcc},
+        {"ResponseMCCPresent", sc->sc_native_mcc_response_present},
+        {"ResponseSource", sc->sc_native_mcc_response_source},
+        {"ResponseSourcePresent", sc->sc_native_mcc_response_present},
+        {"ResponseStatus", sc->sc_native_mcc_response_status},
+        {"ResponseStatusPresent", sc->sc_native_mcc_response_present},
+        {"ResponseCapabilities", sc->sc_native_mcc_response_capabilities},
+        {"ResponseTime", sc->sc_native_mcc_response_time},
+        {"ResponseGeoInfo", sc->sc_native_mcc_response_geo_info},
+        {"ResponseChannelCount", sc->sc_native_mcc_response_channel_count},
+        {"ResponseProfile149Flags",
+         sc->sc_native_mcc_response_profile149_flags},
+        {"ResponseProfile149FlagsPresent",
+         sc->sc_native_mcc_response_profile149_flags_present},
+        {"AppliedNoticeGeneration",
+         sc->sc_native_mcc_applied_notice_generation},
+        {"AppliedFirmwareGeneration",
+         sc->sc_native_mcc_applied_firmware_generation},
+        {"AppliedChannel149Flags",
+         sc->sc_native_mcc_applied_channel149_flags},
+        {"AppliedChannel149FlagsPresent",
+         sc->sc_native_mcc_applied_channel149_flags_present},
+        {"AppliedChannel149Frequency",
+         sc->sc_native_mcc_applied_channel149_frequency},
+        {"AppliedChannel149FrequencyPresent",
+         sc->sc_native_mcc_applied_channel149_frequency_present},
+        {"NVMFirmwareGeneration", sc->sc_native_mcc_nvm_firmware_generation},
+        {"NVMProfile149Flags", sc->sc_native_mcc_nvm_profile149_flags},
+        {"NVMProfile149FlagsPresent",
+         sc->sc_native_mcc_nvm_profile149_flags_present},
+        {"NVMChannel149Flags", sc->sc_native_mcc_nvm_channel149_flags},
+        {"NVMChannel149FlagsPresent",
+         sc->sc_native_mcc_nvm_channel149_flags_present},
+        {"NVMChannel149Frequency",
+         sc->sc_native_mcc_nvm_channel149_frequency},
+        {"NVMChannel149FrequencyPresent",
+         sc->sc_native_mcc_nvm_channel149_frequency_present},
+        {"Profile149Index", sc->sc_native_mcc_profile149_index},
+        {"LastError", sc->sc_native_mcc_last_error},
+        {"FailedNoticeGeneration",
+         sc->sc_native_mcc_failed_notice_generation},
+        {"FailedFirmwareGeneration",
+         sc->sc_native_mcc_failed_firmware_generation},
+        {"FailedRequestSequence",
+         sc->sc_native_mcc_failed_request_sequence},
+        {"LastGate", __atomic_load_n(
+            &sc->sc_native_mcc_last_gate, __ATOMIC_ACQUIRE)},
+    };
+
+    // Hash the exact numeric payload using a compact, allocation-free FNV-1a
+    // pass. SnapshotRevision is an envelope counter, so it is not content.
+    uint64_t fingerprint = 14695981039346656037ULL;
+    for (const SnapshotProperty &property : properties) {
+        if (strcmp(property.name, "SnapshotRevision") == 0)
+            continue;
+        for (const unsigned char *p =
+                 reinterpret_cast<const unsigned char *>(property.name);
+             *p; ++p) {
+            fingerprint ^= *p;
+            fingerprint *= 1099511628211ULL;
+        }
+        fingerprint ^= 0xffU;
+        fingerprint *= 1099511628211ULL;
+        uint32_t value = property.value;
+        for (unsigned byte = 0; byte < sizeof(value); ++byte) {
+            fingerprint ^= static_cast<uint8_t>(value & 0xffU);
+            fingerprint *= 1099511628211ULL;
+            value >>= 8;
+        }
+    }
+    if (sc->sc_native_mcc_published_fingerprint_valid != 0 &&
+        sc->sc_native_mcc_published_fingerprint == fingerprint) {
+        tahoeReleaseLifecycleFence(false);
+        return;
+    }
+
+    if (!scalar("SnapshotBegin", finish - 1U) ||
+        !scalar("SnapshotValid", 0)) {
+        tahoeReleaseLifecycleFence(false);
+        return;
+    }
+    bool okay = true;
+    for (const SnapshotProperty &property : properties) {
+        if (!scalar(property.name, property.value)) {
+            okay = false;
+            break;
+        }
+    }
+    const uint32_t noticeGenerationFinal = __atomic_load_n(
+        &sc->sc_native_mcc_notice_generation, __ATOMIC_ACQUIRE);
+    const bool noticeStillStable = noticeGenerationFinal == noticeGenerationBefore &&
+        ((noticeGenerationFinal != 0 && (noticeGenerationFinal & 1U) == 0) ||
+         (noticeGenerationFinal == 0 && noticeValid == 0 && noticePending == 0));
+    okay = okay && scalar("SnapshotEnd", finish) &&
+        scalar("SnapshotBegin", finish) && noticeStillStable &&
+        scalar("SnapshotValid", 1);
+    if (!okay) {
+        (void)scalar("SnapshotValid", 0);
+    } else {
+        sc->sc_native_mcc_snapshot_revision = finish;
+        sc->sc_native_mcc_published_fingerprint = fingerprint;
+        sc->sc_native_mcc_published_fingerprint_valid = 1;
+    }
+    tahoeReleaseLifecycleFence(false);
+}
+
+IOReturn ItlIwx::iwx_native_mcc_capture_action(
+    OSObject *, void *ownerArg, void *scArg, void *workArg, void *)
+{
+    auto *owner = static_cast<ItlIwx *>(ownerArg);
+    auto *sc = static_cast<struct iwx_softc *>(scArg);
+    auto *work = static_cast<NativeMccWork *>(workArg);
+    if (!owner || !sc || sc != &owner->com || !work ||
+        !owner->tahoeP2pOnMainGate())
+        return kIOReturnBadArgument;
+
+    struct _ifnet *ifp = &sc->sc_ic.ic_ac.ac_if;
+    const uint32_t generationBefore = __atomic_load_n(
+        &sc->sc_native_mcc_notice_generation, __ATOMIC_ACQUIRE);
+    const uint32_t noticeMcc = __atomic_load_n(
+        &sc->sc_native_mcc_notice_code, __ATOMIC_RELAXED);
+    const uint32_t noticeSource = __atomic_load_n(
+        &sc->sc_native_mcc_notice_source, __ATOMIC_RELAXED);
+    const uint32_t noticeValid = __atomic_load_n(
+        &sc->sc_native_mcc_notice_valid, __ATOMIC_RELAXED);
+    const uint32_t generationAfter = __atomic_load_n(
+        &sc->sc_native_mcc_notice_generation, __ATOMIC_ACQUIRE);
+    const bool generationStable = generationBefore != 0 &&
+        (generationBefore & 1U) == 0 && generationBefore == generationAfter;
+    const IwxMccRefreshPolicy::RequestInputs inputs {
+        __atomic_load_n(&sc->sc_native_mcc_pending, __ATOMIC_ACQUIRE) != 0,
+        sc->sc_nvm.lar_enabled != 0,
+        iwx_mcc_multi_source_supported(sc),
+        (ifp->if_flags & (IFF_UP | IFF_RUNNING)) == (IFF_UP | IFF_RUNNING),
+        (sc->sc_flags & IWX_FLAG_SHUTDOWN) != 0 ||
+            __atomic_load_n(&owner->nativeLifecycleTearingDown_,
+                            __ATOMIC_ACQUIRE) != 0
+    };
+    const auto block = IwxMccRefreshPolicy::requestBlock(inputs);
+    if (block != IwxMccRefreshPolicy::RequestBlock::kReady) {
+        __atomic_store_n(&sc->sc_native_mcc_last_gate,
+            static_cast<uint32_t>(block), __ATOMIC_RELEASE);
+        owner->tahoePublishMccSnapshot(owner->getController());
+        return kIOReturnNotReady;
+    }
+    if (owner->nativeP2pBusy() || owner->nativeP2pResourcesRetained()) {
+        const bool changed = __atomic_load_n(&sc->sc_native_mcc_last_gate,
+            __ATOMIC_ACQUIRE) != 9U;
+        __atomic_store_n(&sc->sc_native_mcc_last_gate, 9U, __ATOMIC_RELEASE);
+        if (changed)
+            owner->tahoePublishMccSnapshot(owner->getController());
+        return kIOReturnNotReady;
+    }
+    if (!generationStable || !noticeValid ||
+        !IwxMccRefreshPolicy::chubRequestValid(noticeMcc, noticeSource)) {
+        __atomic_store_n(&sc->sc_native_mcc_last_gate, 6U, __ATOMIC_RELEASE);
+        owner->tahoePublishMccSnapshot(owner->getController());
+        return kIOReturnBadArgument;
+    }
+
+    uint32_t sequence = sc->sc_native_mcc_request_sequence + 1U;
+    if (sequence == 0)
+        sequence = 1U;
+    sc->sc_native_mcc_request_sequence = sequence;
+    sc->sc_native_mcc_request_mcc = noticeMcc;
+    sc->sc_native_mcc_request_source = noticeSource;
+    sc->sc_native_mcc_request_origin =
+        IwxMccRefreshPolicy::kRequestOriginChubNotification;
+    sc->sc_native_mcc_request_notice_generation = generationBefore;
+    sc->sc_native_mcc_request_firmware_generation =
+        static_cast<uint32_t>(sc->sc_generation);
+    sc->sc_native_mcc_command_version = iwx_lookup_cmd_ver(
+        sc, IWX_LONG_GROUP, IWX_MCC_UPDATE_CMD);
+    sc->sc_native_mcc_command_version_present =
+        sc->sc_native_mcc_command_version != IWX_FW_CMD_VER_UNKNOWN;
+    sc->sc_native_mcc_notification_version = iwx_lookup_notif_ver(
+        sc, IWX_LONG_GROUP, IWX_MCC_UPDATE_CMD);
+    sc->sc_native_mcc_notification_version_present =
+        sc->sc_native_mcc_notification_version != IWX_FW_CMD_VER_UNKNOWN;
+    sc->sc_native_mcc_response_format = isset(sc->sc_enabled_capa,
+        IWX_UCODE_TLV_CAPA_MCC_UPDATE_11AX_SUPPORT) ?
+        IwxMccRefreshPolicy::kResponseFormatV4 :
+        IwxMccRefreshPolicy::kResponseFormatV3;
+    sc->sc_native_mcc_11ax_capability = isset(sc->sc_enabled_capa,
+        IWX_UCODE_TLV_CAPA_MCC_UPDATE_11AX_SUPPORT) ? 1U : 0U;
+    sc->sc_native_mcc_11ax_capability_present = 1;
+    sc->sc_native_mcc_response_present = 0;
+    if (!sc->sc_native_mcc_command_version_present) {
+        __atomic_store_n(&sc->sc_native_mcc_last_gate, 3U, __ATOMIC_RELEASE);
+        owner->tahoePublishMccSnapshot(owner->getController());
+        return kIOReturnNotReady;
+    }
+    __atomic_store_n(&sc->sc_native_mcc_last_gate, 0U, __ATOMIC_RELEASE);
+
+    memset(work, 0, sizeof(*work));
+    work->requestMcc = noticeMcc;
+    work->requestSource = noticeSource;
+    work->requestOrigin = IwxMccRefreshPolicy::kRequestOriginChubNotification;
+    work->profile.requestSequence = sequence;
+    work->profile.requestMcc = noticeMcc;
+    work->profile.requestSource = noticeSource;
+    work->profile.requestOrigin = work->requestOrigin;
+    work->profile.noticeGeneration = generationBefore;
+    work->profile.firmwareGeneration =
+        static_cast<uint32_t>(sc->sc_generation);
+    work->profile.commandVersion = sc->sc_native_mcc_command_version;
+    work->profile.notificationVersion =
+        sc->sc_native_mcc_notification_version;
+    work->profile.responseFormat = sc->sc_native_mcc_response_format;
+    work->profile.mccUpdate11axCapability =
+        sc->sc_native_mcc_11ax_capability;
+    owner->tahoePublishMccSnapshot(owner->getController());
+    return kIOReturnSuccess;
+}
+
+IOReturn ItlIwx::iwx_native_mcc_apply_action(
+    OSObject *, void *ownerArg, void *scArg, void *workArg, void *)
+{
+    auto *owner = static_cast<ItlIwx *>(ownerArg);
+    auto *sc = static_cast<struct iwx_softc *>(scArg);
+    auto *work = static_cast<NativeMccWork *>(workArg);
+    if (!owner || !sc || sc != &owner->com || !work ||
+        !owner->tahoeP2pOnMainGate())
+        return kIOReturnBadArgument;
+
+    // ROC keeps a channel pointer while its firmware lease is live. The
+    // lifecycle fence serializes changes to the lease while this callback
+    // runs; reject before splnet/channel-map work when it is present/unknown.
+    if (owner->nativeP2pBusy() || owner->nativeP2pResourcesRetained()) {
+        const bool changed = __atomic_load_n(&sc->sc_native_mcc_last_gate,
+            __ATOMIC_ACQUIRE) != 9U;
+        __atomic_store_n(&sc->sc_native_mcc_last_gate, 9U, __ATOMIC_RELEASE);
+        if (changed)
+            owner->tahoePublishMccSnapshot(owner->getController());
+        return kIOReturnNotReady;
+    }
+
+    int s = splnet();
+    const bool running =
+        (sc->sc_ic.ic_ac.ac_if.if_flags & (IFF_UP | IFF_RUNNING)) ==
+            (IFF_UP | IFF_RUNNING);
+    const bool shuttingDown = (sc->sc_flags & IWX_FLAG_SHUTDOWN) != 0 ||
+        __atomic_load_n(&owner->nativeLifecycleTearingDown_,
+                        __ATOMIC_ACQUIRE) != 0;
+    const uint32_t currentNoticeGeneration = __atomic_load_n(
+        &sc->sc_native_mcc_notice_generation, __ATOMIC_ACQUIRE);
+    const bool requestStillCurrent =
+        work->profile.requestSequence == sc->sc_native_mcc_request_sequence &&
+        work->profile.requestMcc == sc->sc_native_mcc_request_mcc &&
+        work->profile.requestSource == sc->sc_native_mcc_request_source &&
+        work->profile.requestOrigin ==
+            IwxMccRefreshPolicy::kRequestOriginChubNotification &&
+        work->profile.firmwareGeneration != 0 &&
+        work->profile.firmwareGeneration ==
+            static_cast<uint32_t>(sc->sc_generation) &&
+        work->profile.noticeGeneration != 0 &&
+        work->profile.noticeGeneration == currentNoticeGeneration &&
+        running && !shuttingDown;
+    if (!requestStillCurrent) {
+        work->retryAfterStale =
+            !shuttingDown && running &&
+            __atomic_load_n(&sc->sc_native_mcc_pending, __ATOMIC_ACQUIRE) != 0 &&
+            currentNoticeGeneration != work->profile.noticeGeneration;
+        __atomic_store_n(&sc->sc_native_mcc_last_gate, 7U, __ATOMIC_RELEASE);
+        splx(s);
+        owner->tahoePublishMccSnapshot(owner->getController());
+        return kIOReturnNotReady;
+    }
+
+    IwxMccRefreshPolicy::ProfileResponse &response = work->profile;
+    sc->sc_native_mcc_command_version = response.commandVersion;
+    sc->sc_native_mcc_command_version_present =
+        response.commandVersion != IWX_FW_CMD_VER_UNKNOWN;
+    sc->sc_native_mcc_notification_version = response.notificationVersion;
+    sc->sc_native_mcc_notification_version_present =
+        response.notificationVersion != IWX_FW_CMD_VER_UNKNOWN;
+    sc->sc_native_mcc_response_format = response.responseFormat;
+    sc->sc_native_mcc_11ax_capability =
+        response.mccUpdate11axCapability;
+    sc->sc_native_mcc_11ax_capability_present = 1;
+    const uint32_t action = response.profileAction;
+    if (work->error != 0 || response.responseValid == 0 ||
+        (action != static_cast<uint32_t>(IwxMccRefreshPolicy::ProfileAction::kNoChange) &&
+         action != static_cast<uint32_t>(IwxMccRefreshPolicy::ProfileAction::kApplyComplete))) {
+        sc->sc_native_mcc_response_present = 0;
+        sc->sc_native_mcc_last_error = work->error != 0 ?
+            static_cast<uint32_t>(work->error) : static_cast<uint32_t>(EPROTO);
+        if (response.commandAttempted != 0) {
+            // A command/parser failure consumes only this exact notice. A
+            // replacement notice that arrived while waiting already failed
+            // requestStillCurrent and retains its own pending bit.
+            __atomic_store_n(&sc->sc_native_mcc_pending, 0U,
+                             __ATOMIC_RELEASE);
+            sc->sc_native_mcc_failed_notice_generation =
+                response.noticeGeneration;
+            sc->sc_native_mcc_failed_firmware_generation =
+                response.firmwareGeneration;
+            sc->sc_native_mcc_failed_request_sequence =
+                response.requestSequence;
+            __atomic_store_n(&sc->sc_native_mcc_last_gate, 8U,
+                             __ATOMIC_RELEASE);
+        } else {
+            __atomic_store_n(&sc->sc_native_mcc_last_gate, 3U,
+                             __ATOMIC_RELEASE);
+        }
+        splx(s);
+        owner->tahoePublishMccSnapshot(owner->getController());
+        return kIOReturnError;
+    }
+
+    // This is the last freshness check before the map update. RX notification
+    // updates share splnet serialization with this action, so an older result
+    // cannot pass this check and overwrite a newer MCC profile.
+    if (__atomic_load_n(&sc->sc_native_mcc_notice_generation,
+                        __ATOMIC_ACQUIRE) != work->profile.noticeGeneration ||
+        static_cast<uint32_t>(sc->sc_generation) !=
+            work->profile.firmwareGeneration ||
+        (sc->sc_flags & IWX_FLAG_SHUTDOWN) != 0 ||
+        (sc->sc_ic.ic_ac.ac_if.if_flags & (IFF_UP | IFF_RUNNING)) !=
+            (IFF_UP | IFF_RUNNING)) {
+        work->retryAfterStale =
+            __atomic_load_n(&sc->sc_native_mcc_pending, __ATOMIC_ACQUIRE) != 0 &&
+            (sc->sc_ic.ic_ac.ac_if.if_flags & (IFF_UP | IFF_RUNNING)) ==
+                (IFF_UP | IFF_RUNNING);
+        __atomic_store_n(&sc->sc_native_mcc_last_gate, 7U, __ATOMIC_RELEASE);
+        splx(s);
+        owner->tahoePublishMccSnapshot(owner->getController());
+        return kIOReturnNotReady;
+    }
+
+    if (!IwxMccRefreshPolicy::responseMayApply(
+            work->profile.firmwareGeneration,
+            static_cast<uint32_t>(sc->sc_generation),
+            work->profile.noticeGeneration,
+            __atomic_load_n(&sc->sc_native_mcc_notice_generation,
+                            __ATOMIC_ACQUIRE),
+            (sc->sc_ic.ic_ac.ac_if.if_flags & (IFF_UP | IFF_RUNNING)) ==
+                (IFF_UP | IFF_RUNNING),
+            (sc->sc_flags & IWX_FLAG_SHUTDOWN) != 0 ||
+                __atomic_load_n(&owner->nativeLifecycleTearingDown_,
+                                __ATOMIC_ACQUIRE) != 0,
+            response.responseValid != 0)) {
+        work->retryAfterStale =
+            __atomic_load_n(&sc->sc_native_mcc_pending, __ATOMIC_ACQUIRE) != 0;
+        __atomic_store_n(&sc->sc_native_mcc_last_gate, 7U, __ATOMIC_RELEASE);
+        splx(s);
+        owner->tahoePublishMccSnapshot(owner->getController());
+        return kIOReturnNotReady;
+    }
+
+    if (action == static_cast<uint32_t>(
+            IwxMccRefreshPolicy::ProfileAction::kApplyComplete)) {
+        owner->iwx_init_channel_map(sc, NULL, response.channelFlags,
+                                    static_cast<int>(response.channelCount));
+    }
+    sc->sc_native_mcc_applied_channel149_flags =
+        sc->sc_ic.ic_channels[149].ic_flags;
+    sc->sc_native_mcc_applied_channel149_flags_present = 1;
+    sc->sc_native_mcc_applied_channel149_frequency =
+        sc->sc_ic.ic_channels[149].ic_freq;
+    sc->sc_native_mcc_applied_channel149_frequency_present = 1;
+
+    sc->sc_native_mcc_response_present = 1;
+    sc->sc_native_mcc_response_notice_generation = response.noticeGeneration;
+    sc->sc_native_mcc_response_firmware_generation =
+        response.firmwareGeneration;
+    sc->sc_native_mcc_response_mcc = response.mcc;
+    sc->sc_native_mcc_response_source = response.source;
+    sc->sc_native_mcc_response_status = response.status;
+    sc->sc_native_mcc_response_capabilities = response.capabilities;
+    sc->sc_native_mcc_response_time = response.time;
+    sc->sc_native_mcc_response_geo_info = response.geoInfo;
+    sc->sc_native_mcc_response_channel_count = response.channelCount;
+    sc->sc_native_mcc_response_profile149_flags = response.profile149Flags;
+    sc->sc_native_mcc_response_profile149_flags_present =
+        response.profile149Present ? 1U : 0U;
+    sc->sc_native_mcc_applied_notice_generation = response.noticeGeneration;
+    sc->sc_native_mcc_applied_firmware_generation =
+        response.firmwareGeneration;
+    const uint16_t returnedMcc = htole16(static_cast<uint16_t>(response.mcc));
+    const bool countryChanged = sc->sc_fw_mcc_int != returnedMcc;
+    sc->sc_fw_mcc_int = returnedMcc;
+    snprintf(sc->sc_fw_mcc, sizeof(sc->sc_fw_mcc), "%c%c",
+        static_cast<char>((response.mcc >> 8) & 0xffU),
+        static_cast<char>(response.mcc & 0xffU));
+    __atomic_store_n(&sc->sc_native_mcc_pending, 0U, __ATOMIC_RELEASE);
+    sc->sc_native_mcc_last_error = 0;
+    __atomic_store_n(&sc->sc_native_mcc_last_gate, 0U, __ATOMIC_RELEASE);
+    splx(s);
+
+    if (countryChanged && sc->sc_ic.ic_event_handler)
+        (*sc->sc_ic.ic_event_handler)(&sc->sc_ic,
+            IEEE80211_EVT_COUNTRY_CODE_UPDATE, NULL);
+    owner->tahoePublishMccSnapshot(owner->getController());
+    return kIOReturnSuccess;
+}
+
+int ItlIwx::iwx_request_mcc_profile(
+    struct iwx_softc *sc, uint16_t requestMcc, uint8_t requestSource,
+    IwxMccRefreshPolicy::ProfileResponse *profile, bool requireMultiSource)
+{
+    if (!sc || !profile)
+        return EINVAL;
+    uint8_t commandVersion = iwx_lookup_cmd_ver(sc, IWX_LONG_GROUP,
+                                                 IWX_MCC_UPDATE_CMD);
+    const uint8_t notificationVersion = iwx_lookup_notif_ver(
+        sc, IWX_LONG_GROUP, IWX_MCC_UPDATE_CMD);
+    const bool capability89 = isset(sc->sc_enabled_capa,
+        IWX_UCODE_TLV_CAPA_MCC_UPDATE_11AX_SUPPORT);
+    profile->commandVersion = commandVersion;
+    profile->notificationVersion = notificationVersion;
+    profile->responseFormat = capability89 ?
+        IwxMccRefreshPolicy::kResponseFormatV4 :
+        IwxMccRefreshPolicy::kResponseFormatV3;
+    profile->mccUpdate11axCapability = capability89 ? 1U : 0U;
+    const bool multiSource = iwx_mcc_multi_source_supported(sc);
+    if (requireMultiSource && !multiSource)
+        return EOPNOTSUPP;
+    if (!IwxMccRefreshPolicy::validMcc(requestMcc) ||
+        (requireMultiSource &&
+         !IwxMccRefreshPolicy::chubRequestValid(requestMcc, requestSource)))
+        return EINVAL;
+
+    if (requireMultiSource && commandVersion == IWX_FW_CMD_VER_UNKNOWN)
+        return EOPNOTSUPP;
+
+    struct iwx_mcc_update_cmd mccCmd{};
+    mccCmd.mcc = htole16(requestMcc);
+    mccCmd.source_id = requestSource;
+    struct iwx_host_cmd hostCmd = {
+        // Preserve the existing narrow request ID. iwx_send_cmd() promotes
+        // it to LONG_GROUP with CMD_IS_NARROW and version 0; the firmware
+        // command-directory cmd_version is metadata, not this header byte.
+        .id = IWX_MCC_UPDATE_CMD,
+        .flags = IWX_CMD_WANT_RESP,
+        .data = { &mccCmd },
+    };
+    hostCmd.len[0] = sizeof(mccCmd);
+    hostCmd.resp_pkt_len = IWX_CMD_RESP_MAX;
+
+    memset(profile->channelFlags, 0, sizeof(profile->channelFlags));
+    profile->commandAttempted = 1;
+    int error = iwx_send_cmd(sc, &hostCmd);
+    if (error)
+        return error;
+    struct iwx_rx_packet *packet = hostCmd.resp_pkt;
+    if (!packet || (packet->hdr.group_id & IWX_CMD_FAILED_MSK)) {
+        error = EIO;
+        goto out;
+    }
+
+    {
+        const size_t payloadLength = iwx_rx_packet_payload_len(packet);
+        size_t channelCount = 0;
+        const uint8_t *channelList = iwx_mcc_channel_list(sc, &channelCount);
+        IwxMccRefreshPolicy::ProfileResponse parsed{};
+        if (!channelList || !IwxMccRefreshPolicy::parseResponse(
+                packet->data, payloadLength, capability89, channelList,
+                channelCount, 149, &parsed)) {
+            error = EPROTO;
+            goto out;
+        }
+        parsed.requestSequence = profile->requestSequence;
+        parsed.requestMcc = requestMcc;
+        parsed.requestSource = requestSource;
+        parsed.requestOrigin = profile->requestOrigin;
+        parsed.noticeGeneration = profile->noticeGeneration;
+        parsed.firmwareGeneration = profile->firmwareGeneration;
+        parsed.commandAttempted = profile->commandAttempted;
+        parsed.commandVersion = commandVersion;
+        parsed.notificationVersion = notificationVersion;
+        parsed.mccUpdate11axCapability = capability89 ? 1U : 0U;
+        *profile = parsed;
+    }
+
+out:
+    iwx_free_resp(sc, &hostCmd);
+    return error;
+}
+
+void ItlIwx::iwx_native_mcc_refresh_task(void *arg)
+{
+    auto *sc = static_cast<struct iwx_softc *>(arg);
+    if (!sc)
+        return;
+    ItlIwx *owner = container_of(sc, ItlIwx, com);
+    bool retry = false;
+    {
+        TahoeLifecycleGuard lifecycle(owner, kTahoeLifecycleMccTask);
+        if (!lifecycle)
+            return;
+        NativeMccWork work{};
+        IOCommandGate *gate = owner->getMainCommandGate();
+        if (!gate)
+            return;
+        IOReturn captureResult = gate->runAction(
+            iwx_native_mcc_capture_action, owner, sc, &work);
+        if (captureResult == kIOReturnSuccess) {
+            work.error = owner->iwx_request_mcc_profile(sc,
+                static_cast<uint16_t>(work.requestMcc),
+                static_cast<uint8_t>(work.requestSource), &work.profile, true);
+            IOReturn applyResult = gate->runAction(
+                iwx_native_mcc_apply_action, owner, sc, &work);
+            retry = work.retryAfterStale != 0;
+            (void)applyResult;
+        }
+    }
+    if (retry)
+        owner->tahoeMccScheduleIfReady(sc);
+}
+
+void ItlIwx::tahoeMccScheduleIfReady(struct iwx_softc *sc)
+{
+    if (!sc || !sc->sc_nswq)
+        return;
+    struct _ifnet *ifp = &sc->sc_ic.ic_ac.ac_if;
+    const bool shuttingDown = (sc->sc_flags & IWX_FLAG_SHUTDOWN) != 0 ||
+        __atomic_load_n(&nativeLifecycleTearingDown_, __ATOMIC_ACQUIRE) != 0;
+    const IwxMccRefreshPolicy::RequestInputs inputs {
+        __atomic_load_n(&sc->sc_native_mcc_pending, __ATOMIC_ACQUIRE) != 0,
+        sc->sc_nvm.lar_enabled != 0,
+        iwx_mcc_multi_source_supported(sc),
+        (ifp->if_flags & (IFF_UP | IFF_RUNNING)) == (IFF_UP | IFF_RUNNING),
+        shuttingDown
+    };
+    const auto block = IwxMccRefreshPolicy::requestBlock(inputs);
+    if (block != IwxMccRefreshPolicy::RequestBlock::kReady) {
+        __atomic_store_n(&sc->sc_native_mcc_last_gate,
+            static_cast<uint32_t>(block), __ATOMIC_RELEASE);
+        return;
+    }
+    if (__atomic_load_n(&sc->sc_native_mcc_notice_valid,
+                        __ATOMIC_ACQUIRE) == 0)
+        return;
+
+    int s = splnet();
+    if (taskq_enter_unpaused(sc->sc_nswq) == 0) {
+        task_add(sc->sc_nswq, &sc->sc_native_mcc_task);
+        taskq_leave(sc->sc_nswq);
+    }
+    splx(s);
+}
+#endif
+
 void ItlIwx::
 iwx_mcc_update(struct iwx_softc *sc, struct iwx_mcc_chub_notif *notif)
 {
-   struct ieee80211com *ic = &sc->sc_ic;
-   struct _ifnet *ifp = IC2IFP(ic);
-
+    if (!sc || !notif)
+        return;
+#ifdef AIRPORT_TAHOE
+    const uint32_t noticeMcc = le16toh(notif->mcc);
+    const uint32_t noticeSource = notif->source_id;
+    const bool valid = IwxMccRefreshPolicy::chubRequestValid(
+        noticeMcc, noticeSource);
+    const int s = splnet();
+    const uint32_t previous = __atomic_load_n(
+        &sc->sc_native_mcc_notice_generation, __ATOMIC_RELAXED) & ~1U;
+    uint32_t odd = previous + 1U;
+    uint32_t even = previous + 2U;
+    if (even < 2U || odd == 0U) {
+        odd = 1U;
+        even = 2U;
+    }
+    __atomic_store_n(&sc->sc_native_mcc_notice_generation, odd,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&sc->sc_native_mcc_notice_code, noticeMcc,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&sc->sc_native_mcc_notice_source, noticeSource,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&sc->sc_native_mcc_notice_valid, valid ? 1U : 0U,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&sc->sc_native_mcc_pending, valid ? 1U : 0U,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&sc->sc_native_mcc_notice_generation, even,
+                     __ATOMIC_RELEASE);
+    if (!valid)
+        __atomic_store_n(&sc->sc_native_mcc_last_gate, 6U,
+                         __ATOMIC_RELEASE);
+    splx(s);
+    if (valid)
+        container_of(sc, ItlIwx, com)->tahoeMccScheduleIfReady(sc);
+#else
+    struct ieee80211com *ic = &sc->sc_ic;
     snprintf(sc->sc_fw_mcc, sizeof(sc->sc_fw_mcc), "%c%c",
              (le16toh(notif->mcc) & 0xff00) >> 8, le16toh(notif->mcc) & 0xff);
     if (sc->sc_fw_mcc_int != notif->mcc && sc->sc_ic.ic_event_handler) {
@@ -11213,12 +12277,11 @@ iwx_mcc_update(struct iwx_softc *sc, struct iwx_mcc_chub_notif *notif)
     }
     sc->sc_fw_mcc_int = notif->mcc;
 
-    if (ifp->if_flags & IFF_DEBUG) {
+    if (IC2IFP(ic)->if_flags & IFF_DEBUG) {
         DPRINTFN(3, ("%s: firmware has detected regulatory domain '%s' "
                "(0x%x)\n", DEVNAME(sc), sc->sc_fw_mcc, le16toh(notif->mcc)));
     }
-
-   /* TODO: Schedule a task to send MCC_UPDATE_CMD? */
+#endif
 }
 
 uint8_t ItlIwx::
@@ -13493,6 +14556,82 @@ int ItlIwx::
 iwx_send_update_mcc_cmd(struct iwx_softc *sc, const char *alpha2)
 {
     XYLog("%s\n", __FUNCTION__);
+#ifdef AIRPORT_TAHOE
+    if (!sc || !alpha2)
+        return EINVAL;
+    const uint16_t requestMcc = static_cast<uint16_t>(
+        (static_cast<uint16_t>(static_cast<uint8_t>(alpha2[0])) << 8) |
+        static_cast<uint8_t>(alpha2[1]));
+    const uint8_t requestSource = iwx_mcc_multi_source_supported(sc) ?
+        IWX_MCC_SOURCE_GET_CURRENT : IWX_MCC_SOURCE_OLD_FW;
+    IwxMccRefreshPolicy::ProfileResponse response{};
+    uint32_t sequence = sc->sc_native_mcc_request_sequence + 1U;
+    if (sequence == 0)
+        sequence = 1U;
+    sc->sc_native_mcc_request_sequence = sequence;
+    sc->sc_native_mcc_request_mcc = requestMcc;
+    sc->sc_native_mcc_request_source = requestSource;
+    sc->sc_native_mcc_request_origin =
+        IwxMccRefreshPolicy::kRequestOriginInitGetCurrent;
+    sc->sc_native_mcc_request_notice_generation = 0;
+    sc->sc_native_mcc_request_firmware_generation =
+        static_cast<uint32_t>(sc->sc_generation);
+    response.requestSequence = sequence;
+    response.requestMcc = requestMcc;
+    response.requestSource = requestSource;
+    response.requestOrigin =
+        IwxMccRefreshPolicy::kRequestOriginInitGetCurrent;
+    response.firmwareGeneration = static_cast<uint32_t>(sc->sc_generation);
+    const int initError = iwx_request_mcc_profile(sc, requestMcc,
+        requestSource, &response, false);
+    if (initError)
+        return initError;
+    if (response.profileAction == static_cast<uint32_t>(
+            IwxMccRefreshPolicy::ProfileAction::kApplyComplete)) {
+        iwx_init_channel_map(sc, NULL, response.channelFlags,
+                             static_cast<int>(response.channelCount));
+    }
+    sc->sc_native_mcc_applied_channel149_flags =
+        sc->sc_ic.ic_channels[149].ic_flags;
+    sc->sc_native_mcc_applied_channel149_flags_present = 1;
+    sc->sc_native_mcc_applied_channel149_frequency =
+        sc->sc_ic.ic_channels[149].ic_freq;
+    sc->sc_native_mcc_applied_channel149_frequency_present = 1;
+    sc->sc_native_mcc_command_version = response.commandVersion;
+    sc->sc_native_mcc_command_version_present =
+        response.commandVersion != IWX_FW_CMD_VER_UNKNOWN;
+    sc->sc_native_mcc_notification_version = response.notificationVersion;
+    sc->sc_native_mcc_notification_version_present =
+        response.notificationVersion != IWX_FW_CMD_VER_UNKNOWN;
+    sc->sc_native_mcc_response_format = response.responseFormat;
+    sc->sc_native_mcc_11ax_capability =
+        response.mccUpdate11axCapability;
+    sc->sc_native_mcc_11ax_capability_present = 1;
+    sc->sc_native_mcc_response_present = 1;
+    sc->sc_native_mcc_response_notice_generation = 0;
+    sc->sc_native_mcc_response_firmware_generation =
+        static_cast<uint32_t>(sc->sc_generation);
+    sc->sc_native_mcc_response_mcc = response.mcc;
+    sc->sc_native_mcc_response_source = response.source;
+    sc->sc_native_mcc_response_status = response.status;
+    sc->sc_native_mcc_response_capabilities = response.capabilities;
+    sc->sc_native_mcc_response_time = response.time;
+    sc->sc_native_mcc_response_geo_info = response.geoInfo;
+    sc->sc_native_mcc_response_channel_count = response.channelCount;
+    sc->sc_native_mcc_response_profile149_flags =
+        response.profile149Flags;
+    sc->sc_native_mcc_response_profile149_flags_present =
+        response.profile149Present ? 1U : 0U;
+    sc->sc_native_mcc_applied_firmware_generation =
+        static_cast<uint32_t>(sc->sc_generation);
+    const uint16_t returnedMcc = htole16(static_cast<uint16_t>(response.mcc));
+    sc->sc_fw_mcc_int = returnedMcc;
+    snprintf(sc->sc_fw_mcc, sizeof(sc->sc_fw_mcc), "%c%c",
+        static_cast<char>((response.mcc >> 8) & 0xffU),
+        static_cast<char>(response.mcc & 0xffU));
+    sc->sc_native_mcc_last_error = 0;
+    return 0;
+#else
     struct iwx_mcc_update_cmd mcc_cmd;
     struct iwx_host_cmd hcmd = {
         .id = IWX_MCC_UPDATE_CMD,
@@ -13548,6 +14687,7 @@ out:
     iwx_free_resp(sc, &hcmd);
     
     return err;
+#endif
 }
 
 int ItlIwx::
@@ -13858,6 +14998,7 @@ iwx_init(struct _ifnet *ifp)
         ieee80211_new_state(ic, IEEE80211_S_RUN, -1);
 #ifdef AIRPORT_TAHOE
         tahoeDriverEvent(ITL_TAHOE_EVT_DRIVER_READY);
+        tahoeMccScheduleIfReady(sc);
 #endif
         return 0;
     }
@@ -13888,6 +15029,7 @@ iwx_init(struct _ifnet *ifp)
     }
     ic->ic_tahoe_init_stage = 14;
     tahoeDriverEvent(ITL_TAHOE_EVT_DRIVER_READY);
+    tahoeMccScheduleIfReady(sc);
 #else
     ieee80211_begin_scan(ifp);
 
@@ -14261,6 +15403,9 @@ iwx_stop(struct _ifnet *ifp, IwxResetTrace::ResetReason reason)
     task_del(systq, &tahoe_scan_abort_task_);
 #endif
     iwx_del_task(sc, sc->sc_nswq, &sc->newstate_task);
+#ifdef AIRPORT_TAHOE
+    iwx_del_task(sc, sc->sc_nswq, &sc->sc_native_mcc_task);
+#endif
     iwx_del_task(sc, systq, &sc->ba_task);
     iwx_del_task(sc, systq, &sc->mac_ctxt_task);
     iwx_del_task(sc, systq, &sc->chan_ctxt_task);
@@ -14269,6 +15414,9 @@ iwx_stop(struct _ifnet *ifp, IwxResetTrace::ResetReason reason)
     
 #ifdef AIRPORT_TAHOE
     const int hardwareStopError = iwx_stop_device(sc);
+    // Do this after firmware stop while splnet still excludes a final
+    // notification. No old-generation CHUB request may survive into init.
+    tahoeRetireNativeMccNotice(sc);
 #else
     (void)iwx_stop_device(sc);
 #endif
@@ -15240,6 +16388,14 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
                 
             case IWX_MCC_CHUB_UPDATE_CMD: {
                 struct iwx_mcc_chub_notif *notif;
+                if (iwx_rx_packet_payload_len(pkt) !=
+                    sizeof(struct iwx_mcc_chub_notif)) {
+#ifdef AIRPORT_TAHOE
+                    __atomic_store_n(&sc->sc_native_mcc_last_gate, 6U,
+                                     __ATOMIC_RELEASE);
+#endif
+                    break;
+                }
                 SYNC_RESP_STRUCT(notif, pkt, struct iwx_mcc_chub_notif *);
                 iwx_mcc_update(sc, notif);
                 break;
@@ -17316,6 +18472,10 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
     }
     task_set(&sc->init_task, iwx_init_task, sc, "iwx_init_task");
     task_set(&sc->newstate_task, iwx_newstate_task, sc, "iwx_newstate_task");
+#ifdef AIRPORT_TAHOE
+    task_set(&sc->sc_native_mcc_task, iwx_native_mcc_refresh_task, sc,
+             "iwx_native_mcc_refresh_task");
+#endif
     task_set(&sc->ba_task, iwx_ba_task, sc, "iwx_ba_task");
     task_set(&sc->mac_ctxt_task, iwx_mac_ctxt_task, sc, "iwx_mac_ctxt_task");
     task_set(&sc->chan_ctxt_task, iwx_chan_ctxt_task, sc, "iwx_chan_ctxt_task");

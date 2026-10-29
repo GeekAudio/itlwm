@@ -156,6 +156,7 @@
 #include "../../native/intel_roc_event_state.hpp"
 #include "../../native/iwx_reset_trace.hpp"
 #include "../../native/iwx_link_state_trace.hpp"
+#include "../../native/iwx_mcc_refresh_policy.hpp"
 #include "ItlIwxP2PTx.hpp"
 #include "ItlIwxP2PAction.hpp"
 #endif
@@ -333,6 +334,11 @@ public:
 #ifdef AIRPORT_TAHOE
     IwxOutputKick::DrainResult iwx_start_drain(struct _ifnet *, uint32_t epoch);
     static IOReturn _iwx_watchdog_task(OSObject *target, void *arg0, void *arg1, void *arg2, void *arg3);
+    static void iwx_native_mcc_refresh_task(void *);
+    static IOReturn iwx_native_mcc_capture_action(
+        OSObject *, void *, void *, void *, void *);
+    static IOReturn iwx_native_mcc_apply_action(
+        OSObject *, void *, void *, void *, void *);
 #endif
     
     virtual ItlDriverInfo *getDriverInfo() override;
@@ -395,8 +401,14 @@ public:
     void tahoeRecordInitTaskTrigger(IwxResetTrace::InitTaskTrigger);
     void tahoeRecordTxWatchdogSnapshot(struct iwx_softc *, uint32_t);
     void tahoePublishTxProgressSnapshot(IOEthernetController *, struct iwx_softc *);
+    bool tahoePublishStaTxSnapshot(IOEthernetController *, struct iwx_softc *);
     uint32_t tahoeRecordReset(IwxResetTrace::ResetReason, struct iwx_softc *);
     void tahoePublishResetTrace(IOEthernetController *);
+    void tahoePublishMccSnapshot(IOEthernetController *);
+    void tahoeMccScheduleIfReady(struct iwx_softc *);
+    int iwx_request_mcc_profile(struct iwx_softc *, uint16_t requestMcc,
+        uint8_t requestSource, IwxMccRefreshPolicy::ProfileResponse *,
+        bool requireMultiSource);
 
     void nativeP2pTick() override;
     bool nativeP2pBusy() override;
