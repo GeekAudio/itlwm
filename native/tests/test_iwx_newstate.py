@@ -116,6 +116,9 @@ struct ieee80211com {
 };
 
 struct taskq;
+namespace IwxLinkStateTrace {
+enum class Event : uint32_t { kNewStateRequested = 1 };
+}
 struct iwx_softc {
     uint32_t sc_flags = 0;
     uint32_t sc_generation = 1;
@@ -140,6 +143,8 @@ struct ItlIwx {
     unsigned baDeletes = 0;
 
     int iwx_newstate(ieee80211com *, enum ieee80211_state, int);
+    void tahoeRecordLinkTransition(iwx_softc *, IwxLinkStateTrace::Event,
+        uint32_t, uint32_t, int, int, uint32_t = UINT32_MAX, bool = false);
     void iwx_add_task(iwx_softc *, taskq *, task *);
     void iwx_del_task(iwx_softc *, taskq *, task *);
 };
@@ -239,6 +244,11 @@ void ItlIwx::iwx_del_task(iwx_softc *, taskq *, task *t)
     if (t == &com.mac_ctxt_task) ++delMacCalls;
     if (t == &com.chan_ctxt_task) ++delChanCalls;
     t->onQueue = false;
+}
+
+void ItlIwx::tahoeRecordLinkTransition(iwx_softc *,
+    IwxLinkStateTrace::Event, uint32_t, uint32_t, int, int, uint32_t, bool)
+{
 }
 
 // Redirect only the two net80211 cleanup calls to observable fixture counters.

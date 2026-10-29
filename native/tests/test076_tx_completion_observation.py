@@ -62,6 +62,9 @@ def check_production_wiring() -> tuple[str, str, str]:
         assert f"IWX_TX_COMPLETION_TX_RSP_{reason}" in tx_body
     assert tx_body.index("bus_dmamap_sync(") < tx_body.index(
         "IwxTxWatchdog::clear(") < tx_body.index("iwx_ampdu_txq_advance(")
+    single_branch = tx_body[tx_body.index("} else {"):]
+    assert single_branch.index("responseIndexValid") < single_branch.index(
+        "IwxTxWatchdog::clear(") < single_branch.index("iwx_ampdu_txq_advance(")
 
     for reason in (
         "HEADER_TOO_SHORT", "TFD_ARRAY_TRUNCATED", "STA_ID_MISMATCH",
@@ -86,7 +89,13 @@ def check_production_wiring() -> tuple[str, str, str]:
     assert "event.output_epoch = __atomic_load_n(&sc->sc_tx_output_epoch," in record_body
     ring = braced_source(source, "static bool iwx_tx_response_ring(") + "\n" + \
         braced_source(source, "static bool iwx_tx_response_index(")
-    return helpers, ring, tx_body
+    sta_helpers_start = source.index(
+        "#ifdef AIRPORT_TAHOE\nstatic uint64_t recordStaTxResponse(")
+    sta_helpers_end = source.index(
+        "\n#endif\n\nvoid ItlIwx::\niwx_rx_tx_cmd", sta_helpers_start) + \
+        len("\n#endif")
+    sta_helpers = source[sta_helpers_start:sta_helpers_end]
+    return helpers, ring, tx_body, sta_helpers
 
 
 CPP_HANDLER_PREFIX = r"""
@@ -98,6 +107,7 @@ CPP_HANDLER_PREFIX = r"""
 #include "native/iwx_tx_completion_observation.hpp"
 #include "native/iwx_tx_progress_observation.hpp"
 #include "native/iwx_tx_ring_capacity.hpp"
+#include "native/iwx_sta_tx_observation.hpp"
 
 #define AIRPORT_TAHOE 1
 #define IWX_RBUF_SIZE 2048
@@ -210,7 +220,9 @@ struct iwx_softc {
     iwx_tx_ring txq[4];
     int sc_tx_timer;
     void *sc_dmat;
+    int sc_generation;
     uint32_t sc_tx_output_epoch;
+    iwx_sta_tx_observation_state sc_sta_tx_observation{};
     iwx_tx_completion_observation_state sc_tx_completion_observation{};
     iwx_tx_progress_observation_state sc_tx_progress_observation{};
 };
@@ -427,9 +439,9 @@ int main() {
     compareScenario(RingNotAddressable,
         IWX_TX_COMPLETION_TX_RSP_QUEUE_OR_RING_UNADDRESSABLE, {});
     compareScenario(RingEmpty,
-        IWX_TX_COMPLETION_TX_RSP_SINGLE_RING_EMPTY, {1, 2, 3});
+        IWX_TX_COMPLETION_TX_RSP_SINGLE_RING_EMPTY, {1});
     compareScenario(ForcedSsnIndexReject,
-        IWX_TX_COMPLETION_TX_RSP_SSN_INDEX_REJECTED, {1, 2, 3});
+        IWX_TX_COMPLETION_TX_RSP_SSN_INDEX_REJECTED, {1});
     compareScenario(AggregateWaitsForBa,
         IWX_TX_COMPLETION_TX_RSP_AGGREGATE_WAITING_FOR_BA, {1, 2, 3});
     compareScenario(SingleReclaim,
@@ -458,7 +470,7 @@ with tempfile.TemporaryDirectory(prefix="iwx-tx-completion-") as temporary:
     )
     subprocess.run([str(directory / "c-layout-probe")], check=True)
 
-    helpers, ring_guards, tx_handler = check_production_wiring()
+    helpers, ring_guards, tx_handler, sta_helpers = check_production_wiring()
     record_guard = """    if (!sc)\n        return;\n    event.presence_flags |= IWX_TX_COMPLETION_HAS_MONOTONIC_NS |\n        IWX_TX_COMPLETION_HAS_OUTPUT_EPOCH;"""
     record_hook = """    if (!sc || !gCompletionObservationEnabled)\n        return;\n    event.presence_flags |= IWX_TX_COMPLETION_HAS_MONOTONIC_NS |\n        IWX_TX_COMPLETION_HAS_OUTPUT_EPOCH;"""
     assert helpers.count(record_guard) == 1
@@ -470,6 +482,7 @@ with tempfile.TemporaryDirectory(prefix="iwx-tx-completion-") as temporary:
     harness = directory / "production-tx-rsp-handler.cpp"
     harness.write_text(
         CPP_HANDLER_PREFIX + helpers + "\n" + ring_guards + "\n" +
+        sta_helpers + "\n" +
         tx_handler + "\n" + CPP_HANDLER_TESTS,
         encoding="utf-8",
     )

@@ -1,0 +1,111 @@
+{
+  "schema_version": 1,
+  "package": "Test082 developer tools",
+  "artifact_status": "Full build and signature passed; binary is not included in this tools snapshot.",
+  "files": [
+    {
+      "role": "source",
+      "source_relative_path": "IntelWirelessNative/arm_p2p_rx149_test082.swift",
+      "snapshot_path": "arm_p2p_rx149_test082.swift",
+      "size_bytes": 5242,
+      "source_sha256": "d3736e9c8a8565ed4051dee1f3761cb79a84560c1c7c610efeed7752f1073847",
+      "snapshot_sha256": "d3736e9c8a8565ed4051dee1f3761cb79a84560c1c7c610efeed7752f1073847"
+    },
+    {
+      "role": "source",
+      "source_relative_path": "IntelWirelessNative/capture_test082_receive149_once.py",
+      "snapshot_path": "capture_test082_receive149_once.py",
+      "size_bytes": 47386,
+      "source_sha256": "8904ccbdcf791aca21145d27170ecd9cc5f8a6e441d01545f35262f1071e71e5",
+      "snapshot_sha256": "8904ccbdcf791aca21145d27170ecd9cc5f8a6e441d01545f35262f1071e71e5"
+    },
+    {
+      "role": "source",
+      "source_relative_path": "IntelWirelessNative/tools/run_test082_router_observation_once.py",
+      "snapshot_path": "tools/run_test082_router_observation_once.py",
+      "size_bytes": 20447,
+      "source_sha256": "14dc158090cebaf05c300fade6f4598495dccb0323a117f9f1a37311e99916bc",
+      "snapshot_sha256": "14dc158090cebaf05c300fade6f4598495dccb0323a117f9f1a37311e99916bc"
+    },
+    {
+      "role": "test",
+      "source_relative_path": "IntelWirelessNative/tools/test_test082_receive149_once.py",
+      "snapshot_path": "tools/test_test082_receive149_once.py",
+      "size_bytes": 17042,
+      "source_sha256": "b9a83f8f4faeaec63210417fc595af37f59e8b8cdc1c51ce1ffbf99368a74bbf",
+      "snapshot_sha256": "e539213a64b10e15d749862352ce945c66d8507015b885ff80dd3b788e597350",
+      "sanitization": "Synthetic addresses replaced with neutral placeholders; numeric supporting-field checks unchanged."
+    },
+    {
+      "role": "test",
+      "source_relative_path": "IntelWirelessNative/tools/test_run_test082_router_observation_once.py",
+      "snapshot_path": "tools/test_run_test082_router_observation_once.py",
+      "size_bytes": 5270,
+      "source_sha256": "897cbfeb5bee44a2597bad8666109cec809485d34945ca5aa402e94b1f07c01f",
+      "snapshot_sha256": "cc931ff1aa6922100fe9671e9a19e8d75a23dcd3621b57b9cbd0477a2a39c2f7",
+      "sanitization": "Synthetic router hostname retained as router.invalid; no live router identity."
+    },
+    {
+      "role": "python_import_dependency",
+      "source_relative_path": "IntelWirelessNative/capture_test076_resident_data_once.py",
+      "snapshot_path": "capture_test076_resident_data_once.py",
+      "size_bytes": 174367,
+      "source_sha256": "ec718f504e2b0d092b69798e86bc55a458c6b9c4ce4925d5f3551a9d9862fa2b",
+      "snapshot_sha256": "ec718f504e2b0d092b69798e86bc55a458c6b9c4ce4925d5f3551a9d9862fa2b"
+    },
+    {
+      "role": "python_import_dependency",
+      "source_relative_path": "IntelWirelessNative/probe_p2p_result.py",
+      "snapshot_path": "probe_p2p_result.py",
+      "size_bytes": 26919,
+      "source_sha256": "7d41e4c5d236325e4cfe235717048030ab80d8f97392ac37307c9bf82603a732",
+      "snapshot_sha256": "7d41e4c5d236325e4cfe235717048030ab80d8f97392ac37307c9bf82603a732"
+    },
+    {
+      "role": "python_import_dependency",
+      "source_relative_path": "IntelWirelessNative/probe_wifi_rate.py",
+      "snapshot_path": "probe_wifi_rate.py",
+      "size_bytes": 5684,
+      "source_sha256": "6e802a71ebeb5b9010ae0e0f7f0edd6f2782c51e50d8a5d566492c996efd9ca0",
+      "snapshot_sha256": "6e802a71ebeb5b9010ae0e0f7f0edd6f2782c51e50d8a5d566492c996efd9ca0"
+    },
+    {
+      "role": "python_import_dependency",
+      "source_relative_path": "IntelWirelessNative/tools/awdl_ioreg_u32.py",
+      "snapshot_path": "tools/awdl_ioreg_u32.py",
+      "size_bytes": 10477,
+      "source_sha256": "4a4fef3e2ac9189ab53fe93a39a5f183c6081a1b10c69a5901d06b495f1d3ff3",
+      "snapshot_sha256": "4a4fef3e2ac9189ab53fe93a39a5f183c6081a1b10c69a5901d06b495f1d3ff3"
+    },
+    {
+      "role": "runtime_subprocess_dependency",
+      "source_relative_path": "IntelWirelessNative/tools/openwrt_capture_once.py",
+      "snapshot_path": "tools/openwrt_capture_once.py",
+      "size_bytes": 54243,
+      "source_sha256": "7c7b750604acf3c18372600084bcf6a899f3b8c2e0c364ebb6a1129d77dbeac2",
+      "snapshot_sha256": "7c7b750604acf3c18372600084bcf6a899f3b8c2e0c364ebb6a1129d77dbeac2"
+    }
+  ],
+  "excluded": [
+    "kexts, firmware, and other build outputs",
+    "private build, boot, deployment, and runtime metadata",
+    "logs, crash reports, PCAP/PCAPNG captures, and evidence",
+    "router credentials, configuration, live addresses, and device identities",
+    "personal absolute paths and unrelated workspace files"
+  ],
+  "notes": [
+    "Test files are offline mock tests; fixture identifiers are synthetic.",
+    "NativeMCC and NativeStaTx numeric supporting fields and their allowlist checks are unchanged.",
+    "Runtime acquisition requires separately supplied private metadata and explicit runtime gates; this snapshot does not include them."
+  ],
+  "build_production_commit": "379bb10ee5d6be40eeada7fd90d88d69f846409a",
+  "artifact": {
+    "mach_o_uuid": "AEBE29FF-FCF4-32C5-9A0E-CD9BEDB34C18",
+    "binary_sha256": "3da1b995ec3d04c62e89c8dba4316d94fdceb4deee05421a3716134d5db0bcad",
+    "archive_sha256": "112d94bf90c9521cd7fa553c77e45d075e932a4d24dd8a76fb0b1db4ba17dba0",
+    "profile": "native_awdl_rx149_observation_only",
+    "full_build_passed": true,
+    "strict_signature_passed": true
+  },
+  "build_status": "Full build and signature passed; not boot or RF tested"
+}
