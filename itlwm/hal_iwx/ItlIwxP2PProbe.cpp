@@ -337,8 +337,24 @@ struct P2PProbeRun {
     uint32_t contextGeneration;
     uint32_t powerGeneration;
     uint32_t stationGeneration;
+    // Keep the driver's software power generation and firmware generation in
+    // separate fields. They are distinct epochs even when a given boot has
+    // assigned them the same numeric value.
+    uint32_t scGeneration;
+    uint32_t p2pFirmwareGeneration;
+    uint32_t prepareTraceSerialBefore;
+    uint32_t prepareTraceSerialExpected;
+    bool prepareTraceBaselineValid;
+    bool sessionSubmitReached;
     uint8_t address[6];
     NativeP2PProbe::BlockedReason blocked;
+};
+
+struct P2PExerciseRecoveryAction {
+    P2PProbeRun *run;
+    int32_t exerciseErrno;
+    NativeP2PProbe::ExerciseRecoveryProof *proof;
+    bool snapshotRead;
 };
 
 #if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
@@ -5872,6 +5888,7 @@ static NativeP2PProbe::BlockedReason validateCurrentState(
     state.generationMatches =
         owner->nativeP2pProbeGeneration_ == run->contextGeneration &&
         uint32_t(sc->sc_generation) == run->powerGeneration &&
+        uint32_t(sc->sc_generation) == run->scGeneration &&
         __atomic_load_n(&sc->sc_tx_rate_generation, __ATOMIC_ACQUIRE) ==
             run->stationGeneration;
     state.radioAvailable = (sc->sc_flags & IWX_FLAG_RFKILL) == 0;
@@ -5889,8 +5906,12 @@ static NativeP2PProbe::BlockedReason validateCurrentState(
     state.noPendingNewstate = !task_pending(&sc->newstate_task) &&
         sc->ns_nstate == ic->ic_state && sc->sc_newstate_pending == 0;
     state.p2pContextInitialized = sc->sc_p2p.initialized != 0;
-    state.p2pGenerationMatches =
-        sc->sc_p2p.fw_generation == run->powerGeneration;
+    // Capture the P2P firmware epoch independently after MAC configure. The
+    // production contract requires it to match the captured sc generation;
+    // the HAL snapshot remains a separate revalidation input.
+    state.p2pGenerationMatches = run->p2pFirmwareGeneration ==
+        run->scGeneration && sc->sc_p2p.fw_generation ==
+            run->p2pFirmwareGeneration;
     state.addAcknowledged = run->addAcknowledged;
     state.p2pMacAbsent = sc->sc_p2p.mac_state == IWX_P2P_RESOURCE_ABSENT;
     state.p2pMacActive = sc->sc_p2p.mac_state == IWX_P2P_RESOURCE_ACTIVE;
@@ -5935,7 +5956,79 @@ static bool snapshotEqual(const NativeP2PProbe::Snapshot &a,
         a.contextGeneration == b.contextGeneration &&
         a.powerGeneration == b.powerGeneration &&
         a.stationGeneration == b.stationGeneration &&
-        a.resourceMayExist == b.resourceMayExist;
+        a.resourceMayExist == b.resourceMayExist &&
+        a.exerciseResult == b.exerciseResult &&
+        a.exerciseRecoveryAttempted == b.exerciseRecoveryAttempted &&
+        a.exerciseRecoveryProofAccepted == b.exerciseRecoveryProofAccepted;
+}
+
+static bool readPrepareTraceSnapshot(
+    struct iwx_softc *sc,
+    struct iwx_p2p_roc_prepare_trace_snapshot *snapshot,
+    uint32_t *revisionBegin, uint32_t *revisionEnd)
+{
+    if (!sc || !snapshot || !revisionBegin || !revisionEnd)
+        return false;
+    *snapshot = {};
+    *revisionBegin = __atomic_load_n(
+        &sc->sc_p2p_roc_prepare_trace.revision, __ATOMIC_ACQUIRE);
+    const int readResult = iwx_p2p_roc_prepare_trace_read_snapshot(
+        &sc->sc_p2p_roc_prepare_trace, snapshot);
+    *revisionEnd = __atomic_load_n(
+        &sc->sc_p2p_roc_prepare_trace.revision, __ATOMIC_ACQUIRE);
+    return readResult == 0 && *revisionBegin == *revisionEnd &&
+        (*revisionEnd & 1U) == 0;
+}
+
+static void publishPrepareTraceSnapshot(
+    IOEthernetController *controller,
+    const struct iwx_p2p_roc_prepare_trace_snapshot &snapshot,
+    uint32_t revisionBegin, uint32_t revisionEnd, bool stable)
+{
+    if (!controller)
+        return;
+    controller->setProperty("NativeP2PPrepareTraceSchemaVersion",
+                            uint32_t(1), 32);
+    // IORegistry properties are separate writes. Hold an odd/invalid marker
+    // while copying the field map so the host collector cannot mistake a
+    // partially published generation for a stable snapshot.
+    const uint32_t publishRevision = stable ? revisionEnd : 0U;
+    const uint32_t oddMarker = stable ? (revisionEnd | 1U) : 1U;
+    controller->setProperty("NativeP2PPrepareTraceSnapshotValid",
+                            uint32_t(0), 32);
+    controller->setProperty("NativeP2PPrepareTraceSnapshotVersionBegin",
+                            oddMarker, 32);
+    controller->setProperty("NativeP2PPrepareTraceSnapshotVersionEnd",
+                            uint32_t(0), 32);
+    controller->setProperty("NativeP2PPrepareTraceRevision", uint32_t(0), 32);
+    controller->setProperty("NativeP2PPrepareTraceAttemptSerial",
+                            stable ? snapshot.serial : 0U, 32);
+#define IWX_P2P_TRACE_PUBLISH(name) \
+    controller->setProperty("NativeP2PPrepareTraceField." #name, \
+        stable ? snapshot.name : 0U, 32);
+    IWX_P2P_ROC_PREPARE_TRACE_FIELDS(IWX_P2P_TRACE_PUBLISH)
+#undef IWX_P2P_TRACE_PUBLISH
+    const uint32_t prepareErrno = stable ? snapshot.prepareErrno : 0U;
+    const uint32_t cleanupErrno = stable ? snapshot.cleanupErrno : 0U;
+    const uint32_t step = stable ? snapshot.step : 0U;
+    const uint32_t reason = stable ? snapshot.reason : 0U;
+    controller->setProperty("NativeP2PPrepareTracePrepareErrno",
+                            prepareErrno, 32);
+    controller->setProperty("NativeP2PPrepareTraceCleanupErrno",
+                            cleanupErrno, 32);
+    controller->setProperty("NativeP2PPrepareTraceStep", step, 32);
+    controller->setProperty("NativeP2PPrepareTraceReason", reason, 32);
+    if (!stable)
+        return;
+
+    controller->setProperty("NativeP2PPrepareTraceSnapshotVersionEnd",
+                            publishRevision, 32);
+    controller->setProperty("NativeP2PPrepareTraceRevision",
+                            publishRevision, 32);
+    controller->setProperty("NativeP2PPrepareTraceSnapshotVersionBegin",
+                            revisionBegin, 32);
+    controller->setProperty("NativeP2PPrepareTraceSnapshotValid",
+                            snapshot.valid ? 1U : 0U, 32);
 }
 
 static int readRocState(P2PProbeRun *probe, RocEventRun *event,
@@ -7372,6 +7465,16 @@ static int exerciseRx149Observation(P2PProbeRun *probe)
         !owner->nativeP2pCommandAllowed())
         return EOPNOTSUPP;
 
+    struct iwx_p2p_roc_prepare_trace_snapshot traceBefore{};
+    uint32_t traceRevisionBegin = 0;
+    uint32_t traceRevisionEnd = 0;
+    probe->prepareTraceBaselineValid = readPrepareTraceSnapshot(
+        sc, &traceBefore, &traceRevisionBegin, &traceRevisionEnd);
+    if (probe->prepareTraceBaselineValid) {
+        probe->prepareTraceSerialBefore = traceBefore.serial;
+        probe->prepareTraceSerialExpected = traceBefore.serial + 1U;
+    }
+
     __atomic_store_n(&owner->nativeP2pRocStage_, 1u, __ATOMIC_RELEASE);
     __atomic_store_n(&owner->nativeP2pRocChannel_, channelNumber,
                      __ATOMIC_RELEASE);
@@ -7390,6 +7493,10 @@ static int exerciseRx149Observation(P2PProbeRun *probe)
     }
 
     __atomic_store_n(&owner->nativeP2pRocStage_, 2u, __ATOMIC_RELEASE);
+    // From this point onward the Session Protection command may have reached
+    // firmware even if the host sees an error. Never treat a later failure as
+    // a prepare-only, known-unsubmitted case.
+    probe->sessionSubmitReached = true;
     const int commandResult = owner->tahoeP2pRocSubmit(
         sc, probe->contextGeneration, configuration, durationMs,
         ItlIwx::tahoeP2pArmRoc, probe);
@@ -7537,6 +7644,147 @@ int ItlIwx::tahoeP2pExerciseRoc(void *opaque)
         (action.snapshot.observedScheduledPair ? 0 : EIO)), __ATOMIC_RELAXED);
     __atomic_store_n(&owner->nativeP2pRocStage_, error ? 6u : 5u, __ATOMIC_RELEASE);
     return error;
+}
+
+bool ItlIwx::tahoeP2pExerciseRecovery(
+    void *opaque, int32_t exerciseErrno,
+    NativeP2PProbe::ExerciseRecoveryProof *proof)
+{
+    auto run = static_cast<P2PProbeRun *>(opaque);
+    if (!run || !run->owner || !proof || exerciseErrno == 0 ||
+        !run->rx149ObservationOnly)
+        return false;
+
+    P2PExerciseRecoveryAction action{};
+    action.run = run;
+    action.exerciseErrno = exerciseErrno;
+    action.proof = proof;
+    IOCommandGate *gate = run->owner->getMainCommandGate();
+    IOWorkLoop *workLoop = run->owner->getMainWorkLoop();
+    if (!gate || !workLoop || workLoop->onThread() || workLoop->inGate())
+        return false;
+    const IOReturn result = gate->runAction(
+        tahoeP2pExerciseRecoveryAction, &action);
+    return result == kIOReturnSuccess && action.snapshotRead;
+}
+
+IOReturn ItlIwx::tahoeP2pExerciseRecoveryAction(
+    OSObject *, void *opaque, void *, void *, void *)
+{
+    auto action = static_cast<P2PExerciseRecoveryAction *>(opaque);
+    auto run = action ? action->run : nullptr;
+    auto proof = action ? action->proof : nullptr;
+    ItlIwx *owner = run ? run->owner : nullptr;
+    if (!action || !run || !owner || !proof ||
+        !owner->tahoeP2pOnMainGate() || !run->rx149ObservationOnly)
+        return kIOReturnBadArgument;
+
+    *proof = {};
+    action->snapshotRead = false;
+    struct iwx_softc *sc = &owner->com;
+    struct iwx_p2p_roc_prepare_trace_snapshot trace{};
+    uint32_t revisionBegin = 0;
+    uint32_t revisionEnd = 0;
+    const bool stable = readPrepareTraceSnapshot(
+        sc, &trace, &revisionBegin, &revisionEnd);
+    publishPrepareTraceSnapshot(owner->tahoeP2pController(), trace,
+                                revisionBegin, revisionEnd, stable);
+    if (!stable)
+        return kIOReturnSuccess;
+
+    const bool ownerCurrent = owner->nativeP2pBusy() &&
+        __atomic_load_n(&owner->nativeP2pProbeOwner_, __ATOMIC_ACQUIRE) ==
+            reinterpret_cast<void *>(run->workerThread) &&
+        owner->nativeP2pProbeGeneration_ == run->contextGeneration &&
+        !run->canceled;
+    const NativeP2PProbe::Snapshot halSnapshot =
+        owner->nativeP2pProbe_.snapshot();
+    const bool traceAttemptMatches = run->prepareTraceBaselineValid &&
+        run->prepareTraceSerialExpected != 0 && trace.valid == 1 &&
+        trace.serial == run->prepareTraceSerialExpected &&
+        trace.token == run->contextGeneration &&
+        trace.configuration == IWX_SESSION_PROTECT_CONF_P2P_DEVICE_DISCOV &&
+        trace.receiveObservation149 == 1 && trace.featureCompiled == 1 &&
+        trace.requestedChannelPresent == 1 &&
+        trace.ieeeChannelNumber == NativeP2PRx149Observation::kIeeeChannel &&
+        trace.channelIndex == NativeP2PRx149Observation::kIeeeChannel;
+    const bool scGenerationMatches =
+        uint32_t(sc->sc_generation) == run->scGeneration &&
+        trace.scGenerationEntry == run->scGeneration &&
+        trace.scGenerationExit == run->scGeneration;
+    const bool p2pFirmwareGenerationMatches =
+        run->p2pFirmwareGeneration == run->scGeneration &&
+        sc->sc_p2p.fw_generation == run->p2pFirmwareGeneration &&
+        trace.p2pFirmwareGenerationEntry == run->p2pFirmwareGeneration &&
+        trace.p2pFirmwareGenerationExit == run->p2pFirmwareGeneration;
+    const uint32_t currentStationEpoch = __atomic_load_n(
+        &sc->sc_tx_rate_generation, __ATOMIC_ACQUIRE);
+    const bool stationEpochMatches =
+        currentStationEpoch == run->stationGeneration &&
+        trace.stationEpochEntry == run->stationGeneration &&
+        trace.stationEpochExit == run->stationGeneration;
+    const bool bindingAbsent = trace.bindingKnownAbsent == 1 &&
+        sc->sc_p2p.binding_state == IWX_P2P_RESOURCE_ABSENT;
+    const bool phyUnleased = trace.phyKnownUnleased == 1 &&
+        sc->sc_p2p.phy_leased == 0;
+    const bool rocIdle = trace.phaseKnownIdle == 1 &&
+        sc->sc_p2p_roc.phase == IWX_P2P_ROC_IDLE;
+    const bool rocAtRestoredTerminal =
+        sc->sc_p2p_roc.phase == IWX_P2P_ROC_IDLE ||
+        sc->sc_p2p_roc.phase == IWX_P2P_ROC_COMPLETE;
+    const bool restoreComplete = trace.fullyRestored == 1 &&
+        trace.cleanupErrno == 0 && rocAtRestoredTerminal &&
+        trace.restoredChannelFrequency == trace.originalChannelFrequency &&
+        bindingAbsent && phyUnleased;
+    P2PTxDiagnosticSnapshot txSnapshot{};
+    const bool txResourcesAbsent = rx149TxHistoryQuiescent(
+        owner, &txSnapshot);
+    const bool sessionSubmitReached = run->sessionSubmitReached ||
+        trace.sessionSubmitAttempted != 0;
+    const bool sessionOutcomeUnknown =
+        sc->sc_p2p_roc.phase == IWX_P2P_ROC_SESSION_SUBMIT_UNKNOWN ||
+        (sessionSubmitReached && sc->sc_p2p_roc.session_submit_seen == 0);
+
+    proof->snapshotValid = trace.valid == 1;
+    proof->snapshotStable = stable && revisionEnd != 0 &&
+        revisionBegin == revisionEnd && (revisionEnd & 1U) == 0;
+    proof->prepareAttemptMatches = traceAttemptMatches;
+    proof->prepareErrorMatches = action->exerciseErrno != 0 &&
+        static_cast<int32_t>(trace.prepareErrno) == action->exerciseErrno;
+    proof->ownerMatches = ownerCurrent && trace.ownerEpochsUnchanged == 1;
+    proof->contextGenerationMatches =
+        halSnapshot.contextGeneration == run->contextGeneration &&
+        owner->nativeP2pProbeGeneration_ == run->contextGeneration &&
+        trace.token == run->contextGeneration;
+    // These represent independent gates: the controller's power epoch is
+    // compared only with the admitted controller epoch; trace.scGeneration is
+    // checked separately against the driver's captured generation.
+    proof->powerGenerationMatches = halSnapshot.powerGeneration != 0 &&
+        halSnapshot.powerGeneration == run->powerGeneration;
+    proof->firmwareGenerationMatches = scGenerationMatches;
+    proof->p2pFirmwareGenerationMatches = p2pFirmwareGenerationMatches;
+    proof->stationGenerationMatches = stationEpochMatches &&
+        halSnapshot.stationGeneration == run->stationGeneration;
+    proof->knownNotSubmittedSafeToAbort =
+        trace.knownNotSubmittedSafeToAbort == 1 &&
+        trace.sessionSubmitAttempted == 0 && !run->sessionSubmitReached;
+    proof->fullyRestored = trace.fullyRestored == 1 &&
+        trace.cleanupErrno == 0 &&
+        trace.originalChannelFrequency == trace.restoredChannelFrequency;
+    proof->bindingAbsent = bindingAbsent;
+    proof->phyUnleased = phyUnleased;
+    proof->rocIdle = rocIdle;
+    proof->restoreComplete = restoreComplete;
+    proof->sessionProtectionSubmitReached = sessionSubmitReached;
+    proof->sessionOutcomeUnknown = sessionOutcomeUnknown;
+    proof->txResourcesPresent = !txResourcesAbsent;
+    proof->prepareStep = trace.step;
+    proof->prepareErrno = static_cast<int32_t>(trace.prepareErrno);
+    proof->cleanupErrno = static_cast<int32_t>(trace.cleanupErrno);
+    proof->attemptSerial = trace.serial;
+    proof->snapshotRevision = revisionEnd;
+    action->snapshotRead = true;
+    return kIOReturnSuccess;
 }
 
 void ItlIwx::tahoeP2pPublishRocState()
@@ -7761,7 +8009,11 @@ NativeP2PProbe::BlockedReason ItlIwx::tahoeP2pRevalidate(
 
 int ItlIwx::tahoeP2pConfigure(void *opaque)
 {
-    return configure(opaque);
+    auto run = static_cast<P2PProbeRun *>(opaque);
+    const int result = configure(opaque);
+    if (run && run->owner && result == 0)
+        run->p2pFirmwareGeneration = run->owner->com.sc_p2p.fw_generation;
+    return result;
 }
 
 int ItlIwx::tahoeP2pAdd(void *opaque)
@@ -7922,6 +8174,7 @@ IOReturn ItlIwx::tahoeP2pAdmitAction(OSObject *, void *contextArg,
     run->contextGeneration = admission.contextGeneration;
     run->powerGeneration = admission.powerGeneration;
     run->stationGeneration = admission.stationGeneration;
+    run->scGeneration = uint32_t(sc->sc_generation);
     __atomic_store_n(&owner->nativeP2pProbeOwner_,
                      reinterpret_cast<void *>(run->workerThread),
                      __ATOMIC_RELEASE);
@@ -7989,6 +8242,19 @@ IOReturn ItlIwx::tahoeP2pFinishAction(OSObject *, void *contextArg,
     if (!run || !run->owner)
         return kIOReturnBadArgument;
     ItlIwx *owner = run->owner;
+    // Publish the low-level Prepare trace for every terminal result, including
+    // a successful listen and a quarantined failure. Recovery publication is
+    // repeated inside its own gate action so that the caller can validate the
+    // same stable snapshot before deciding whether MAC REMOVE is safe.
+    if (owner->tahoeP2pOnMainGate()) {
+        struct iwx_p2p_roc_prepare_trace_snapshot trace{};
+        uint32_t revisionBegin = 0;
+        uint32_t revisionEnd = 0;
+        const bool stable = readPrepareTraceSnapshot(
+            &owner->com, &trace, &revisionBegin, &revisionEnd);
+        publishPrepareTraceSnapshot(owner->tahoeP2pController(), trace,
+                                    revisionBegin, revisionEnd, stable);
+    }
 #if defined(ITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332)
     // The planner observation is a RAM snapshot captured before authorization;
     // publish its single fixed-size OSData after the operation returned and
@@ -8347,6 +8613,8 @@ void ItlIwx::tahoeP2pProbeTask(void *opaque)
             owner->getController()->getProperty("NativeP2PRocProbe") ==
                 kOSBooleanTrue)
             operations.exercise = tahoeP2pExerciseRoc;
+        if (run.rx149ObservationOnly)
+            operations.exerciseRecovery = tahoeP2pExerciseRecovery;
         owner->nativeP2pProbe_.executeOnce(operations);
         owner->tahoeP2pObserveGp2(run.contextGeneration, run.powerGeneration,
                                   run.stationGeneration, 1);
@@ -9460,6 +9728,12 @@ void ItlIwx::tahoeP2pPublishProbeState()
                             snapshot.stationGeneration, 32);
     controller->setProperty("NativeP2PProbeResourceMayExist",
                             snapshot.resourceMayExist, 32);
+    controller->setProperty("NativeP2PProbeExerciseResult",
+                            static_cast<uint32_t>(snapshot.exerciseResult), 32);
+    controller->setProperty("NativeP2PProbeExerciseRecoveryAttempted",
+                            snapshot.exerciseRecoveryAttempted, 32);
+    controller->setProperty("NativeP2PProbeExerciseRecoveryProofAccepted",
+                            snapshot.exerciseRecoveryProofAccepted, 32);
     nativeP2pProbePublished_ = snapshot;
     nativeP2pProbePublishedOnce_ = true;
 }

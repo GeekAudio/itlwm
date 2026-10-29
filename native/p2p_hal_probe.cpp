@@ -8,6 +8,24 @@ constexpr int32_t kNotRun = -1;
 
 } // namespace
 
+bool safeToRemoveAfterExerciseFailure(
+    int32_t exerciseErrno, const ExerciseRecoveryProof &p)
+{
+    return exerciseErrno != 0 && p.snapshotValid && p.snapshotStable &&
+        p.prepareAttemptMatches && p.prepareErrorMatches &&
+        p.ownerMatches && p.contextGenerationMatches &&
+        p.powerGenerationMatches && p.firmwareGenerationMatches &&
+        p.p2pFirmwareGenerationMatches && p.stationGenerationMatches &&
+        p.knownNotSubmittedSafeToAbort && p.fullyRestored &&
+        p.bindingAbsent && p.phyUnleased &&
+        (p.rocIdle || p.restoreComplete) &&
+        !p.sessionProtectionSubmitReached && !p.sessionOutcomeUnknown &&
+        !p.txResourcesPresent && p.prepareStep != 0 && p.prepareErrno != 0 &&
+        p.prepareErrno == exerciseErrno && p.cleanupErrno == 0 &&
+        p.attemptSerial != 0 && p.snapshotRevision != 0 &&
+        (p.snapshotRevision & 1u) == 0;
+}
+
 BlockedReason admissionBlockReason(const Admission &a, bool requireQueueLease)
 {
     if (!a.enabled) return kProbeDisabled;
@@ -101,7 +119,9 @@ BlockedReason transientReason(BlockedReason reason)
 Controller::Controller()
     : state_(kIdle), attempted_(0), addResult_(kNotRun),
       removeResult_(kNotRun), blocked_(kNotBlocked), contextGeneration_(0),
-      powerGeneration_(0), stationGeneration_(0), resourceMayExist_(0)
+      powerGeneration_(0), stationGeneration_(0), resourceMayExist_(0),
+      exerciseResult_(0), exerciseRecoveryAttempted_(0),
+      exerciseRecoveryProofAccepted_(0)
 {
 }
 
@@ -109,7 +129,7 @@ bool Controller::terminal() const
 {
     const uint32_t state = __atomic_load_n(&state_, __ATOMIC_ACQUIRE);
     return state == kComplete || state == kQuarantined ||
-           state == kResetDrained;
+           state == kResetDrained || state == kExerciseFailedCleaned;
 }
 
 void Controller::storeState(uint32_t state, uint32_t blocked)
@@ -224,9 +244,26 @@ RunResult Controller::executeOnce(const Operations &ops)
         return RunResult::kQuarantined;
     }
 
-    if (ops.exercise && ops.exercise(ops.context) != 0) {
-        quarantine(kExerciseOutcomeUnknown, true);
-        return RunResult::kQuarantined;
+    bool exerciseFailed = false;
+    if (ops.exercise) {
+        const int exerciseResult = ops.exercise(ops.context);
+        __atomic_store_n(&exerciseResult_, exerciseResult, __ATOMIC_RELAXED);
+        if (exerciseResult != 0) {
+            __atomic_store_n(&exerciseRecoveryAttempted_, 1u,
+                             __ATOMIC_RELAXED);
+            ExerciseRecoveryProof proof{};
+            const bool snapshotRead = ops.exerciseRecovery &&
+                ops.exerciseRecovery(ops.context, exerciseResult, &proof);
+            const bool safeToRemove = snapshotRead &&
+                safeToRemoveAfterExerciseFailure(exerciseResult, proof);
+            __atomic_store_n(&exerciseRecoveryProofAccepted_,
+                             safeToRemove ? 1u : 0u, __ATOMIC_RELAXED);
+            if (!safeToRemove) {
+                quarantine(kExerciseOutcomeUnknown, true);
+                return RunResult::kQuarantined;
+            }
+            exerciseFailed = true;
+        }
     }
     // The optional exercise can hold a separate PHY/binding/TE lease. It must
     // return only after a safe cleanup, then pass the original radio guards.
@@ -253,6 +290,10 @@ RunResult Controller::executeOnce(const Operations &ops)
     if (!ops.publishLease(ops.context, false)) {
         quarantine(kGateActionFailed, false);
         return RunResult::kQuarantined;
+    }
+    if (exerciseFailed) {
+        storeState(kExerciseFailedCleaned, kExerciseFailureRecovered);
+        return RunResult::kExerciseFailedCleaned;
     }
     storeState(kComplete, kNotBlocked);
     return RunResult::kCompleted;
@@ -291,6 +332,11 @@ Snapshot Controller::snapshot() const
     out.powerGeneration = __atomic_load_n(&powerGeneration_, __ATOMIC_RELAXED);
     out.stationGeneration = __atomic_load_n(&stationGeneration_, __ATOMIC_RELAXED);
     out.resourceMayExist = __atomic_load_n(&resourceMayExist_, __ATOMIC_RELAXED);
+    out.exerciseResult = __atomic_load_n(&exerciseResult_, __ATOMIC_RELAXED);
+    out.exerciseRecoveryAttempted = __atomic_load_n(
+        &exerciseRecoveryAttempted_, __ATOMIC_RELAXED);
+    out.exerciseRecoveryProofAccepted = __atomic_load_n(
+        &exerciseRecoveryProofAccepted_, __ATOMIC_RELAXED);
     return out;
 }
 

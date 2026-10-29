@@ -108,6 +108,10 @@
 #include <net80211/ieee80211_mira.h>
 #include <net80211/ieee80211_radiotap.h>
 
+#ifdef AIRPORT_TAHOE
+#include "../../native/iwx_p2p_roc_prepare_trace.h"
+#endif
+
 #include <IOKit/network/IOMbufMemoryCursor.h>
 #include <IOKit/IODMACommand.h>
 #ifdef AIRPORT_TAHOE
@@ -777,6 +781,10 @@ struct iwx_softc {
 	int sc_flags;
 	struct iwx_p2p_context sc_p2p;
 	struct iwx_p2p_roc_state sc_p2p_roc;
+#ifdef AIRPORT_TAHOE
+	/* Independent of ROC resets; published through atomic snapshot helper. */
+	struct iwx_p2p_roc_prepare_trace sc_p2p_roc_prepare_trace;
+#endif
 
 	uint32_t sc_fh_init_mask;
 	uint32_t sc_hw_init_mask;

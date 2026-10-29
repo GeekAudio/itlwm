@@ -29,6 +29,7 @@ shim = r"""
 #define ITL_NATIVE_AWDL_RX149_OBSERVATION_25G332 1
 #include "itlwm/hal_iwx/tahoe_p2p_roc_observation_policy.hpp"
 #include "native/p2p_rx149_observation.hpp"
+#include "native/iwx_p2p_roc_prepare_trace.h"
 #define htole32(x) static_cast<uint32_t>(x)
 #define nitems(x) (sizeof(x) / sizeof((x)[0]))
 #define isset(bits,bit) (((bits)[(bit)/8] & (1U<<((bit)%8))) != 0)
@@ -108,6 +109,7 @@ struct iwx_softc {
  uint32_t sc_tx_rate_generation=0;
  int sc_capaflags=IWX_UCODE_TLV_FLAGS_P2P; uint8_t sc_enabled_capa[8]{};
  iwx_p2p_context sc_p2p{};iwx_p2p_roc_state sc_p2p_roc{};
+ iwx_p2p_roc_prepare_trace sc_p2p_roc_prepare_trace{};
  iwx_phy_ctxt sc_phyctxt[IWX_NUM_PHY_CTX]{};ieee80211com sc_ic{};
 };
 struct iwx_fw_channel_info { uint32_t channel;uint8_t band,width,ctrl_pos,reserved; } __attribute__((packed));
@@ -200,6 +202,7 @@ actual = "\n".join([
     extract("itlwm/hal_iwx/ItlIwxP2PRoc.cpp", "static int\ntahoeP2pRocRestorePhy("),
     extract("itlwm/hal_iwx/ItlIwxP2PRoc.cpp", "static uint32_t\ntahoeP2pMsecToTu("),
     extract("itlwm/hal_iwx/ItlIwxP2PRoc.cpp", "static bool\ntahoeP2pRocConfigurationSupported("),
+    extract("itlwm/hal_iwx/ItlIwxP2PRoc.cpp", "static bool\ntahoeP2pRocChannelPointerInTable("),
     extract("itlwm/hal_iwx/ItlIwxP2PRoc.cpp", "static bool\ntahoeP2pRocCurrentChannelIndex("),
     extract("itlwm/hal_iwx/ItlIwxP2PRoc.cpp", "static bool\ntahoeP2pRocSocialChannel6Allowed("),
     extract("itlwm/hal_iwx/ItlIwxP2PRoc.cpp", "static bool\ntahoeP2pRocOffChannelAllowed("),
@@ -262,6 +265,22 @@ static void setup(ItlIwx &h,ieee80211_channel &staChan,ieee80211_channel &initia
       1U<<(IWX_UCODE_TLV_CAPA_SESSION_PROT_CMD%8);
 }
 int main() {
+ // The observer can be sampled before a Prepare attempt, and an unfinished
+ // writer is explicitly unavailable instead of exposing a torn record.
+ {
+  iwx_p2p_roc_prepare_trace trace{};
+  struct iwx_p2p_roc_prepare_trace_snapshot sample{};
+  assert(iwx_p2p_roc_prepare_trace_read_snapshot(&trace,&sample)==0);
+  assert(sample.valid==0&&sample.serial==0);
+  assert(iwx_p2p_roc_prepare_trace_begin(&trace)==1);
+  assert(iwx_p2p_roc_prepare_trace_read_snapshot(&trace,&sample)==EAGAIN);
+  iwx_p2p_roc_prepare_trace_store(&trace,IWX_P2P_TRACE_step,
+                                  IWX_P2P_PREPARE_STEP_ARGUMENT);
+  iwx_p2p_roc_prepare_trace_finish(&trace);
+  assert(iwx_p2p_roc_prepare_trace_read_snapshot(&trace,&sample)==0);
+  assert(sample.valid==1&&sample.serial==1&&
+         sample.step==IWX_P2P_PREPARE_STEP_ARGUMENT);
+ }
  // Compile the production RX149 table check against the C API's const
  // contract: mutable ieee80211com pointer and const channel pointer.
  {
@@ -414,6 +433,18 @@ int main() {
   assert(h.tahoeP2pRocPrepare(sc,currentChannel(h,staChan.channel),9,2)==ETIMEDOUT);
   assert(sc->sc_p2p_roc.phase==IWX_P2P_ROC_QUARANTINED&&sc->sc_p2p.phy_leased);
   assert(sc->sc_p2p.binding_state==IWX_P2P_RESOURCE_ABSENT&&h.statusSends==0);
+  struct iwx_p2p_roc_prepare_trace_snapshot trace{};
+  assert(iwx_p2p_roc_prepare_trace_read_snapshot(
+      &sc->sc_p2p_roc_prepare_trace,&trace)==0);
+  assert(trace.valid&&trace.prepareErrno==ETIMEDOUT&&
+         trace.knownNotSubmittedSafeToAbort==0&&trace.fullyRestored==0);
+  assert(trace.phyLeaseAttempted&&trace.phyLeaseReturned&&
+         trace.phyRemoveAttempted==1&&trace.phyRemoveReturned&&
+         trace.phyRemoveResult==
+         static_cast<uint32_t>(failAt==1?ETIMEDOUT:0));
+  assert(trace.phyAddAttempted==(failAt==2?1U:0U)&&
+         trace.phyAddReturned==(failAt==2?1U:0U));
+  if(failAt==2)assert(trace.phyAddResult==ETIMEDOUT);
   sc->sc_generation=8;assert(h.iwx_p2p_context_reset_after_fw_reset(sc,8)==EBUSY);
  }
  // A valid nonzero binding status is a rejection; unwind only known resources.
@@ -421,11 +452,69 @@ int main() {
   ItlIwx h;ieee80211_channel staChan{36,false},initial{1,true};setup(h,staChan,initial);
   h.status=1;auto *sc=&h.com;
   assert(h.tahoeP2pRocPrepare(sc,currentChannel(h,staChan.channel),11,2)==EIO);
-  assert(sc->sc_p2p_roc.binding_rejected&&sc->sc_p2p_roc.binding_status_valid);
-  assert(sc->sc_p2p_roc.phase==IWX_P2P_ROC_COMPLETE&&!sc->sc_p2p.phy_leased);
+  assert(sc->sc_p2p_roc.phase==IWX_P2P_ROC_IDLE&&!sc->sc_p2p.phy_leased);
   assert(sc->sc_p2p.binding_state==IWX_P2P_RESOURCE_ABSENT&&
          sc->sc_phyctxt[1].channel==currentChannel(h,initial.channel));
   assert(h.pduSends==4&&h.statusSends==1);
+  struct iwx_p2p_roc_prepare_trace_snapshot trace{};
+  assert(iwx_p2p_roc_prepare_trace_read_snapshot(
+      &sc->sc_p2p_roc_prepare_trace,&trace)==0);
+  assert(trace.step==IWX_P2P_PREPARE_STEP_BINDING_ADD&&
+         trace.reason==IWX_P2P_PREPARE_REASON_BINDING_ADD_DECODED_REJECT&&
+         trace.prepareErrno==EIO&&trace.cleanupErrno==0);
+  assert(trace.bindingAddAttempted&&trace.bindingAddReturned&&
+         trace.bindingAddResult==EIO&&
+         trace.bindingStatusValid&&trace.bindingRejected&&
+         trace.bindingRawStatus==1);
+  assert(trace.restoreRemoveAttempted&&trace.restoreRemoveReturned&&
+         trace.restoreRemoveResult==0&&
+         trace.restoreAddAttempted&&trace.restoreAddReturned&&
+         trace.restoreAddResult==0&&
+         trace.phyReleaseAttempted&&trace.phyReleaseReturned&&
+         trace.phyReleaseResult==0);
+  assert(trace.postPhase==IWX_P2P_ROC_IDLE&&trace.bindingKnownAbsent&&
+         trace.phyKnownUnleased&&trace.phaseKnownIdle&&
+         !trace.sessionSubmitAttempted);
+  assert(trace.ownerEpochsUnchanged&&trace.knownNotSubmittedSafeToAbort&&
+         trace.fullyRestored);
+  assert(trace.ownerScGenerationUnchanged&&
+         trace.ownerP2pFirmwareGenerationUnchanged&&
+         trace.ownerStationEpochUnchanged&&trace.ownerBssIdentityUnchanged&&
+         trace.ownerStationIdUnchanged&&
+         trace.ownerStationPhyIdentityUnchanged&&
+         trace.ownerStationPhyIdUnchanged&&
+         trace.ownerStationPhyColorUnchanged&&
+         trace.ownerStationPhyChannelUnchanged&&
+         trace.ownerStationChannelIdentityUnchanged);
+ }
+ // A decoded binding rejection remains distinct from a failed restore, and
+ // the function return continues to be the real cleanup errno.
+ for(int failAt: {3,4}) {
+  ItlIwx h;ieee80211_channel staChan{36,false},initial{1,true};setup(h,staChan,initial);
+  h.status=1;h.pduFailAt=failAt;
+  const int returned=h.tahoeP2pRocPrepare(
+      &h.com,currentChannel(h,staChan.channel),111,2);
+  assert(returned==ETIMEDOUT&&h.com.sc_p2p_roc.phase==IWX_P2P_ROC_QUARANTINED);
+  struct iwx_p2p_roc_prepare_trace_snapshot trace{};
+  assert(iwx_p2p_roc_prepare_trace_read_snapshot(
+      &h.com.sc_p2p_roc_prepare_trace,&trace)==0);
+  assert(trace.bindingAddReturned&&trace.bindingAddResult==EIO&&
+         trace.bindingRawStatus==1&&
+         trace.bindingStatusValid&&trace.bindingRejected&&
+         trace.prepareErrno==ETIMEDOUT&&trace.cleanupErrno==ETIMEDOUT);
+  assert(!trace.knownNotSubmittedSafeToAbort&&!trace.fullyRestored);
+  if(failAt==3) {
+   assert(trace.reason==IWX_P2P_PREPARE_REASON_RESTORE_REMOVE_FAILED&&
+          trace.restoreRemoveAttempted&&trace.restoreRemoveReturned&&
+          trace.restoreRemoveResult==ETIMEDOUT&&
+          !trace.restoreAddAttempted);
+  } else {
+   assert(trace.reason==IWX_P2P_PREPARE_REASON_RESTORE_ADD_FAILED&&
+          trace.restoreRemoveAttempted&&trace.restoreRemoveReturned&&
+          trace.restoreRemoveResult==0&&
+          trace.restoreAddAttempted&&trace.restoreAddReturned&&
+          trace.restoreAddResult==ETIMEDOUT);
+  }
  }
  // A transport timeout while adding/removing a binding stays unknown; no
  // speculative PHY/MAC teardown follows.
@@ -435,6 +524,14 @@ int main() {
   assert(h.tahoeP2pRocPrepare(sc,currentChannel(h,staChan.channel),12,2)==ETIMEDOUT);
   assert(sc->sc_p2p_roc.phase==IWX_P2P_ROC_QUARANTINED);
   assert(sc->sc_p2p.binding_state==IWX_P2P_RESOURCE_UNKNOWN&&sc->sc_p2p.phy_leased);
+  struct iwx_p2p_roc_prepare_trace_snapshot trace{};
+  assert(iwx_p2p_roc_prepare_trace_read_snapshot(
+      &sc->sc_p2p_roc_prepare_trace,&trace)==0);
+  assert(trace.bindingAddAttempted&&trace.bindingAddReturned&&
+         trace.bindingAddResult==ETIMEDOUT&&
+         !trace.bindingStatusValid&&!trace.bindingRejected&&
+         trace.cleanupErrno==0&&!trace.knownNotSubmittedSafeToAbort&&
+         !trace.fullyRestored);
   assert(h.pduSends==2&&h.statusSends==1);
  }
  // Cleanup's binding failure stops before any PHY restore.
@@ -486,6 +583,13 @@ int main() {
   h.com.sc_phyctxt[0].channel=currentChannel(h,staChan.channel);
   h.sessionNotif=1;
   assert(h.tahoeP2pRocPrepare(&h.com,currentChannel(h,staChan.channel),16,2)==EOPNOTSUPP&&h.pduSends==0);
+  struct iwx_p2p_roc_prepare_trace_snapshot trace{};
+  assert(iwx_p2p_roc_prepare_trace_read_snapshot(
+      &h.com.sc_p2p_roc_prepare_trace,&trace)==0);
+  assert(trace.step==IWX_P2P_PREPARE_STEP_FIRMWARE_CAPABILITY&&
+         trace.reason==IWX_P2P_PREPARE_REASON_SESSION_NOTIFICATION_VERSION&&
+         trace.prepareErrno==EOPNOTSUPP&&
+         trace.sessionProtectionNotificationVersion==1);
  }
  // A same-channel channel-6 request cannot bypass the regulatory table guard.
  {
@@ -600,6 +704,18 @@ int main() {
   if (invalid==0) {
    ieee80211_channel foreign{149,false};
    assert(h.tahoeP2pRocPrepare(&h.com,&foreign,92,2,true)==EOPNOTSUPP);
+   struct iwx_p2p_roc_prepare_trace_snapshot trace{};
+   assert(iwx_p2p_roc_prepare_trace_read_snapshot(
+       &h.com.sc_p2p_roc_prepare_trace,&trace)==0);
+   assert(trace.step==IWX_P2P_PREPARE_STEP_CHANNEL_INDEX&&
+          trace.reason==IWX_P2P_PREPARE_REASON_CHANNEL_NOT_IN_TABLE&&
+          trace.prepareErrno==EOPNOTSUPP&&trace.knownNotSubmittedSafeToAbort&&
+          trace.fullyRestored&&trace.ownerEpochsUnchanged);
+   assert(trace.stationDetailsCapturedEntry&&trace.stationDetailsCapturedExit&&
+          trace.stationChannelDetailsCapturedEntry&&
+          trace.stationChannelDetailsCapturedExit&&
+          trace.ownerP2pMacContextUnchanged&&trace.bindingKnownAbsent&&
+          trace.phyKnownUnleased&&trace.phaseKnownIdle);
   } else {
    if (invalid==1) channel->ic_freq=5740;
    if (invalid==2) channel->ic_flags=0;
@@ -614,6 +730,12 @@ int main() {
     continue;
    }
    assert(h.tahoeP2pRocPrepare(&h.com,channel,92,2,true)==EOPNOTSUPP);
+   struct iwx_p2p_roc_prepare_trace_snapshot trace{};
+   assert(iwx_p2p_roc_prepare_trace_read_snapshot(
+       &h.com.sc_p2p_roc_prepare_trace,&trace)==0);
+   assert(trace.step==IWX_P2P_PREPARE_STEP_RX149_POLICY&&
+          trace.reason==IWX_P2P_PREPARE_REASON_RX149_CHANNEL_NOT_ALLOWED&&
+          trace.knownNotSubmittedSafeToAbort&&trace.fullyRestored);
   }
   assert(h.pduSends==0&&h.statusSends==0&&
          h.com.sc_p2p_roc.phase==IWX_P2P_ROC_IDLE);

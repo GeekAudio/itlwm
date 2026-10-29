@@ -436,6 +436,10 @@ public:
     void tahoeP2pPublishProbeState();
     void tahoeP2pObserveGp2(uint32_t, uint32_t, uint32_t, uint32_t);
     static int tahoeP2pExerciseRoc(void *);
+    static bool tahoeP2pExerciseRecovery(
+        void *, int32_t, NativeP2PProbe::ExerciseRecoveryProof *);
+    static IOReturn tahoeP2pExerciseRecoveryAction(
+        OSObject *, void *, void *, void *, void *);
     static bool tahoeP2pArmRoc(void *, uint32_t, uint32_t, uint32_t);
     static IOReturn tahoeP2pRocEventAction(OSObject *, void *, void *, void *, void *);
     void tahoeP2pTapSessionEvent(struct iwx_softc *, const uint8_t *, size_t);

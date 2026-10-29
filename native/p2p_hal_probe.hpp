@@ -16,7 +16,11 @@ enum State : uint32_t {
     kRemoving = 6,
     kComplete = 7,
     kQuarantined = 8,
-    kResetDrained = 9
+    kResetDrained = 9,
+    // The diagnostic exercise failed, but a stable proof showed that it
+    // never submitted a session and all ROC resources were restored. The
+    // outer MAC lease was removed safely; this is still a failed exercise.
+    kExerciseFailedCleaned = 10
 };
 
 enum BlockedReason : uint32_t {
@@ -42,13 +46,15 @@ enum BlockedReason : uint32_t {
     kGateActionFailed = 19,
     kProbeQueueBusy = 20,
     kExerciseOutcomeUnknown = 21,
-    kNativeAwdlIdentityUnavailable = 22
+    kNativeAwdlIdentityUnavailable = 22,
+    kExerciseFailureRecovered = 23
 };
 
 enum class RunResult : uint8_t {
     kNotQueued,
     kDeferred,
     kCompleted,
+    kExerciseFailedCleaned,
     kQuarantined
 };
 
@@ -113,7 +119,44 @@ struct Snapshot {
     uint32_t powerGeneration;
     uint32_t stationGeneration;
     uint32_t resourceMayExist;
+    int32_t exerciseResult;
+    uint32_t exerciseRecoveryAttempted;
+    uint32_t exerciseRecoveryProofAccepted;
 };
+
+// Evidence used only after an exercise returns an error. A nonzero errno is
+// preserved separately from proof that the failed operation can be cleaned
+// up. Every identity/state field is required; absent or unknown evidence is
+// represented as false and keeps the outer MAC lease quarantined.
+struct ExerciseRecoveryProof {
+    bool snapshotValid;
+    bool snapshotStable;
+    bool prepareAttemptMatches;
+    bool prepareErrorMatches;
+    bool ownerMatches;
+    bool contextGenerationMatches;
+    bool powerGenerationMatches;
+    bool firmwareGenerationMatches;
+    bool p2pFirmwareGenerationMatches;
+    bool stationGenerationMatches;
+    bool knownNotSubmittedSafeToAbort;
+    bool fullyRestored;
+    bool bindingAbsent;
+    bool phyUnleased;
+    bool rocIdle;
+    bool restoreComplete;
+    bool sessionProtectionSubmitReached;
+    bool sessionOutcomeUnknown;
+    bool txResourcesPresent;
+    uint32_t prepareStep;
+    int32_t prepareErrno;
+    int32_t cleanupErrno;
+    uint32_t attemptSerial;
+    uint32_t snapshotRevision;
+};
+
+bool safeToRemoveAfterExerciseFailure(
+    int32_t exerciseErrno, const ExerciseRecoveryProof &proof);
 
 struct Operations {
     void *context;
@@ -127,8 +170,15 @@ struct Operations {
     bool (*publishLease)(void *, bool resourceMayExist);
     // Optional independent hardware exercise after MAC ADD. Zero certifies
     // its resources were drained/released, so the MAC may be removed. Any
-    // other result retains the MAC lease and quarantines this whole-boot run.
+    // error retains the MAC lease unless the optional recovery callback
+    // supplies the complete, matching cleanup proof below.
     int (*exercise)(void *) {nullptr};
+    // Called only after exercise returns nonzero. The callback may perform
+    // only the cleanup already authorized by its production protocol, then
+    // must return a stable proof. A positive callback return or incomplete
+    // proof never authorizes MAC REMOVE.
+    bool (*exerciseRecovery)(void *, int32_t exerciseErrno,
+                             ExerciseRecoveryProof *) {nullptr};
 };
 
 class Controller {
@@ -165,6 +215,9 @@ private:
     uint32_t powerGeneration_;
     uint32_t stationGeneration_;
     uint32_t resourceMayExist_;
+    int32_t exerciseResult_;
+    uint32_t exerciseRecoveryAttempted_;
+    uint32_t exerciseRecoveryProofAccepted_;
 };
 
 } // namespace NativeP2PProbe

@@ -20,6 +20,9 @@ struct FakeCommands {
     bool failLeasePublish{false};
     int exerciseResult{0};
     unsigned exerciseCalls{0};
+    unsigned exerciseRecoveryCalls{0};
+    bool exerciseRecoveryAvailable{true};
+    ExerciseRecoveryProof exerciseProof{};
 
     static BlockedReason revalidate(void *context, uint32_t, uint32_t)
     {
@@ -59,9 +62,52 @@ struct FakeCommands {
         ++f->exerciseCalls;
         return f->exerciseResult;
     }
+    static bool exerciseRecovery(void *context, int32_t exerciseErrno,
+                                 ExerciseRecoveryProof *proof)
+    {
+        auto *f = static_cast<FakeCommands *>(context);
+        ++f->exerciseRecoveryCalls;
+        if (!f->exerciseRecoveryAvailable || !proof)
+            return false;
+        *proof = f->exerciseProof;
+        // This models the production callback's exact errno cross-check.
+        proof->prepareErrorMatches =
+            proof->prepareErrno == exerciseErrno;
+        return true;
+    }
     Operations operations()
     { return {this, revalidate, configure, add, remove, publishLease}; }
 };
+
+static ExerciseRecoveryProof knownUnsubmittedRestoredProof(int32_t error)
+{
+    ExerciseRecoveryProof p{};
+    p.snapshotValid = true;
+    p.snapshotStable = true;
+    p.prepareAttemptMatches = true;
+    p.prepareErrorMatches = true;
+    p.ownerMatches = true;
+    p.contextGenerationMatches = true;
+    p.powerGenerationMatches = true;
+    p.firmwareGenerationMatches = true;
+    p.p2pFirmwareGenerationMatches = true;
+    p.stationGenerationMatches = true;
+    p.knownNotSubmittedSafeToAbort = true;
+    p.fullyRestored = true;
+    p.bindingAbsent = true;
+    p.phyUnleased = true;
+    p.rocIdle = true;
+    p.restoreComplete = false;
+    p.sessionProtectionSubmitReached = false;
+    p.sessionOutcomeUnknown = false;
+    p.txResourcesPresent = false;
+    p.prepareStep = 102;
+    p.prepareErrno = error;
+    p.cleanupErrno = 0;
+    p.attemptSerial = 4;
+    p.snapshotRevision = 8;
+    return p;
+}
 
 static Admission readyAdmission()
 {
@@ -215,6 +261,108 @@ static void testOneAddThenOneRemove()
     assert(f.addCalls == 1 && f.removeCalls == 1);
 }
 
+static void testExerciseFailureNeedsCompleteMatchingCleanupProof()
+{
+    const int32_t originalPrepareError = 60;
+    ExerciseRecoveryProof valid =
+        knownUnsubmittedRestoredProof(originalPrepareError);
+    assert(safeToRemoveAfterExerciseFailure(originalPrepareError, valid));
+
+    // Every proof dimension fails closed. An errno or an idle-looking ROC by
+    // itself must never authorize releasing the outer MAC context.
+    auto reject = [&](ExerciseRecoveryProof p) {
+        assert(!safeToRemoveAfterExerciseFailure(originalPrepareError, p));
+    };
+    { auto p = valid; p.snapshotValid = false; reject(p); }
+    { auto p = valid; p.snapshotStable = false; reject(p); }
+    { auto p = valid; p.prepareAttemptMatches = false; reject(p); }
+    { auto p = valid; p.ownerMatches = false; reject(p); }
+    { auto p = valid; p.contextGenerationMatches = false; reject(p); }
+    { auto p = valid; p.powerGenerationMatches = false; reject(p); }
+    { auto p = valid; p.firmwareGenerationMatches = false; reject(p); }
+    { auto p = valid; p.p2pFirmwareGenerationMatches = false; reject(p); }
+    { auto p = valid; p.stationGenerationMatches = false; reject(p); }
+    { auto p = valid; p.knownNotSubmittedSafeToAbort = false; reject(p); }
+    { auto p = valid; p.fullyRestored = false; reject(p); }
+    { auto p = valid; p.bindingAbsent = false; reject(p); }
+    { auto p = valid; p.phyUnleased = false; reject(p); }
+    { auto p = valid; p.rocIdle = false; p.restoreComplete = false; reject(p); }
+    { auto p = valid; p.sessionProtectionSubmitReached = true; reject(p); }
+    { auto p = valid; p.sessionOutcomeUnknown = true; reject(p); }
+    { auto p = valid; p.txResourcesPresent = true; reject(p); }
+    { auto p = valid; p.prepareErrno = 0; reject(p); }
+    { auto p = valid; p.prepareErrno = 61; reject(p); }
+    { auto p = valid; p.cleanupErrno = 5; reject(p); }
+    { auto p = valid; p.attemptSerial = 0; reject(p); }
+    { auto p = valid; p.snapshotRevision = 9; reject(p); }
+    assert(!safeToRemoveAfterExerciseFailure(0, valid));
+
+    Controller recovered;
+    FakeCommands safe;
+    safe.exerciseResult = originalPrepareError;
+    safe.exerciseProof = valid;
+    auto safeOps = safe.operations();
+    safeOps.exercise = FakeCommands::exercise;
+    safeOps.exerciseRecovery = FakeCommands::exerciseRecovery;
+    assert(recovered.tryQueue(readyAdmission()));
+    assert(recovered.executeOnce(safeOps) ==
+           RunResult::kExerciseFailedCleaned);
+    const Snapshot recoveredSnapshot = recovered.snapshot();
+    assert(recoveredSnapshot.state == kExerciseFailedCleaned);
+    assert(recoveredSnapshot.blocked == kExerciseFailureRecovered);
+    assert(recoveredSnapshot.exerciseResult == originalPrepareError);
+    assert(recoveredSnapshot.exerciseRecoveryAttempted == 1);
+    assert(recoveredSnapshot.exerciseRecoveryProofAccepted == 1);
+    assert(recoveredSnapshot.resourceMayExist == 0);
+    assert(safe.exerciseRecoveryCalls == 1);
+    assert(safe.addCalls == 1 && safe.removeCalls == 1);
+    assert(safe.leaseTrueCalls == 1 && safe.leaseFalseCalls == 1);
+    // This terminal result explicitly carries the failed exercise errno;
+    // successful cleanup cannot masquerade as a successful ROC observation.
+    assert(!recovered.tryQueue(readyAdmission()));
+    assert(safe.addCalls == 1 && safe.removeCalls == 1);
+}
+
+static void testFailedOrStaleRecoveryKeepsMacLeaseQuarantined()
+{
+    const int32_t originalPrepareError = 60;
+    const auto runRejected = [&](ExerciseRecoveryProof proof,
+                                 unsigned failVerifyAt,
+                                 bool recoveryAvailable) {
+        Controller probe;
+        FakeCommands f;
+        f.exerciseResult = originalPrepareError;
+        f.exerciseProof = proof;
+        f.exerciseRecoveryAvailable = recoveryAvailable;
+        f.failVerifyAt = failVerifyAt;
+        auto operations = f.operations();
+        operations.exercise = FakeCommands::exercise;
+        operations.exerciseRecovery = FakeCommands::exerciseRecovery;
+        assert(probe.tryQueue(readyAdmission()));
+        assert(probe.executeOnce(operations) == RunResult::kQuarantined);
+        const Snapshot s = probe.snapshot();
+        assert(s.state == kQuarantined && s.resourceMayExist == 1);
+        assert(s.exerciseResult == originalPrepareError);
+        assert(s.exerciseRecoveryAttempted == 1);
+        assert(f.addCalls == 1 && f.removeCalls == 0);
+        return s;
+    };
+
+    auto valid = knownUnsubmittedRestoredProof(originalPrepareError);
+    auto invalid = valid;
+    invalid.sessionOutcomeUnknown = true;
+    auto unknown = runRejected(invalid, 0, true);
+    assert(unknown.exerciseRecoveryProofAccepted == 0);
+
+    // Even an initially safe snapshot is insufficient if the main-gate
+    // revalidation sees an epoch change before MAC REMOVE.
+    auto changed = runRejected(valid, 3, true);
+    assert(changed.blocked == kGenerationChanged);
+
+    auto missing = runRejected(valid, 0, false);
+    assert(missing.exerciseRecoveryProofAccepted == 0);
+}
+
 static void testConfigureFailureDoesNotMarkAttempt()
 {
     Controller probe;
@@ -313,6 +461,9 @@ int main()
     assert(badExercise.exerciseCalls == 1 && badExercise.removeCalls == 0);
     assert(exerciseFailure.snapshot().resourceMayExist == 1);
     assert(exerciseFailure.snapshot().blocked == kExerciseOutcomeUnknown);
+
+    testExerciseFailureNeedsCompleteMatchingCleanupProof();
+    testFailedOrStaleRecoveryKeepsMacLeaseQuarantined();
 
     Controller exerciseSuccess;
     FakeCommands goodExercise;
