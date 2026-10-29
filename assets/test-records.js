@@ -1,32 +1,30 @@
 window.TEST_RECORDS = [
   {
-    "id": "record-test076",
-    "version": "25G332-Test076",
+    "id": "record-test077",
+    "version": "25G332-Test077",
     "label": "本轮验证记录",
-    "state": "本轮17/40通过（42.5%）；数据未发送，后段Wi-Fi自动断链。",
+    "state": "Test077 本轮 6/40 项通过（15%），7 项部分验证；7条控制事件唯一匹配，数据回包未证实。",
     "tone": "working",
     "date": "2026-10-29",
-    "summary": "Test076当前启动实测：17/40项通过（42.5%），3项部分覆盖。en1两段各约125秒观察稳定，3次绑定en1的1 MB公网请求均HTTP 200；平均1.93 Mbps仅代表公网路径。P2P上下文、广播站/队列准备与回收通过；900毫秒频道START/END和原始时钟通过；外部PCAP捕获并解析控制及mDNS数据，驱动唯一匹配并接纳1个同源MIF。PSF本地完成1次、MIF本地完成3次；2个内核数据包只进入BSD队列，编码/提交/完成均为0。PCAP因2048包上限只覆盖15.18秒，完整无线窗口与接收/浏览时钟重叠未证明。未证明数据回包、Bonjour对端应答或AirDrop文件收件。 后续14:04:17在用户未操作、未睡眠时自动断链，约22秒后自动重连；Wi-Fi开关保持开启，无新增watchdog、复位、固件或硬件错误。原因仍在排查。",
+    "summary": "Test077 新启动实测：诊断前后各约125秒 Wi-Fi观察均保持en1关联、UP/RUNNING与IPv4，复位5→5，无新增watchdog、固件或硬件错误；默认路由为en0，未验证en1公网请求。OpenWrt 20秒捕获2218包，含155条Action和151条Apple vendor Action。7条驱动控制RX事件按序列控制字段和MPDU长度唯一匹配，含6条PSF-like subtype 0及1条已接纳AWDL subtype 3/MIF；peer count=1且运行时MIF绑定有效。没有payload或源/目的地址关联，窗口重叠未证明，监听只覆盖channel 6。当前Qm TX无PCAP数据帧精确匹配，数据RX捕获、解码、交付均为0。current-AW trace不完整；coordinator汇总输出异常，单次额度已消耗。无对端数据回包或AirDrop收件证明。",
     "evidence": [
-      "Wi-Fi：前后各约125秒观察均保持关联，reset 5→5，无新增watchdog/固件/硬件错误；三次绑定en1的1 MB公网请求全为HTTP 200，平均1.93 Mbps不是PHY速率。",
-      "P2P：当前启动P2P MAC ADD/REMOVE均成功；广播站/队列准备到第6步成功，队列响应解析有效；探针完整结束并清零资源标记。严格队列所有权快照仍有unknown项。",
-      "频道与时钟：同一900ms ROC有成功START/END主机单调时钟；本机RX同时记录GP2、PHY和target时间，不能据此宣称跨设备绝对时钟映射。",
-      "接收：PCAP解析115个控制帧候选；7条驱动事件全部解析、解码并入队，6条唯一匹配PCAP元组，含一条同源PSF和一个同源MIF；没有把来源映射到指定iPhone。",
-      "发送：PSF本地提交/完成/成功为1/1/1，MIF burst准备/提交/完成/成功为3/3/3/3；不是对端ACK。MIF next-AW空窗为2464微秒。",
-      "数据通路：真实BSD队列接纳2个包，但编码/提交/完成均为0；12个PCAP AWDL数据候选可解出IPv6/UDP/mDNS，但方向和所有者未知。",
-      "AirDrop：没有数据回包、Bonjour对端应答、双向文件收件或文件哈希校验。",
-      "后段Wi-Fi：无人操作且无睡眠时自动断链约22秒后重连；未见新增watchdog/复位/FW/HW错误，原因未知。"
+      "Wi-Fi：诊断前 125.134 秒、后 125.233 秒被动观察均保持 en1 关联、UP/RUNNING 与 IPv4；复位 5→5，无新增 watchdog、固件或硬件错误。默认路由为 en0，本轮没有验证 en1 公网请求或吞吐。",
+      "发送：原生 Qm 查询在驱动 TX trace 中有当前 token 绑定，编码、提交、完成、成功各 1；固件未回显完整身份，不能据此证明空口或对端收到。",
+      "监听与归因：OpenWrt 20秒捕获2218包，155条Action、151条Apple vendor Action；7条驱动控制RX事件按sequence control和MPDU长度唯一匹配。接收窗口与browse时序重叠未证明，且监听只覆盖channel 6。",
+      "控制接收：6条PSF-like subtype 0事件、1条被接纳的AWDL subtype 3/MIF事件唯一匹配；peer count=1、PSF revision=2、MIF revision=1，运行时MIF绑定有效。没有payload/地址关联，不证明指定iPhone身份。",
+      "数据通路：当前Qm查询有驱动编码、提交、完成、成功各1，但PCAP无按帧控制/序列/长度精确匹配的数据帧；数据RX捕获、解码和交付均为0。",
+      "诊断器：数据记录已落盘，但最终汇总打印因参数错误退出；coordinator complete=false。单次启动 claim 已消耗，不允许重试。",
+      "AirDrop：没有对端数据回包、Bonjour 服务应答、双向文件收件或文件哈希校验。"
     ],
     "blockers": [
-      "排查无人操作时的自动断链；当前AW候选不作为Wi-Fi断链修复。",
-      "在离线原型中解决MIF next-AW窗口被16TU新鲜度上限截空的问题，并保留当前严格边界与回收规则。",
-      "严格队列所有权/完成快照当前有unknown字段；完成结构化采集前不宣称队列身份或DMA归属验证通过。",
-      "下一次外部接收需避免2048包上限提前结束，证明计划无线窗口及接收/浏览时钟重叠。",
-      "数据帧仍停在BSD队列入口；需先得到编码/提交/完成与实际RX数据回包。",
-      "仍需证明服务发现归属、原生ifnet收件以及双向AirDrop文件完整性。"
+      "两段约 125 秒的被动 Wi-Fi 观察稳定；仍需较长时间运行、睡眠恢复、开关回连、私有地址轮换，以及绑定 en1 的公网请求验证。",
+      "控制帧归因已完成；仍需在覆盖相应频道和窗口的独立观察中关联Qm数据帧、发送/接收时序与对端来源。",
+      "修复收集器汇总输出参数；补齐当前 AW trace 发布字段，再在新启动准备下一轮。",
+      "AWDL RX控制事件已确认，但数据RX捕获、解码、ifnet交付均为0；需继续核对数据帧 descriptor、过滤和输入路径。",
+      "仍需证明 Bonjour 对端服务应答及双向 AirDrop 文件完整性。"
     ],
     "next": [
-      "手动重启加载Test077。新启动核对版本并完成Wi-Fi基线，再执行唯一一次受限回包诊断。"
+      "修复current-AW trace与诊断汇总输出；再按受控的完整频道/窗口证据闭环Qm数据回包、原生ifnet与AirDrop。"
     ]
   }
 ];
