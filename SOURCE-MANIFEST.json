@@ -1129,5 +1129,17 @@
     "compatibility_compile_cases": 15,
     "independent_source_review": "STA initialization/state handling and firmware TX/MCC contracts reviewed; PASSIVE guard unchanged",
     "scope": "Offline only. Test082 has no boot, stability, radio receive, native data return or AirDrop success evidence."
+  },
+  "runtime_validation": {
+    "candidate": "25G332-Test082",
+    "wifi_observation_seconds": 300.084,
+    "wifi_samples": 60,
+    "window_passed": true,
+    "interface_bound_gateway_and_https_passed": true,
+    "mcc_profile_refresh_observed": true,
+    "channel149_still_passive": true,
+    "rf_attempt_issued": false,
+    "airdrop_verified": false,
+    "scope": "Only this observed boot/window; no long-term,sleep,toggle,passive-RX firmware or AirDrop completion proof."
   }
 }
