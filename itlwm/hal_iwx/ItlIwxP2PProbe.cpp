@@ -27,6 +27,7 @@
 #include "../../native/awdl_mif_discovery_hold_test068.hpp"
 #include "../../native/awdl_mif_current_admission_test069.hpp"
 #include "../../native/awdl_mif_bootstrap_test070.hpp"
+#include "../../native/awdl_bootstrap_pair_transition.hpp"
 #include <libkern/c++/OSNumber.h>
 #endif
 #endif
@@ -160,6 +161,24 @@ enum CurrentAwQuietBlocker : uint32_t {
 };
 #endif
 
+struct P2PProbeTicketIdentity {
+    uint32_t queueGeneration;
+    uint32_t actionGeneration;
+    uint32_t queueId;
+    uint32_t descriptorIndex;
+    uint32_t rocToken;
+    uint32_t sequenceControl;
+    uint32_t frameControl;
+    uint32_t byteCount;
+    uint16_t nextSequenceNumber;
+    bool valid;
+};
+
+struct P2PMifCompletionClassification {
+    bool txSucceeded;
+    bool grantsOwnFirst;
+};
+
 struct P2PProbeRun {
     static void *operator new(size_t size) noexcept { return IOMalloc(size); }
     static void operator delete(void *memory) noexcept {
@@ -213,9 +232,26 @@ struct P2PProbeRun {
     bool mifBootstrapCandidatePrepared;
     bool mifBootstrapSubmitted;
     bool mifBootstrapSucceeded;
+    bool mifBootstrapPairClaimed;
+    bool mifBootstrapPairMifAttempted;
+    bool mifBootstrapPairMifCompleted;
+    bool mifBootstrapPairMifSucceeded;
+    bool mifBootstrapPairDiagnosticsDirty;
     uint32_t mifBootstrapStatus;
     uint32_t mifBootstrapBlockers;
     uint32_t mifBootstrapChecks;
+    uint32_t mifBootstrapPairChecks;
+    uint32_t mifBootstrapPairStatus;
+    uint64_t mifBootstrapPairBlockers;
+    uint64_t mifBootstrapCompletedUs;
+    uint64_t mifBootstrapPairPeerIncarnation;
+    uint64_t mifBootstrapPairPsfRevision;
+    uint64_t mifBootstrapPairMifRevision;
+    uint64_t mifBootstrapPairPsfRxUs;
+    uint64_t mifBootstrapPairMifRxUs;
+    uint8_t mifBootstrapPairSlot;
+    P2PProbeTicketIdentity mifBootstrapTicketIdentity;
+    P2PProbeTicketIdentity mifBootstrapPairTicketIdentity;
     Test070MifBootstrap::Binding mifBootstrapBinding;
     NativeAwdlDiscoveryBinding::OneShot discoveryBinding;
     uint64_t discoverySubmitCallStartUs;
@@ -464,6 +500,7 @@ struct P2PTxDiagnosticSnapshot {
     uint32_t stationId;
     uint32_t stationState;
     uint32_t queueId;
+    uint32_t queueGeneration;
     uint32_t queueState;
     uint32_t outstandingTx;
     uint32_t actionState;
@@ -471,6 +508,13 @@ struct P2PTxDiagnosticSnapshot {
     uint32_t ticketByteCount;
     uint32_t ticketSequenceControl;
     uint32_t ticketFrameControl;
+    uint32_t actionGeneration;
+    uint32_t actionQueueId;
+    uint32_t actionDescriptorIndex;
+    uint32_t actionRocToken;
+    uint32_t actionSequenceControl;
+    uint32_t actionFrameControl;
+    uint32_t actionByteCount;
     uint32_t ringQueued;
     uint32_t ringCur;
     uint32_t ringTail;
@@ -503,6 +547,7 @@ struct RocEventRun {
     uint32_t configuration;
     int commandResult;
     bool armed;
+    bool consumeRxAfterRead;
     IntelROCEvent::SessionSnapshot snapshot;
     P2PTxDiagnosticSnapshot txSnapshot;
     bool txSnapshotValid;
@@ -717,6 +762,7 @@ static bool captureP2PTxSnapshot(ItlIwx *owner,
     output->queueId = owner->nativeP2pTxQueue_.state ==
             TahoeP2PResourceState::kAbsent ? 0xffffu :
             owner->nativeP2pTxQueue_.queueId;
+    output->queueGeneration = queue.generation;
     output->queueState = static_cast<uint32_t>(
         owner->nativeP2pTxQueue_.state);
     output->outstandingTx = queue.outstandingTx;
@@ -732,6 +778,13 @@ static bool captureP2PTxSnapshot(ItlIwx *owner,
     output->ticketByteCount = ticket.byteCount;
     output->ticketSequenceControl = ticket.sequenceControl;
     output->ticketFrameControl = ticket.frameControl;
+    output->actionGeneration = owner->nativeP2pActionTx_.generation;
+    output->actionQueueId = owner->nativeP2pActionTx_.queueId;
+    output->actionDescriptorIndex = owner->nativeP2pActionTx_.descriptorIndex;
+    output->actionRocToken = owner->nativeP2pActionTx_.rocToken;
+    output->actionSequenceControl = owner->nativeP2pActionTx_.sequenceControl;
+    output->actionFrameControl = owner->nativeP2pActionTx_.frameControl;
+    output->actionByteCount = owner->nativeP2pActionTx_.frameByteCount;
     output->ticketArmed = ticket.armed;
     output->ticketCompleted = ticket.completed;
     output->frameAttemptSucceeded = ticket.frameAttemptSucceeded;
@@ -774,6 +827,90 @@ static bool captureP2PTxSnapshot(ItlIwx *owner,
                                       interruptState);
     return true;
 }
+
+static P2PProbeTicketIdentity ticketIdentityFromSnapshot(
+    const P2PTxDiagnosticSnapshot &snapshot)
+{
+    P2PProbeTicketIdentity identity{};
+    identity.queueGeneration = snapshot.queueGeneration;
+    identity.actionGeneration = snapshot.actionGeneration;
+    identity.queueId = snapshot.actionQueueId;
+    identity.descriptorIndex = snapshot.actionDescriptorIndex;
+    identity.rocToken = snapshot.actionRocToken;
+    identity.sequenceControl = snapshot.actionSequenceControl;
+    identity.frameControl = snapshot.actionFrameControl;
+    identity.byteCount = snapshot.actionByteCount;
+    identity.nextSequenceNumber = snapshot.nextSequenceNumber;
+    identity.valid = snapshot.queueGeneration != 0 &&
+        snapshot.actionGeneration != 0 && snapshot.actionQueueId != 0xffffu &&
+        snapshot.actionRocToken != 0 && snapshot.actionByteCount != 0;
+    return identity;
+}
+
+static bool ticketIdentityFieldsMatch(
+    const P2PProbeTicketIdentity &expected,
+    const P2PTxDiagnosticSnapshot &snapshot)
+{
+    if (!expected.valid || !snapshot.ticketArmed ||
+        !snapshot.ticketCompleted ||
+        snapshot.actionState != static_cast<uint32_t>(
+            TahoeP2PActionTxState::kIdle))
+        return false;
+    return snapshot.queueGeneration == expected.queueGeneration &&
+        snapshot.actionGeneration == expected.actionGeneration &&
+        snapshot.actionQueueId == expected.queueId &&
+        snapshot.queueId == expected.queueId &&
+        snapshot.actionDescriptorIndex == expected.descriptorIndex &&
+        snapshot.actionRocToken == expected.rocToken &&
+        snapshot.actionSequenceControl == expected.sequenceControl &&
+        snapshot.actionFrameControl == expected.frameControl &&
+        snapshot.actionByteCount == expected.byteCount &&
+        snapshot.ticketSequenceControl == expected.sequenceControl &&
+        snapshot.ticketFrameControl == expected.frameControl &&
+        snapshot.ticketByteCount == expected.byteCount &&
+        snapshot.nextSequenceNumber == expected.nextSequenceNumber &&
+        snapshot.ticketSequenceControl != 0xffffffffu &&
+        (snapshot.ticketSequenceControl & 0x000fu) == 0 &&
+        snapshot.ticketFrameControl == 0x00d0u;
+}
+
+static bool ticketIdentityMatches(const P2PProbeTicketIdentity &expected,
+                                  const P2PTxDiagnosticSnapshot &snapshot)
+{
+    return ticketIdentityFieldsMatch(expected, snapshot) &&
+        // A successful firmware TX status proves local completion only.
+        // peerAcknowledged is intentionally not inferred from this ticket.
+        snapshot.frameAttemptSucceeded &&
+        (snapshot.ticketStatus & 0xffu) == 1u;
+}
+
+static P2PMifCompletionClassification classifyMifCompletion(
+    bool bootstrapSelected, bool pairedMifAttempted,
+    const P2PProbeTicketIdentity &bootstrapIdentity,
+    const P2PProbeTicketIdentity &pairedIdentity,
+    const P2PTxDiagnosticSnapshot &snapshot)
+{
+    const bool firmwareTxSucceeded = snapshot.frameAttemptSucceeded &&
+        (snapshot.ticketStatus & 0xffu) == 1u;
+    if (!bootstrapSelected)
+        return {firmwareTxSucceeded, firmwareTxSucceeded};
+
+    // After a paired attempt, only its exact submitted ticket may count as a
+    // successful MIF or grant own-first. A late bootstrap completion must not
+    // promote the normal-MIF phase even if its generic status is successful.
+    if (pairedMifAttempted) {
+        const bool pairedSucceeded = ticketIdentityMatches(
+            pairedIdentity, snapshot);
+        return {pairedSucceeded, pairedSucceeded};
+    }
+
+    // Before the one normal paired attempt, only the selected bootstrap
+    // ticket can count as local TX completion; bootstrap never grants own-first.
+    return {ticketIdentityMatches(bootstrapIdentity, snapshot), false};
+}
+
+static bool mifBurstTicketMatchesPreviousCompletion(
+    const P2PProbeRun *probe, const P2PTxDiagnosticSnapshot &tx);
 
 static void publishP2PTxStage(ItlIwx *owner, uint32_t stage, int result)
 {
@@ -1004,6 +1141,54 @@ static void publishMifProbeDetails(ItlIwx *owner, const P2PProbeRun *probe)
         probe->mifResultCaptured && probe->mifTxSucceeded ? 1u : 0u, 32);
 }
 
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332)
+// Publish the pair-phase summary from the worker/finalizer, outside the TX
+// submit callback. The bootstrap ticket remains historical; NoAttempt is an
+// explicit outcome when no fresh same-entry pair ever opened the normal path.
+static void publishMifBootstrapPairDiagnostics(
+    ItlIwx *owner, P2PProbeRun *probe, bool force = false)
+{
+    IOEthernetController *controller = owner ? owner->tahoeP2pController() :
+                                                nullptr;
+    if (!controller || !probe ||
+        (!force && !probe->mifBootstrapPairDiagnosticsDirty))
+        return;
+    controller->setProperty("NativeP2PAwdlMifPairPhase",
+        probe->mifBootstrapPairStatus, 32);
+    controller->setProperty("NativeP2PAwdlMifPairBlockers",
+        probe->mifBootstrapPairBlockers, 64);
+    controller->setProperty("NativeP2PAwdlMifPairChecks",
+        probe->mifBootstrapPairChecks, 32);
+    controller->setProperty("NativeP2PAwdlMifPairNoAttempt",
+        probe->mifBootstrapSelected &&
+            !probe->mifBootstrapPairMifAttempted ? 1u : 0u, 32);
+    controller->setProperty("NativeP2PAwdlMifPairSelected",
+        probe->mifBootstrapPairClaimed ? 1u : 0u, 32);
+    controller->setProperty("NativeP2PAwdlMifPairMifAttempted",
+        probe->mifBootstrapPairMifAttempted ? 1u : 0u, 32);
+    controller->setProperty("NativeP2PAwdlMifPairMifCompleted",
+        probe->mifBootstrapPairMifCompleted ? 1u : 0u, 32);
+    controller->setProperty("NativeP2PAwdlMifPairMifSucceeded",
+        probe->mifBootstrapPairMifSucceeded ? 1u : 0u, 32);
+    controller->setProperty("NativeP2PAwdlMifBootstrapCompletionUs",
+        probe->mifBootstrapCompletedUs, 64);
+    controller->setProperty("NativeP2PAwdlMifPairPeerSlot",
+        probe->mifBootstrapPairClaimed ? probe->mifBootstrapPairSlot : 0xffu,
+        32);
+    controller->setProperty("NativeP2PAwdlMifPairPeerIncarnation",
+        probe->mifBootstrapPairPeerIncarnation, 64);
+    controller->setProperty("NativeP2PAwdlMifPairPsfRevision",
+        probe->mifBootstrapPairPsfRevision, 64);
+    controller->setProperty("NativeP2PAwdlMifPairMifRevision",
+        probe->mifBootstrapPairMifRevision, 64);
+    controller->setProperty("NativeP2PAwdlMifPairPsfRxUs",
+        probe->mifBootstrapPairPsfRxUs, 64);
+    controller->setProperty("NativeP2PAwdlMifPairMifRxUs",
+        probe->mifBootstrapPairMifRxUs, 64);
+    probe->mifBootstrapPairDiagnosticsDirty = false;
+}
+#endif
+
 static mbuf_t makeActionFrameFromBytes(const uint8_t *bytes, size_t length);
 
 static bool preparePsfCandidateAfterStart(
@@ -1151,9 +1336,17 @@ struct MifPacingPeerView {
     uint64_t contextGeneration;
     uint64_t powerGeneration;
     uint64_t stationGeneration;
+    uint64_t rocGeneration;
     uint64_t rxMonotonicUs;
     uint64_t sampleUs;
+    uint64_t peerIncarnation;
+    uint64_t psfRevision;
+    uint64_t mifRevision;
+    uint64_t mifRxMonotonicUs;
     uint16_t rxChannelIndex;
+    uint16_t mifRxChannelIndex;
+    uint8_t slot;
+    bool ownerCurrent;
     bool rocActive;
     bool rocChannel6Confirmed;
     bool endSeen;
@@ -1162,6 +1355,19 @@ struct MifPacingPeerView {
     bool syncConsistent;
     bool fresh;
     bool rxChannel6Confirmed;
+    bool tracked;
+    bool hasPsf;
+    bool hasMif;
+    bool psfComplete;
+    bool mifComplete;
+    bool mifFresh;
+    bool mifSyncConsistent;
+    bool historyCompatible;
+    bool mifRxChannel6Confirmed;
+    bool queueLeaseActive;
+    bool ticketReclaimed;
+    bool txRingEmpty;
+    bool ringIndicesConsistent;
 };
 
 struct MifPacingPeerRead {
@@ -1194,24 +1400,58 @@ static IOReturn readMifPacingPeerInGate(OSObject *, void *opaque,
 
     auto &sc = owner->com;
     auto &ic = sc.sc_ic;
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332)
+    const bool bootstrapSelected = probe->mifBootstrapSelected;
+    const uint8_t bootstrapSlot = probe->mifBootstrapBinding.slot;
+#else
+    // Bootstrap peer pinning is a discovery-profile transition. Keep the
+    // ordinary/resident profiles on their existing global-newest PSF path.
+    const bool bootstrapSelected = false;
+    const uint8_t bootstrapSlot = 0xff;
+#endif
     const auto session = owner->nativeP2pRocEvents_.snapshot();
     auto &view = read->view;
     view.endSeen = session.endSeen;
     view.outcomeUnknown = session.outcomeUnknown;
-    view.rocActive = session.commandReturned && session.commandResult == 0 &&
+    view.rocGeneration = session.generation;
+    view.ownerCurrent = owner->nativeP2pBusy() &&
+        __atomic_load_n(&owner->nativeP2pProbeOwner_, __ATOMIC_ACQUIRE) ==
+            reinterpret_cast<void *>(probe->workerThread) &&
+        owner->nativeP2pProbeGeneration_ == probe->contextGeneration &&
+        uint32_t(sc.sc_generation) == probe->powerGeneration &&
+        __atomic_load_n(&sc.sc_tx_rate_generation, __ATOMIC_ACQUIRE) ==
+            probe->stationGeneration;
+    view.rocActive = view.ownerCurrent &&
+        session.commandReturned && session.commandResult == 0 &&
         session.configuration == IWX_SESSION_PROTECT_CONF_P2P_GO_NEGOTIATION &&
         session.startSeen && session.startStatus == 1 &&
         session.generation == probe->contextGeneration &&
-        !session.endSeen && !session.outcomeUnknown &&
-        owner->nativeP2pProbeGeneration_ == probe->contextGeneration &&
         sc.sc_p2p_roc.token == probe->contextGeneration &&
-        sc.sc_p2p_roc.phase == IWX_P2P_ROC_SESSION_ACKED;
+        sc.sc_p2p_roc.phase == IWX_P2P_ROC_SESSION_ACKED &&
+        !session.endSeen && !session.outcomeUnknown;
     view.rocChannel6Confirmed = isCurrentIeeeChannel6(
         &ic, sc.sc_p2p_roc.roc_channel);
 
-    owner->tahoeP2pRxConsume();
-    const uint64_t nowUs = p2pProbeMonotonicNanoseconds() / 1000ULL;
+    uint64_t nowUs = p2pProbeMonotonicNanoseconds() / 1000ULL;
     view.sampleUs = nowUs;
+    P2PTxDiagnosticSnapshot txSnapshot{};
+    if (bootstrapSelected && captureP2PTxSnapshot(owner, &txSnapshot)) {
+        view.queueLeaseActive = txSnapshot.queueLeaseActive;
+        view.txRingEmpty = txSnapshot.txRingEmpty;
+        view.ringIndicesConsistent = txSnapshot.ringIndicesConsistent;
+        view.ticketReclaimed = txSnapshot.ticketCompleted &&
+            txSnapshot.actionState == static_cast<uint32_t>(
+                TahoeP2PActionTxState::kIdle) &&
+            txSnapshot.outstandingTx == 0 &&
+            (!txSnapshot.ticketArmed || txSnapshot.ticketCompleted);
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332)
+        if (bootstrapSelected)
+            view.ticketReclaimed =
+                mifBurstTicketMatchesPreviousCompletion(probe, txSnapshot) &&
+                ticketIdentityMatches(probe->mifBootstrapTicketIdentity,
+                                      txSnapshot);
+#endif
+    }
     IntelAwdlPeer::RuntimeEpochs epochs{
         owner->nativeP2pProbeGeneration_,
         uint64_t(uint32_t(sc.sc_generation)),
@@ -1229,14 +1469,41 @@ static IOReturn readMifPacingPeerInGate(OSObject *, void *opaque,
         !view.rocActive || !view.rocChannel6Confirmed || nowUs == 0)
         return kIOReturnSuccess;
 
+    if (bootstrapSelected && probe->leaseValue &&
+        probe->leasePublished && probe->addAcknowledged &&
+        sc.sc_p2p.initialized &&
+        sc.sc_p2p.mac_state == IWX_P2P_RESOURCE_ACTIVE &&
+        sc.sc_p2p.binding_state == IWX_P2P_RESOURCE_ACTIVE &&
+        sc.sc_p2p.phy_leased) {
+        const auto &rxLease = owner->tahoe_p2p_rx_lease_;
+        const bool rxLeaseCurrent = rxLease.active &&
+            rxLease.contextGeneration == probe->contextGeneration &&
+            rxLease.currentContextGeneration ==
+                owner->nativeP2pProbeGeneration_ &&
+            rxLease.powerGeneration == probe->powerGeneration &&
+            rxLease.currentPowerGeneration == uint32_t(sc.sc_generation) &&
+            rxLease.stationGeneration == probe->stationGeneration &&
+            rxLease.currentStationGeneration ==
+                __atomic_load_n(&sc.sc_tx_rate_generation, __ATOMIC_ACQUIRE);
+        if (rxLeaseCurrent) {
+            owner->tahoeP2pRxConsume();
+            nowUs = p2pProbeMonotonicNanoseconds() / 1000ULL;
+            view.sampleUs = nowUs;
+        }
+    }
+
     IntelAwdlPeerRuntime::PsfPeerSnapshot newest{};
+    uint8_t newestSlot = 0xff;
     bool found = false;
     for (uint8_t slot = 0; slot < IntelAwdlPeerRuntime::kPeerCapacity;
          ++slot) {
+        if (bootstrapSelected && slot != bootstrapSlot)
+            continue;
         IntelAwdlPeerRuntime::PsfPeerSnapshot candidate{};
         if (!owner->tahoe_awdl_peer_runtime_.getPsfSnapshot(
                 slot, epochs, nowUs, &candidate) || !candidate.tracked ||
-            !candidate.hasPsf || !candidate.psfFresh ||
+            !candidate.hasPsf ||
+            (!bootstrapSelected && !candidate.psfFresh) ||
             candidate.contextGeneration != epochs.contextGeneration ||
             candidate.powerGeneration != epochs.powerGeneration ||
             candidate.stationGeneration != epochs.stationGeneration)
@@ -1244,6 +1511,7 @@ static IOReturn readMifPacingPeerInGate(OSObject *, void *opaque,
         if (!found || candidate.psfRxMonotonicUs >
                           newest.psfRxMonotonicUs) {
             newest = candidate;
+            newestSlot = slot;
             found = true;
         }
     }
@@ -1261,6 +1529,35 @@ static IOReturn readMifPacingPeerInGate(OSObject *, void *opaque,
     view.rxChannel6Confirmed = newest.rxChannel <
             sizeof(ic.ic_channels) / sizeof(ic.ic_channels[0]) &&
         ieee80211_chan2ieee(&ic, &ic.ic_channels[newest.rxChannel]) == 6;
+    view.slot = bootstrapSelected ? bootstrapSlot :
+        static_cast<uint8_t>(newestSlot);
+    view.peerIncarnation = newest.peerIncarnation;
+    view.psfRevision = newest.psfRevision;
+    view.mifRevision = newest.mifRevision;
+    view.mifRxMonotonicUs = newest.mifRxMonotonicUs;
+    view.mifRxChannelIndex = newest.mif.rxChannel;
+    view.tracked = newest.tracked;
+    view.hasPsf = newest.hasPsf;
+    view.hasMif = newest.hasMif;
+    view.psfComplete = view.complete && newest.psfRevision != 0 &&
+        newest.syncConsistent;
+    const bool sameMifEntry = newest.mif.peerIncarnation ==
+            newest.peerIncarnation &&
+        newest.mif.mifRevision == newest.mifRevision &&
+        newest.mif.rxMonotonicUs == newest.mifRxMonotonicUs &&
+        newest.mif.contextGeneration == newest.contextGeneration &&
+        newest.mif.powerGeneration == newest.powerGeneration &&
+        newest.mif.stationGeneration == newest.stationGeneration;
+    view.mifComplete = newest.hasMif && newest.mif.present &&
+        newest.mif.complete && sameMifEntry;
+    view.mifFresh = newest.mifFresh;
+    view.mifSyncConsistent = newest.mifSyncConsistent &&
+        newest.mif.syncConsistent;
+    view.historyCompatible = newest.historyCompatible;
+    view.mifRxChannel6Confirmed = newest.mif.rxChannel <
+            sizeof(ic.ic_channels) / sizeof(ic.ic_channels[0]) &&
+        ieee80211_chan2ieee(&ic,
+            &ic.ic_channels[newest.mif.rxChannel]) == 6;
     return kIOReturnSuccess;
 }
 
@@ -1279,6 +1576,162 @@ static bool readMifPacingPeer(P2PProbeRun *probe, MifPacingPeerView *output)
     *output = read.view;
     return true;
 }
+
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332)
+enum MifBootstrapPairPhase : uint32_t {
+    kMifBootstrapPairNotSelected = 0,
+    kMifBootstrapPairWaitingForFreshPeer = 1,
+    kMifBootstrapPairCandidateSelected = 2,
+    kMifBootstrapPairMifAttempted = 3,
+    kMifBootstrapPairMifCompleted = 4,
+    kMifBootstrapPairMifFailed = 5
+};
+
+constexpr uint64_t kMifBootstrapPairPinnedSnapshotChanged = 1ULL << 33;
+constexpr uint64_t kMifBootstrapPairTicketMismatch = 1ULL << 34;
+
+static Test079BootstrapPairTransition::Input makeMifBootstrapPairInput(
+    const P2PProbeRun *probe, const MifPacingPeerView &peer)
+{
+    using namespace Test079BootstrapPairTransition;
+    Input input{};
+    if (!probe)
+        return input;
+
+    input.bootstrap.epochs = {
+        probe->mifBootstrapBinding.contextGeneration,
+        probe->mifBootstrapBinding.powerGeneration,
+        probe->mifBootstrapBinding.stationGeneration,
+        probe->mifBootstrapBinding.rocGeneration};
+    input.bootstrap.completedUs = probe->mifBootstrapCompletedUs;
+    input.bootstrap.upgradeDeadlineUs =
+        probe->mifPacingWindowEndUs < probe->psfCandidate.hardDeadlineUs ?
+            probe->mifPacingWindowEndUs : probe->psfCandidate.hardDeadlineUs;
+    input.bootstrap.peerIncarnation =
+        probe->mifBootstrapBinding.peerIncarnation;
+    input.bootstrap.mifRevision = probe->mifBootstrapBinding.mifRevision;
+    // Bootstrap selection is deliberately allowed to start from MIF-only
+    // evidence; no PSF revision existed in that binding to anchor against.
+    input.bootstrap.psfRevision = 0;
+    input.bootstrap.slot = probe->mifBootstrapBinding.slot;
+    input.bootstrap.selected = probe->mifBootstrapSelected;
+    input.bootstrap.submitted = probe->mifBootstrapSubmitted;
+    input.bootstrap.succeeded = probe->mifBootstrapSucceeded;
+
+    input.live.epochs = {peer.contextGeneration, peer.powerGeneration,
+        peer.stationGeneration, peer.rocGeneration};
+    input.live.nowUs = peer.sampleUs;
+    input.live.ownerCurrent = peer.ownerCurrent;
+    input.live.rocActive = peer.rocActive;
+    input.live.rocClosing = peer.endSeen || peer.outcomeUnknown;
+    input.live.rocAckedChannel6 = peer.rocActive &&
+        peer.rocChannel6Confirmed;
+    input.live.queueLeaseActive = peer.queueLeaseActive;
+    input.live.ticketReclaimed = peer.ticketReclaimed;
+    input.live.txRingEmpty = peer.txRingEmpty;
+    input.live.ringIndicesConsistent = peer.ringIndicesConsistent;
+
+    input.peer.epochs = {peer.contextGeneration, peer.powerGeneration,
+        peer.stationGeneration, peer.rocGeneration};
+    input.peer.peerIncarnation = peer.peerIncarnation;
+    input.peer.psfRevision = peer.psfRevision;
+    input.peer.mifRevision = peer.mifRevision;
+    input.peer.psfRxUs = peer.rxMonotonicUs;
+    input.peer.mifRxUs = peer.mifRxMonotonicUs;
+    input.peer.psfChannel = peer.rxChannel6Confirmed ? 6 : 0;
+    input.peer.mifChannel = peer.mifRxChannel6Confirmed ? 6 : 0;
+    input.peer.slot = peer.slot;
+    input.peer.tracked = peer.tracked;
+    input.peer.hasPsf = peer.hasPsf;
+    input.peer.hasMif = peer.hasMif;
+    input.peer.psfComplete = peer.psfComplete;
+    input.peer.mifComplete = peer.mifComplete;
+    input.peer.psfFresh = peer.fresh;
+    input.peer.mifFresh = peer.mifFresh;
+    input.peer.mifSyncConsistent = peer.mifSyncConsistent;
+    input.peer.historyCompatible = peer.historyCompatible;
+    input.normalMifAlreadyAttempted = probe->mifBootstrapPairMifAttempted;
+    return input;
+}
+
+static bool mifBootstrapPairSnapshotMatches(
+    const P2PProbeRun *probe, const MifPacingPeerView &peer);
+
+static bool evaluateMifBootstrapPairTransition(
+    P2PProbeRun *probe, const MifPacingPeerView &peer, bool allowClaim)
+{
+    if (!probe)
+        return false;
+    if (probe->mifBootstrapPairChecks != UINT32_MAX)
+        ++probe->mifBootstrapPairChecks;
+
+    const uint32_t oldStatus = probe->mifBootstrapPairStatus;
+    const uint64_t oldBlockers = probe->mifBootstrapPairBlockers;
+    const bool wasClaimed = probe->mifBootstrapPairClaimed;
+    const auto input = makeMifBootstrapPairInput(probe, peer);
+    const auto plan = Test079BootstrapPairTransition::evaluate(input);
+    uint64_t blockers = plan.blockers;
+    if (plan.permitExistingNormalMifPath) {
+        if (!probe->mifBootstrapPairClaimed) {
+            if (!allowClaim || probe->mifBootstrapPairMifAttempted) {
+                blockers |= Test079BootstrapPairTransition::kAttemptAlreadyUsed;
+            } else {
+                probe->mifBootstrapPairClaimed = true;
+                probe->mifBootstrapPairSlot = peer.slot;
+                probe->mifBootstrapPairPeerIncarnation = peer.peerIncarnation;
+                probe->mifBootstrapPairPsfRevision = peer.psfRevision;
+                probe->mifBootstrapPairMifRevision = peer.mifRevision;
+                probe->mifBootstrapPairPsfRxUs = peer.rxMonotonicUs;
+                probe->mifBootstrapPairMifRxUs = peer.mifRxMonotonicUs;
+            }
+        } else if (!mifBootstrapPairSnapshotMatches(probe, peer)) {
+            blockers |= kMifBootstrapPairPinnedSnapshotChanged;
+        }
+    }
+
+    probe->mifBootstrapPairBlockers = blockers;
+    if (blockers == Test079BootstrapPairTransition::kNoBlocker &&
+        probe->mifBootstrapPairClaimed) {
+        probe->mifBootstrapPairStatus =
+            probe->mifBootstrapPairMifAttempted ?
+                kMifBootstrapPairMifAttempted :
+                kMifBootstrapPairCandidateSelected;
+        if (probe->mifBootstrapPairStatus != oldStatus ||
+            probe->mifBootstrapPairBlockers != oldBlockers ||
+            probe->mifBootstrapPairClaimed != wasClaimed)
+            probe->mifBootstrapPairDiagnosticsDirty = true;
+        return true;
+    }
+    probe->mifBootstrapPairStatus = probe->mifBootstrapPairMifCompleted ?
+        (probe->mifBootstrapPairMifSucceeded ?
+            kMifBootstrapPairMifCompleted : kMifBootstrapPairMifFailed) :
+        kMifBootstrapPairWaitingForFreshPeer;
+    if (probe->mifBootstrapPairStatus != oldStatus ||
+        probe->mifBootstrapPairBlockers != oldBlockers ||
+        probe->mifBootstrapPairClaimed != wasClaimed)
+        probe->mifBootstrapPairDiagnosticsDirty = true;
+    return false;
+}
+
+static bool mifBootstrapPairSnapshotMatches(
+    const P2PProbeRun *probe, const MifPacingPeerView &peer)
+{
+    return probe && probe->mifBootstrapPairClaimed &&
+        probe->mifBootstrapPairSlot == peer.slot &&
+        probe->mifBootstrapPairPeerIncarnation == peer.peerIncarnation &&
+        probe->mifBootstrapPairPsfRevision == peer.psfRevision &&
+        probe->mifBootstrapPairMifRevision == peer.mifRevision &&
+        probe->mifBootstrapPairPsfRxUs == peer.rxMonotonicUs &&
+        probe->mifBootstrapPairMifRxUs == peer.mifRxMonotonicUs &&
+        probe->contextGeneration == peer.contextGeneration &&
+        probe->powerGeneration == peer.powerGeneration &&
+        probe->stationGeneration == peer.stationGeneration &&
+        probe->mifBootstrapBinding.rocGeneration == peer.rocGeneration &&
+        peer.ownerCurrent && peer.rocActive &&
+        peer.rocChannel6Confirmed && peer.rxChannel6Confirmed &&
+        peer.mifRxChannel6Confirmed;
+}
+#endif
 
 #if defined(ITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332)
 struct MifBootstrapPeerView {
@@ -1330,7 +1783,6 @@ static IOReturn readMifBootstrapPeerInGate(OSObject *, void *opaque,
     view.rocChannel6Confirmed = isCurrentIeeeChannel6(
         &ic, sc.sc_p2p_roc.roc_channel);
 
-    owner->tahoeP2pRxConsume();
     const uint64_t nowUs = p2pProbeMonotonicNanoseconds() / 1000ULL;
     view.sampleUs = nowUs;
     IntelAwdlPeer::RuntimeEpochs epochs{
@@ -3710,6 +4162,13 @@ static NativeAwdlProbe::MifPacingPlan refreshMifPacingAnchorInGate(
         return {NativeAwdlProbe::MifPacingDecision::Stop,
                 NativeAwdlProbe::MifPacingReason::InvalidInput,
                 0, probe->mifPacingWindowEndUs, 0, 0};
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332)
+    if (probe->mifBootstrapSelected &&
+        !evaluateMifBootstrapPairTransition(probe, read.view, false))
+        return {NativeAwdlProbe::MifPacingDecision::Stop,
+                NativeAwdlProbe::MifPacingReason::PreparedFrameStale,
+                0, probe->mifPacingWindowEndUs, 0, 0};
+#endif
     const uint64_t afterDrainUs = p2pProbeMonotonicNanoseconds() / 1000ULL;
     *sampleUs = afterDrainUs > read.view.sampleUs ? afterDrainUs :
                 read.view.sampleUs;
@@ -3749,6 +4208,25 @@ static NativeAwdlProbe::MifPacingPlan finalCheckMifPacingAnchorInGate(
     auto &sc = owner->com;
     auto &ic = sc.sc_ic;
     const auto session = owner->nativeP2pRocEvents_.snapshot();
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332)
+    if (probe->mifBootstrapSelected) {
+        MifPacingPeerRead read{};
+        read.owner = owner;
+        read.probe = const_cast<P2PProbeRun *>(probe);
+        if (readMifPacingPeerInGate(nullptr, &read, nullptr, nullptr, nullptr) !=
+                kIOReturnSuccess ||
+            !evaluateMifBootstrapPairTransition(
+                const_cast<P2PProbeRun *>(probe), read.view, false))
+            return {NativeAwdlProbe::MifPacingDecision::Stop,
+                    NativeAwdlProbe::MifPacingReason::PreparedFrameStale,
+                    0, probe->mifPacingWindowEndUs, 0, 0};
+        const uint64_t sampleUs = nowUs > read.view.sampleUs ?
+            nowUs : read.view.sampleUs;
+        return NativeAwdlProbe::planMifPacing(makeMifPacingInput(
+            probe, read.view, sampleUs, probe->mifPacingCandidateOrdinal,
+            probe->mifPacingLastConsumedAnchorRxUs));
+    }
+#endif
     MifPacingPeerView peer{};
     peer.contextGeneration = probe->mifPacingCandidateContextGeneration;
     peer.powerGeneration = probe->mifPacingCandidatePowerGeneration;
@@ -4161,7 +4639,7 @@ static bool tryPrepareMifAtPacingPoint(
 {
     if (!probe || !frame || *frame || probe->mifBurstStopped ||
 #if defined(ITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332)
-        probe->mifBootstrapSelected ||
+        probe->mifBootstrapPairMifAttempted ||
 #endif
         probe->mifCandidatePrepared || !probe->psfResultCaptured ||
         !probe->psfTxSucceeded ||
@@ -4213,8 +4691,27 @@ static bool tryPrepareMifAtPacingPoint(
         recordMifPacingPlan(probe, plan, false);
         return false;
     }
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332)
+    if (probe->mifBootstrapSelected &&
+        !evaluateMifBootstrapPairTransition(probe, peer, true)) {
+        if (probe->mifBootstrapPairClaimed ||
+            (probe->mifBootstrapPairBlockers &
+                (Test079BootstrapPairTransition::kWindowExpired |
+                 kMifBootstrapPairPinnedSnapshotChanged)))
+            probe->mifBurstStopped = true;
+        probe->mifStatus = kMifProbeWaitingForPeerPsf;
+        probe->mifPacingReason = static_cast<uint32_t>(
+            NativeAwdlProbe::MifPacingReason::WaitingForFreshPsf);
+        probe->mifPacingEarliestUs = 0;
+        probe->mifPacingLatestUs = probe->mifPacingWindowEndUs;
+        publishMifProbeDetails(probe->owner, probe);
+        return false;
+    }
+#endif
     if (peer.rxMonotonicUs == 0) {
 #if defined(ITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332)
+        if (probe->mifBootstrapSelected)
+            return false;
         return tryPrepareMifBootstrapAtPacingPoint(
             probe, session, tx, nowUs, frame);
 #else
@@ -4383,6 +4880,7 @@ static IOReturn tahoeP2pSubmitActionInGate(OSObject *, void *opaque,
             NativeAwdlProbe::kMifBurstMaximumFrames &&
 #if defined(ITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332)
         (!probe->mifBootstrapCandidatePrepared ||
+         probe->mifBootstrapSubmitted ||
          (probe->mifBootstrapSelected && !probe->mifBootstrapSubmitted &&
           probe->mifBootstrapStatus == static_cast<uint32_t>(
               Test070MifBootstrap::Status::Ready))) &&
@@ -4446,7 +4944,8 @@ static IOReturn tahoeP2pSubmitActionInGate(OSObject *, void *opaque,
     if (mifFrame) {
 #if defined(ITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332)
         const bool bootstrapMif =
-            probe->mifBootstrapCandidatePrepared;
+            probe->mifBootstrapCandidatePrepared &&
+            !probe->mifBootstrapSubmitted;
 #else
         const bool bootstrapMif = false;
 #endif
@@ -4790,6 +5289,21 @@ static IOReturn tahoeP2pSubmitActionInGate(OSObject *, void *opaque,
     }
 #endif
 
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332)
+    const bool bootstrapMifSubmit = mifFrame &&
+        probe->mifBootstrapCandidatePrepared &&
+        !probe->mifBootstrapSubmitted;
+    if (mifFrame && probe->mifBootstrapSelected &&
+        probe->mifBootstrapPairClaimed && !bootstrapMifSubmit &&
+        !probe->mifBootstrapPairMifAttempted) {
+        // This is the only normal paired-MIF attempt allowed after bootstrap.
+        // Latch before the submit call so a failed prepare/doorbell cannot
+        // re-enter using unchanged peer evidence.
+        probe->mifBootstrapPairMifAttempted = true;
+        probe->mifBootstrapPairStatus = kMifBootstrapPairMifAttempted;
+        probe->mifBootstrapPairDiagnosticsDirty = true;
+    }
+#endif
     probe->actionTxAttempted = true;
     probe->actionTxRequired = true;
     if (mifFrame) {
@@ -4805,7 +5319,8 @@ static IOReturn tahoeP2pSubmitActionInGate(OSObject *, void *opaque,
     TahoeP2PActionTxControlSubmitFence bootstrapSubmitFence{};
     const TahoeP2PActionTxControlSubmitFence *bootstrapSubmitFencePointer =
         nullptr;
-    if (mifFrame && probe->mifBootstrapCandidatePrepared) {
+    if (mifFrame && probe->mifBootstrapCandidatePrepared &&
+        !probe->mifBootstrapSubmitted) {
         bootstrapSubmitFence.phaseOriginUs = probe->psfCandidate.sampleUs;
         bootstrapSubmitFence.peerMifRxUs =
             probe->mifBootstrapBinding.rxMonotonicUs;
@@ -4866,7 +5381,8 @@ static IOReturn tahoeP2pSubmitActionInGate(OSObject *, void *opaque,
         );
 #endif
 #if defined(ITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332)
-    if (mifFrame && probe->mifBootstrapCandidatePrepared) {
+    if (mifFrame && probe->mifBootstrapCandidatePrepared &&
+        !probe->mifBootstrapSubmitted) {
         const uint32_t submitStage = __atomic_load_n(
             &owner->nativeP2pActionTx_.submitDiagnostics.lastStage,
             __ATOMIC_ACQUIRE);
@@ -4877,11 +5393,31 @@ static IOReturn tahoeP2pSubmitActionInGate(OSObject *, void *opaque,
                 TahoeP2PActionTxSubmitStage::kPostDoorbellFinish));
         if (realDoorbell) {
             probe->mifBootstrapSubmitted = true;
+            P2PTxDiagnosticSnapshot submittedSnapshot{};
+            if (captureP2PTxSnapshot(owner, &submittedSnapshot))
+                probe->mifBootstrapTicketIdentity =
+                    ticketIdentityFromSnapshot(submittedSnapshot);
         } else {
             probe->mifBootstrapStatus = static_cast<uint32_t>(
                 Test070MifBootstrap::Status::Blocked);
             probe->mifBootstrapBlockers |=
                 Test070MifBootstrap::kCandidatePreparationFailed;
+        }
+    } else if (mifFrame && probe->mifBootstrapSelected &&
+        probe->mifBootstrapPairMifAttempted) {
+        const uint32_t submitStage = __atomic_load_n(
+            &owner->nativeP2pActionTx_.submitDiagnostics.lastStage,
+            __ATOMIC_ACQUIRE);
+        const bool realDoorbell =
+            submitStage == static_cast<uint32_t>(
+                TahoeP2PActionTxSubmitStage::kDoorbellIssued) ||
+            submitStage == static_cast<uint32_t>(
+                TahoeP2PActionTxSubmitStage::kPostDoorbellFinish);
+        if (realDoorbell) {
+            P2PTxDiagnosticSnapshot submittedSnapshot{};
+            if (captureP2PTxSnapshot(owner, &submittedSnapshot))
+                probe->mifBootstrapPairTicketIdentity =
+                    ticketIdentityFromSnapshot(submittedSnapshot);
         }
     }
 #endif
@@ -5126,12 +5662,14 @@ static bool snapshotEqual(const NativeP2PProbe::Snapshot &a,
         a.resourceMayExist == b.resourceMayExist;
 }
 
-static int readRocState(P2PProbeRun *probe, RocEventRun *event)
+static int readRocState(P2PProbeRun *probe, RocEventRun *event,
+                        bool consumeRx = false)
 {
     if (!probe || !probe->owner || !event)
         return EINVAL;
     event->probe = probe;
     event->operation = kRocRead;
+    event->consumeRxAfterRead = consumeRx;
     IOCommandGate *gate = probe->owner->tahoeP2pCommandGate();
     if (!gate || gate->runAction(ItlIwx::tahoeP2pRocEventAction, event) !=
                      kIOReturnSuccess || !event->txSnapshotValid)
@@ -5249,7 +5787,7 @@ static int runTxProbeSession(P2PProbeRun *probe, mbuf_t *frame,
     P2PProbeObservationWindow observationWindow(
         p2pProbeMonotonicNanoseconds(), configuration, durationMs);
     while (!observationWindow.expired(p2pProbeMonotonicNanoseconds())) {
-        const int readError = readRocState(probe, &event);
+        const int readError = readRocState(probe, &event, true);
         if (readError)
             return readError;
         if (event.snapshot.configuration != configuration)
@@ -5310,12 +5848,63 @@ static int runTxProbeSession(P2PProbeRun *probe, mbuf_t *frame,
                 TahoeP2PActionTxState::kIdle)) {
             probe->mifResultCaptured = true;
             probe->mifTxCompleted = true;
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332)
+            const auto mifCompletion = classifyMifCompletion(
+                probe->mifBootstrapSelected,
+                probe->mifBootstrapPairMifAttempted,
+                probe->mifBootstrapTicketIdentity,
+                probe->mifBootstrapPairTicketIdentity,
+                event.txSnapshot);
+            probe->mifTxSucceeded = mifCompletion.txSucceeded;
+            const uint64_t mifCompletionUs =
+                p2pProbeMonotonicNanoseconds() / 1000ULL;
+            const bool bootstrapTicketCompletion =
+                probe->mifBootstrapSubmitted &&
+                !probe->mifBootstrapPairMifAttempted &&
+                ticketIdentityFieldsMatch(probe->mifBootstrapTicketIdentity,
+                                          event.txSnapshot);
+            if (bootstrapTicketCompletion) {
+                probe->mifBootstrapCompletedUs = mifCompletionUs;
+                probe->mifBootstrapSucceeded =
+                    ticketIdentityMatches(probe->mifBootstrapTicketIdentity,
+                                          event.txSnapshot);
+                probe->mifBootstrapPairDiagnosticsDirty = true;
+                if (!probe->mifBootstrapSucceeded) {
+                    probe->mifBootstrapStatus = static_cast<uint32_t>(
+                        Test070MifBootstrap::Status::Blocked);
+                    probe->mifBootstrapBlockers |=
+                        Test070MifBootstrap::kCandidatePreparationFailed;
+                }
+            } else if (probe->mifBootstrapSubmitted &&
+                       !probe->mifBootstrapPairMifAttempted &&
+                       !probe->mifBootstrapSucceeded) {
+                probe->mifBootstrapStatus = static_cast<uint32_t>(
+                    Test070MifBootstrap::Status::Blocked);
+                probe->mifBootstrapBlockers |=
+                    Test070MifBootstrap::kCandidatePreparationFailed;
+            }
+            if (probe->mifBootstrapSelected &&
+                probe->mifBootstrapPairMifAttempted) {
+                probe->mifBootstrapPairMifCompleted = true;
+                probe->mifBootstrapPairMifSucceeded =
+                    mifCompletion.txSucceeded;
+                probe->mifBootstrapPairStatus =
+                    probe->mifBootstrapPairMifSucceeded ?
+                        kMifBootstrapPairMifCompleted :
+                        kMifBootstrapPairMifFailed;
+                probe->mifBootstrapPairDiagnosticsDirty = true;
+                if (!probe->mifBootstrapPairMifSucceeded) {
+                    probe->mifBootstrapPairBlockers |=
+                        kMifBootstrapPairTicketMismatch;
+                    probe->mifBurstStopped = true;
+                    probe->mifBurstStopReason = static_cast<uint32_t>(
+                        NativeAwdlProbe::MifBurstStopReason::PreviousTicketFailed);
+                }
+            }
+#else
             probe->mifTxSucceeded =
                 event.txSnapshot.frameAttemptSucceeded &&
                 (event.txSnapshot.ticketStatus & 0xffu) == 1u;
-#if defined(ITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332)
-            if (probe->mifBootstrapCandidatePrepared)
-                probe->mifBootstrapSucceeded = probe->mifTxSucceeded;
 #endif
             probe->mifPeerAcknowledged = event.txSnapshot.peerAcknowledged;
             probe->mifTicketStatus = event.txSnapshot.ticketStatus;
@@ -5335,7 +5924,7 @@ static int runTxProbeSession(P2PProbeRun *probe, mbuf_t *frame,
                 probe->discoveryModeSelected &&
                 probe->discoveryMode ==
                     NativeAwdlDiscoveryBinding::Mode::kMifCurrentSlot &&
-                !probe->mifBootstrapCandidatePrepared &&
+                mifCompletion.grantsOwnFirst &&
                 probe->discoveryOwnFirstMifCompletionUs == 0)
                 probe->discoveryOwnFirstMifCompletionUs =
                     probe->mifBurstLastCompletionUs;
@@ -5371,7 +5960,9 @@ static int runTxProbeSession(P2PProbeRun *probe, mbuf_t *frame,
         if(successfulStart&&!event.snapshot.endSeen&&!event.snapshot.outcomeUnknown&&
            probe->mifResultCaptured&&probe->mifTxSucceeded&&probe->nativeDataAttempts<4
 #if defined(ITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332)
-           && !probe->mifBootstrapSelected
+           && (!probe->mifBootstrapSelected ||
+               (probe->mifBootstrapPairMifCompleted &&
+                probe->mifBootstrapPairMifSucceeded))
 #endif
 #if defined(ITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332)
            && !probe->discoveryConsumed
@@ -5403,10 +5994,8 @@ static int runTxProbeSession(P2PProbeRun *probe, mbuf_t *frame,
                 };
                 const uint32_t blockers=NativeAwdlDataGate::blockers(dataState);
                 if(blockers){NativeAwdlBSD::gateObservation(blockers);return kIOReturnNotReady;}
-                // Do not wait for the periodic timer: this radio lease is
-                // shorter than one timer period. Drain real peer/RX records
-                // while the matching window is still open.
-                self->tahoeP2pRxConsume();
+                // RX has an independent bounded drain on the active main-gate
+                // ROC path; data dequeue remains behind its own strict gates.
                 NativeAwdlBSD::poll(true,uint32_t(self->com.sc_generation));
 #if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
                 if (nativeResidentAddressProfileEnabled(self)) {
@@ -5479,6 +6068,12 @@ static int runTxProbeSession(P2PProbeRun *probe, mbuf_t *frame,
                     NativeAwdlBSD::gateObservation(peerBlockers);
                     return kIOReturnNotReady;
                 }
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332)
+                if (run->mifBootstrapSelected && !discoveryPacket) {
+                    NativeAwdlBSD::gateObservation(1u << 14);
+                    return kIOReturnNotReady;
+                }
+#endif
                 if (!packet)
                     packet = NativeAwdlBSD::nextTx(
                         self->nativeP2pActionTx_.nextSequenceNumber, &token);
@@ -5788,6 +6383,10 @@ static int runTxProbeSession(P2PProbeRun *probe, mbuf_t *frame,
         if (event.snapshot.outcomeUnknown)
             break;
 
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332)
+        if (probe->mifBootstrapSelected)
+            publishMifBootstrapPairDiagnostics(owner, probe);
+#endif
         const uint32_t sleepMs = observationWindow.nextSleepMilliseconds(
             p2pProbeMonotonicNanoseconds());
         uint32_t boundedSleepMs = sleepMs;
@@ -6142,9 +6741,45 @@ IOReturn ItlIwx::tahoeP2pRocEventAction(OSObject *, void *opaque,
     }
     action->snapshot = tracker.snapshot();
     storeRocSnapshot(owner, action->snapshot);
-    if (action->operation == kRocRead)
+    if (action->operation == kRocRead) {
         action->txSnapshotValid = captureP2PTxSnapshot(
             owner, &action->txSnapshot);
+        if (action->consumeRxAfterRead && action->txSnapshotValid) {
+            auto &sc = owner->com;
+            const auto &session = action->snapshot;
+            const auto &rxLease = owner->tahoe_p2p_rx_lease_;
+            const bool rxLeaseCurrent = rxLease.active &&
+                rxLease.contextGeneration == probe->contextGeneration &&
+                rxLease.currentContextGeneration ==
+                    owner->nativeP2pProbeGeneration_ &&
+                rxLease.powerGeneration == probe->powerGeneration &&
+                rxLease.currentPowerGeneration ==
+                    uint32_t(sc.sc_generation) &&
+                rxLease.stationGeneration == probe->stationGeneration &&
+                rxLease.currentStationGeneration ==
+                    __atomic_load_n(&sc.sc_tx_rate_generation,
+                                    __ATOMIC_ACQUIRE);
+            const bool activeAckedRoc = session.commandReturned &&
+                session.commandResult == 0 &&
+                session.configuration ==
+                    IWX_SESSION_PROTECT_CONF_P2P_GO_NEGOTIATION &&
+                session.generation == probe->contextGeneration &&
+                session.startSeen && session.startStatus == 1 &&
+                !session.endSeen && !session.outcomeUnknown &&
+                sc.sc_p2p_roc.token == probe->contextGeneration &&
+                sc.sc_p2p_roc.phase == IWX_P2P_ROC_SESSION_ACKED &&
+                isCurrentIeeeChannel6(&sc.sc_ic,
+                                      sc.sc_p2p_roc.roc_channel);
+            const bool p2pOwnerCurrent = probe->leaseValue &&
+                probe->leasePublished && probe->addAcknowledged &&
+                sc.sc_p2p.initialized &&
+                sc.sc_p2p.mac_state == IWX_P2P_RESOURCE_ACTIVE &&
+                sc.sc_p2p.binding_state == IWX_P2P_RESOURCE_ACTIVE &&
+                sc.sc_p2p.phy_leased;
+            if (rxLeaseCurrent && activeAckedRoc && p2pOwnerCurrent)
+                owner->tahoeP2pRxConsume();
+        }
+    }
     return kIOReturnSuccess;
 }
 
@@ -6745,13 +7380,22 @@ IOReturn ItlIwx::tahoeP2pFinishAction(OSObject *, void *contextArg,
     if (owner->tahoeP2pOnMainGate() &&
         owner->nativeAwdlRxEventOwnerSerial_ != 0) {
         const auto trace = owner->nativeAwdlRxEventTimeline_.snapshot();
+        const bool sameRunEpoch =
+            trace.epochs.contextGeneration == run->contextGeneration &&
+            trace.epochs.powerGeneration == run->powerGeneration &&
+            trace.epochs.stationGeneration == run->stationGeneration &&
+            // This probe's ROC generation is its context token; the active
+            // session and resource gates use the same equality throughout.
+            trace.epochs.rocGeneration == run->contextGeneration;
         if (trace.ownerPresent && trace.ownerSerial ==
-                owner->nativeAwdlRxEventOwnerSerial_) {
+                owner->nativeAwdlRxEventOwnerSerial_ && sameRunEpoch) {
             // Closure is an observation boundary only. It does not gate or
             // change the existing cleanup decision.
             const uint32_t reason = run->canceled ? 3u : 2u;
             rxProducerClosed = owner->nativeAwdlRxEventTimeline_.closeProducer(
                 owner->nativeAwdlRxEventOwnerSerial_, trace.epochs, reason);
+            if (rxProducerClosed)
+                owner->tahoeP2pRxConsume();
             const auto closedTrace =
                 owner->nativeAwdlRxEventTimeline_.snapshot();
             rxDrainComplete = rxProducerClosed && closedTrace.producerClosed &&
@@ -6814,6 +7458,9 @@ IOReturn ItlIwx::tahoeP2pFinishAction(OSObject *, void *contextArg,
         const bool quiet = quietBlockerMask == 0;
         publishDiscoveryCurrentAwTrace(run, quiet);
     }
+#endif
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332)
+    publishMifBootstrapPairDiagnostics(owner, run, true);
 #endif
     return kIOReturnSuccess;
 }

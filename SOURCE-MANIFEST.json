@@ -1,12 +1,12 @@
 {
-  "candidate": "25G332-Test078",
+  "candidate": "25G332-Test079",
   "upstream_base": "53c51c2cdd6e4b69beb91f310d74c53422b0f8bd",
   "parent_release_commit": "0b292eb",
   "frozen_build_source_sha256": {
     "AirportItlwm/AirportAWDL.cpp": "49ff2f1cf8eacb451337417ed4ba70d55913bcfe1b42b609b984c7e22a81213c",
     "AirportItlwm/AirportItlwm-Monterey-Info.plist": "17059e95003950f7cd0a83ab8327d4773b30899351c66d41870265b2593651db",
     "AirportItlwm/AirportItlwm-Sonoma-Info.plist": "5e10e18f572b8eed9c85e34275932a326d520bc7576eb33b7d52cd8a45401dba",
-    "AirportItlwm/AirportItlwm-Tahoe-Info.plist": "3480907a60e8fcdf2db3e1e11d3651ca51888d6a221a5bf733c35c6f403e6dc1",
+    "AirportItlwm/AirportItlwm-Tahoe-Info.plist": "eae29c0158103f13e1d3f0d6963b28616e5ab388a5b3b8da4807ce0cc056f1ee",
     "AirportItlwm/AirportItlwm.cpp": "24f1cd21812f7ba22df2f8f0c8e4245481a70631134ee8c4964ef0b61e4eebf8",
     "AirportItlwm/AirportItlwm.hpp": "f39c1e8e66bd99f3aafcf52231c0191310bb76aac86c362884ae231d4c061722",
     "AirportItlwm/AirportItlwmEthernetInterface.cpp": "68730f6ccd50aad769cc7db794c4d8c4a5ea6df83ad1fdce579415a4d18f4381",
@@ -217,7 +217,7 @@
     "itlwm/hal_iwx/ItlIwxP2PAction.hpp": "86584f1b8202a6f1962d985314d5909c64e987b203b9efb2a65c0fce0ff25b30",
     "itlwm/hal_iwx/ItlIwxP2PClock.cpp": "09e2b25f9e9e1bea8665a18d9c645f25c837ffbd5802ce3543b9c7731c517fe3",
     "itlwm/hal_iwx/ItlIwxP2PPeer.cpp": "ca24d3c748e6cc014cbd6d8a180295a6286bf88392624efe789bf1ae66953b74",
-    "itlwm/hal_iwx/ItlIwxP2PProbe.cpp": "3cdb575e7eeaa167c74e1c349e3c939fde2f004754821c55c2591f92ed10d087",
+    "itlwm/hal_iwx/ItlIwxP2PProbe.cpp": "b8f3604e4030beb66bb10594d75a001495db276ef274ad52e32213a09c47d770",
     "itlwm/hal_iwx/ItlIwxP2PRoc.cpp": "74a1df1f5341a79e28116abaae374e991872888ff9ecc01665dbb64804d98e53",
     "itlwm/hal_iwx/ItlIwxP2PRx.cpp": "ccbd33e82fb8131adcc931bf666a1e42c27685994131e7241bfdf1940abb07e8",
     "itlwm/hal_iwx/ItlIwxP2PTx.cpp": "7e6237ff87fd122bc73fdeebe2902c4678b3b80a0dc87f89d6855808ded1a7d5",
@@ -342,7 +342,8 @@
     "native/wcl_channels.hpp": "e9a85ef9c23c7ba4ae1f7d06322ab3e1c40b7e7f9e89788246efc474c4863385",
     "native/wcl_ingress.hpp": "8becdcf34c9c2af788193daa36a22476d360335a64d390a9f91c9c3463112604",
     "native/wcl_wire.cpp": "7e855fd7e57606ff1f88683083a0bf7f17033143af7cf71dcf4969a334e83794",
-    "native/wcl_wire.hpp": "11c0a9404f764597c8b85683bebfa52c74cc66f93fd1b5de93a8efd6cbdae7db"
+    "native/wcl_wire.hpp": "11c0a9404f764597c8b85683bebfa52c74cc66f93fd1b5de93a8efd6cbdae7db",
+    "native/awdl_bootstrap_pair_transition.hpp": "6b64de56667ac7d93aff0619a2baa4ce3083d9c2ee5b9f8ce3b4cd58356aded2"
   },
   "source_sha256": {
     ".github/ISSUE_TEMPLATE/Bug.md": "fdb12581f696b04dcbfd6c467c4fd6389eedb7b5129bf35ef79fe6b94895cd64",
@@ -352,7 +353,7 @@
     "AirportItlwm/AirportAWDL.cpp": "49ff2f1cf8eacb451337417ed4ba70d55913bcfe1b42b609b984c7e22a81213c",
     "AirportItlwm/AirportItlwm-Monterey-Info.plist": "17059e95003950f7cd0a83ab8327d4773b30899351c66d41870265b2593651db",
     "AirportItlwm/AirportItlwm-Sonoma-Info.plist": "5e10e18f572b8eed9c85e34275932a326d520bc7576eb33b7d52cd8a45401dba",
-    "AirportItlwm/AirportItlwm-Tahoe-Info.plist": "3480907a60e8fcdf2db3e1e11d3651ca51888d6a221a5bf733c35c6f403e6dc1",
+    "AirportItlwm/AirportItlwm-Tahoe-Info.plist": "eae29c0158103f13e1d3f0d6963b28616e5ab388a5b3b8da4807ce0cc056f1ee",
     "AirportItlwm/AirportItlwm.cpp": "24f1cd21812f7ba22df2f8f0c8e4245481a70631134ee8c4964ef0b61e4eebf8",
     "AirportItlwm/AirportItlwm.hpp": "f39c1e8e66bd99f3aafcf52231c0191310bb76aac86c362884ae231d4c061722",
     "AirportItlwm/AirportItlwmEthernetInterface.cpp": "68730f6ccd50aad769cc7db794c4d8c4a5ea6df83ad1fdce579415a4d18f4381",
@@ -369,9 +370,9 @@
     "AirportItlwm/IOPCIEDeviceWrapper.hpp": "bb2e207a464546186f45271f1c416d3223eaafb6a1903e4a4d5ef108d87347d0",
     "AirportItlwm/Info.plist": "3b3838b93c7025cfd749837fbf2318fff0351e0ed34afa66812595de6be40a5f",
     "LICENSE": "8177f97513213526df2cf6184d8ff986c675afb514d4e68a404010521b880643",
-    "README.md": "4234ac9f74411dc95fa671d9cfd5faf16a9ada6c6978bb1a98e2b28129385e37",
+    "README.md": "797f7b491c145236bd2ec526e56a8c79e779748983932c4d73b33543ffd58ae9",
     "developer-tools/README.md": "5fb7789d739d6764b3ec78026759a92212332cba3c4c9737e11306f773164d2a",
-    "developer-tools/RX-DATA-PATH.md": "bb385f2dd1c59294872fa68df54bb261f968089b221b6ac87a96d659746c49ed",
+    "developer-tools/RX-DATA-PATH.md": "cdd41c19b4e36b24ec6f9935d9516db9a466e764baa3a8eb736e19980e9d02ec",
     "developer-tools/VALIDATION.md": "0acb6ef2ac31b456d3eaf2befd5fbc256bbb58762c4d904d291db88a1a882bd7",
     "developer-tools/progress-site/README.md": "bc45538986622364e2891a85a6e93e297967229d5305032cd91e187287ad04b2",
     "developer-tools/progress-site/SOURCE-MANIFEST.json": "b12da3322961cab0956f7b8aefe68f4c07495fd8a500e6271b0da2f7ba5b5462",
@@ -634,7 +635,7 @@
     "itlwm/hal_iwx/ItlIwxP2PAction.hpp": "86584f1b8202a6f1962d985314d5909c64e987b203b9efb2a65c0fce0ff25b30",
     "itlwm/hal_iwx/ItlIwxP2PClock.cpp": "09e2b25f9e9e1bea8665a18d9c645f25c837ffbd5802ce3543b9c7731c517fe3",
     "itlwm/hal_iwx/ItlIwxP2PPeer.cpp": "ca24d3c748e6cc014cbd6d8a180295a6286bf88392624efe789bf1ae66953b74",
-    "itlwm/hal_iwx/ItlIwxP2PProbe.cpp": "3cdb575e7eeaa167c74e1c349e3c939fde2f004754821c55c2591f92ed10d087",
+    "itlwm/hal_iwx/ItlIwxP2PProbe.cpp": "b8f3604e4030beb66bb10594d75a001495db276ef274ad52e32213a09c47d770",
     "itlwm/hal_iwx/ItlIwxP2PRoc.cpp": "74a1df1f5341a79e28116abaae374e991872888ff9ecc01665dbb64804d98e53",
     "itlwm/hal_iwx/ItlIwxP2PRx.cpp": "ccbd33e82fb8131adcc931bf666a1e42c27685994131e7241bfdf1940abb07e8",
     "itlwm/hal_iwx/ItlIwxP2PTx.cpp": "7e6237ff87fd122bc73fdeebe2902c4678b3b80a0dc87f89d6855808ded1a7d5",
@@ -646,7 +647,7 @@
     "itlwm/itlwm.hpp": "b340ceb8062a6724b9da21ad738a3875fa2149944eecd25d3a3a7cbb7d05af40",
     "itlwm/pm.cpp": "58c9708125c43e5b312196e194347039edcedfaa42efbe9d554ed07ba2eec722",
     "iwlwifi-firmware-license": "16d5040c7cf851fc693b7542e20870935b99802533ea1bfd231c377a2305e5c5",
-    "native/README.md": "7bd8e493e1b5c46d414c739f7b44889a473677d6d5297b89013734633d4d445e",
+    "native/README.md": "d0a5c0c39a6670d820e4317c2b838f78efba8b23cfcc180e1159c9eccdee73c0",
     "native/awdl_action_encode.cpp": "2647996d2ec31b904cf47a4c60f8f5d2b5bf72920612d24d93d13865a37026c8",
     "native/awdl_action_encode.hpp": "33d05e45194899a6701d1ce8a8f4eb98e58286edb90054e567883833338a0907",
     "native/awdl_action_encode_contract.md": "8daa7c05c8276342f1ac3a2ffd6c8faa1c2fbe333c6a61a1b7de18148ba54ba3",
@@ -907,7 +908,7 @@
     "native/tests/test069_mif_early_first.py": "558085e7097bef81373426e1cbf0afb16e0b4946b906452aef3ce5315c0f2b50",
     "native/tests/test070_control_submit_fence.py": "b34583c182222ae13a571ede190f2c1bbd8be525c5a588e8c03decb1efde2ccc",
     "native/tests/test070_control_submit_macro_guards.py": "f49b21768411cdb11a08b5f11ec21ce576741773d556d87c77196be022791ccf",
-    "native/tests/test070_mif_bootstrap.py": "db6a566ec14b4157eade72013d1ba850f481474cb2f73ed367fc024ffa7d52c8",
+    "native/tests/test070_mif_bootstrap.py": "8a2d085df0b5702108ad9d2e8c9588bff79aaadacb9ebeaf2170c6eca8a2a62b",
     "native/tests/test070_submit_frame_ownership.py": "4509b2c985ddd48fec9df1e0d6c64282f4534aaf9674857e19a588e891deb9fc",
     "native/tests/test071_rx_event_timeline.py": "dcc50c474432cce61272ccab8aedbe38c92a21ca0ec2110e702b218b3c825899",
     "native/tests/test071_tx_wire_evidence.py": "4cb01c62c966ad8a3001c35cb0db47111ec3a02a136140be850fae13aecfa9c4",
@@ -937,7 +938,7 @@
     "native/tests/test_iwx_p2p_firmware_profile.py": "9c047618da1af807ec64a239aba510e2dbcd9b3fd11126dc19df201c9244a985",
     "native/tests/test_iwx_p2p_hal.py": "91ce229d4942861b174c4dcf339f29c3915c446663b121cce3011df0a41b77a7",
     "native/tests/test_iwx_p2p_peer_publication.py": "4877db25083e15875146d168ad584e69c90ca9aab2a3d1fb1083f38b7b361afd",
-    "native/tests/test_iwx_p2p_probe_worker.py": "0773e4a2b59eebc81e0c1dd5b2a8dc592d73e39b58906bddaf6932c9d5bb6353",
+    "native/tests/test_iwx_p2p_probe_worker.py": "0b0f39c56e43ab76ec022ac69ffd01fe34a3de2875551f5d6479b23e06873679",
     "native/tests/test_iwx_p2p_roc_hal.py": "480cad54dfaf38e01b5e461c8fc2ab25d566a58bfc1ea9860507a16cf1309f2f",
     "native/tests/test_iwx_p2p_rx_tap.py": "6a931fe6ebcd338d908e659498bc42b29a35c37b9058587537d2df11238b8e9e",
     "native/tests/test_iwx_p2p_tx_evidence_publish.py": "226ce6446ffc92e17cc50617759854042ba10adb5c689c52f9b10b793bcebabe",
@@ -969,18 +970,20 @@
     "scripts/load.sh": "9b2d31bc4207dce0d30b27fd95f4bbb9a8a199ce8c76f092ed11b9a4df511c87",
     "scripts/unload.sh": "230b2eeda730af4cc0e5fe66bf0c21479d74450a238734d61d24d06838b0da08",
     "scripts/zlib_compress_fw.py": "48bf17d19d6f873483e56f74554504c6744de063f8f66b902748c5c980116858",
-    "tests/iwx_tx_rate_test.cpp": "ad09e302f2ad7dda0e3201324ef1aa83f61958222badeea7110491c70877d664"
+    "tests/iwx_tx_rate_test.cpp": "ad09e302f2ad7dda0e3201324ef1aa83f61958222badeea7110491c70877d664",
+    "native/awdl_bootstrap_pair_transition.hpp": "6b64de56667ac7d93aff0619a2baa4ce3083d9c2ee5b9f8ce3b4cd58356aded2",
+    "native/tests/awdl_bootstrap_pair_transition_test079.cpp": "894d716038de5e87e48727b53c1dcaf6edd429223d117e0967e09d9305cacf95",
+    "native/tests/test079_bootstrap_pair_transition.py": "06a68076d019f09265c76cb305f7152e67d90ea035a6231be49265ba4576bc4a",
+    "native/tests/test079_probe_integration.py": "e371378914cb918b81b271507dda1033d3a594d413aa249a89158e4fe25e4f60"
   },
   "artifact": {
-    "mach_o_uuid": "E52163C1-680C-3BBB-BFA1-4EC35410ABA3",
-    "binary_sha256": "1efcb1db8fe5d726d85ec60d522c822a81ff91f0b71f96855bb2af26de0f9c9d",
-    "runtime_verified": true,
-    "runtime_verification_scope": "Loaded Mach-O UUID and two bounded Wi-Fi association observations only; no confirmed AWDL data return or AirDrop transfer."
+    "status": "not_built",
+    "runtime_verified": false
   },
   "notes": [
-    "Test078 kernel/ABI build input hashes match the offline build freeze. Documentation and the sanitized non-Tahoe WiFiConfig template retain remote updates.",
+    "Test079 kernel/ABI build input hashes match the offline build freeze. Documentation and the sanitized non-Tahoe WiFiConfig template retain remote updates.",
     "Private runtime logs, packet captures, credentials, analysis binaries, and build artifacts are excluded.",
-    "The existing binary Release remains Test059; this commit preserves Test078 development source.",
+    "The existing binary Release remains Test059; this commit preserves Test079 development source.",
     "Developer tool and website source snapshots are versioned; private runtime fixtures are excluded and missing-fixture tests skip explicitly."
   ]
 }

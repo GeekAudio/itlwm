@@ -75,12 +75,28 @@ def verify_production_contract():
         source, "static IOReturn tahoeP2pSubmitActionInGate(")
     assert "evaluateMifBootstrapInGate(\n                    probe, finalSnapshot, finalDoorbellUs, true)" in submit
 
-    # A bootstrap is deliberately control-only: it is a single ordinal-zero
-    # MIF, terminates ordinary repeats, and cannot enter BSD/QM data dequeue.
+    # A bootstrap is deliberately control-only: the old one-shot MIF does not
+    # itself authorize a QM dequeue. A later ordinary MIF needs a fresh paired
+    # transition claim and remains subject to the existing MIF gates.
     ordinary_mif = extract_function(
         source, "static bool tryPrepareMifAtPacingPoint(")
     assert "probe->mifBootstrapSelected" in ordinary_mif
-    assert "if (mifFrame && probe->mifBootstrapCandidatePrepared)" in submit
+    ordinary_mif_contract = " ".join(ordinary_mif.split())
+    submit_contract = " ".join(submit.split())
+    assert (
+        "if (probe->mifBootstrapSelected && "
+        "!evaluateMifBootstrapPairTransition(probe, peer, true))"
+    ) in ordinary_mif_contract
+    assert "if (probe->mifBootstrapSelected) return false;" in ordinary_mif_contract
+    assert (
+        "const bool bootstrapMifSubmit = mifFrame && "
+        "probe->mifBootstrapCandidatePrepared && "
+        "!probe->mifBootstrapSubmitted;"
+    ) in submit_contract
+    assert (
+        "probe->mifBootstrapPairClaimed && !bootstrapMifSubmit && "
+        "!probe->mifBootstrapPairMifAttempted"
+    ) in submit_contract
     assert "probe->mifBootstrapSubmitted = true" in submit
     worker = extract_function(source, "static int runTxProbeSession(")
     data_guard_start = worker.index("if(successfulStart")

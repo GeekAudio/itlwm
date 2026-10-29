@@ -15,14 +15,69 @@ MIF_BURST = (ROOT / "native/awdl_mif_burst.hpp").read_text()
 MIF_PACING = (ROOT / "native/awdl_mif_pacing.hpp").read_text()
 
 
-def extract(source, marker):
+def extract(source, marker, end_marker=None):
     start = source.index(marker)
-    opening = source.index("{", start)
+    while True:
+        opening = source.find("{", start)
+        semicolon = source.find(";", start)
+        if opening < 0:
+            raise ValueError(f"definition body not found for {marker!r}")
+        if semicolon < 0 or opening < semicolon:
+            break
+        # Skip a forward declaration and continue to the same marker's body.
+        start = source.find(marker, semicolon + 1)
+        if start < 0:
+            raise ValueError(f"definition body not found after declaration: {marker!r}")
+    if end_marker is not None:
+        end = source.find(end_marker, start)
+        if end < 0:
+            raise ValueError(f"end marker not found for {marker!r}: {end_marker!r}")
+        definition = source[start:end].rstrip()
+        if not definition.endswith("}"):
+            raise ValueError(f"definition did not end before {end_marker!r}")
+        return definition
     end, depth = opening + 1, 1
     while depth:
         depth += (source[end] == "{") - (source[end] == "}")
         end += 1
     return source[start:end]
+
+
+_prototype_fixture = (
+    "static int readRocState(int *);\n"
+    "static int readRocState(int *value) { return *value; }\n"
+    "static int nextFunction() { return 0; }\n"
+)
+assert "return *value;" in extract(_prototype_fixture, "static int readRocState(")
+assert "nextFunction" not in extract(_prototype_fixture, "static int readRocState(")
+
+
+def verify_receive_pump_contract():
+    read_state = " ".join(extract(PROBE, "static int readRocState(").split())
+    assert "event->consumeRxAfterRead = consumeRx;" in read_state
+    worker = " ".join(extract(
+        PROBE, "static int runTxProbeSession(",
+        end_marker="static int exerciseTxProbe(",
+    ).split())
+    assert "readRocState(probe, &event, true)" in worker
+
+    # The runtime fixture substitutes the command-gate boundary to feed
+    # deterministic ROC/TX snapshots. Keep a source contract on the real gate
+    # callback so this host harness cannot imply it exercised the RX lease gate.
+    event_action = " ".join(extract(
+        PROBE, "IOReturn ItlIwx::tahoeP2pRocEventAction("
+    ).split())
+    assert "if (action->consumeRxAfterRead && action->txSnapshotValid)" in event_action
+    assert "const bool rxLeaseCurrent = rxLease.active &&" in event_action
+    assert "const bool activeAckedRoc = session.commandReturned &&" in event_action
+    assert "const bool p2pOwnerCurrent = probe->leaseValue &&" in event_action
+    assert (
+        "if (rxLeaseCurrent && activeAckedRoc && p2pOwnerCurrent) "
+        "owner->tahoeP2pRxConsume();"
+    ) in event_action
+
+
+verify_receive_pump_contract()
 
 
 def extract_declaration(source, marker):
@@ -44,7 +99,11 @@ session_helpers = "\n\n".join((
     extract(PROBE, "static void reconcileP2PTxSubmitFrame("),
     extract(PROBE, "static int readRocState("),
     extract(PROBE, "static bool psfQueueProvenUnused("),
-    extract(PROBE, "static int runTxProbeSession("),
+    # This function contains mutually exclusive feature-macro branches with
+    # different brace counts. Bound it by the next top-level definition so the
+    # fixture compiles the actual source body without swallowing exerciseTxProbe.
+    extract(PROBE, "static int runTxProbeSession(",
+            end_marker="static int exerciseTxProbe("),
 ))
 
 session_shim = r"""
@@ -364,6 +423,7 @@ struct RocEventRun {
     P2PProbeRun *probe = nullptr;
     RocEventOperation operation = kRocRead;
     int commandResult = 0;
+    bool consumeRxAfterRead = false;
     IntelROCEvent::SessionSnapshot snapshot{};
     P2PTxDiagnosticSnapshot txSnapshot{};
     bool txSnapshotValid = false;

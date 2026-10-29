@@ -6,12 +6,13 @@ association, and event flow. The separate P2P/AWDL path experiments with action
 frames, peer timing, transmit queues, RX tracing, and the native `awdl0`
 interface lifecycle.
 
-The current development candidate, Test078, targets x86_64 macOS Tahoe 26.7.2
-(build 25G332) and the AX201 device match documented in the main README. It has
-booted on one machine. Wi-Fi remained associated during two approximately
-124-second observation windows around the diagnostic; native `awdl0` stayed
-running. The AWDL run selected a control-only MIF bootstrap and did not submit
-a data query. There is no confirmed peer data return or AirDrop file transfer.
+The current development candidate, Test079, targets x86_64 macOS Tahoe 26.7.2
+(build 25G332) and the AX201 device match documented in the main README. It adds
+guarded post-bootstrap pairing and bounded RX observation draining, and has no
+runtime validation yet. Test078 booted with native `awdl0` and passed two short
+Wi-Fi observation windows, but a later disconnect and watchdog remain unresolved.
+Its AWDL run selected a control-only MIF bootstrap and did not submit a data query.
+There is no confirmed peer data return or AirDrop file transfer.
 See [the RX review](../developer-tools/RX-DATA-PATH.md) for the current boundary.
 
 Some early WCL ABI investigation used macOS build 25G241. That is an analysis
