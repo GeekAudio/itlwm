@@ -9613,12 +9613,6 @@ iwx_send_cmd(struct iwx_softc *sc, struct iwx_host_cmd *hcmd)
     //    bus_dmamap_sync(sc->sc_dmat, ring->desc_dma.map,
     //        (char *)(void *)desc - (char *)(void *)ring->desc_dma.vaddr,
     //        sizeof (*desc), BUS_DMASYNC_PREWRITE);
-    /* Kick command ring. */
-    DPRINTF(("%s: Sending command (%.2x.%.2x), %d bytes at [%d]:%d ver: %d\n", __func__, group_id, cmd->hdr.cmd, cmd->hdr_wide.length, cmd->hdr.idx, cmd->hdr.qid, cmd->hdr_wide.version));
-    ring->queued++;
-    ring->cur = (ring->cur + 1) % getTxQueueSize();
-    IWX_WRITE(sc, IWX_HBUS_TARG_WRPTR, ring->qid << 16 | ring->cur);
-
 #ifdef AIRPORT_TAHOE
     {
     IwxFirmwareDiagnostics::Entry diagnosticEntry{};
@@ -9640,6 +9634,14 @@ iwx_send_cmd(struct iwx_softc *sc, struct iwx_host_cmd *hcmd)
             ? IwxFirmwareDiagnostics::kWantResponse : 0U);
     diagnosticEntry.packet_length = static_cast<uint32_t>(hdrlen + paylen);
     diagnosticEntry.payload_length = static_cast<uint32_t>(paylen);
+    /* Completion may free a dynamic command buffer after the doorbell. */
+#endif
+    /* Kick command ring. */
+    DPRINTF(("%s: Sending command (%.2x.%.2x), %d bytes at [%d]:%d ver: %d\n", __func__, group_id, cmd->hdr.cmd, cmd->hdr_wide.length, cmd->hdr.idx, cmd->hdr.qid, cmd->hdr_wide.version));
+    ring->queued++;
+    ring->cur = (ring->cur + 1) % getTxQueueSize();
+    IWX_WRITE(sc, IWX_HBUS_TARG_WRPTR, ring->qid << 16 | ring->cur);
+#ifdef AIRPORT_TAHOE
     tahoeRecordFirmwareMetadata(sc, diagnosticEntry);
     }
 #endif
