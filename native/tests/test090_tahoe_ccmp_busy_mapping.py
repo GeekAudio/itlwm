@@ -25,11 +25,13 @@ def extract_function(text: str, marker: str) -> str:
 set_key = extract_function(
     source, "int ItlIwx::\niwx_set_key(struct ieee80211com *ic,"
 )
+set_key_impl = extract_function(source, "static int iwx_set_key_with_receipt(")
 send_cmd = extract_function(source, "iwx_send_cmd(struct iwx_softc *sc,")
 
 # EBUSY is the early ownership rejection before command-ring address/slot access.
-guard = "if (nativeP2pBusy() && !nativeP2pCommandAllowed())\n        return EBUSY;"
-assert guard in send_cmd
+guard = extract_function(send_cmd, "if (nativeP2pBusy() && !nativeP2pCommandAllowed())")
+assert 'return EBUSY;' in guard
+assert 'IWX_STA_SUBMIT_REJECTED_BEFORE_RING' in guard
 ring_access = "struct iwx_tx_ring *ring = &sc->txq[IWX_DQA_CMD_QUEUE];"
 assert send_cmd.index(guard) < send_cmd.index(ring_access)
 assert send_cmd.count("return EBUSY;") == 1
@@ -40,6 +42,7 @@ HARNESS = r"""
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include "native/iwx_sta_auth_trace.h"
 
 #define IEEE80211_CIPHER_CCMP 1
 #define IEEE80211_KEY_GROUP 0x01
@@ -63,7 +66,7 @@ static unsigned gSoftwareCalls = 0;
 static uint32_t gSubmittedCommand = 0;
 static int gSubmittedFlags = 0;
 
-struct iwx_softc {};
+struct iwx_softc { int sc_generation = 5; };
 struct ieee80211com { iwx_softc *ic_softc = nullptr; };
 struct ieee80211_node {};
 struct ieee80211_key {
@@ -93,10 +96,16 @@ class ItlIwx {
 public:
     iwx_softc com{};
     int iwx_send_cmd_pdu(iwx_softc *, uint32_t command, int flags,
-                         size_t, void *) {
+                         size_t, void *, IwxStaAuthSubmitReceipt *receipt = nullptr) {
         ++gHardwareCalls;
         gSubmittedCommand = command;
         gSubmittedFlags = flags;
+        if (receipt) {
+            receipt->state = gHardwareResult == EBUSY ?
+                IWX_STA_SUBMIT_REJECTED_BEFORE_RING :
+                (gHardwareResult == 0 ? IWX_STA_SUBMIT_LOCAL_ENQUEUE : IWX_STA_SUBMIT_OTHER_ERROR);
+            receipt->raw_command_result = gHardwareResult;
+        }
         return gHardwareResult;
     }
     int iwx_set_key(ieee80211com *, ieee80211_node *, ieee80211_key *);
@@ -144,13 +153,14 @@ int main() {
 
 
 def run_case(tahoe: bool, directory: pathlib.Path) -> None:
-    cpp = HARNESS.replace("// PRODUCTION_SET_KEY", set_key)
+    cpp = HARNESS.replace("// PRODUCTION_SET_KEY", set_key_impl + '\n' + set_key)
     source_path = directory / ("tahoe.cpp" if tahoe else "legacy.cpp")
     binary_path = directory / ("tahoe" if tahoe else "legacy")
     source_path.write_text(cpp)
     command = [
         "clang++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
         "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
+        "-I", str(ROOT),
     ]
     if tahoe:
         command += ["-DAIRPORT_TAHOE=1"]

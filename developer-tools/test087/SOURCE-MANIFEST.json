@@ -1,5 +1,5 @@
 {
-  "candidate": "25G332-Test087",
+  "candidate": "receipt-bound (Test087 compatibility bundle retained)",
   "excluded": [
     "private build and runtime receipts",
     "generated disarmed runtime metadata",
@@ -57,24 +57,26 @@
   },
   "runtime_sources": {
     "developer-tools/test087/README.md": "92d143ee7afda1e5e30e857af3416cb5e28671cc2f7d3faa319dea2b4691d16e",
-    "developer-tools/test087/arm_p2p_rx149_test087.swift": "54336cda1946c6b4b0dbdefbfc6112a4ee76352179a141545caee7d656ee9e31",
-    "developer-tools/test087/controlled_run_coordinator.py": "34b68952a836b4acb31f5fae845bfbf3cc07238c4e256263228028b76cff9d88",
+    "developer-tools/test087/arm_p2p_rx149_test087.swift": "ab44649bee7e7ad0cae7a84af839881b431a705d08c119f0d04424c9cb174919",
+    "developer-tools/test087/controlled_run_coordinator.py": "57dff186c43b7e92d08430b1fa857d6f17e9f9592b234bca914a60304c908c5c",
     "developer-tools/test087/controlled_trace_report.py": "e330fbcb92788f928a0895bd34cf471552fa9151f31910eff751a85c8f58cd14",
-    "developer-tools/test087/finalize_test087_runtime_binding.py": "be57a550aba41c58faef53eb7b41987183c6f5de4dcd3889026144042963c206",
+    "developer-tools/test087/finalize_test087_runtime_binding.py": "fc04bcb08565c68a5a52872c96bfe05d5d105e6c839552283c260b525fbdbbea",
     "developer-tools/test087/host_clock_domain.py": "8abb0390d135c36eba87e95ea0cfdd6850f48258c7c6fbb5ab2fe98984fc7a1c",
-    "developer-tools/test087/native_controlled_capture.py": "db4fb18bb5d1a70cb054f81abd223f1483476e0b19719e4f1fc5ed12efb69266",
+    "developer-tools/test087/native_controlled_capture.py": "789a1501e52b55222261b801486cdc3252d64e0b3f046c29582a64798c60ba30",
     "developer-tools/test087/preowner_decode.py": "7e89f9683add17a0127da75d3e0c8ded2392b5d1ca01b257d8f44ca69620b8e3",
     "developer-tools/test087/run_controlled_probe_once.py": "3dac10d838093c8a7e83270dada59f9bd6c238fa4d070190a78a68c2a218b831",
-    "developer-tools/test087/test087_controlled.py": "44f15b4e1e7b4d9b1d4d20d8aebfdbffbda1b5acaa06ad29afe1077f585df16a",
+    "developer-tools/test087/test087_controlled.py": "6cd4c0082a1da49cdaea002c953a79d952e1ee41bdde889a734b51a13d1e9feb",
     "developer-tools/test087/tests/test_preowner_wire.py": "3e6bedb9f91c043b63a157d20a4dfa6f9d3ca8324816b2aeac7bba1e8cdb44bc",
-    "developer-tools/test087/tests/test_test087_runtime.py": "0dd403c277abf6dc7da89ba2833cf97a0143b522707d213d396068949dc48cba"
+    "developer-tools/test087/tests/test_test087_runtime.py": "d59a4023f4dcde07e0f6b45092221f9be56f156d7dc78ab9e7879c0b63957493",
+    "developer-tools/test087/tests/test_candidate_binding.py": "a2d4364c8caf87f1cd00af030197e9da3309a12cd43ccd3a55a436626b69aa46",
+    "developer-tools/test087/candidate_binding.py": "a72457955fd4c7c652f93f25d1463262fa6934928254d99ec84ec59b05c3820d"
   },
   "schema": 1,
-  "scope": "Public Test087 runtime tooling, offline fixtures, and hash-pinned frozen Test086 source dependencies.",
+  "scope": "Receipt-bound native AWDL RX149 runtime tooling with Test087 compatibility, offline fixtures, and hash-pinned frozen Test086 dependencies.",
   "validation_scope": {
-    "finalizer": "read-only --plan validated the final build receipt and source map; no runtime binding was written",
-    "hardware_rf_or_efi_operation": false,
-    "offline_runtime_and_wire_tests": "13 tests passed",
-    "swift_helper_typecheck": "passed"
+    "candidate_binding": "Test091 candidate, UUID, archive SHA, profile, baseline receipt SHA, source map, and measurement contract are receipt-bound through finalizer, coordinator, native worker, and helper summary.",
+    "offline_runtime_and_wire_tests": "26 Test087 candidate-binding/runtime, Test088 adapter, and Test089 source-parity tests passed.",
+    "swift_helper_typecheck": "passed with swiftc; helper not executed.",
+    "hardware_rf_or_efi_operation": false
   }
 }

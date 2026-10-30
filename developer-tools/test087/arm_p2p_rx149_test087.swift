@@ -1,24 +1,34 @@
 import Foundation
 import IOKit
 
-// One explicit, receive-only Test087 trigger. This helper does not enqueue
+// One explicit, receive-only candidate trigger. This helper does not enqueue
 // host management/data frames and does not arm the legacy ROC/TX profiles.
 func fail(_ message: String) -> Never {
     FileHandle.standardError.write(Data((message + "\n").utf8))
     exit(1)
 }
 
-guard CommandLine.arguments.count == 5,
+guard CommandLine.arguments.count == 9,
       CommandLine.arguments[1] == "--expect-build",
-      CommandLine.arguments[2] == "25G332-Test087",
+      CommandLine.arguments[2].range(
+        of: "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$",
+        options: .regularExpression) != nil,
       CommandLine.arguments[3] == "--expect-uuid",
       CommandLine.arguments[4].range(
         of: "^[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}$",
         options: .regularExpression) != nil,
+      CommandLine.arguments[5] == "--expect-binary-sha256",
+      CommandLine.arguments[6].range(
+        of: "^[0-9a-f]{64}$", options: .regularExpression) != nil,
+      CommandLine.arguments[7] == "--expect-profile",
+      CommandLine.arguments[8] == "native_awdl_rx149_preowner_observation",
       geteuid() == 0 else {
-    fail("Usage: arm_p2p_rx149_probe --expect-build 25G332-Test087 --expect-uuid UUID")
+    fail("Usage: arm_p2p_rx149_probe --expect-build CANDIDATE --expect-uuid UUID --expect-binary-sha256 SHA256 --expect-profile PROFILE")
 }
+let expectedBuild = CommandLine.arguments[2]
 let expectedUUID = CommandLine.arguments[4]
+let expectedBinarySHA256 = CommandLine.arguments[6]
+let expectedProfile = CommandLine.arguments[8]
 
 let loaded = Process()
 loaded.executableURL = URL(fileURLWithPath: "/usr/bin/kmutil")
@@ -29,7 +39,7 @@ loaded.standardError = Pipe()
 do {
     try loaded.run()
 } catch {
-    fail("Cannot inspect the loaded Test087 identity.")
+    fail("Cannot inspect the loaded candidate identity.")
 }
 let loadedBytes = loadedOutput.fileHandleForReading.readDataToEndOfFile()
 loaded.waitUntilExit()
@@ -41,7 +51,7 @@ guard loaded.terminationStatus == 0,
         in: loadedText, range: NSRange(loadedText.startIndex..., in: loadedText)),
       let uuidRange = Range(loadedMatch.range(at: 1), in: loadedText),
       String(loadedText[uuidRange]) == expectedUUID else {
-    fail("Loaded AirportItlwm UUID does not match the armed Test087 candidate.")
+    fail("Loaded AirportItlwm UUID does not match the armed candidate.")
 }
 
 var iterator: io_iterator_t = 0
@@ -74,7 +84,7 @@ func flag(_ key: String) -> Bool? {
     property(key) as? Bool
 }
 
-guard property("NativeTestBuild") as? String == "25G332-Test087",
+guard property("NativeTestBuild") as? String == expectedBuild,
       number("NativePowerReady") == 1,
       flag("NativeP2PProbe") == true,
       flag("NativeP2PManualTrigger") == true,
@@ -85,7 +95,7 @@ guard property("NativeTestBuild") as? String == "25G332-Test087",
       flag("NativeRxPreOwnerObservation") == true,
       number("NativeP2PRx149Selected") == 0,
       number("NativeP2PRx149HostTxBlocked") == 1 else {
-    fail("Test087 RX149/pre-owner profile is not ready; no arm.")
+    fail("Candidate RX149/pre-owner profile is not ready; no arm.")
 }
 
 let disabledFlags = [
@@ -118,22 +128,25 @@ for key in txZeroCounters {
 guard number("NativeP2PManualArmed") == 0,
       number("NativeP2PProbeAttempted") == 0,
       number("NativeP2PProbeResourceMayExist") == 0 else {
-    fail("Test087 one-shot was already attempted or has a live resource.")
+    fail("Candidate one-shot was already attempted or has a live resource.")
 }
 
 let result = IORegistryEntrySetCFProperty(service,
     "NativeP2PRx149ArmOnce" as CFString, kCFBooleanTrue)
 guard result == KERN_SUCCESS else {
-    fail(String(format: "Test087 RX149 arm rejected: 0x%08x",
+        fail(String(format: "Candidate RX149 arm rejected: 0x%08x",
                 UInt32(bitPattern: result)))
 }
 guard number("NativeRxPreOwnerArmAccepted") == 1 else {
-    fail("Test087 pre-owner observer did not acknowledge arm.")
+    fail("Candidate pre-owner observer did not acknowledge arm.")
 }
 let payload: [String: Any] = [
     "schema": 1,
-    "build": "25G332-Test087",
-    "profile": "native_awdl_rx149_preowner_observation",
+    "build": expectedBuild,
+    "mach_o_uuid": expectedUUID,
+    "expected_archive_binary_sha256": expectedBinarySHA256,
+    "profile": expectedProfile,
+    "loaded_uuid_matches_receipt": true,
     "native_data_input_experiment_enabled": true,
     "native_data_input_profile_enabled": true,
     "arm_property_accepted": true,

@@ -134,6 +134,7 @@
 #include <net80211/ieee80211_priv.h>
 
 #ifdef AIRPORT_TAHOE
+static uint32_t gTahoeStaAuthTraceInstance = 0;
 static_assert(__atomic_always_lock_free(sizeof(uint64_t), nullptr),
               "Tahoe TX rate snapshot must use a lock-free 64-bit access");
 static_assert(__atomic_always_lock_free(sizeof(uint64_t), nullptr),
@@ -189,6 +190,28 @@ static uint64_t tahoeMonotonicNs()
     absolutetime_to_nanoseconds(absolute, &nanoseconds);
     return nanoseconds;
 }
+
+#ifdef AIRPORT_TAHOE
+static int tahoeRecordStaAuth(struct iwx_softc *sc, uint16_t kind,
+    uint16_t stage, uint16_t source, int32_t result, uint32_t detail,
+    uint32_t attemptId = 0, uint32_t flags = 0, bool freeze = false)
+{
+    if (sc == nullptr)
+        return 0;
+    IwxStaAuthTraceInput input{};
+    input.monotonic_us = tahoeMonotonicNs() / 1000ULL;
+    input.driver_generation = static_cast<uint32_t>(sc->sc_generation);
+    input.attempt_id = attemptId;
+    input.kind = kind;
+    input.stage = stage;
+    input.source = source;
+    input.result = result;
+    input.detail = detail;
+    input.flags = flags;
+    input.freeze_first_failure = freeze ? 1 : 0;
+    return iwx_sta_auth_trace_record(&sc->sc_ic.ic_tahoe_auth_trace, &input);
+}
+#endif
 
 static_assert(IWX_RX_DESC_SIZE_V1 == 48,
               "RX MPDU descriptor v1 size must match firmware ABI");
@@ -512,11 +535,22 @@ public:
     NativeDeauthObservation(ItlIwx *owner, struct iwx_softc *sc)
         : owner_(owner), sc_(sc), state_(static_cast<uint32_t>(sc->sc_ic.ic_state))
     {
+#ifdef AIRPORT_TAHOE
+        (void)tahoeRecordStaAuth(sc_, IWX_STA_TRACE_DRIVER_DEAUTH_CLEANUP,
+            IWX_STA_STAGE_DRIVER_CLEANUP_ENTER,
+            IWX_STA_SOURCE_DRIVER_CLEANUP, 0, state_);
+#endif
         owner_->tahoeRecordLinkTransition(sc_,
             IwxLinkStateTrace::Event::kDeauthEntered, state_, state_, 0, 0);
     }
     ~NativeDeauthObservation()
     {
+#ifdef AIRPORT_TAHOE
+        (void)tahoeRecordStaAuth(sc_, IWX_STA_TRACE_DRIVER_DEAUTH_CLEANUP,
+            IWX_STA_STAGE_DRIVER_CLEANUP_RETURN,
+            IWX_STA_SOURCE_DRIVER_CLEANUP, result_,
+            static_cast<uint32_t>(sc_->sc_ic.ic_state));
+#endif
         if (owner_ && sc_)
             owner_->tahoeRecordLinkTransition(sc_,
                 IwxLinkStateTrace::Event::kDeauthReturned, state_,
@@ -1538,6 +1572,84 @@ bool ItlIwx::tahoePublishLinkTransitionTrace(
     nativeLinkTransitionPublishedOnce_ = true;
     return true;
 }
+
+static void iwxStaAuthTraceEventToLE(IwxStaAuthTraceEvent *dst,
+                                    const IwxStaAuthTraceEvent *src)
+{
+    dst->sequence = htole32(src->sequence);
+    dst->monotonic_us_low = htole32(src->monotonic_us_low);
+    dst->monotonic_us_high = htole32(src->monotonic_us_high);
+    dst->diagnostic_instance = htole32(src->diagnostic_instance);
+    dst->driver_generation = htole32(src->driver_generation);
+    dst->association_id = htole32(src->association_id);
+    dst->attempt_id = htole32(src->attempt_id);
+    dst->kind = htole16(src->kind);
+    dst->stage = htole16(src->stage);
+    dst->component = htole16(src->component);
+    dst->source = htole16(src->source);
+    dst->result = static_cast<int32_t>(htole32(static_cast<uint32_t>(src->result)));
+    dst->flags = htole32(src->flags);
+    dst->detail = htole32(src->detail);
+}
+
+bool ItlIwx::tahoePublishStaAuthTrace(IOEthernetController *controller,
+                                     struct iwx_softc *sc)
+{
+    if (!controller || !sc || !tahoeP2pOnMainGate())
+        return false;
+    IwxStaAuthTraceSnapshot host{};
+    if (!iwx_sta_auth_trace_snapshot(&sc->sc_ic.ic_tahoe_auth_trace, &host))
+        return false;
+    if (nativeStaAuthTracePublishedOnce_ &&
+        host.revision_end == nativeStaAuthTracePublishedRevision_ &&
+        host.dropped_count == nativeStaAuthTracePublishedDropped_ &&
+        host.diagnostic_instance == nativeStaAuthTracePublishedDiagnostic_ &&
+        host.association_id == nativeStaAuthTracePublishedAssociation_ &&
+        host.next_attempt_id == nativeStaAuthTracePublishedAttempt_ &&
+        host.first_state == nativeStaAuthTracePublishedFirstState_ &&
+        host.first_count == nativeStaAuthTracePublishedFirstCount_)
+        return true;
+
+    IwxStaAuthTraceSnapshot wire{};
+    wire.magic = htole32(host.magic);
+    wire.schema = htole16(host.schema);
+    wire.header_bytes = htole16(host.header_bytes);
+    wire.record_bytes = htole16(host.record_bytes);
+    wire.capacity = htole16(host.capacity);
+    wire.revision_begin = htole32(host.revision_begin);
+    wire.revision_end = htole32(host.revision_end);
+    wire.flags = htole32(host.flags);
+    wire.live_count = htole32(host.live_count);
+    wire.dropped_count = htole32(host.dropped_count);
+    wire.diagnostic_instance = htole32(host.diagnostic_instance);
+    wire.driver_generation = htole32(host.driver_generation);
+    wire.association_id = htole32(host.association_id);
+    wire.next_attempt_id = htole32(host.next_attempt_id);
+    wire.first_state = htole32(host.first_state);
+    wire.first_count = htole32(host.first_count);
+    for (unsigned i = 0; i < IWX_STA_AUTH_TRACE_LIVE_CAPACITY; ++i)
+        iwxStaAuthTraceEventToLE(&wire.live[i], &host.live[i]);
+    for (unsigned i = 0; i < IWX_STA_AUTH_TRACE_FIRST_CAPACITY; ++i)
+        iwxStaAuthTraceEventToLE(&wire.first[i], &host.first[i]);
+
+    OSData *payload = OSData::withBytes(&wire, sizeof(wire));
+    if (!payload)
+        return false;
+    const bool okay = controller->setProperty(
+        "NativeGroupKeyForensicSnapshot", payload);
+    payload->release();
+    if (!okay)
+        return false;
+    nativeStaAuthTracePublishedRevision_ = host.revision_end;
+    nativeStaAuthTracePublishedDropped_ = host.dropped_count;
+    nativeStaAuthTracePublishedDiagnostic_ = host.diagnostic_instance;
+    nativeStaAuthTracePublishedAssociation_ = host.association_id;
+    nativeStaAuthTracePublishedAttempt_ = host.next_attempt_id;
+    nativeStaAuthTracePublishedFirstState_ = host.first_state;
+    nativeStaAuthTracePublishedFirstCount_ = host.first_count;
+    nativeStaAuthTracePublishedOnce_ = true;
+    return true;
+}
 #endif
 
 bool ItlIwx::attach(IOPCIDevice *device)
@@ -1699,6 +1811,13 @@ bool ItlIwx::attach(IOPCIDevice *device)
         return false;
     }
 #ifdef AIRPORT_TAHOE
+    uint32_t staTraceInstance = __atomic_add_fetch(
+        &gTahoeStaAuthTraceInstance, 1u, __ATOMIC_RELAXED);
+    if (staTraceInstance == 0)
+        staTraceInstance = __atomic_add_fetch(
+            &gTahoeStaAuthTraceInstance, 1u, __ATOMIC_RELAXED);
+    iwx_sta_auth_trace_init(&com.sc_ic.ic_tahoe_auth_trace,
+                            staTraceInstance);
     static const char abort_name[sizeof(tahoe_scan_abort_task_.name)] = "tahoe-scan-abort";
     task_set(&tahoe_scan_abort_task_, tahoeScanAbortTask, this, abort_name);
     tahoeP2pInitializeTask();
@@ -7249,15 +7368,18 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
             rxStageOwnerGeneration,
             static_cast<TahoeAwdlRxStageCounters::FrameKind>(rxStageKind),
             TahoeAwdlRxStageCounters::kTap);
+    uint32_t dataTapDiagnosticCandidateGeneration = 0;
     if (rxStageOwnerGeneration && NativeAwdlData::isAwdlDataCandidate(
-            mtod(m, const uint8_t *), mbuf_len(m)))
+            mtod(m, const uint8_t *), mbuf_len(m)) &&
         tahoe_awdl_rx_stage_counters_.recordData(
             rxStageOwnerGeneration,
-            TahoeAwdlRxStageCounters::kDataTapCandidate);
+            TahoeAwdlRxStageCounters::kDataTapCandidate))
+        dataTapDiagnosticCandidateGeneration = rxStageOwnerGeneration;
     tahoeP2pTapAction(sc, mtod(m, const uint8_t *), mbuf_len(m),
                       p2pFrameWasProtected, uint16_t(chanidx),
                       device_timestamp, true, rxMacPhyIndex,
-                      rxMacPhyIndexPresent, originalData);
+                      rxMacPhyIndexPresent, originalData,
+                      dataTapDiagnosticCandidateGeneration);
 #endif
     ieee80211_inputm(IC2IFP(ic), m, ni, rxi, ml);
     ieee80211_release_node(ic, ni);
@@ -9700,14 +9822,29 @@ iwx_phy_ctxt_cmd(struct iwx_softc *sc, struct iwx_phy_ctxt *ctxt,
 }
 
 int ItlIwx::
-iwx_send_cmd(struct iwx_softc *sc, struct iwx_host_cmd *hcmd)
+iwx_send_cmd(struct iwx_softc *sc, struct iwx_host_cmd *hcmd,
+             IwxStaAuthSubmitReceipt *receipt)
 {
+#ifdef AIRPORT_TAHOE
+    if (receipt != nullptr) {
+        memset(receipt, 0, sizeof(*receipt));
+        receipt->command_id = hcmd->id;
+        receipt->driver_generation = static_cast<uint32_t>(sc->sc_generation);
+        receipt->queue_id = UINT32_MAX;
+        receipt->queue_index = UINT32_MAX;
+    }
+#endif
 #ifdef AIRPORT_TAHOE
     // The experimental systq worker temporarily owns command submission.
     // Competing callers fail without touching the ring; IRQ completion stays
     // runnable because this never waits on a worker-owned lock.
-    if (nativeP2pBusy() && !nativeP2pCommandAllowed())
+    if (nativeP2pBusy() && !nativeP2pCommandAllowed()) {
+        if (receipt != nullptr) {
+            receipt->state = IWX_STA_SUBMIT_REJECTED_BEFORE_RING;
+            receipt->raw_command_result = EBUSY;
+        }
         return EBUSY;
+    }
 #endif
     struct iwx_tx_ring *ring = &sc->txq[IWX_DQA_CMD_QUEUE];
     struct iwx_tfh_tfd *desc;
@@ -9727,6 +9864,12 @@ iwx_send_cmd(struct iwx_softc *sc, struct iwx_host_cmd *hcmd)
     code = hcmd->id;
     async = hcmd->flags & IWX_CMD_ASYNC;
     idx = (ring->cur & (ring->ring_count - 1));
+#ifdef AIRPORT_TAHOE
+    if (receipt != nullptr) {
+        receipt->queue_id = static_cast<uint32_t>(ring->qid);
+        receipt->queue_index = static_cast<uint32_t>(idx);
+    }
+#endif
     
     for (i = 0, paylen = 0; i < nitems(hcmd->len); i++) {
         paylen += hcmd->len[i];
@@ -9739,12 +9882,26 @@ iwx_send_cmd(struct iwx_softc *sc, struct iwx_host_cmd *hcmd)
         //        KASSERT(!async);
         //        KASSERT(hcmd->resp_pkt_len >= sizeof(struct iwx_rx_packet));
         //        KASSERT(hcmd->resp_pkt_len <= IWX_CMD_RESP_MAX);
-        if (sc->sc_cmd_resp_pkt[idx] != NULL)
+        if (sc->sc_cmd_resp_pkt[idx] != NULL) {
+#ifdef AIRPORT_TAHOE
+            if (receipt != nullptr) {
+                receipt->state = IWX_STA_SUBMIT_OTHER_ERROR;
+                receipt->raw_command_result = ENOSPC;
+            }
+#endif
             return ENOSPC;
+        }
         resp_buf = (uint8_t *)malloc(hcmd->resp_pkt_len, 0,
                                      M_NOWAIT | M_ZERO);
-        if (resp_buf == NULL)
+        if (resp_buf == NULL) {
+#ifdef AIRPORT_TAHOE
+            if (receipt != nullptr) {
+                receipt->state = IWX_STA_SUBMIT_OTHER_ERROR;
+                receipt->raw_command_result = ENOMEM;
+            }
+#endif
             return ENOMEM;
+        }
         bzero(resp_buf, hcmd->resp_pkt_len);
         sc->sc_cmd_resp_pkt[idx] = resp_buf;
         sc->sc_cmd_resp_len[idx] = hcmd->resp_pkt_len;
@@ -9878,6 +10035,10 @@ iwx_send_cmd(struct iwx_softc *sc, struct iwx_host_cmd *hcmd)
     ring->cur = (ring->cur + 1) % getTxQueueSize();
     IWX_WRITE(sc, IWX_HBUS_TARG_WRPTR, ring->qid << 16 | ring->cur);
 #ifdef AIRPORT_TAHOE
+    if (receipt != nullptr)
+        receipt->state = IWX_STA_SUBMIT_LOCAL_ENQUEUE;
+#endif
+#ifdef AIRPORT_TAHOE
     tahoeRecordFirmwareMetadata(sc, diagnosticEntry);
     }
 #endif
@@ -9901,6 +10062,14 @@ iwx_send_cmd(struct iwx_softc *sc, struct iwx_host_cmd *hcmd)
     }
 out:
     splx(s);
+
+#ifdef AIRPORT_TAHOE
+    if (receipt != nullptr) {
+        if (receipt->state == IWX_STA_SUBMIT_UNKNOWN && err != 0)
+            receipt->state = IWX_STA_SUBMIT_OTHER_ERROR;
+        receipt->raw_command_result = err;
+    }
+#endif
 
 #ifdef AIRPORT_TAHOE
     if (!async) {
@@ -9929,7 +10098,8 @@ out:
 
 int ItlIwx::
 iwx_send_cmd_pdu(struct iwx_softc *sc, uint32_t id, uint32_t flags,
-                 uint16_t len, const void *data)
+                 uint16_t len, const void *data,
+                 IwxStaAuthSubmitReceipt *receipt)
 {
     struct iwx_host_cmd cmd = {
         .id = id,
@@ -9938,7 +10108,7 @@ iwx_send_cmd_pdu(struct iwx_softc *sc, uint32_t id, uint32_t flags,
         .flags = flags,
     };
     
-    return iwx_send_cmd(sc, &cmd);
+    return iwx_send_cmd(sc, &cmd, receipt);
 }
 
 int ItlIwx::
@@ -14385,17 +14555,33 @@ iwx_node_alloc(struct ieee80211com *ic)
     return (struct ieee80211_node *)malloc(sizeof (struct iwx_node), 0, M_NOWAIT | M_ZERO);
 }
 
-int ItlIwx::
-iwx_set_key(struct ieee80211com *ic, struct ieee80211_node *ni,
-            struct ieee80211_key *k)
+static int iwx_set_key_with_receipt(struct ieee80211com *ic,
+    struct ieee80211_node *ni, struct ieee80211_key *k,
+    IwxStaAuthSubmitReceipt *receipt)
 {
     struct iwx_softc *sc = (struct iwx_softc *)ic->ic_softc;
     struct iwx_add_sta_key_cmd cmd;
     ItlIwx *that = container_of(sc, ItlIwx, com);
+#ifdef AIRPORT_TAHOE
+    if (receipt != nullptr) {
+        memset(receipt, 0, sizeof(*receipt));
+        receipt->driver_generation = static_cast<uint32_t>(sc->sc_generation);
+        receipt->queue_id = UINT32_MAX;
+        receipt->queue_index = UINT32_MAX;
+    }
+#endif
     
     if (k->k_cipher != IEEE80211_CIPHER_CCMP) {
         /* Fallback to software crypto for other ciphers. */
-        return (ieee80211_set_key(ic, ni, k));
+        const int softwareError = ieee80211_set_key(ic, ni, k);
+#ifdef AIRPORT_TAHOE
+        if (receipt != nullptr) {
+            receipt->state = IWX_STA_SUBMIT_SOFTWARE_CRYPTO;
+            receipt->raw_command_result = 0;
+            receipt->key_callback_result = softwareError;
+        }
+#endif
+        return softwareError;
     }
     
     memset(&cmd, 0, sizeof(cmd));
@@ -14416,16 +14602,34 @@ iwx_set_key(struct ieee80211com *ic, struct ieee80211_node *ni,
     cmd.transmit_seq_cnt = htole64(k->k_tsc);
     
     const int error = that->iwx_send_cmd_pdu(sc, IWX_ADD_STA_KEY,
-        IWX_CMD_ASYNC, sizeof(cmd), &cmd);
+        IWX_CMD_ASYNC, sizeof(cmd), &cmd, receipt);
 #ifdef AIRPORT_TAHOE
     // net80211 treats EBUSY from key installation as an accepted async
     // request and may commit the key/port state.  The Tahoe command gate's
     // pre-ring ownership fence means this request was not enqueued; report a
     // retryable failure instead.  Preserve legacy errno behavior elsewhere.
-    if (error == EBUSY)
-        return EAGAIN;
-#endif
+    const int callbackError = error == EBUSY ? EAGAIN : error;
+    if (receipt != nullptr)
+        receipt->key_callback_result = callbackError;
+    return callbackError;
+#else
+    (void)receipt;
     return error;
+#endif
+}
+
+int ItlIwx::
+iwx_set_key(struct ieee80211com *ic, struct ieee80211_node *ni,
+            struct ieee80211_key *k)
+{
+    return iwx_set_key_with_receipt(ic, ni, k, nullptr);
+}
+
+static int iwx_set_key_observed(struct ieee80211com *ic,
+    struct ieee80211_node *ni, struct ieee80211_key *key, uint32_t,
+    IwxStaAuthSubmitReceipt *receipt)
+{
+    return iwx_set_key_with_receipt(ic, ni, key, receipt);
 }
 
 void ItlIwx::
@@ -14684,6 +14888,25 @@ out:
             int state_error = sc->sc_newstate(ic, nstate, arg);
             stateObservation.terminalReason = static_cast<uint32_t>(state_error);
             if (state_error == 0 && nstate == IEEE80211_S_RUN &&
+                ostate != IEEE80211_S_RUN &&
+                ic->ic_state == IEEE80211_S_RUN &&
+                ic->ic_assoc_status == IEEE80211_STATUS_SUCCESS) {
+                (void)iwx_sta_auth_trace_begin_run(&ic->ic_tahoe_auth_trace);
+                (void)tahoeRecordStaAuth(sc,
+                    IWX_STA_TRACE_RUN_ESTABLISHED,
+                    IWX_STA_STAGE_ASSOC_COMPLETE,
+                    IWX_STA_SOURCE_UNKNOWN, 0, 0);
+            } else if (state_error == 0 && ostate == IEEE80211_S_RUN &&
+                nstate != IEEE80211_S_RUN &&
+                ic->ic_state != IEEE80211_S_RUN) {
+                (void)tahoeRecordStaAuth(sc, IWX_STA_TRACE_ASSOC_LOSS,
+                    IWX_STA_STAGE_STATE_COMPLETED,
+                    IWX_STA_SOURCE_UNKNOWN, state_error,
+                    (static_cast<uint32_t>(ostate) << 16) |
+                        static_cast<uint32_t>(nstate), 0, 0, true);
+                iwx_sta_auth_trace_end_run(&ic->ic_tahoe_auth_trace);
+            }
+            if (state_error == 0 && nstate == IEEE80211_S_RUN &&
                 ic->ic_state == IEEE80211_S_RUN &&
                 ic->ic_assoc_status == IEEE80211_STATUS_SUCCESS &&
                 ic->ic_event_handler)
@@ -14803,6 +15026,11 @@ iwx_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
         IwxLinkStateTrace::Event::kNewStateRequested,
         static_cast<uint32_t>(ic->ic_state), static_cast<uint32_t>(nstate),
         arg, 0);
+    if (ic->ic_state == IEEE80211_S_RUN && nstate != IEEE80211_S_RUN)
+        (void)tahoeRecordStaAuth(sc, IWX_STA_TRACE_ASSOC_LOSS_REQUEST,
+            IWX_STA_STAGE_STATE_REQUEST, IWX_STA_SOURCE_UNKNOWN, arg,
+            (static_cast<uint32_t>(ic->ic_state) << 16) |
+                static_cast<uint32_t>(nstate));
 #endif
 #ifdef AIRPORT_TAHOE
     taskq_leave(sc->sc_nswq);
@@ -16101,9 +16329,11 @@ IOReturn ItlIwx::_iwx_watchdog_task(OSObject *, void *arg0, void *arg1,
     // OSData/IORegistry publication to init_task or a later ordinary tick so
     // it cannot extend this watchdog gate hold before recovery can acquire it.
     // An early recovery return does not clear the frozen pending snapshot.
-    if (!result->timedOut)
+    if (!result->timedOut) {
+        (void)that->tahoePublishStaAuthTrace(that->getController(), sc);
         (void)that->tahoePublishFirmwareDiagnostics(
             that->getController(), sc, false);
+    }
     return kIOReturnSuccess;
 }
 #endif
@@ -20097,6 +20327,9 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
     ic->ic_node_alloc = iwx_node_alloc;
     ic->ic_bgscan_start = iwx_bgscan;
     ic->ic_set_key = iwx_set_key;
+#ifdef AIRPORT_TAHOE
+    ic->ic_tahoe_set_key_observed = iwx_set_key_observed;
+#endif
     ic->ic_delete_key = iwx_delete_key;
     
     /* Override 802.11 state transition machine. */

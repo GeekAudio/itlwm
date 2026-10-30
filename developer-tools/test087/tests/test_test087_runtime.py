@@ -156,6 +156,7 @@ class Test087RuntimeTests(unittest.TestCase):
         self.assertEqual(fields["failure_code"], "PREOWNER_ARM_NOT_ACKNOWLEDGED")
 
     def test_receipt_uuid_and_source_count_are_dynamic(self):
+        candidate = "25G332-Test091"
         uuid = "2E1F109C-8DF2-359F-8D7E-EDE692B454E9"
         sha = "a" * 64
         source_map = {
@@ -179,26 +180,40 @@ class Test087RuntimeTests(unittest.TestCase):
         frozen = {
             "source_sha256": source_map, "expected_loaded_uuid": uuid,
             "expected_binary_sha256": sha, "expected_info_plist_sha256": sha,
+            "candidate": candidate, "profile": protocol.PROFILE,
+            "build_report": "/private/research/test091-build-private.json",
+            "status": "frozen_disarmed", "armed": False,
         }
         template = {
+            "schema": protocol.candidate_binding.METADATA_SCHEMA,
+            "candidate": candidate,
             "source_sha256": source_map, "expected_loaded_uuid": uuid,
+            "profile": protocol.PROFILE,
             "rx149_data_input_contract": rx_contract,
             "preowner_observation_contract": {
                 **preowner_receipt, "schema": 1, "duration_ms": 4000,
             },
             "source_binding": {
+                "schema": "candidate-build-binding/v1",
+                "candidate": candidate, "profile": protocol.PROFILE,
+                "build_report_path": "/private/research/test091-build-private.json",
                 "build_receipt_sha256": sha, "source_file_count": len(source_map),
                 "source_sha256_map_sha256": hashlib.sha256(json.dumps(
                     source_map, sort_keys=True, separators=(",", ":")).encode()).hexdigest(),
                 "expected_binary_sha256": sha, "expected_info_plist_sha256": sha,
-                "expected_loaded_uuid": uuid, "frozen_test087_metadata": frozen,
+                "expected_loaded_uuid": uuid, "frozen_candidate_metadata": frozen,
             },
         }
         receipt = {
-            "candidate": protocol.BUILD, "status": "built_offline",
+            "candidate": candidate, "baseline": "25G332-Test090",
+            "status": "built_offline", "installed": False, "rf_tested": False,
+            "full_build_passed": True, "strict_signature_passed": True,
+            "source_freeze_matches": True,
+            "profile": protocol.PROFILE,
             "mach_o_uuid": uuid, "source_sha256": source_map,
             "source_file_count": len(source_map),
             "binary_sha256": sha, "info_plist_sha256": sha,
+            "archive_sha256": sha,
             "rx149_data_input_contract": rx_contract,
             "rx_preowner_observation_contract": preowner_receipt,
         }
@@ -206,8 +221,52 @@ class Test087RuntimeTests(unittest.TestCase):
         template["source_binding"]["build_receipt_sha256"] = hashlib.sha256(raw).hexdigest()
         self.assertEqual(protocol.validate_frozen_source_binding(template, receipt, raw), [])
         receipt["source_file_count"] = 396
-        self.assertIn("receipt_source_file_count",
+        self.assertIn("source_sha256",
                       protocol.validate_frozen_source_binding(template, receipt, raw))
+
+    def test_build_receipt_rejects_cross_candidate_uuid_and_binary_hash(self):
+        candidate = "25G332-Test091"
+        uuid = "2E1F109C-8DF2-359F-8D7E-EDE692B454E9"
+        source_map = {
+            "native/rx_preowner_observation.hpp": "b" * 64,
+            "native/p2p_rx149_data_input.hpp": "c" * 64,
+        }
+        receipt = {
+            "candidate": candidate, "baseline": "25G332-Test090",
+            "status": "built_offline", "installed": False, "rf_tested": False,
+            "full_build_passed": True, "strict_signature_passed": True,
+            "source_freeze_matches": True, "mach_o_uuid": uuid,
+            "source_sha256": source_map, "source_file_count": len(source_map),
+            "binary_sha256": "a" * 64, "info_plist_sha256": "d" * 64,
+            "archive_sha256": "e" * 64, "profile": protocol.PROFILE,
+            "rx149_data_input_contract": {
+                "artifact_enabled": True,
+                "host_management_or_data_tx_allowed": False,
+                "session_duration_ms": 100, "channel": 149,
+                "source_header": "native/p2p_rx149_data_input.hpp",
+                "source_header_sha256": source_map[
+                    "native/p2p_rx149_data_input.hpp"],
+            },
+            "rx_preowner_observation_contract": {
+                "window_us": 4_000_000, "numeric_only": True,
+                "rx_policy_changed": False, "tx_policy_changed": False,
+                "schema_version": 1,
+                "snapshot_property": "NativeRxPreOwnerSnapshot",
+                "source_header_sha256": source_map[
+                    "native/rx_preowner_observation.hpp"],
+            },
+        }
+        raw = json.dumps(receipt, sort_keys=True).encode()
+        self.assertEqual(protocol.candidate_binding.validate_build_receipt(
+            receipt, raw, expected_candidate=candidate), [])
+        self.assertIn("candidate", protocol.candidate_binding.validate_build_receipt(
+            receipt, raw, expected_candidate="25G332-Test090"))
+        for field, value in (("mach_o_uuid", "bad"),):
+            mutated = dict(receipt)
+            mutated[field] = value
+            mutated_raw = json.dumps(mutated, sort_keys=True).encode()
+            self.assertIn(field, protocol.candidate_binding.validate_build_receipt(
+                mutated, mutated_raw, expected_candidate=candidate))
 
     def test_binding_finalizer_copies_dynamic_build_identity_and_map(self):
         uuid = "2E1F109C-8DF2-359F-8D7E-EDE692B454E9"
@@ -215,12 +274,16 @@ class Test087RuntimeTests(unittest.TestCase):
             "native/rx_preowner_observation.hpp": "b" * 64,
             "native/p2p_rx149_data_input.hpp": "c" * 64,
         }
+        candidate = "25G332-Test091"
         build = {
-            "candidate": "25G332-Test087", "baseline": "25G332-Test086",
+            "candidate": candidate, "baseline": "25G332-Test090",
             "status": "built_offline", "installed": False, "rf_tested": False,
+            "full_build_passed": True, "strict_signature_passed": True,
+            "source_freeze_matches": True,
             "mach_o_uuid": uuid, "source_sha256": source_map,
             "source_file_count": len(source_map),
             "binary_sha256": "a" * 64, "info_plist_sha256": "d" * 64,
+            "archive_sha256": "e" * 64,
             "profile": protocol.PROFILE,
             "rx149_data_input_contract": {
                 "artifact_enabled": True,
@@ -237,13 +300,23 @@ class Test087RuntimeTests(unittest.TestCase):
                 "source_header_sha256": source_map["native/rx_preowner_observation.hpp"],
             },
         }
-        baseline = {"candidate": "25G332-Test086"}
+        baseline = {"candidate": "25G332-Test090", "status": "built_offline",
+                    "installed": False}
+        baseline_raw = b"baseline"
+        build["baseline_build_report_sha256"] = hashlib.sha256(baseline_raw).hexdigest()
+        build_path = Path(self.temp.name) / "research/test091-build-private.json"
+        baseline_path = Path(self.temp.name) / "research/test090-build-private.json"
+        build_path.parent.mkdir(mode=0o700, exist_ok=True)
         with mock.patch.object(binding_builder, "validate_receipts",
-                               return_value=(build, b"build", baseline, b"baseline")):
+                               return_value=(build, b"build", baseline, baseline_raw)):
             metadata = binding_builder.build_metadata(
-                minimum_boot_epoch_exclusive=1234)
+                minimum_boot_epoch_exclusive=1234,
+                iwn_root=self.temp.name, candidate=candidate,
+                build_receipt=build_path, baseline_receipt=baseline_path)
         self.assertEqual(metadata["expected_loaded_uuid"], uuid)
         self.assertEqual(metadata["source_binding"]["source_file_count"], 2)
+        self.assertEqual(metadata["candidate"], candidate)
+        self.assertEqual(metadata["schema"], protocol.candidate_binding.METADATA_SCHEMA)
         self.assertEqual(metadata["source_sha256"], source_map)
         self.assertEqual(metadata["minimum_boot_epoch_exclusive"], 1234)
         self.assertEqual(metadata["sender"]["interval_ms"], 80)
@@ -256,9 +329,11 @@ class Test087RuntimeTests(unittest.TestCase):
     def test_real_worker_event_lines_pass_real_coordinator_parsers(self):
         token = "0123456789abcdef0123456789abcdef"
         uuid = "2E1F109C-8DF2-359F-8D7E-EDE692B454E9"
-        template = {"expected_loaded_uuid": uuid}
+        template = {"candidate": protocol.BUILD, "profile": protocol.PROFILE,
+                    "expected_loaded_uuid": uuid}
         frozen = {}
-        binding = {}
+        binary_sha = "b" * 64
+        binding = {"expected_binary_sha256": binary_sha}
         receipt = {"candidate": protocol.BUILD, "mach_o_uuid": uuid}
         temp_root = Path(self.temp.name)
         output = temp_root / "run"
@@ -291,7 +366,10 @@ class Test087RuntimeTests(unittest.TestCase):
 
         initial = {"NativeP2PProbeState": 7}
         preflight = {
-            "identity": {"binary_identity_verified": True},
+            "identity": {"loaded_uuid_matches_receipt": True,
+                         "archive_binary_sha256_verified": True,
+                         "archive_info_plist_sha256_verified": True,
+                         "expected_archive_binary_sha256": binary_sha},
             "initial": initial,
             "p2p_tx_zero": {"valid": True},
             "host_tx_zero": {"valid": True},
@@ -314,7 +392,12 @@ class Test087RuntimeTests(unittest.TestCase):
         fake_result = SimpleNamespace(
             returncode=0,
             stdout=json.dumps({"arm_property_accepted": True,
-                               "preowner_arm_accepted": True}),
+                               "preowner_arm_accepted": True,
+                               "build": protocol.BUILD,
+                               "mach_o_uuid": uuid,
+                               "expected_archive_binary_sha256": binary_sha,
+                               "profile": protocol.PROFILE,
+                               "loaded_uuid_matches_receipt": True}),
             stderr="",
         )
         marker = {
@@ -354,15 +437,42 @@ class Test087RuntimeTests(unittest.TestCase):
         armed = next(line for line in lines if line.startswith("NATIVE_ARMED "))
         arm_result = next(line for line in lines if line.startswith("NATIVE_ARM_RESULT "))
         final_result = next(line for line in lines if line.startswith("NATIVE_RESULT "))
-        coordinator.EXPECTED_UUID = uuid
-        coordinator.MINIMUM_BOOT_EPOCH_EXCLUSIVE = 1000
-        self.assertEqual(coordinator._parse_native_ready(ready)["expected_loaded_uuid"], uuid)
+        self.assertEqual(coordinator._parse_native_ready(
+            ready, candidate=protocol.BUILD, expected_uuid=uuid,
+            expected_archive_binary_sha256=binary_sha,
+            minimum_boot_epoch_exclusive=1000,
+            profile=protocol.PROFILE)["expected_loaded_uuid"], uuid)
         self.assertTrue(coordinator._parse_native_armed(armed, token)["preowner_arm_accepted"])
         self.assertTrue(coordinator._parse_native_arm_result(arm_result, token)[
             "preowner_arm_accepted"])
         parsed = coordinator._parse_native_result(final_result, token)
         self.assertTrue(parsed["preowner_arm_accepted"])
         self.assertTrue(parsed["preowner_snapshot_complete"])
+
+    def test_swift_summary_requires_all_receipt_identity_fields(self):
+        summary = {
+            "build": "25G332-Test091",
+            "mach_o_uuid": "2E1F109C-8DF2-359F-8D7E-EDE692B454E9",
+            "expected_archive_binary_sha256": "a" * 64,
+            "profile": protocol.PROFILE,
+            "loaded_uuid_matches_receipt": True,
+        }
+        expected = {
+            "candidate": "25G332-Test091",
+            "expected_uuid": "2E1F109C-8DF2-359F-8D7E-EDE692B454E9",
+            "expected_archive_binary_sha256": "a" * 64,
+            "profile": protocol.PROFILE,
+        }
+        self.assertTrue(worker._helper_binding_matches(summary, **expected))
+        for field, wrong in (
+                ("build", "25G332-Test090"),
+                ("mach_o_uuid", "9" * 36),
+                ("expected_archive_binary_sha256", "f" * 64),
+                ("profile", "other"),
+                ("loaded_uuid_matches_receipt", False)):
+            bad = dict(summary)
+            bad[field] = wrong
+            self.assertFalse(worker._helper_binding_matches(bad, **expected), field)
 
 
 if __name__ == "__main__":

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Test088 tools-only adapter for the frozen Test087 native capture.
+"""Test088 tools-only adapter for the shared candidate-bound native capture.
 
 No-argument invocation prints a plan. A run requires explicit ``--run`` and
-reuses the Test087 native worker, metadata, helper, one-boot claim, counters,
+reuses the Test087-compatible native worker, metadata, helper, one-boot claim, counters,
 listener, and router transport. Only the router sender protocol adapter is
 revised here to preserve the new sender timing events.
 """
@@ -29,16 +29,13 @@ from typing import Any, Dict, Optional, Tuple
 TOOL_DIR = Path(__file__).resolve().parent
 ROOT = TOOL_DIR.parents[1]
 IWN_ROOT = ROOT.parent / "IntelWirelessNative"
-PRIVATE_ROOT = IWN_ROOT / "research/test087-runtime-private"
 NATIVE_WORKER = ROOT / "developer-tools/test087/native_controlled_capture.py"
 COORDINATOR_SOURCE = ROOT / "developer-tools/test087/controlled_run_coordinator.py"
 SENDER_BINARY = TOOL_DIR / "afpacket-sender/build/awdl_probe_sender-aarch64-linux-musl"
 SENDER_SHA256 = "f134be242075e19f38b61ca105d89dfa148133fd3dafdf37480fcd3d7c0fd222"
-MINIMUM_BOOT_EPOCH_EXCLUSIVE = 1793365591
 MAX_LINE_BYTES = 16384
 RESULT_EVENT = "SENDER_RESULT"
 STARTED_EVENT = "SENDER_STARTED"
-DRIVER_CANDIDATE = "25G332-Test087"
 DEFAULT_AP_INTERFACE = "wlan7"
 _PATCH_LOCK = threading.RLock()
 
@@ -123,8 +120,10 @@ def _read_current_boot_epoch() -> int:
     return value
 
 
-def _new_run_dir(boot_epoch: int) -> Path:
-    return PRIVATE_ROOT / ("test088-tools-boot" + str(boot_epoch))
+def _new_run_dir(boot_epoch: int, candidate: str) -> Path:
+    identity = PROTOCOL.candidate_binding
+    return identity.runtime_private_root(IWN_ROOT, candidate) / (
+        "test088-tools-boot" + str(boot_epoch))
 
 
 def _event_hint(line: str) -> Optional[str]:
@@ -161,7 +160,8 @@ def _json_record(line: str, event: str) -> Dict[str, Any]:
 
 
 class _RunCapture:
-    def __init__(self):
+    def __init__(self, candidate: str):
+        self.candidate = candidate
         self.report: Optional[Dict[str, Any]] = None
         self.parent_clock: Any = None
         self.started_raw: Optional[str] = None
@@ -323,7 +323,7 @@ class _RunCapture:
                 "cross_clock_mapping_proven": False,
             }
         report["tool_revision"] = "Test088"
-        report["driver_candidate"] = DRIVER_CANDIDATE
+        report["driver_candidate"] = self.candidate
         report["test088_sender"] = {
             "binary_sha256": SENDER_SHA256,
             "raw_records": {
@@ -643,7 +643,9 @@ def _router_facade(capture: _RunCapture):
     return SimpleNamespace(**values)
 
 
-def _decorate_run(capture: _RunCapture, *, expected_epoch: int):
+def _decorate_run(capture: _RunCapture, *, expected_epoch: int,
+                  candidate: str, expected_uuid: str,
+                  minimum_boot_epoch_exclusive: int, profile: str):
     original_modules = BASE._modules
     original_append = BASE._append_parent_clock_event
     original_parse_ready = BASE._parse_native_ready
@@ -660,11 +662,14 @@ def _decorate_run(capture: _RunCapture, *, expected_epoch: int):
             phase = "BEGIN" if event.endswith("BEGIN") else "END"
             capture.go_write[phase] = sample
 
-    def parse_native_ready(line):
-        value = original_parse_ready(line)
+    def parse_native_ready(line, **_kwargs):
+        value = original_parse_ready(
+            line, candidate=candidate, expected_uuid=expected_uuid,
+            minimum_boot_epoch_exclusive=minimum_boot_epoch_exclusive,
+            profile=profile)
         if value.get("boot_epoch") != expected_epoch:
             raise BASE.CoordinatorError("BOOT_EPOCH_CHANGED_OR_MISMATCH")
-        if value.get("boot_epoch", 0) <= MINIMUM_BOOT_EPOCH_EXCLUSIVE:
+        if value.get("boot_epoch", 0) <= minimum_boot_epoch_exclusive:
             raise BASE.CoordinatorError("BOOT_EPOCH_TOO_OLD")
         return value
 
@@ -693,14 +698,26 @@ def run_test088_once(*, host: str, control_path: str,
         boot_epoch = _read_current_boot_epoch()
     if type(boot_epoch) is not int or boot_epoch <= 0:
         raise AdapterError("BOOT_EPOCH_INVALID")
-    if boot_epoch <= MINIMUM_BOOT_EPOCH_EXCLUSIVE:
+    account = _workspace_account()
+    try:
+        metadata, _, _, _ = BASE._validate_bundle(
+            Path(metadata_path), account.pw_uid, PROTOCOL)
+    except BASE.CoordinatorError as error:
+        raise AdapterError(error.code)
+    candidate = metadata["candidate"]
+    minimum_boot_epoch_exclusive = metadata["minimum_boot_epoch_exclusive"]
+    if boot_epoch <= minimum_boot_epoch_exclusive:
         raise AdapterError("BOOT_EPOCH_TOO_OLD")
-    output_dir = _new_run_dir(boot_epoch)
-    capture = _RunCapture()
+    output_dir = _new_run_dir(boot_epoch, candidate)
+    capture = _RunCapture(candidate)
     capture.native_report_path = output_dir / "native-controlled-capture-private.json"
     capture.native_report_owner_uid = _workspace_account().pw_uid
     with _PATCH_LOCK:
-        originals = _decorate_run(capture, expected_epoch=boot_epoch)
+        originals = _decorate_run(
+            capture, expected_epoch=boot_epoch, candidate=candidate,
+            expected_uuid=metadata["expected_loaded_uuid"],
+            minimum_boot_epoch_exclusive=minimum_boot_epoch_exclusive,
+            profile=metadata["profile"])
         try:
             report = BASE.run_controlled_once(
                 host=host,
@@ -723,18 +740,36 @@ def run_test088_once(*, host: str, control_path: str,
     return capture.attach(report)
 
 
-def plan() -> Dict[str, Any]:
+def plan(metadata_path: Path = BASE.DEFAULT_METADATA) -> Dict[str, Any]:
+    candidate = None
+    expected_uuid = None
+    profile = None
+    minimum_boot_epoch = None
+    try:
+        metadata = json.loads(Path(metadata_path).read_text(encoding="utf-8"))
+        if isinstance(metadata, dict):
+            candidate = metadata.get("candidate")
+            expected_uuid = metadata.get("expected_loaded_uuid")
+            profile = metadata.get("profile")
+            minimum_boot_epoch = metadata.get("minimum_boot_epoch_exclusive")
+    except (OSError, ValueError, TypeError):
+        pass
+    identity = PROTOCOL.candidate_binding
+    private_root = (identity.runtime_private_root(IWN_ROOT, candidate)
+                    if identity.valid_candidate(candidate) else None)
     return {
         "mode": "plan",
         "tool_revision": "Test088",
-        "driver_candidate": DRIVER_CANDIDATE,
-        "expected_loaded_uuid": "A73745C1-8CF6-3534-A138-988D61FF4E48",
+        "driver_candidate": candidate,
+        "expected_loaded_uuid": expected_uuid,
+        "expected_profile": profile,
         "native_worker_source": str(NATIVE_WORKER),
-        "metadata_source": str(BASE.DEFAULT_METADATA),
+        "metadata_source": str(metadata_path),
         "sender_binary": str(SENDER_BINARY),
         "sender_sha256": SENDER_SHA256,
-        "run_directory_pattern": str(PRIVATE_ROOT / "test088-tools-boot<epoch>"),
-        "minimum_boot_epoch_exclusive": MINIMUM_BOOT_EPOCH_EXCLUSIVE,
+        "run_directory_pattern": (str(private_root / "test088-tools-boot<epoch>")
+                                   if private_root else None),
+        "minimum_boot_epoch_exclusive": minimum_boot_epoch,
         "ap_interface_must_be_explicit_for_run": True,
         "ap_interface_profile": DEFAULT_AP_INTERFACE,
         "requires_explicit_run_flag": True,
@@ -748,14 +783,14 @@ def plan() -> Dict[str, Any]:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run", action="store_true",
-                        help="Run exactly one Test087 native capture using Test088 tools")
+                        help="Run one candidate-bound native capture using Test088 tools")
     parser.add_argument("--host")
     parser.add_argument("--control-path")
     parser.add_argument("--metadata", type=Path, default=BASE.DEFAULT_METADATA)
     parser.add_argument("--ap", help="explicit live AP interface (next-run profile: wlan7)")
     args = parser.parse_args(argv)
     if not args.run:
-        print(json.dumps(plan(), sort_keys=True))
+        print(json.dumps(plan(args.metadata), sort_keys=True))
         return 0
     if not args.host or not args.control_path:
         print("ERROR: ROUTER_TRANSPORT_REQUIRED", file=sys.stderr)
@@ -766,12 +801,17 @@ def main(argv=None) -> int:
         return 2
     account = _workspace_account()
     output_dir: Optional[Path] = None
+    candidate: Optional[str] = None
     try:
         PROTOCOL.validate_ap_interface(args.ap)
         boot_epoch = _read_current_boot_epoch()
-        if boot_epoch <= MINIMUM_BOOT_EPOCH_EXCLUSIVE:
+        metadata, _, _, _ = BASE._validate_bundle(
+            args.metadata, account.pw_uid, PROTOCOL)
+        candidate = metadata["candidate"]
+        minimum_boot_epoch = metadata["minimum_boot_epoch_exclusive"]
+        if boot_epoch <= minimum_boot_epoch:
             raise AdapterError("BOOT_EPOCH_TOO_OLD")
-        output_dir = _new_run_dir(boot_epoch)
+        output_dir = _new_run_dir(boot_epoch, candidate)
         report = run_test088_once(
             host=args.host, control_path=args.control_path,
             metadata_path=args.metadata, ap=args.ap, boot_epoch=boot_epoch)
@@ -784,7 +824,7 @@ def main(argv=None) -> int:
         failure = {
             "schema": "test088-tools-controlled-run-private/v1",
             "tool_revision": "Test088",
-            "driver_candidate": DRIVER_CANDIDATE,
+            "driver_candidate": candidate,
             "error_code": error.code,
             "efi_modified": False,
             "retry_allowed": False,
@@ -803,7 +843,7 @@ def main(argv=None) -> int:
         failure.update({
             "schema": "test088-tools-controlled-run-private/v1",
             "tool_revision": "Test088",
-            "driver_candidate": DRIVER_CANDIDATE,
+            "driver_candidate": candidate,
             "error_code": error.code,
             "error_evidence": error.evidence,
             "efi_modified": False,
@@ -822,7 +862,7 @@ def main(argv=None) -> int:
         failure = {
             "schema": "test088-tools-controlled-run-private/v1",
             "tool_revision": "Test088",
-            "driver_candidate": DRIVER_CANDIDATE,
+            "driver_candidate": candidate,
             "error_code": error.code,
             "error_evidence": error.evidence,
             "efi_modified": False,

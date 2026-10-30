@@ -120,6 +120,25 @@ void    ieee80211_recv_deauth(struct ieee80211com *, mbuf_t,
                               struct ieee80211_node *);
 void    ieee80211_recv_disassoc(struct ieee80211com *, mbuf_t,
                                 struct ieee80211_node *);
+#ifdef AIRPORT_TAHOE
+static void ieee80211_tahoe_record_peer_reason(struct ieee80211com *ic,
+    uint16_t kind, uint16_t subtype, uint16_t reason)
+{
+    struct timeval tv;
+    struct IwxStaAuthTraceInput input = {};
+    microuptime(&tv);
+    input.monotonic_us = (uint64_t)tv.tv_sec * 1000000ULL +
+        (uint64_t)tv.tv_usec;
+    input.driver_generation = __atomic_load_n(
+        &ic->ic_tahoe_auth_trace.driver_generation, __ATOMIC_RELAXED);
+    input.kind = kind;
+    input.stage = IWX_STA_STAGE_RX_REASON;
+    input.source = IWX_STA_SOURCE_RX_PEER;
+    input.result = reason;
+    input.detail = subtype;
+    (void)iwx_sta_auth_trace_record(&ic->ic_tahoe_auth_trace, &input);
+}
+#endif
 void    ieee80211_recv_addba_req(struct ieee80211com *, mbuf_t,
                                  struct ieee80211_node *);
 void    ieee80211_recv_addba_resp(struct ieee80211com *, mbuf_t,
@@ -2911,6 +2930,10 @@ ieee80211_recv_deauth(struct ieee80211com *ic, mbuf_t m,
     reason = LE_READ_2(frm);
 
     XYLog("Deauth received, reason %d\n", reason);
+#ifdef AIRPORT_TAHOE
+    ieee80211_tahoe_record_peer_reason(ic, IWX_STA_TRACE_RX_DEAUTH,
+        IEEE80211_FC0_SUBTYPE_DEAUTH, reason);
+#endif
     ic->ic_deauth_reason = reason;
     if (ic->ic_event_handler) {
         (*ic->ic_event_handler)(ic, IEEE80211_EVT_STA_DEAUTH, NULL);
@@ -2977,6 +3000,10 @@ ieee80211_recv_disassoc(struct ieee80211com *ic, mbuf_t m,
     reason = LE_READ_2(frm);
     
     XYLog("Disassoc received, reason %d\n", reason);
+#ifdef AIRPORT_TAHOE
+    ieee80211_tahoe_record_peer_reason(ic, IWX_STA_TRACE_RX_DISASSOC,
+        IEEE80211_FC0_SUBTYPE_DISASSOC, reason);
+#endif
     
     ic->ic_stats.is_rx_disassoc++;
     switch (ic->ic_opmode) {

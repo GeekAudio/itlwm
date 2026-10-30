@@ -133,7 +133,7 @@ class ControlledRunTest088Tests(unittest.TestCase):
 
     def _run_fake_pipe(self, *, incomplete_timing=False, result=None,
                        first_line=None, emit_started=True, native_roc=None):
-        capture = adapter._RunCapture()
+        capture = adapter._RunCapture("25G332-Test087")
         result = result or _legacy_result(incomplete_timing=incomplete_timing)
         process, underlying = self._session(
             result, first_line=first_line, emit_started=emit_started)
@@ -213,8 +213,9 @@ class ControlledRunTest088Tests(unittest.TestCase):
         self.assertTrue(report["native_result"]["ifnet_input_kpi_accepted"])
 
     def test_old_boot_epoch_rejected_before_base_coordinator(self):
+        minimum = adapter.plan()["minimum_boot_epoch_exclusive"]
         with mock.patch.object(adapter, "_read_current_boot_epoch",
-                               return_value=adapter.MINIMUM_BOOT_EPOCH_EXCLUSIVE), \
+                               return_value=minimum), \
                 mock.patch.object(adapter.BASE, "run_controlled_once") as run:
             with self.assertRaises(adapter.AdapterError) as error:
                 adapter.run_test088_once(host="router", control_path="/tmp/socket",

@@ -143,6 +143,7 @@
 #include <HAL/ItlDriverController.hpp>
 #include "../../native/iwx_tx_watchdog.hpp"
 #include "../../native/iwx_output_kick.hpp"
+#include "../../native/iwx_sta_auth_trace.h"
 
 #ifdef AIRPORT_TAHOE
 #include "../../native/intel_p2p_rx_router.hpp"
@@ -205,7 +206,17 @@ struct TahoeAwdlRxStageCounters {
         kDataDuplicateRejected = 4,
         kDataTapCandidate = 5,
         kDataTapRejected = 6,
-        kDataStageCount = 7
+        kDataTapContextUnavailable = 7,
+        kDataTapLeaseInactive = 8,
+        kDataTapRx149PathNotSelected = 9,
+        kDataTapRx149OwnerRejected = 10,
+        kDataTapLeaseSnapshotUnavailable = 11,
+        kDataTapOriginalDescriptorMissing = 12,
+        kDataTapInputInvalid = 13,
+        kDataTapPermitRejected = 14,
+        kDataTapCaptureRejected = 15,
+        kDataTapQueueFull = 16,
+        kDataStageCount = 17
     };
 
     struct Snapshot {
@@ -425,11 +436,20 @@ public:
     uint32_t nativeLinkTransitionPublishedVersion_ {0};
     uint32_t nativeLinkTransitionPublishedDropped_ {0};
     bool nativeLinkTransitionPublishedOnce_ {false};
+    uint32_t nativeStaAuthTracePublishedRevision_ {0};
+    uint32_t nativeStaAuthTracePublishedDropped_ {0};
+    uint32_t nativeStaAuthTracePublishedDiagnostic_ {0};
+    uint32_t nativeStaAuthTracePublishedAssociation_ {0};
+    uint32_t nativeStaAuthTracePublishedAttempt_ {0};
+    uint32_t nativeStaAuthTracePublishedFirstState_ {0};
+    uint32_t nativeStaAuthTracePublishedFirstCount_ {0};
+    bool nativeStaAuthTracePublishedOnce_ {false};
     void tahoeRecordLinkTransition(struct iwx_softc *,
         IwxLinkStateTrace::Event, uint32_t, uint32_t, int, int,
         uint32_t resetSequence = UINT32_MAX,
         bool resetSequenceValid = false);
     bool tahoePublishLinkTransitionTrace(IOEthernetController *);
+    bool tahoePublishStaAuthTrace(IOEthernetController *, struct iwx_softc *);
     void tahoeRecordFirmwareMetadata(
         struct iwx_softc *, IwxFirmwareDiagnostics::Entry);
     void tahoeFreezeFirmwareMetadata(
@@ -489,7 +509,8 @@ public:
     void tahoeP2pTapTimeEvent(struct iwx_softc *, const uint8_t *, size_t);
     void tahoeP2pTapAction(struct iwx_softc *, const uint8_t *, size_t, bool,
                            uint16_t, uint32_t, bool, uint32_t, bool,
-                           const NativeP2PRx149DataInput::OriginalDescriptor * = nullptr);
+                           const NativeP2PRx149DataInput::OriginalDescriptor * = nullptr,
+                           uint32_t diagnosticCandidateGeneration = 0);
     bool tahoeP2pRx149DataLease(NativeP2PRx149DataInput::Lease *);
     void tahoeP2pRxConsume();
     void tahoeP2pRxDrain();
@@ -810,9 +831,10 @@ public:
                                 uint8_t, uint32_t, uint32_t);
     int    iwx_phy_ctxt_cmd(struct iwx_softc *, struct iwx_phy_ctxt *, uint8_t,
             uint8_t, uint32_t, uint32_t);
-    int    iwx_send_cmd(struct iwx_softc *, struct iwx_host_cmd *);
+    int    iwx_send_cmd(struct iwx_softc *, struct iwx_host_cmd *,
+                        IwxStaAuthSubmitReceipt * = nullptr);
     int    iwx_send_cmd_pdu(struct iwx_softc *, uint32_t, uint32_t, uint16_t,
-            const void *);
+            const void *, IwxStaAuthSubmitReceipt * = nullptr);
     int    iwx_send_cmd_status(struct iwx_softc *, struct iwx_host_cmd *,
             uint32_t *);
     int    iwx_send_cmd_pdu_status(struct iwx_softc *, uint32_t, uint16_t,

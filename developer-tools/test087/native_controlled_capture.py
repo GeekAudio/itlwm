@@ -34,7 +34,6 @@ IWN_ROOT = ROOT.parent / "IntelWirelessNative"
 PRIVATE_ROOT = IWN_ROOT / "research/test087-runtime-private"
 DEFAULT_METADATA = PRIVATE_ROOT / "native-controlled-probe-private.json"
 HELPER_SOURCE = TOOL_DIR / "arm_p2p_rx149_test087.swift"
-BUILD = "25G332-Test087"
 PROFILE = "native_awdl_rx149_preowner_observation"
 RX149_DURATION_MS = 100
 PREOWNER_DURATION_MS = 4000
@@ -120,14 +119,34 @@ def _arm_gate_event(run_token: str, helper_result: Dict[str, Any]
     }
 
 
-def plan() -> Dict[str, Any]:
+def _helper_binding_matches(summary: Any, *, candidate: str, expected_uuid: str,
+                            expected_archive_binary_sha256: str,
+                            profile: str) -> bool:
+    return (isinstance(summary, dict) and
+            summary.get("build") == candidate and
+            summary.get("mach_o_uuid") == expected_uuid and
+            summary.get("expected_archive_binary_sha256") ==
+                expected_archive_binary_sha256 and
+            summary.get("profile") == profile and
+            summary.get("loaded_uuid_matches_receipt") is True)
+
+
+def plan(metadata_path: Path = DEFAULT_METADATA) -> Dict[str, Any]:
     """Pure plan; deliberately does not import the hardware collector."""
+    candidate = None
+    profile = None
+    try:
+        value = json.loads(Path(metadata_path).read_text(encoding="utf-8"))
+        if isinstance(value, dict):
+            candidate, profile = value.get("candidate"), value.get("profile")
+    except (OSError, ValueError, TypeError):
+        pass
     return {
         "mode": "plan",
-        "candidate": BUILD,
+        "candidate": candidate,
         "source_ready_kind": SOURCE_KIND,
         "requires_phone_ready": False,
-        "profile": PROFILE,
+        "profile": profile,
         "diagnostic_duration_ms": RX149_DURATION_MS,
         "preowner_observation_duration_ms": PREOWNER_DURATION_MS,
         "native_worker_supported": True,
@@ -188,13 +207,17 @@ def _check_private_file(path: Path, account, *, required_parent: Optional[Path] 
 
 
 def _metadata_path_allowed(metadata_path: Path) -> bool:
-    """Pin all private inputs to the ignored sibling-worktree directory."""
+    """Require an absolute metadata path under the ignored research directory."""
     path = Path(metadata_path)
-    return path.is_absolute() and path == DEFAULT_METADATA
+    try:
+        return (path.is_absolute() and path.name == DEFAULT_METADATA.name and
+                path.parent.parent.resolve() == (IWN_ROOT / "research").resolve())
+    except OSError:
+        return False
 
 
-def _check_private_directory_chain(account) -> None:
-    for path in (IWN_ROOT, IWN_ROOT / "research", PRIVATE_ROOT):
+def _check_private_directory_chain(account, private_root: Path) -> None:
+    for path in (IWN_ROOT, IWN_ROOT / "research", private_root):
         try:
             info = path.lstat()
         except OSError:
@@ -202,45 +225,49 @@ def _check_private_directory_chain(account) -> None:
         if (path.is_symlink() or not path.is_dir() or
                 info.st_uid != account.pw_uid or info.st_mode & 0o022):
             raise NativeCaptureError("PRIVATE_METADATA_PARENT_UNSAFE")
-        if path == PRIVATE_ROOT and info.st_mode & 0o077:
+        if path == private_root and info.st_mode & 0o077:
             raise NativeCaptureError("PRIVATE_METADATA_PARENT_UNSAFE")
 
 
 def _load_private_bundle(metadata_path: Path, account):
     metadata_path = Path(metadata_path)
-    expected_parent = DEFAULT_METADATA.parent
-    if (not _metadata_path_allowed(metadata_path) or
-            metadata_path.name != DEFAULT_METADATA.name or
-            metadata_path.parent.resolve() != expected_parent.resolve() or
-            metadata_path.parent.is_symlink()):
+    if not _metadata_path_allowed(metadata_path) or metadata_path.parent.is_symlink():
         raise NativeCaptureError("PRIVATE_METADATA_PATH_INVALID")
-    _check_private_directory_chain(account)
+    _check_private_directory_chain(account, metadata_path.parent)
+    _check_private_file(metadata_path, account,
+                        required_parent=metadata_path.parent)
+    try:
+        template = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, TypeError):
+        raise NativeCaptureError("PRIVATE_METADATA_INVALID")
+    if not isinstance(template, dict):
+        raise NativeCaptureError("PRIVATE_METADATA_INVALID")
+    identity = _candidate_binding_module()
+    try:
+        template = identity.normalize_metadata(template)
+    except identity.CandidateBindingError:
+        raise NativeCaptureError("PRIVATE_METADATA_SCHEMA_UNSUPPORTED")
+    candidate = template.get("candidate")
+    if not identity.valid_candidate(candidate):
+        raise NativeCaptureError("CANDIDATE_TAG_INVALID")
+    expected_parent = identity.runtime_private_root(IWN_ROOT, candidate)
+    if metadata_path.parent != expected_parent:
+        raise NativeCaptureError("PRIVATE_METADATA_PATH_INVALID")
     parent_info = metadata_path.parent.lstat()
     if (not metadata_path.parent.is_dir() or parent_info.st_uid != account.pw_uid or
             parent_info.st_mode & 0o077):
         raise NativeCaptureError("PRIVATE_METADATA_PARENT_UNSAFE")
     _check_private_file(metadata_path, account, required_parent=metadata_path.parent)
-    try:
-        template = json.loads(metadata_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, TypeError):
-        raise NativeCaptureError("PRIVATE_METADATA_INVALID")
     binding = template.get("source_binding") if isinstance(template, dict) else None
     if not isinstance(binding, dict):
         raise NativeCaptureError("SOURCE_BINDING_INVALID")
     build_report_path = Path(str(binding.get("build_report_path", "")))
     baseline_report_path = Path(str(binding.get("baseline_build_report_path", "")))
-    expected_build = IWN_ROOT / "research/test087-build-private.json"
-    expected_baseline = IWN_ROOT / "research/test086-build-private.json"
-    if build_report_path != expected_build or baseline_report_path != expected_baseline:
+    expected_build = identity.default_build_receipt_path(IWN_ROOT, candidate)
+    if build_report_path != expected_build:
         raise NativeCaptureError("BUILD_RECEIPT_PATH_INVALID")
     for path in (build_report_path, baseline_report_path):
         _check_private_file(path, account)
-    try:
-        frozen_metadata = binding["frozen_test087_metadata"]
-    except KeyError:
-        raise NativeCaptureError("FROZEN_SOURCE_METADATA_MISSING")
-    if not isinstance(frozen_metadata, dict):
-        raise NativeCaptureError("FROZEN_SOURCE_METADATA_INVALID")
     try:
         build_receipt_raw = build_report_path.read_bytes()
         build_receipt = json.loads(build_receipt_raw)
@@ -254,6 +281,10 @@ def _load_private_bundle(metadata_path: Path, account):
     expected_receipt_sha = binding.get("build_receipt_sha256")
     if expected_receipt_sha != build_receipt_sha:
         raise NativeCaptureError("BUILD_RECEIPT_HASH_MISMATCH")
+    expected_baseline = identity.default_build_receipt_path(
+        IWN_ROOT, str(build_receipt.get("baseline", "")))
+    if baseline_report_path != expected_baseline:
+        raise NativeCaptureError("BASELINE_RECEIPT_PATH_INVALID")
     try:
         baseline_raw = baseline_report_path.read_bytes()
         baseline = json.loads(baseline_raw)
@@ -261,15 +292,30 @@ def _load_private_bundle(metadata_path: Path, account):
         raise NativeCaptureError("BASELINE_RECEIPT_UNAVAILABLE")
     except (ValueError, TypeError):
         raise NativeCaptureError("BASELINE_RECEIPT_INVALID")
-    if (not isinstance(baseline, dict) or
-            hashlib.sha256(baseline_raw).hexdigest() !=
-                binding.get("baseline_build_report_sha256") or
-            baseline.get("candidate") != "25G332-Test086" or
-            baseline.get("status") != "built_offline"):
-        raise NativeCaptureError("BASELINE_RECEIPT_BINDING_FAILED")
+    if not isinstance(baseline, dict):
+        raise NativeCaptureError("BASELINE_RECEIPT_INVALID")
+    metadata_errors = identity.validate_metadata_binding(
+        template, build_receipt, build_receipt_raw,
+        baseline, baseline_raw, build_report_path, baseline_report_path,
+        expected_candidate=candidate)
+    if metadata_errors:
+        raise NativeCaptureError("CANDIDATE_BINDING_FAILED")
+    frozen_metadata = binding.get("frozen_candidate_metadata")
+    if not isinstance(frozen_metadata, dict):
+        raise NativeCaptureError("FROZEN_CANDIDATE_METADATA_INVALID")
     return (template, binding, frozen_metadata, build_report_path,
             baseline_report_path, build_receipt, build_receipt_raw,
             build_receipt_sha)
+
+
+def _candidate_binding_module():
+    if str(TOOL_DIR) not in sys.path:
+        sys.path.insert(0, str(TOOL_DIR))
+    try:
+        import candidate_binding
+    except ImportError:
+        raise NativeCaptureError("CANDIDATE_BINDING_SOURCE_UNAVAILABLE")
+    return candidate_binding
 
 
 def _validate_source_binding(protocol, template: Dict[str, Any],
@@ -364,8 +410,11 @@ def _custom_loaded_identity(capture, build_report_path: Path,
         import zipfile
         with zipfile.ZipFile(archive) as package:
             binary = package.read("AirportItlwm.kext/Contents/MacOS/AirportItlwm")
+            info_plist = package.read("AirportItlwm.kext/Contents/Info.plist")
         if hashlib.sha256(binary).hexdigest() != binary_sha:
             raise NativeCaptureError("BUILD_BINARY_HASH_MISMATCH")
+        if hashlib.sha256(info_plist).hexdigest() != build.get("info_plist_sha256"):
+            raise NativeCaptureError("BUILD_INFO_PLIST_HASH_MISMATCH")
         with tempfile.TemporaryDirectory(prefix="iwn-t087-identity-", dir="/private/tmp") as temp:
             executable = Path(temp) / "AirportItlwm"
             executable.write_bytes(binary)
@@ -383,7 +432,10 @@ def _custom_loaded_identity(capture, build_report_path: Path,
         identity = {
             "archive_uuid": expected_uuids[0] if len(expected_uuids) == 1 else None,
             "loaded_uuid": loaded_uuids[0] if len(loaded_uuids) == 1 else None,
-            "binary_identity_verified": matched,
+            "loaded_uuid_matches_receipt": matched,
+            "archive_binary_sha256_verified": True,
+            "archive_info_plist_sha256_verified": True,
+            "expected_archive_binary_sha256": binary_sha,
         }
         return identity
     except NativeCaptureError:
@@ -422,11 +474,14 @@ def _native_preflight(template: Dict[str, Any], binding: Dict[str, Any],
                              build_receipt, build_receipt_raw)
 
     expected_uuid = template.get("expected_loaded_uuid")
-    if (template.get("candidate") != BUILD or
+    expected_build = build_receipt.get("candidate")
+    expected_profile = build_receipt.get("profile")
+    if (not _candidate_binding_module().valid_candidate(expected_build) or
+            template.get("candidate") != expected_build or
             template.get("source_ready_kind") != SOURCE_KIND or
             template.get("requires_phone_ready") is not False or
             not isinstance(expected_uuid, str) or
-            build_receipt.get("candidate") != BUILD or
+            template.get("profile") != expected_profile or
             build_receipt.get("mach_o_uuid") != expected_uuid):
         raise NativeCaptureError("CONTROLLED_SOURCE_IDENTITY_MISMATCH")
     if frozen_metadata.get("expected_loaded_uuid") != expected_uuid:
@@ -442,14 +497,14 @@ def _native_preflight(template: Dict[str, Any], binding: Dict[str, Any],
     capture.HELPER_SOURCE = HELPER_SOURCE
     try:
         identity = _custom_loaded_identity(
-            capture, build_report_path, BUILD, expected_uuid)
+            capture, build_report_path, expected_build, expected_uuid)
         wrapper = capture.properties("IOPCIEDeviceWrapper")
-        if wrapper.get("NativeTestBuild") != BUILD:
+        if wrapper.get("NativeTestBuild") != expected_build:
             raise NativeCaptureError("LOADED_WRAPPER_BUILD_MISMATCH")
         initial = capture.properties("AirportItlwm")
         if capture.profile_problems(initial, selected=False):
             raise NativeCaptureError("RX149_PROFILE_NOT_READY")
-        if initial.get("NativeTestBuild") != BUILD:
+        if initial.get("NativeTestBuild") != expected_build:
             raise NativeCaptureError("LOADED_CONTROLLER_BUILD_MISMATCH")
         if initial.get("NativePowerReady") != 1:
             raise NativeCaptureError("WIFI_POWER_NOT_READY")
@@ -506,7 +561,21 @@ def _compile_helper(capture, temp_dir: Path) -> Path:
     return helper
 
 
-def _private_output(capture, path: Path, account) -> Path:
+def _private_output(capture, path: Path, account, private_root: Path) -> Path:
+    path = Path(path)
+    private_root = Path(private_root)
+    try:
+        root_info = private_root.lstat()
+        if (private_root.is_symlink() or not stat.S_ISDIR(root_info.st_mode) or
+                root_info.st_uid != account.pw_uid or root_info.st_mode & 0o077 or
+                path.is_symlink() or not path.is_absolute()):
+            raise NativeCaptureError("PRIVATE_OUTPUT_UNSAFE")
+        resolved_parent = path.parent.resolve(strict=True)
+        resolved_parent.relative_to(private_root.resolve(strict=True))
+    except NativeCaptureError:
+        raise
+    except (OSError, ValueError):
+        raise NativeCaptureError("PRIVATE_OUTPUT_UNSAFE")
     try:
         return Path(capture._require_private_output(path, account))
     except NativeCaptureError:
@@ -787,7 +856,8 @@ def _worker(args) -> int:
                                       build_path, baseline_path, boot_epoch,
                                       account, capture, protocol,
                                       build_receipt, build_receipt_raw)
-        output = _private_output(capture, Path(args.output), account)
+        output = _private_output(capture, Path(args.output), account,
+                                 metadata_path.parent)
         report_path = output / "native-controlled-capture-private.json"
         if report_path.exists() or report_path.is_symlink():
             raise NativeCaptureError("OUTPUT_ALREADY_EXISTS")
@@ -796,12 +866,13 @@ def _worker(args) -> int:
         return 2
 
     report: Dict[str, Any] = {
-        "schema": "test087-controlled-native-runtime-private/v1",
+        "schema": "native-awdl-rx149-controlled-native-runtime-private/v2",
         "source_ready_kind": SOURCE_KIND,
-        "candidate": BUILD,
+        "candidate": template["candidate"],
         "expected_loaded_uuid": template["expected_loaded_uuid"],
+        "expected_archive_binary_sha256": binding["expected_binary_sha256"],
         "boot_epoch": boot_epoch,
-        "profile": PROFILE,
+        "profile": template["profile"],
         "diagnostic_duration_ms": RX149_DURATION_MS,
         "preowner_observation_duration_ms": PREOWNER_DURATION_MS,
         "preowner_arm_accepted": False,
@@ -854,11 +925,12 @@ def _worker(args) -> int:
             return 2
 
         _json_line("NATIVE_READY", {
-            "candidate": BUILD,
+            "candidate": template["candidate"],
             "source_ready_kind": SOURCE_KIND,
             "expected_loaded_uuid": template["expected_loaded_uuid"],
+            "expected_archive_binary_sha256": binding["expected_binary_sha256"],
             "boot_epoch": boot_epoch,
-            "profile": PROFILE,
+            "profile": template["profile"],
             "diagnostic_duration_ms": RX149_DURATION_MS,
             "preowner_observation_duration_ms": PREOWNER_DURATION_MS,
             "requires_phone_ready": False,
@@ -925,34 +997,46 @@ def _worker(args) -> int:
         helper_result: Dict[str, Any]
         try:
             result = subprocess.run(
-                [str(helper), "--expect-build", BUILD,
-                 "--expect-uuid", template["expected_loaded_uuid"]],
+                [str(helper), "--expect-build", template["candidate"],
+                 "--expect-uuid", template["expected_loaded_uuid"],
+                 "--expect-binary-sha256", binding["expected_binary_sha256"],
+                 "--expect-profile", template["profile"]],
                 capture_output=True, text=True, timeout=5)
             try:
                 helper_summary = json.loads(result.stdout.strip())
             except (ValueError, TypeError):
                 helper_summary = None
+            helper_binding_matches = _helper_binding_matches(
+                helper_summary,
+                candidate=template["candidate"],
+                expected_uuid=template["expected_loaded_uuid"],
+                expected_archive_binary_sha256=binding["expected_binary_sha256"],
+                profile=template["profile"])
             helper_result = {
                 "exit_code": result.returncode,
                 "arm_property_accepted": (
                     helper_summary.get("arm_property_accepted")
-                    if isinstance(helper_summary, dict) and
+                    if helper_binding_matches and
                     type(helper_summary.get("arm_property_accepted")) is bool
                     else None),
                 "preowner_arm_accepted": (
                     helper_summary.get("preowner_arm_accepted")
-                    if isinstance(helper_summary, dict) and
+                    if helper_binding_matches and
                     type(helper_summary.get("preowner_arm_accepted")) is bool
                     else None),
                 "helper_summary": helper_summary,
+                "helper_candidate_binding_matches": helper_binding_matches,
                 "stderr_present": bool(result.stderr),
-                "helper_error_type": None,
+                "helper_error_type": (
+                    None if helper_binding_matches or result.returncode != 0
+                    else "CandidateBindingMismatch"),
             }
         except (OSError, subprocess.SubprocessError) as error:
             helper_result = {
                 "exit_code": None,
                 "arm_property_accepted": None,
                 "helper_summary": None,
+                "helper_candidate_binding_matches": False,
                 "stderr_present": False,
                 "helper_error_type": type(error).__name__,
             }
@@ -1064,12 +1148,12 @@ def main(argv=None) -> int:
     parser.add_argument("--native-worker", action="store_true",
                         help="Join a controlled coordinator; never use standalone.")
     parser.add_argument("--metadata", type=Path,
-                        help="Private Test087 bundle; defaults to the ignored runtime path.")
+                        help="Candidate-private runtime bundle; defaults to Test087 compatibility path.")
     parser.add_argument("--output", type=Path,
                         help="New private directory for this run's local report.")
     args = parser.parse_args(argv)
     if not args.native_worker:
-        print(json.dumps(plan(), sort_keys=True))
+        print(json.dumps(plan(args.metadata or DEFAULT_METADATA), sort_keys=True))
         return 0
     if not args.output:
         _emit_native_error("PRIVATE_OUTPUT_REQUIRED", "arguments")

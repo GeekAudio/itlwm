@@ -1066,13 +1066,27 @@ void ItlIwx::tahoeP2pTapAction(struct iwx_softc *sc, const uint8_t *frame,
                              uint32_t gp2TimestampUs, bool gp2TimestampPresent,
                              uint32_t rxMacPhyIndex,
                              bool rxMacPhyIndexPresent,
-                             const NativeP2PRx149DataInput::OriginalDescriptor *originalData)
+                             const NativeP2PRx149DataInput::OriginalDescriptor *originalData,
+                             uint32_t diagnosticCandidateGeneration)
 {
-    if (!sc || !getMainWorkLoop() || !getMainWorkLoop()->inGate())
+    const auto recordCandidateDiagnostic =
+        [this, diagnosticCandidateGeneration](
+            TahoeAwdlRxStageCounters::DataStage stage) {
+            if (diagnosticCandidateGeneration != 0)
+                (void)tahoe_awdl_rx_stage_counters_.recordData(
+                    diagnosticCandidateGeneration, stage);
+        };
+    if (!sc || !getMainWorkLoop() || !getMainWorkLoop()->inGate()) {
+        recordCandidateDiagnostic(
+            TahoeAwdlRxStageCounters::kDataTapContextUnavailable);
         return;
+    }
     auto lease = tahoe_p2p_rx_lease_;
-    if (!lease.active)
+    if (!lease.active) {
+        recordCandidateDiagnostic(
+            TahoeAwdlRxStageCounters::kDataTapLeaseInactive);
         return;
+    }
     lease.currentPowerGeneration = uint64_t(uint32_t(sc->sc_generation));
     lease.currentStationGeneration = __atomic_load_n(
         &sc->sc_tx_rate_generation, __ATOMIC_ACQUIRE);
@@ -1105,8 +1119,14 @@ void ItlIwx::tahoeP2pTapAction(struct iwx_softc *sc, const uint8_t *frame,
         const auto session = nativeP2pRocEvents_.snapshot();
         const auto evidence = currentRx149ActionEvidence(
             this, sc, lease, channel, session, traceOwner);
-        if (!NativeP2PRx149Observation::mayConsumeManagementAction(evidence))
+        if (!NativeP2PRx149Observation::mayConsumeManagementAction(evidence)) {
+            recordCandidateDiagnostic(
+                TahoeAwdlRxStageCounters::kDataTapRx149OwnerRejected);
             return; // Never queue pre-START, stale-owner, or non-149 Actions.
+        }
+    } else {
+        recordCandidateDiagnostic(
+            TahoeAwdlRxStageCounters::kDataTapRx149PathNotSelected);
     }
     if (traceOwnerMatches && frame && length >= 2) {
         NativeAwdlRxTrace::ActionTap tap{};
@@ -1147,8 +1167,17 @@ void ItlIwx::tahoeP2pTapAction(struct iwx_softc *sc, const uint8_t *frame,
     if (rx149ProfilePath) {
         NativeP2PRx149DataInput::Lease inputLease{};
         const bool leaseReady=tahoeP2pRx149DataLease(&inputLease);
-        if (leaseReady&&originalData&&originalData->present&&frame&&
-            length<=UINT32_MAX&&channel<nitems(sc->sc_ic.ic_channels)) {
+        if (!leaseReady) {
+            recordCandidateDiagnostic(
+                TahoeAwdlRxStageCounters::kDataTapLeaseSnapshotUnavailable);
+        } else if (!originalData || !originalData->present) {
+            recordCandidateDiagnostic(
+                TahoeAwdlRxStageCounters::kDataTapOriginalDescriptorMissing);
+        } else if (!frame || length > UINT32_MAX ||
+                   channel >= nitems(sc->sc_ic.ic_channels)) {
+            recordCandidateDiagnostic(
+                TahoeAwdlRxStageCounters::kDataTapInputInvalid);
+        } else {
             NativeP2PRx149DataInput::Descriptor descriptor{};
             descriptor.channelPresent=true;
             descriptor.ieeeChannel=ieee80211_chan2ieee(
@@ -1179,10 +1208,18 @@ void ItlIwx::tahoeP2pTapAction(struct iwx_softc *sc, const uint8_t *frame,
                     tahoe_awdl_rx_stage_counters_.recordData(
                         uint32_t(lease.contextGeneration),
                         TahoeAwdlRxStageCounters::kDataTapRejected);
+                if (capture == NativeAwdlBSD::CaptureResult::Rejected)
+                    recordCandidateDiagnostic(
+                        TahoeAwdlRxStageCounters::kDataTapCaptureRejected);
+                else if (capture == NativeAwdlBSD::CaptureResult::QueueFull)
+                    recordCandidateDiagnostic(
+                        TahoeAwdlRxStageCounters::kDataTapQueueFull);
             } else if(descriptor.awdlDataCandidate) {
                 tahoe_awdl_rx_stage_counters_.recordData(
                     uint32_t(lease.contextGeneration),
                     TahoeAwdlRxStageCounters::kDataTapRejected);
+                recordCandidateDiagnostic(
+                    TahoeAwdlRxStageCounters::kDataTapPermitRejected);
             }
         }
     }
@@ -1856,7 +1893,17 @@ void ItlIwx::tahoeP2pPublishRxStageCounters(IOEthernetController *controller)
         "NativeP2PRxDataStageAfterDuplicateAwdlBssidCandidate",
         "NativeP2PRxDataStageDuplicateRejectedAwdlBssidCandidate",
         "NativeP2PRxDataStageAtTapAwdlBssidCandidate",
-        "NativeP2PRxDataStageTapRejectedAwdlBssidCandidate"
+        "NativeP2PRxDataStageTapRejectedAwdlBssidCandidate",
+        "NativeP2PRxDataStageTapContextUnavailableAwdlBssidCandidate",
+        "NativeP2PRxDataStageTapLeaseInactiveAwdlBssidCandidate",
+        "NativeP2PRxDataStageTapRX149PathNotSelectedAwdlBssidCandidate",
+        "NativeP2PRxDataStageTapRX149OwnerRejectedAwdlBssidCandidate",
+        "NativeP2PRxDataStageTapLeaseSnapshotUnavailableAwdlBssidCandidate",
+        "NativeP2PRxDataStageTapOriginalDescriptorMissingAwdlBssidCandidate",
+        "NativeP2PRxDataStageTapInputInvalidAwdlBssidCandidate",
+        "NativeP2PRxDataStageTapPermitRejectedAwdlBssidCandidate",
+        "NativeP2PRxDataStageTapCaptureRejectedAwdlBssidCandidate",
+        "NativeP2PRxDataStageTapQueueFullAwdlBssidCandidate"
     };
     for (unsigned stage = 0; stage < TahoeAwdlRxStageCounters::kDataStageCount;
          ++stage)

@@ -32,16 +32,13 @@ from typing import Any, Dict, List, Optional, Tuple
 TOOL_DIR = Path(__file__).resolve().parent
 ROOT = TOOL_DIR.parents[1]
 PRIVATE_ROOT = ROOT.parent / "IntelWirelessNative/research/test087-runtime-private"
+IWN_ROOT = ROOT.parent / "IntelWirelessNative"
 SENDER_BUILD_ROOT = ROOT.parent / "IntelWirelessNative/research/test086-boot1793355959-private/host-timing-tools/build"
 DEFAULT_METADATA = PRIVATE_ROOT / "native-controlled-probe-private.json"
 DEFAULT_SENDER_BINARY = SENDER_BUILD_ROOT / "awdl_probe_sender-aarch64-linux-musl"
 DEFAULT_SENDER_SHA256 = "1aaa5bafc0e6ddb2bb3fbd74d29d53612d3ab5cc72b65eb68d49e340e3c77a5f"
-DEFAULT_BUILD_RECEIPT = ROOT.parent / "IntelWirelessNative/research/test087-build-private.json"
 NATIVE_WORKER = TOOL_DIR / "native_controlled_capture.py"
 LISTENER_SOURCE = ROOT / "developer-tools/test086-controlled/awdl0_udp_probe_listener.c"
-BUILD = "25G332-Test087"
-EXPECTED_UUID: Optional[str] = None  # bound from the signed build receipt per run
-MINIMUM_BOOT_EPOCH_EXCLUSIVE = 0  # bound from the disarmed Test087 metadata per run
 PROFILE = "native_awdl_rx149_preowner_observation"
 SOURCE_KIND = "controlled_probe"
 HOST_PROBE_PROTOCOL = "setter_success_before_go_v2"
@@ -134,8 +131,18 @@ def _read_private_json(path: Path, owner_uid: int, *, parent_must_be_private: bo
 
 def _validate_bundle(metadata_path: Path, owner_uid: int,
                      protocol) -> Tuple[Dict[str, Any], Dict[str, Any], str, Path]:
+    metadata_path = Path(metadata_path)
     metadata, _ = _read_private_json(metadata_path, owner_uid, parent_must_be_private=True)
-    if metadata_path.name != DEFAULT_METADATA.name or metadata_path.parent.resolve() != PRIVATE_ROOT.resolve():
+    identity = protocol.candidate_binding
+    try:
+        metadata = identity.normalize_metadata(metadata)
+    except identity.CandidateBindingError:
+        raise CoordinatorError("CONTROLLED_METADATA_SCHEMA_UNSUPPORTED")
+    candidate = metadata.get("candidate")
+    if not identity.valid_candidate(candidate):
+        raise CoordinatorError("CANDIDATE_TAG_INVALID")
+    expected_metadata = identity.metadata_path(IWN_ROOT, candidate)
+    if metadata_path != expected_metadata:
         raise CoordinatorError("CONTROLLED_METADATA_PATH_INVALID")
     binding = metadata.get("source_binding")
     if not isinstance(binding, dict):
@@ -144,54 +151,29 @@ def _validate_bundle(metadata_path: Path, owner_uid: int,
     if not isinstance(build_path_value, str) or not Path(build_path_value).is_absolute():
         raise CoordinatorError("BUILD_RECEIPT_PATH_INVALID")
     build_path = Path(build_path_value)
+    expected_build = identity.default_build_receipt_path(IWN_ROOT, candidate)
+    if build_path != expected_build:
+        raise CoordinatorError("BUILD_RECEIPT_PATH_INVALID")
     receipt, receipt_raw = _read_private_json(
         build_path, owner_uid, parent_must_be_private=False)
     baseline_path_value = binding.get("baseline_build_report_path")
     if not isinstance(baseline_path_value, str) or not Path(baseline_path_value).is_absolute():
         raise CoordinatorError("BASELINE_RECEIPT_PATH_INVALID")
     baseline_path = Path(baseline_path_value)
-    expected_build = ROOT.parent / "IntelWirelessNative/research/test087-build-private.json"
-    expected_baseline = ROOT.parent / "IntelWirelessNative/research/test086-build-private.json"
-    if build_path != expected_build or baseline_path != expected_baseline:
-        raise CoordinatorError("BUILD_RECEIPT_PATH_INVALID")
-    _read_private_json(baseline_path, owner_uid, parent_must_be_private=False)
-    static_expected = {
-        "schema": "test087-controlled-probe-private/v1",
-        "candidate": BUILD,
-        "source_ready_kind": SOURCE_KIND,
-        "requires_phone_ready": False,
-        "armed": False,
-        "status": "prepared_disarmed",
-        "retry_allowed": False,
-        "expected_loaded_uuid": receipt.get("mach_o_uuid"),
-        "profile": PROFILE,
-        "diagnostic_duration_ms": 100,
-        "preowner_observation_duration_ms": 4000,
-        "receiver_gated": True,
-        "atomic_boot_claim_required": True,
-        "host_management_or_data_tx_allowed": False,
-    }
-    mismatches = [key for key, value in static_expected.items()
-                  if metadata.get(key) != value]
-    if mismatches:
-        raise CoordinatorError("CONTROLLED_METADATA_GATE_FAILED", {"fields": mismatches})
-    minimum_epoch = metadata.get("minimum_boot_epoch_exclusive")
-    if type(minimum_epoch) is not int or minimum_epoch < 1:
-        raise CoordinatorError("MINIMUM_BOOT_EPOCH_INVALID")
+    expected_baseline = identity.default_build_receipt_path(
+        IWN_ROOT, str(receipt.get("baseline", "")))
+    if baseline_path != expected_baseline:
+        raise CoordinatorError("BASELINE_RECEIPT_PATH_INVALID")
+    baseline, baseline_raw = _read_private_json(
+        baseline_path, owner_uid, parent_must_be_private=False)
+    pair_errors = identity.validate_metadata_binding(
+        metadata, receipt, receipt_raw, baseline, baseline_raw,
+        build_path, baseline_path, expected_candidate=candidate)
+    if pair_errors:
+        raise CoordinatorError("CANDIDATE_BINDING_FAILED", {"fields": pair_errors})
     binding_errors = protocol.validate_frozen_source_binding(metadata, receipt, receipt_raw)
     if binding_errors:
         raise CoordinatorError("FROZEN_SOURCE_BINDING_FAILED", {"fields": binding_errors})
-    if metadata.get("source_sha256") != receipt.get("source_sha256"):
-        raise CoordinatorError("FROZEN_SOURCE_MAP_MISMATCH")
-    frozen = binding.get("frozen_test087_metadata")
-    if (not isinstance(frozen, dict) or
-            frozen.get("build_report") != str(build_path)):
-        raise CoordinatorError("FROZEN_MANIFEST_PATH_MISMATCH")
-    if frozen.get("source_sha256") != receipt.get("source_sha256"):
-        raise CoordinatorError("FROZEN_MANIFEST_SOURCE_MAP_MISMATCH")
-    baseline_sha = binding.get("baseline_build_report_sha256")
-    if baseline_sha != hashlib.sha256(baseline_path.read_bytes()).hexdigest():
-        raise CoordinatorError("BASELINE_RECEIPT_HASH_MISMATCH")
     return metadata, receipt, hashlib.sha256(receipt_raw).hexdigest(), build_path
 
 
@@ -209,7 +191,8 @@ def _event_json(line: str, prefix: str, expected_keys: set[str]) -> Dict[str, An
 
 
 NATIVE_READY_KEYS = {
-    "event", "candidate", "source_ready_kind", "expected_loaded_uuid", "boot_epoch",
+    "event", "candidate", "source_ready_kind", "expected_loaded_uuid",
+    "expected_archive_binary_sha256", "boot_epoch",
     "profile", "diagnostic_duration_ms", "preowner_observation_duration_ms",
     "requires_phone_ready", "native_preflight_ready",
     "helper_compiled", "claim_available", "host_tx_zero",
@@ -230,7 +213,7 @@ NATIVE_ARM_FAILED_KEYS = {
 NATIVE_ARM_RESULT_KEYS = {
     "event", "run_token", "exit_code", "arm_property_accepted",
     "preowner_arm_accepted", "helper_summary",
-    "stderr_present", "helper_error_type",
+    "helper_candidate_binding_matches", "stderr_present", "helper_error_type",
     "arm_property_acceptance_is_not_roc_start", "retry_allowed",
 }
 NATIVE_RESULT_KEYS = {
@@ -241,12 +224,16 @@ NATIVE_RESULT_KEYS = {
 }
 
 
-def _parse_native_ready(line: str) -> Dict[str, Any]:
+def _parse_native_ready(line: str, *, candidate: str, expected_uuid: str,
+                        expected_archive_binary_sha256: str,
+                        minimum_boot_epoch_exclusive: int,
+                        profile: str = PROFILE) -> Dict[str, Any]:
     value = _event_json(line, "NATIVE_READY", NATIVE_READY_KEYS)
-    if (value.get("candidate") != BUILD or value.get("source_ready_kind") != SOURCE_KIND or
-            value.get("expected_loaded_uuid") != EXPECTED_UUID or value.get("profile") != PROFILE or
+    if (value.get("candidate") != candidate or value.get("source_ready_kind") != SOURCE_KIND or
+            value.get("expected_loaded_uuid") != expected_uuid or value.get("profile") != profile or
+            value.get("expected_archive_binary_sha256") != expected_archive_binary_sha256 or
             type(value.get("boot_epoch")) is not int or
-            value["boot_epoch"] <= MINIMUM_BOOT_EPOCH_EXCLUSIVE or
+            value["boot_epoch"] <= minimum_boot_epoch_exclusive or
             value.get("diagnostic_duration_ms") != 100 or
             value.get("preowner_observation_duration_ms") != 4000 or
             value.get("requires_phone_ready") is not False or
@@ -319,6 +306,9 @@ def _parse_native_arm_result(line: str, token: str) -> Dict[str, Any]:
              type(value.get("preowner_arm_accepted")) is not bool) or
             (value.get("helper_summary") is not None and
              not isinstance(value.get("helper_summary"), dict)) or
+            type(value.get("helper_candidate_binding_matches")) is not bool or
+            (value.get("arm_property_accepted") is True and
+             value.get("helper_candidate_binding_matches") is not True) or
             type(value.get("stderr_present")) is not bool or
             (value.get("helper_error_type") is not None and
              (not isinstance(value.get("helper_error_type"), str) or
@@ -329,6 +319,7 @@ def _parse_native_arm_result(line: str, token: str) -> Dict[str, Any]:
     return {key: value.get(key) for key in (
         "event", "run_token", "exit_code", "arm_property_accepted",
         "preowner_arm_accepted",
+        "helper_candidate_binding_matches",
         "stderr_present", "helper_error_type",
         "arm_property_acceptance_is_not_roc_start", "retry_allowed")}
 
@@ -459,23 +450,24 @@ class ManagedPipe:
                     pass
 
 
-def _prepare_run_dir(path: Path, account) -> None:
+def _prepare_run_dir(path: Path, account, *, private_root: Path) -> None:
     path = Path(path)
+    private_root = Path(private_root)
     if not path.is_absolute() or path.is_symlink() or path.exists():
         raise CoordinatorError("RUN_OUTPUT_PATH_NOT_NEW")
     parent = path.parent.lstat()
     if (not stat.S_ISDIR(parent.st_mode) or parent.st_uid != account.pw_uid or
             stat.S_IMODE(parent.st_mode) != 0o700):
         raise CoordinatorError("RUN_OUTPUT_PARENT_UNSAFE")
-    private_info = PRIVATE_ROOT.lstat()
+    private_info = private_root.lstat()
     if (stat.S_ISLNK(private_info.st_mode) or not stat.S_ISDIR(private_info.st_mode) or
             private_info.st_uid != account.pw_uid or
             stat.S_IMODE(private_info.st_mode) != 0o700):
         raise CoordinatorError("PRIVATE_ROOT_MODE_OR_OWNER_INVALID")
-    private_root = PRIVATE_ROOT.resolve(strict=True)
+    private_root_resolved = private_root.resolve(strict=True)
     resolved_parent = path.parent.resolve(strict=True)
     try:
-        resolved_parent.relative_to(private_root)
+        resolved_parent.relative_to(private_root_resolved)
     except ValueError:
         raise CoordinatorError("RUN_OUTPUT_OUTSIDE_PRIVATE_ROOT")
     path.mkdir(mode=0o700)
@@ -525,9 +517,21 @@ def _native_argv(metadata_path: Path, output_dir: Path) -> List[str]:
     return ["/usr/bin/sudo", "-n"] + argv
 
 
-def _private_default_run_dir(account) -> Path:
+def _private_default_run_dir(account, metadata_path: Path) -> Path:
+    metadata_path = Path(metadata_path)
+    try:
+        metadata, _ = _read_private_json(
+            metadata_path, account.pw_uid, parent_must_be_private=True)
+    except CoordinatorError:
+        raise
+    binding_module = _modules()[0].candidate_binding
+    candidate = metadata.get("candidate")
+    if (not binding_module.valid_candidate(candidate) or
+            metadata_path != binding_module.metadata_path(IWN_ROOT, candidate)):
+        raise CoordinatorError("CONTROLLED_METADATA_PATH_INVALID")
+    private_root = binding_module.runtime_private_root(IWN_ROOT, candidate)
     stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
-    return PRIVATE_ROOT / ("controlled-run-" + stamp)
+    return private_root / ("controlled-run-" + stamp)
 
 
 def _append_parent_clock_event(report: Dict[str, Any], event: str,
@@ -563,28 +567,30 @@ def run_controlled_once(*, host: str, control_path: str, metadata_path: Path,
             metadata_path, account.pw_uid, protocol)
     except protocol.ControlledProbeError as error:
         raise CoordinatorError(error.code, error.evidence)
-    global EXPECTED_UUID, MINIMUM_BOOT_EPOCH_EXCLUSIVE
-    EXPECTED_UUID = metadata["expected_loaded_uuid"]
-    MINIMUM_BOOT_EPOCH_EXCLUSIVE = metadata["minimum_boot_epoch_exclusive"]
+    candidate = metadata["candidate"]
+    profile = metadata["profile"]
+    private_root = metadata_path.parent
     sender_binary = Path(sender_binary)
     if (sender_binary.is_symlink() or not sender_binary.is_file() or
             hashlib.sha256(sender_binary.read_bytes()).hexdigest() != sender_sha256):
         raise CoordinatorError("SENDER_BINARY_HASH_MISMATCH")
     if sender_sha256 != DEFAULT_SENDER_SHA256:
         raise CoordinatorError("SENDER_BINARY_NOT_FROZEN")
-    _prepare_run_dir(output_dir, account)
+    _prepare_run_dir(output_dir, account, private_root=private_root)
     listener_binary = _compile_listener(output_dir)
     clock_module = _load_module(
         "test087_host_clock_domain", TOOL_DIR / "host_clock_domain.py")
     parent_clock = clock_module.MachBootClock()
     run_token = __import__("secrets").token_hex(16)
     report: Dict[str, Any] = {
-        "schema": "test087-controlled-run-private/v1",
-        "candidate": BUILD,
+        "schema": "native-awdl-rx149-controlled-run-private/v2",
+        "candidate": candidate,
         "source_ready_kind": SOURCE_KIND,
         "host_probe_protocol": HOST_PROBE_PROTOCOL,
         "sender_profile": dict(SENDER_PROFILE),
-        "profile": PROFILE,
+        "profile": profile,
+        "expected_archive_binary_sha256": metadata["source_binding"][
+            "expected_binary_sha256"],
         "preowner_observation_duration_ms": 4000,
         "build_receipt_sha256": receipt_sha,
         "run_token": run_token,
@@ -637,9 +643,17 @@ def run_controlled_once(*, host: str, control_path: str, metadata_path: Path,
             except CoordinatorError:
                 error_event = {"event": "NATIVE_ERROR", "protocol_valid": False}
             raise CoordinatorError("NATIVE_PREFLIGHT_FAILED", error_event)
-        native_ready = _parse_native_ready(native_ready_line)
+        native_ready = _parse_native_ready(
+            native_ready_line, candidate=candidate,
+            expected_uuid=metadata["expected_loaded_uuid"],
+            expected_archive_binary_sha256=metadata["source_binding"][
+                "expected_binary_sha256"],
+            minimum_boot_epoch_exclusive=metadata["minimum_boot_epoch_exclusive"],
+            profile=profile)
         if (native_ready.get("candidate") != receipt.get("candidate") or
-                native_ready.get("expected_loaded_uuid") != receipt.get("mach_o_uuid")):
+                native_ready.get("expected_loaded_uuid") != receipt.get("mach_o_uuid") or
+                native_ready.get("expected_archive_binary_sha256") !=
+                    receipt.get("binary_sha256")):
             raise CoordinatorError("NATIVE_READY_RECEIPT_MISMATCH")
         metadata_errors = protocol.validate_private_metadata(
             metadata, boot_epoch=native_ready["boot_epoch"],
@@ -912,10 +926,26 @@ def run_controlled_once(*, host: str, control_path: str, metadata_path: Path,
         report["clock_samples"]["post"] = parent_clock.sample_pair()
 
 
-def plan() -> Dict[str, Any]:
+def plan(metadata_path: Path = DEFAULT_METADATA) -> Dict[str, Any]:
+    candidate = None
+    expected_uuid = None
+    profile = None
+    receipt_path = None
+    try:
+        value = json.loads(Path(metadata_path).read_text(encoding="utf-8"))
+        if isinstance(value, dict):
+            candidate = value.get("candidate")
+            expected_uuid = value.get("expected_loaded_uuid")
+            profile = value.get("profile")
+            binding = value.get("source_binding")
+            receipt_path = binding.get("build_report_path") if isinstance(binding, dict) else None
+    except (OSError, ValueError, TypeError):
+        pass
     return {
         "mode": "plan",
-        "candidate": BUILD,
+        "candidate": candidate,
+        "expected_loaded_uuid": expected_uuid,
+        "profile": profile,
         "source_ready_kind": SOURCE_KIND,
         "host_probe_protocol": HOST_PROBE_PROTOCOL,
         "requires_phone_ready": False,
@@ -927,19 +957,19 @@ def plan() -> Dict[str, Any]:
         "no_argument_action": "none",
         "native_worker_source_available": NATIVE_WORKER.is_file(),
         "listener_source_available": LISTENER_SOURCE.is_file(),
-        "private_bundle_available": DEFAULT_METADATA.is_file(),
+        "private_bundle_available": Path(metadata_path).is_file(),
         "sender_binary_available": DEFAULT_SENDER_BINARY.is_file(),
-        "build_receipt_available": DEFAULT_BUILD_RECEIPT.is_file(),
+        "build_receipt_available": bool(receipt_path and Path(receipt_path).is_file()),
         "peer_receipt_proven": False,
         "airdrop_proven": False,
     }
 
 
-def _failure_report(error: CoordinatorError) -> Dict[str, Any]:
+def _failure_report(error: CoordinatorError, *, candidate: Optional[str] = None) -> Dict[str, Any]:
     failure = dict(error.partial_report or {})
     failure.update({
-        "schema": "test087-controlled-run-private/v1",
-        "candidate": BUILD, "source_ready_kind": SOURCE_KIND,
+        "schema": "native-awdl-rx149-controlled-run-private/v2",
+        "candidate": candidate, "source_ready_kind": SOURCE_KIND,
         "error_code": error.code, "error_evidence": error.evidence,
         "retry_allowed": False, "efi_modified": False,
         "peer_receipt_proven": False, "airdrop_proven": False,
@@ -963,13 +993,17 @@ def main(argv=None) -> int:
     parser.add_argument("--output-dir", type=Path)
     args = parser.parse_args(argv)
     if not args.run:
-        print(json.dumps(plan(), sort_keys=True))
+        print(json.dumps(plan(args.metadata), sort_keys=True))
         return 0
     if not args.host or not args.control_path:
         print("ERROR: ROUTER_TRANSPORT_REQUIRED", file=sys.stderr)
         return 2
     account = _workspace_account()
-    output_dir = args.output_dir or _private_default_run_dir(account)
+    try:
+        output_dir = args.output_dir or _private_default_run_dir(account, args.metadata)
+    except CoordinatorError as error:
+        print("ERROR: " + error.code, file=sys.stderr)
+        return 2
     if not output_dir.is_absolute():
         print("ERROR: RUN_OUTPUT_PATH_MUST_BE_ABSOLUTE", file=sys.stderr)
         return 2
@@ -987,7 +1021,12 @@ def main(argv=None) -> int:
         print("CONTROLLED_RUN_PARTIAL")
         return 2
     except CoordinatorError as error:
-        failure = _failure_report(error)
+        candidate = None
+        try:
+            candidate = json.loads(args.metadata.read_text(encoding="utf-8")).get("candidate")
+        except Exception:
+            pass
+        failure = _failure_report(error, candidate=candidate)
         if output_dir.exists() and not report_path.exists() and stat.S_IMODE(output_dir.stat().st_mode) == 0o700:
             try:
                 _atomic_report(report_path, failure, account)

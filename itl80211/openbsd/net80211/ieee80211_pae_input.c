@@ -63,6 +63,77 @@ void	ieee80211_recv_4way_msg2(struct ieee80211com *,
 #endif
 int	ieee80211_must_update_group_key(struct ieee80211_key *, const uint8_t *,
                                     int);
+#ifdef AIRPORT_TAHOE
+static uint64_t ieee80211_tahoe_trace_time_us(void)
+{
+    struct timeval tv;
+    microuptime(&tv);
+    return (uint64_t)tv.tv_sec * 1000000ULL + (uint64_t)tv.tv_usec;
+}
+
+static void ieee80211_tahoe_trace_group(struct ieee80211com *ic,
+    uint32_t attempt, uint16_t kind, uint16_t stage, uint16_t component,
+    uint16_t source, int32_t result, uint32_t flags, uint32_t detail,
+    int freeze)
+{
+    struct IwxStaAuthTraceInput input = {};
+    input.monotonic_us = ieee80211_tahoe_trace_time_us();
+    input.driver_generation = __atomic_load_n(
+        &ic->ic_tahoe_auth_trace.driver_generation, __ATOMIC_RELAXED);
+    input.attempt_id = attempt;
+    input.kind = kind;
+    input.stage = stage;
+    input.component = component;
+    input.source = source;
+    input.result = result;
+    input.flags = flags;
+    input.detail = detail;
+    input.freeze_first_failure = freeze != 0;
+    (void)iwx_sta_auth_trace_record(&ic->ic_tahoe_auth_trace, &input);
+}
+
+static int ieee80211_tahoe_install_group_key(struct ieee80211com *ic,
+    struct ieee80211_node *ni, struct ieee80211_key *key, uint32_t attempt,
+    uint16_t component)
+{
+    struct IwxStaAuthSubmitReceipt receipt = {};
+    int error;
+    if (ic->ic_tahoe_set_key_observed != NULL) {
+        error = (*ic->ic_tahoe_set_key_observed)(ic, ni, key, attempt,
+                                                  &receipt);
+    } else {
+        receipt.state = IWX_STA_SUBMIT_UNKNOWN;
+        error = (*ic->ic_set_key)(ic, ni, key);
+    }
+    receipt.key_callback_result = error;
+    uint32_t flags = 0;
+    switch (receipt.state) {
+    case IWX_STA_SUBMIT_REJECTED_BEFORE_RING:
+        flags |= IWX_STA_FLAG_SUBMIT_REJECTED_BEFORE_RING;
+        break;
+    case IWX_STA_SUBMIT_LOCAL_ENQUEUE:
+        flags |= IWX_STA_FLAG_DOORBELL_ISSUED;
+        break;
+    case IWX_STA_SUBMIT_SOFTWARE_CRYPTO:
+        break;
+    default:
+        flags |= IWX_STA_FLAG_SUBMIT_UNKNOWN;
+        break;
+    }
+    if (error == 0)
+        flags |= IWX_STA_FLAG_ACCEPTED_ZERO;
+    else if (error == EBUSY)
+        flags |= IWX_STA_FLAG_ACCEPTED_EBUSY;
+    const uint32_t detail = ((receipt.state & 0xffu) << 24) |
+        ((receipt.queue_id & 0xffu) << 16) | (receipt.queue_index & 0xffffu);
+    ieee80211_tahoe_trace_group(ic, attempt, IWX_STA_TRACE_KEY_SUBMIT,
+        IWX_STA_STAGE_KEY_CALLBACK, component,
+        receipt.state == IWX_STA_SUBMIT_SOFTWARE_CRYPTO
+            ? IWX_STA_SOURCE_SOFTWARE_CRYPTO : IWX_STA_SOURCE_HAL_COMMAND,
+        error, flags, detail, 0);
+    return error;
+}
+#endif
 void	ieee80211_recv_4way_msg3(struct ieee80211com *,
                                  struct ieee80211_eapol_key *, struct ieee80211_node *);
 #ifndef IEEE80211_STA_ONLY
@@ -839,34 +910,73 @@ ieee80211_recv_rsn_group_msg1(struct ieee80211com *ic,
     const u_int8_t *gtk, *igtk;
     u_int16_t info, kid, reason = 0;
     int keylen;
+#ifdef AIRPORT_TAHOE
+    uint32_t traceAttempt = iwx_sta_auth_trace_begin_attempt(
+        &ic->ic_tahoe_auth_trace, ieee80211_tahoe_trace_time_us(),
+        __atomic_load_n(&ic->ic_tahoe_auth_trace.driver_generation,
+                        __ATOMIC_RELAXED));
+#endif
     
 #ifndef IEEE80211_STA_ONLY
     if (ic->ic_opmode != IEEE80211_M_STA &&
-        ic->ic_opmode != IEEE80211_M_IBSS)
+        ic->ic_opmode != IEEE80211_M_IBSS) {
+#ifdef AIRPORT_TAHOE
+        ieee80211_tahoe_trace_group(ic, traceAttempt,
+            IWX_STA_TRACE_GROUP1_VALIDATION, IWX_STA_STAGE_NOT_EXPECTED,
+            IWX_STA_COMPONENT_NONE, IWX_STA_SOURCE_RX_PEER, 0, 0,
+            (uint32_t)ic->ic_opmode, 0);
+#endif
         return;
+    }
 #endif
     /* discard if we're not expecting this message */
     if (ni->ni_rsn_supp_state != RNSA_SUPP_PTKDONE) {
         DPRINTF(("unexpected in state: %d\n", ni->ni_rsn_supp_state));
+#ifdef AIRPORT_TAHOE
+        ieee80211_tahoe_trace_group(ic, traceAttempt,
+            IWX_STA_TRACE_GROUP1_VALIDATION, IWX_STA_STAGE_NOT_EXPECTED,
+            IWX_STA_COMPONENT_NONE, IWX_STA_SOURCE_RX_PEER, EPROTO, 0,
+            (uint32_t)ni->ni_rsn_supp_state, 0);
+#endif
         return;
     }
     /* enforce monotonicity of key request replay counter */
     if (BE_READ_8(key->replaycnt) <= ni->ni_replaycnt) {
         ic->ic_stats.is_rx_eapol_replay++;
+#ifdef AIRPORT_TAHOE
+        ieee80211_tahoe_trace_group(ic, traceAttempt,
+            IWX_STA_TRACE_GROUP1_VALIDATION, IWX_STA_STAGE_REPLAY_REJECT,
+            IWX_STA_COMPONENT_NONE, IWX_STA_SOURCE_RX_PEER, EALREADY, 0,
+            0, 0);
+#endif
         return;
     }
     /* check Key MIC field using KCK */
-    if (ieee80211_eapol_key_check_mic(key, ni->ni_ptk.kck) != 0) {
+    int micError = ieee80211_eapol_key_check_mic(key, ni->ni_ptk.kck);
+    if (micError != 0) {
         DPRINTF(("key MIC failed\n"));
         ic->ic_stats.is_rx_eapol_badmic++;
+#ifdef AIRPORT_TAHOE
+        ieee80211_tahoe_trace_group(ic, traceAttempt,
+            IWX_STA_TRACE_GROUP1_VALIDATION, IWX_STA_STAGE_MIC_REJECT,
+            IWX_STA_COMPONENT_NONE, IWX_STA_SOURCE_RX_PEER, micError, 0,
+            0, 0);
+#endif
         return;
     }
     info = BE_READ_2(key->info);
     
     /* check that encrypted and decrypt Key Data field using KEK */
+    int decryptError = 0;
     if (!(info & EAPOL_KEY_ENCRYPTED) ||
-        ieee80211_eapol_key_decrypt(key, ni->ni_ptk.kek) != 0) {
+        (decryptError = ieee80211_eapol_key_decrypt(key, ni->ni_ptk.kek)) != 0) {
         DPRINTF(("decryption failed\n"));
+#ifdef AIRPORT_TAHOE
+        ieee80211_tahoe_trace_group(ic, traceAttempt,
+            IWX_STA_TRACE_GROUP1_VALIDATION, IWX_STA_STAGE_DECRYPT_REJECT,
+            IWX_STA_COMPONENT_NONE, IWX_STA_SOURCE_RX_PEER,
+            decryptError != 0 ? decryptError : EINVAL, 0, 0, 0);
+#endif
         return;
     }
     
@@ -900,18 +1010,44 @@ ieee80211_recv_rsn_group_msg1(struct ieee80211com *ic,
     /* check that the GTK KDE is present */
     if (gtk == NULL) {
         DPRINTF(("GTK KDE missing\n"));
+#ifdef AIRPORT_TAHOE
+        ieee80211_tahoe_trace_group(ic, traceAttempt,
+            IWX_STA_TRACE_GROUP1_VALIDATION, IWX_STA_STAGE_GTK_MISSING,
+            IWX_STA_COMPONENT_GTK, IWX_STA_SOURCE_RX_PEER, ENOENT, 0,
+            0, 0);
+#endif
         return;
     }
     
     /* check that key length matches that of group cipher */
     keylen = ieee80211_cipher_keylen(ni->ni_rsngroupcipher);
-    if (gtk[1] != 6 + keylen)
+    if (gtk[1] != 6 + keylen) {
+#ifdef AIRPORT_TAHOE
+        ieee80211_tahoe_trace_group(ic, traceAttempt,
+            IWX_STA_TRACE_GROUP1_VALIDATION, IWX_STA_STAGE_GTK_LENGTH,
+            IWX_STA_COMPONENT_GTK, IWX_STA_SOURCE_RX_PEER, EINVAL, 0,
+            0, 0);
+#endif
         return;
+    }
+#ifdef AIRPORT_TAHOE
+    ieee80211_tahoe_trace_group(ic, traceAttempt,
+        IWX_STA_TRACE_GROUP1_VALIDATION, IWX_STA_STAGE_VALIDATED,
+        IWX_STA_COMPONENT_NONE, IWX_STA_SOURCE_RX_PEER, 0, 0, 0, 0);
+#endif
     
     /* map GTK to 802.11 key */
     kid = gtk[6] & 3;
     k = &ic->ic_nw_keys[kid];
-    if (ieee80211_must_update_group_key(k, &gtk[8], keylen)) {
+    int updateGtk = ieee80211_must_update_group_key(k, &gtk[8], keylen);
+#ifdef AIRPORT_TAHOE
+    ieee80211_tahoe_trace_group(ic, traceAttempt,
+        IWX_STA_TRACE_KEY_COMPONENT, IWX_STA_STAGE_KEY_DECISION,
+        IWX_STA_COMPONENT_GTK, IWX_STA_SOURCE_RX_PEER, 0,
+        updateGtk ? IWX_STA_FLAG_COMPONENT_UPDATED : IWX_STA_FLAG_COMPONENT_SKIPPED,
+        kid, 0);
+#endif
+    if (updateGtk) {
         memset(k, 0, sizeof(*k));
         k->k_id = kid;    /* 0-3 */
         k->k_cipher = ni->ni_rsngroupcipher;
@@ -921,13 +1057,33 @@ ieee80211_recv_rsn_group_msg1(struct ieee80211com *ic,
         k->k_rsc[0] = LE_READ_6(key->rsc);
         k->k_len = keylen;
         memcpy(k->k_key, &gtk[8], k->k_len);
+#ifdef AIRPORT_TAHOE
+        ieee80211_tahoe_trace_group(ic, traceAttempt,
+            IWX_STA_TRACE_KEY_COMPONENT, IWX_STA_STAGE_KEY_PREWRITE,
+            IWX_STA_COMPONENT_GTK, IWX_STA_SOURCE_RX_PEER, 0,
+            IWX_STA_FLAG_PREWRITE | IWX_STA_FLAG_COMPONENT_UPDATED,
+            kid, 0);
+#endif
         /* install the GTK */
-        switch ((*ic->ic_set_key)(ic, ni, k)) {
+        int keyError =
+#ifdef AIRPORT_TAHOE
+            ieee80211_tahoe_install_group_key(ic, ni, k, traceAttempt,
+                                               IWX_STA_COMPONENT_GTK);
+#else
+            (*ic->ic_set_key)(ic, ni, k);
+#endif
+        switch (keyError) {
             case 0:
             case EBUSY:
                 break;
             default:
                 reason = IEEE80211_REASON_AUTH_LEAVE;
+#ifdef AIRPORT_TAHOE
+                ieee80211_tahoe_trace_group(ic, traceAttempt,
+                    IWX_STA_TRACE_GROUP1_LOCAL_FAILURE,
+                    IWX_STA_STAGE_GROUP1_TERMINAL, IWX_STA_COMPONENT_GTK,
+                    IWX_STA_SOURCE_LOCAL_GROUP1, keyError, 0, kid, 0);
+#endif
                 goto deauth;
         }
     }
@@ -935,17 +1091,37 @@ ieee80211_recv_rsn_group_msg1(struct ieee80211com *ic,
         /* check that the IGTK KDE is valid */
         if (igtk[1] != 4 + 24) {
             reason = IEEE80211_REASON_AUTH_LEAVE;
+#ifdef AIRPORT_TAHOE
+            ieee80211_tahoe_trace_group(ic, traceAttempt,
+                IWX_STA_TRACE_GROUP1_VALIDATION, IWX_STA_STAGE_IGTK_LENGTH,
+                IWX_STA_COMPONENT_IGTK, IWX_STA_SOURCE_RX_PEER, EINVAL, 0,
+                0, 0);
+#endif
             goto deauth;
         }
         kid = LE_READ_2(&igtk[6]);
         if (kid != 4 && kid != 5) {
             DPRINTF(("unsupported IGTK id %u\n", kid));
             reason = IEEE80211_REASON_AUTH_LEAVE;
+#ifdef AIRPORT_TAHOE
+            ieee80211_tahoe_trace_group(ic, traceAttempt,
+                IWX_STA_TRACE_GROUP1_VALIDATION, IWX_STA_STAGE_IGTK_ID,
+                IWX_STA_COMPONENT_IGTK, IWX_STA_SOURCE_RX_PEER, EINVAL, 0,
+                kid, 0);
+#endif
             goto deauth;
         }
         /* map IGTK to 802.11 key */
         k = &ic->ic_nw_keys[kid];
-        if (ieee80211_must_update_group_key(k, &igtk[14], 16)) {
+        int updateIgtk = ieee80211_must_update_group_key(k, &igtk[14], 16);
+#ifdef AIRPORT_TAHOE
+        ieee80211_tahoe_trace_group(ic, traceAttempt,
+            IWX_STA_TRACE_KEY_COMPONENT, IWX_STA_STAGE_KEY_DECISION,
+            IWX_STA_COMPONENT_IGTK, IWX_STA_SOURCE_RX_PEER, 0,
+            updateIgtk ? IWX_STA_FLAG_COMPONENT_UPDATED : IWX_STA_FLAG_COMPONENT_SKIPPED,
+            kid, 0);
+#endif
+        if (updateIgtk) {
             memset(k, 0, sizeof(*k));
             k->k_id = kid;    /* either 4 or 5 */
             k->k_cipher = ni->ni_rsngroupmgmtcipher;
@@ -953,13 +1129,34 @@ ieee80211_recv_rsn_group_msg1(struct ieee80211com *ic,
             k->k_mgmt_rsc = LE_READ_6(&igtk[8]);    /* IPN */
             k->k_len = 16;
             memcpy(k->k_key, &igtk[14], k->k_len);
+#ifdef AIRPORT_TAHOE
+            ieee80211_tahoe_trace_group(ic, traceAttempt,
+                IWX_STA_TRACE_KEY_COMPONENT, IWX_STA_STAGE_KEY_PREWRITE,
+                IWX_STA_COMPONENT_IGTK, IWX_STA_SOURCE_RX_PEER, 0,
+                IWX_STA_FLAG_PREWRITE | IWX_STA_FLAG_COMPONENT_UPDATED,
+                kid, 0);
+#endif
             /* install the IGTK */
-            switch ((*ic->ic_set_key)(ic, ni, k)) {
+            int keyError =
+#ifdef AIRPORT_TAHOE
+                ieee80211_tahoe_install_group_key(ic, ni, k, traceAttempt,
+                                                   IWX_STA_COMPONENT_IGTK);
+#else
+                (*ic->ic_set_key)(ic, ni, k);
+#endif
+            switch (keyError) {
                 case 0:
                 case EBUSY:
                     break;
                 default:
                     reason = IEEE80211_REASON_AUTH_LEAVE;
+#ifdef AIRPORT_TAHOE
+                    ieee80211_tahoe_trace_group(ic, traceAttempt,
+                        IWX_STA_TRACE_GROUP1_LOCAL_FAILURE,
+                        IWX_STA_STAGE_GROUP1_TERMINAL,
+                        IWX_STA_COMPONENT_IGTK,
+                        IWX_STA_SOURCE_LOCAL_GROUP1, keyError, 0, kid, 0);
+#endif
                     goto deauth;
             }
         }
@@ -986,10 +1183,32 @@ ieee80211_recv_rsn_group_msg1(struct ieee80211com *ic,
               ether_sprintf(ni->ni_macaddr));
     
     /* send message 2 to authenticator */
-    (void)ieee80211_send_group_msg2(ic, ni, NULL);
+    int group2Result = ieee80211_send_group_msg2(ic, ni, NULL);
+#ifdef AIRPORT_TAHOE
+    ieee80211_tahoe_trace_group(ic, traceAttempt,
+        IWX_STA_TRACE_GROUP2_RESULT, IWX_STA_STAGE_GROUP2_OUTPUT,
+        IWX_STA_COMPONENT_NONE, IWX_STA_SOURCE_LOCAL_GROUP1,
+        group2Result, 0, 0, group2Result != 0);
+#endif
+    (void)group2Result;
     return;
 deauth:
-    IEEE80211_SEND_MGMT(ic, ni, IEEE80211_FC0_SUBTYPE_DEAUTH, reason);
+    ; /* C11 labels must label a statement, even in the legacy build. */
+#ifdef AIRPORT_TAHOE
+    ieee80211_tahoe_trace_group(ic, traceAttempt,
+        IWX_STA_TRACE_GROUP1_LOCAL_FAILURE, IWX_STA_STAGE_GROUP1_TERMINAL,
+        IWX_STA_COMPONENT_NONE, IWX_STA_SOURCE_LOCAL_GROUP1, reason, 0,
+        reason, 1);
+#endif
+    int deauthResult = IEEE80211_SEND_MGMT(ic, ni,
+        IEEE80211_FC0_SUBTYPE_DEAUTH, reason);
+#ifdef AIRPORT_TAHOE
+    ieee80211_tahoe_trace_group(ic, traceAttempt,
+        IWX_STA_TRACE_LOCAL_DEAUTH_TX, IWX_STA_STAGE_GROUP1_TERMINAL,
+        IWX_STA_COMPONENT_NONE, IWX_STA_SOURCE_LOCAL_GROUP1,
+        deauthResult, 0, reason, 0);
+#endif
+    (void)deauthResult;
     ieee80211_new_state(ic, IEEE80211_S_SCAN, -1);
 }
 
@@ -1006,45 +1225,103 @@ ieee80211_recv_wpa_group_msg1(struct ieee80211com *ic,
     u_int8_t kid;
     int keylen;
     const uint8_t *gtk;
+#ifdef AIRPORT_TAHOE
+    uint32_t traceAttempt = iwx_sta_auth_trace_begin_attempt(
+        &ic->ic_tahoe_auth_trace, ieee80211_tahoe_trace_time_us(),
+        __atomic_load_n(&ic->ic_tahoe_auth_trace.driver_generation,
+                        __ATOMIC_RELAXED));
+#endif
     
 #ifndef IEEE80211_STA_ONLY
     if (ic->ic_opmode != IEEE80211_M_STA &&
-        ic->ic_opmode != IEEE80211_M_IBSS)
+        ic->ic_opmode != IEEE80211_M_IBSS) {
+#ifdef AIRPORT_TAHOE
+        ieee80211_tahoe_trace_group(ic, traceAttempt,
+            IWX_STA_TRACE_GROUP1_VALIDATION, IWX_STA_STAGE_NOT_EXPECTED,
+            IWX_STA_COMPONENT_NONE, IWX_STA_SOURCE_RX_PEER, 0, 0,
+            (uint32_t)ic->ic_opmode, 0);
+#endif
         return;
+    }
 #endif
     /* discard if we're not expecting this message */
     if (ni->ni_rsn_supp_state != RNSA_SUPP_PTKDONE) {
         DPRINTF(("unexpected in state: %d\n", ni->ni_rsn_supp_state));
+#ifdef AIRPORT_TAHOE
+        ieee80211_tahoe_trace_group(ic, traceAttempt,
+            IWX_STA_TRACE_GROUP1_VALIDATION, IWX_STA_STAGE_NOT_EXPECTED,
+            IWX_STA_COMPONENT_NONE, IWX_STA_SOURCE_RX_PEER, EPROTO, 0,
+            (uint32_t)ni->ni_rsn_supp_state, 0);
+#endif
         return;
     }
     /* enforce monotonicity of key request replay counter */
     if (BE_READ_8(key->replaycnt) <= ni->ni_replaycnt) {
         ic->ic_stats.is_rx_eapol_replay++;
+#ifdef AIRPORT_TAHOE
+        ieee80211_tahoe_trace_group(ic, traceAttempt,
+            IWX_STA_TRACE_GROUP1_VALIDATION, IWX_STA_STAGE_REPLAY_REJECT,
+            IWX_STA_COMPONENT_NONE, IWX_STA_SOURCE_RX_PEER, EALREADY, 0,
+            0, 0);
+#endif
         return;
     }
     /* check Key MIC field using KCK */
-    if (ieee80211_eapol_key_check_mic(key, ni->ni_ptk.kck) != 0) {
+    int micError = ieee80211_eapol_key_check_mic(key, ni->ni_ptk.kck);
+    if (micError != 0) {
         DPRINTF(("key MIC failed\n"));
         ic->ic_stats.is_rx_eapol_badmic++;
+#ifdef AIRPORT_TAHOE
+        ieee80211_tahoe_trace_group(ic, traceAttempt,
+            IWX_STA_TRACE_GROUP1_VALIDATION, IWX_STA_STAGE_MIC_REJECT,
+            IWX_STA_COMPONENT_NONE, IWX_STA_SOURCE_RX_PEER, micError, 0,
+            0, 0);
+#endif
         return;
     }
     /*
      * EAPOL-Key data field is encrypted even though WPA doesn't set
      * the ENCRYPTED bit in the info field.
      */
-    if (ieee80211_eapol_key_decrypt(key, ni->ni_ptk.kek) != 0) {
+    int decryptError = ieee80211_eapol_key_decrypt(key, ni->ni_ptk.kek);
+    if (decryptError != 0) {
         DPRINTF(("decryption failed\n"));
+#ifdef AIRPORT_TAHOE
+        ieee80211_tahoe_trace_group(ic, traceAttempt,
+            IWX_STA_TRACE_GROUP1_VALIDATION, IWX_STA_STAGE_DECRYPT_REJECT,
+            IWX_STA_COMPONENT_NONE, IWX_STA_SOURCE_RX_PEER, decryptError, 0,
+            0, 0);
+#endif
         return;
     }
     
     /* check that key length matches that of group cipher */
     keylen = ieee80211_cipher_keylen(ni->ni_rsngroupcipher);
-    if (BE_READ_2(key->keylen) != keylen)
+    if (BE_READ_2(key->keylen) != keylen) {
+#ifdef AIRPORT_TAHOE
+        ieee80211_tahoe_trace_group(ic, traceAttempt,
+            IWX_STA_TRACE_GROUP1_VALIDATION, IWX_STA_STAGE_GTK_LENGTH,
+            IWX_STA_COMPONENT_GTK, IWX_STA_SOURCE_RX_PEER, EINVAL, 0,
+            1, 0);
+#endif
         return;
+    }
     
     /* check that the data length is large enough to hold the key */
-    if (BE_READ_2(key->paylen) < keylen)
+    if (BE_READ_2(key->paylen) < keylen) {
+#ifdef AIRPORT_TAHOE
+        ieee80211_tahoe_trace_group(ic, traceAttempt,
+            IWX_STA_TRACE_GROUP1_VALIDATION, IWX_STA_STAGE_GTK_LENGTH,
+            IWX_STA_COMPONENT_GTK, IWX_STA_SOURCE_RX_PEER, EMSGSIZE, 0,
+            2, 0);
+#endif
         return;
+    }
+#ifdef AIRPORT_TAHOE
+    ieee80211_tahoe_trace_group(ic, traceAttempt,
+        IWX_STA_TRACE_GROUP1_VALIDATION, IWX_STA_STAGE_VALIDATED,
+        IWX_STA_COMPONENT_NONE, IWX_STA_SOURCE_RX_PEER, 0, 0, 0, 0);
+#endif
     
     info = BE_READ_2(key->info);
     
@@ -1052,7 +1329,15 @@ ieee80211_recv_wpa_group_msg1(struct ieee80211com *ic,
     kid = (info >> EAPOL_KEY_WPA_KID_SHIFT) & 3;
     k = &ic->ic_nw_keys[kid];
     gtk = (const uint8_t *)&key[1]; /* key data field contains the GTK */
-    if (ieee80211_must_update_group_key(k, gtk, keylen)) {
+    int updateGtk = ieee80211_must_update_group_key(k, gtk, keylen);
+#ifdef AIRPORT_TAHOE
+    ieee80211_tahoe_trace_group(ic, traceAttempt,
+        IWX_STA_TRACE_KEY_COMPONENT, IWX_STA_STAGE_KEY_DECISION,
+        IWX_STA_COMPONENT_GTK, IWX_STA_SOURCE_RX_PEER, 0,
+        updateGtk ? IWX_STA_FLAG_COMPONENT_UPDATED : IWX_STA_FLAG_COMPONENT_SKIPPED,
+        kid, 0);
+#endif
+    if (updateGtk) {
         memset(k, 0, sizeof(*k));
         k->k_id = kid;    /* 0-3 */
         k->k_cipher = ni->ni_rsngroupcipher;
@@ -1062,16 +1347,48 @@ ieee80211_recv_wpa_group_msg1(struct ieee80211com *ic,
         k->k_rsc[0] = LE_READ_6(key->rsc);
         k->k_len = keylen;
         memcpy(k->k_key, gtk, k->k_len);
+#ifdef AIRPORT_TAHOE
+        ieee80211_tahoe_trace_group(ic, traceAttempt,
+            IWX_STA_TRACE_KEY_COMPONENT, IWX_STA_STAGE_KEY_PREWRITE,
+            IWX_STA_COMPONENT_GTK, IWX_STA_SOURCE_RX_PEER, 0,
+            IWX_STA_FLAG_PREWRITE | IWX_STA_FLAG_COMPONENT_UPDATED,
+            kid, 0);
+#endif
         /* install the GTK */
-        switch ((*ic->ic_set_key)(ic, ni, k)) {
+        int keyError =
+#ifdef AIRPORT_TAHOE
+            ieee80211_tahoe_install_group_key(ic, ni, k, traceAttempt,
+                                               IWX_STA_COMPONENT_GTK);
+#else
+            (*ic->ic_set_key)(ic, ni, k);
+#endif
+        switch (keyError) {
             case 0:
             case EBUSY:
                 break;
-            default:
-                IEEE80211_SEND_MGMT(ic, ni, IEEE80211_FC0_SUBTYPE_DEAUTH,
-                                    IEEE80211_REASON_AUTH_LEAVE);
+            default: {
+                int deauthResult;
+#ifdef AIRPORT_TAHOE
+                ieee80211_tahoe_trace_group(ic, traceAttempt,
+                    IWX_STA_TRACE_GROUP1_LOCAL_FAILURE,
+                    IWX_STA_STAGE_GROUP1_TERMINAL, IWX_STA_COMPONENT_GTK,
+                    IWX_STA_SOURCE_LOCAL_GROUP1, keyError, 0,
+                    IEEE80211_REASON_AUTH_LEAVE, 1);
+#endif
+                deauthResult = IEEE80211_SEND_MGMT(ic, ni,
+                    IEEE80211_FC0_SUBTYPE_DEAUTH,
+                    IEEE80211_REASON_AUTH_LEAVE);
+#ifdef AIRPORT_TAHOE
+                ieee80211_tahoe_trace_group(ic, traceAttempt,
+                    IWX_STA_TRACE_LOCAL_DEAUTH_TX,
+                    IWX_STA_STAGE_GROUP1_TERMINAL, IWX_STA_COMPONENT_NONE,
+                    IWX_STA_SOURCE_LOCAL_GROUP1, deauthResult, 0,
+                    IEEE80211_REASON_AUTH_LEAVE, 0);
+#endif
+                (void)deauthResult;
                 ieee80211_new_state(ic, IEEE80211_S_SCAN, -1);
                 return;
+            }
         }
     }
     if (info & EAPOL_KEY_SECURE) {
@@ -1096,7 +1413,14 @@ ieee80211_recv_wpa_group_msg1(struct ieee80211com *ic,
               ether_sprintf(ni->ni_macaddr));
     
     /* send message 2 to authenticator */
-    (void)ieee80211_send_group_msg2(ic, ni, k);
+    int group2Result = ieee80211_send_group_msg2(ic, ni, k);
+#ifdef AIRPORT_TAHOE
+    ieee80211_tahoe_trace_group(ic, traceAttempt,
+        IWX_STA_TRACE_GROUP2_RESULT, IWX_STA_STAGE_GROUP2_OUTPUT,
+        IWX_STA_COMPONENT_NONE, IWX_STA_SOURCE_LOCAL_GROUP1,
+        group2Result, 0, 0, group2Result != 0);
+#endif
+    (void)group2Result;
 }
 
 #ifndef IEEE80211_STA_ONLY

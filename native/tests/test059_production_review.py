@@ -125,7 +125,31 @@ def main():
 
     # RX telemetry is numeric and independently bounded from PSF/MIF counters.
     stage_names = re.findall(r'"NativeP2PRxDataStage[^"\n]+"', tap_text)
-    assert len(stage_names) == 7
+    # Existing indices/properties remain stable; appended diagnostics are
+    # additional counters, not replacements for the original seven stages.
+    assert stage_names[:7] == [
+        '"NativeP2PRxDataStageEarlyAwdlBssidCandidate"',
+        '"NativeP2PRxDataStageAfterDecryptAwdlBssidCandidate"',
+        '"NativeP2PRxDataStageDecryptRejectedAwdlBssidCandidate"',
+        '"NativeP2PRxDataStageAfterDuplicateAwdlBssidCandidate"',
+        '"NativeP2PRxDataStageDuplicateRejectedAwdlBssidCandidate"',
+        '"NativeP2PRxDataStageAtTapAwdlBssidCandidate"',
+        '"NativeP2PRxDataStageTapRejectedAwdlBssidCandidate"',
+    ]
+    assert stage_names[7:] == [
+        '"NativeP2PRxDataStageTapContextUnavailableAwdlBssidCandidate"',
+        '"NativeP2PRxDataStageTapLeaseInactiveAwdlBssidCandidate"',
+        '"NativeP2PRxDataStageTapRX149PathNotSelectedAwdlBssidCandidate"',
+        '"NativeP2PRxDataStageTapRX149OwnerRejectedAwdlBssidCandidate"',
+        '"NativeP2PRxDataStageTapLeaseSnapshotUnavailableAwdlBssidCandidate"',
+        '"NativeP2PRxDataStageTapOriginalDescriptorMissingAwdlBssidCandidate"',
+        '"NativeP2PRxDataStageTapInputInvalidAwdlBssidCandidate"',
+        '"NativeP2PRxDataStageTapPermitRejectedAwdlBssidCandidate"',
+        '"NativeP2PRxDataStageTapCaptureRejectedAwdlBssidCandidate"',
+        '"NativeP2PRxDataStageTapQueueFullAwdlBssidCandidate"',
+    ]
+    assert len(stage_names) == 17
+    assert len(set(stage_names)) == len(stage_names)
     assert "dataCounts[kDataStageCount]" in rx_header
     assert "if (!generation || stage >= kDataStageCount" in rx_header
     assert "RxRejected" in bsd_h.read_text() and "RxQueueFull" in bsd_h.read_text()
@@ -204,7 +228,7 @@ int main() {
             "original STA RX input remains called after the side tap",
             "observation exports numeric fields only and does not drive packet decisions",
             "checksum status uses cumulative atomic OR; mismatch/malformed totals use cumulative counters",
-            "separate seven-stage RX candidate counters with generation and stage bounds",
+            "original seven RX candidate stages retained with ten appended diagnostic counters and generation/stage bounds",
             "MIF stop reason preserves a prior specific reason",
         ],
         "additional_host_harnesses_passed": {

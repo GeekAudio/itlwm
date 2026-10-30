@@ -77,6 +77,10 @@
 
 #include <IOKit/IOLib.h>
 
+#ifdef AIRPORT_TAHOE
+#include "../../../native/iwx_sta_auth_trace.h"
+#endif
+
 #define IEEE80211_DEBUG
 
 #define _KASSERT(exp) KASSERT(exp, "")
@@ -426,6 +430,13 @@ struct ieee80211com {
 	void			(*ic_delete_key)(struct ieee80211com *,
 				    struct ieee80211_node *,
 				    struct ieee80211_key *);
+#ifdef AIRPORT_TAHOE
+	/* Synchronous observer; submit receipt is stack-owned and never retained. */
+	int			(*ic_tahoe_set_key_observed)(struct ieee80211com *,
+				    struct ieee80211_node *, struct ieee80211_key *,
+				    uint32_t, struct IwxStaAuthSubmitReceipt *);
+	struct IwxStaAuthTrace ic_tahoe_auth_trace;
+#endif
 	int			(*ic_ampdu_tx_start)(struct ieee80211com *,
 				    struct ieee80211_node *, u_int8_t);
 	void			(*ic_ampdu_tx_stop)(struct ieee80211com *,

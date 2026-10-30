@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail-closed Test087 controlled probe protocol and build binding."""
+"""Fail-closed native AWDL controlled-probe protocol and candidate binding."""
 from __future__ import annotations
 
 import base64
@@ -11,11 +11,12 @@ import re
 import secrets
 import stat
 import subprocess
+import sys
 import time
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
-BUILD = "25G332-Test087"
+BUILD = "25G332-Test087"  # legacy plan default; runtime identity comes from receipt
 PROFILE = "native_awdl_rx149_preowner_observation"
 SOURCE_KIND = "controlled_probe"
 SENDER_FRAMES = 16
@@ -42,6 +43,10 @@ TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 UUID_RE = re.compile(r"^[0-9A-F]{8}(?:-[0-9A-F]{4}){3}-[0-9A-F]{12}$")
 HELPER_SOURCE = Path(__file__).resolve().with_name("arm_p2p_rx149_test087.swift")
+TOOL_DIR = Path(__file__).resolve().parent
+if str(TOOL_DIR) not in sys.path:
+    sys.path.insert(0, str(TOOL_DIR))
+import candidate_binding as candidate_binding
 
 
 class ControlledProbeError(RuntimeError):
@@ -92,25 +97,17 @@ def read_private_json(path: Path) -> Tuple[Dict[str, Any], bytes]:
 
 def validate_frozen_source_binding(template: Dict[str, Any], receipt: Dict[str, Any],
                                    receipt_raw: bytes) -> List[str]:
-    errors: List[str] = []
+    errors: List[str] = candidate_binding.validate_build_receipt(
+        receipt, receipt_raw, expected_candidate=template.get("candidate"))
     binding = template.get("source_binding")
     if not isinstance(binding, dict):
-        return ["source_binding"]
+        return sorted(set(errors + ["source_binding"]))
     receipt_sha = hashlib.sha256(receipt_raw).hexdigest()
     source_map = receipt.get("source_sha256")
     if not isinstance(source_map, dict):
         errors.append("receipt_source_map")
         source_map = {}
-    source_map_sha = hashlib.sha256(json.dumps(
-        source_map, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
-    if receipt.get("candidate") != BUILD or receipt.get("status") != "built_offline":
-        errors.append("receipt_identity")
     uuid = receipt.get("mach_o_uuid")
-    if not isinstance(uuid, str) or UUID_RE.fullmatch(uuid) is None:
-        errors.append("receipt_uuid")
-    if (receipt.get("source_file_count") != len(source_map) or
-            not isinstance(source_map, dict) or not source_map):
-        errors.append("receipt_source_file_count")
     if template.get("expected_loaded_uuid") != uuid:
         errors.append("template_receipt_uuid_mismatch")
     if receipt.get("binary_sha256") != binding.get("expected_binary_sha256"):
@@ -119,7 +116,10 @@ def validate_frozen_source_binding(template: Dict[str, Any], receipt: Dict[str, 
         errors.append("receipt_info_plist_sha256")
     if (binding.get("build_receipt_sha256") != receipt_sha or
             binding.get("source_file_count") != len(source_map) or
-            binding.get("source_sha256_map_sha256") != source_map_sha):
+            binding.get("source_sha256_map_sha256") !=
+                candidate_binding.canonical_json_sha256(source_map) or
+            binding.get("candidate") != receipt.get("candidate") or
+            binding.get("profile") != receipt.get("profile")):
         errors.append("frozen_receipt_binding")
     if template.get("source_sha256") != source_map:
         errors.append("template_source_map_mismatch")
@@ -133,7 +133,7 @@ def validate_frozen_source_binding(template: Dict[str, Any], receipt: Dict[str, 
         errors.append("rx149_build_contract_mismatch")
     if binding.get("expected_loaded_uuid") != uuid:
         errors.append("binding_uuid_mismatch")
-    frozen = binding.get("frozen_test087_metadata")
+    frozen = binding.get("frozen_candidate_metadata")
     if not isinstance(frozen, dict):
         errors.append("frozen_metadata_missing")
     else:
@@ -459,9 +459,11 @@ def validate_private_metadata(template: Dict[str, Any], *, boot_epoch: int,
                               actual_receipt_sha256: str) -> List[str]:
     """Validate the isolated, disarmed source binding before any runtime action."""
     errors: List[str] = []
+    source_binding = template.get("source_binding")
+    candidate = template.get("candidate")
     expected = {
-        "schema": "test087-controlled-probe-private/v1",
-        "candidate": BUILD,
+        "schema": candidate_binding.METADATA_SCHEMA,
+        "candidate": candidate,
         "source_ready_kind": SOURCE_KIND,
         "requires_phone_ready": False,
         "armed": False,
@@ -478,6 +480,8 @@ def validate_private_metadata(template: Dict[str, Any], *, boot_epoch: int,
     for key, value in expected.items():
         if template.get(key) != value:
             errors.append(key)
+    if not candidate_binding.valid_candidate(candidate):
+        errors.append("candidate")
     minimum_epoch = template.get("minimum_boot_epoch_exclusive")
     if (type(boot_epoch) is not int or type(minimum_epoch) is not int or
             boot_epoch <= minimum_epoch):
@@ -490,13 +494,15 @@ def validate_private_metadata(template: Dict[str, Any], *, boot_epoch: int,
     binding = template.get("source_binding")
     source_map = template.get("source_sha256")
     source_count = len(source_map) if isinstance(source_map, dict) else -1
-    if (not isinstance(binding, dict) or
-            binding.get("build_receipt_sha256") != expected_receipt_sha256 or
-            type(binding.get("source_file_count")) is not int or
-            binding.get("source_file_count") != source_count or
-            not SHA_RE.fullmatch(str(binding.get("source_sha256_map_sha256", ""))) or
-            binding.get("expected_binary_sha256") is None or
-            binding.get("expected_info_plist_sha256") is None):
+    if (not isinstance(source_binding, dict) or
+            source_binding.get("build_receipt_sha256") != expected_receipt_sha256 or
+            type(source_binding.get("source_file_count")) is not int or
+            source_binding.get("source_file_count") != source_count or
+            not SHA_RE.fullmatch(str(source_binding.get("source_sha256_map_sha256", ""))) or
+            not SHA_RE.fullmatch(str(source_binding.get("expected_binary_sha256", ""))) or
+            not SHA_RE.fullmatch(str(source_binding.get("expected_info_plist_sha256", ""))) or
+            source_binding.get("candidate") != candidate or
+            source_binding.get("profile") != template.get("profile")):
         errors.append("source_binding")
     if template.get("owner_epoch_fields") != list(OWNER_EPOCH_FIELDS):
         errors.append("owner_epoch_fields")
@@ -507,9 +513,9 @@ def validate_private_metadata(template: Dict[str, Any], *, boot_epoch: int,
         errors.append("arm_helper_source_hash")
     if not isinstance(source_map, dict) or not source_map:
         errors.append("source_map")
-    elif (binding.get("source_file_count") != len(source_map) or
-          binding.get("source_sha256_map_sha256") != hashlib.sha256(json.dumps(
-              source_map, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()):
+    elif (source_binding.get("source_file_count") != len(source_map) or
+          source_binding.get("source_sha256_map_sha256") != candidate_binding.canonical_json_sha256(
+              source_map)):
         errors.append("source_map_binding")
     preowner = template.get("preowner_observation_contract")
     if (not isinstance(preowner, dict) or preowner.get("schema") != 1 or
