@@ -13,13 +13,13 @@
     "afpacket-sender/test_sender_host_negative.py": "d378f88e1969bf4ed319d2861a6e011125066e67512d3d4136f3987a2103f33d",
     "awdl0_udp_probe_listener.c": "0cba44b3faf635ddb6f33d62f5d7bc46e75bb2dfea7b8bd2f54e1b80a7c8273f",
     "controlled_run_coordinator.py": "d494dc11d6e0f96d938876f3326e574be3ade0eb07254b7b134df1814b371d6f",
-    "native_controlled_capture.py": "1a93898f528bcddd236b58d8581328df0c95a4d75fe0cafec962e97207e6eb03",
+    "native_controlled_capture.py": "485ac3cc938c00d76e7c3130ffdc815c51434bb1abf6596a7c3b9aa6ce37f03e",
     "run_controlled_probe_once.py": "f39e3f4d43d3c9147a5f5e26907b47c6fd2ad95d44151ef5cec1b7d6a9cacca2",
     "test086_controlled.py": "c3fa72046964bf740a9c43c2e72029153a74fdcf431bc448e08ebc045b82405a",
     "tests/test_controlled.py": "3ddad503ec3f8e30656e1bd484d3db8c5f41aba0ede6a6e4e0956ffa8c7a4adf",
     "tests/test_coordinator_e2e.py": "e1966e284803e10bad50f200ed4b899911eeeb14ef612da027c2f19002672398",
     "tests/test_full_coordinator.py": "e34d9a3fbe2a8dafabea631b6f8f319c4124dbcabf9a29dd6af7edc7acd615ab",
-    "tests/test_native_capture.py": "78a53f941c48e10eb6f617bad044b578db43b3a84290e6efbc8365fbbbf92328",
+    "tests/test_native_capture.py": "d464ff5b79486357811b90a5d7d20727a110d1766c9fb4c2378c2db0db4c8ab7",
     "tests/test_openwrt_ash_stdin.sh": "b36c5f7cc3152087b607fffa046ad458701aa0c82e7c8c4f39f8b66541cda559"
   },
   "excluded": [
@@ -34,6 +34,7 @@
     "python_suite_skipped": 1,
     "skip_reason": "BusyBox ash not installed locally; actual OpenWrt READY/ABORT checked separately",
     "sender_host_only_passed": 9,
-    "scope": "Offline tool tests only; no data input or AirDrop proof"
+    "scope": "Offline tool tests only; no data input or AirDrop proof",
+    "post_freeze_targeted_validation": "Existing root-owned claim directories are accepted without changing permissions; 11 native actor tests passed. Full suite was not repeated."
   }
 }

@@ -8,7 +8,9 @@ import io
 import json
 import os
 from pathlib import Path
+import stat
 import tempfile
+from types import SimpleNamespace
 import unittest
 
 
@@ -207,6 +209,34 @@ class NativeControlledCaptureTests(unittest.TestCase):
             self.assertFalse(configured["armed"])
             self.assertTrue(validation_copy["armed"])
             self.assertEqual(validation_copy["status"], "prepared_disarmed")
+
+    def test_claim_directory_owner_and_mode_policy(self):
+        workspace_uid = 501
+
+        def info(owner, mode):
+            return SimpleNamespace(st_uid=owner, st_mode=mode)
+
+        # Existing ObservationClaims is legitimately root-owned 0755; the
+        # final BootGlobal directory remains private at 0700.
+        self.assertTrue(native._claim_directory_component_is_safe(
+            info(0, stat.S_IFDIR | 0o755), workspace_uid=workspace_uid,
+            is_final=False))
+        self.assertTrue(native._claim_directory_component_is_safe(
+            info(workspace_uid, stat.S_IFDIR | 0o700),
+            workspace_uid=workspace_uid, is_final=True))
+
+        rejected = (
+            (info(502, stat.S_IFDIR | 0o755), False),  # unrelated owner
+            (info(0, stat.S_IFDIR | 0o775), False),  # group writable
+            (info(workspace_uid, stat.S_IFDIR | 0o777), False),  # other writable
+            (info(0, stat.S_IFLNK | 0o777), False),  # symlink
+            (info(0, stat.S_IFDIR | 0o755), True),  # BootGlobal not private
+        )
+        for candidate, is_final in rejected:
+            with self.subTest(owner=candidate.st_uid, mode=oct(candidate.st_mode),
+                              is_final=is_final):
+                self.assertFalse(native._claim_directory_component_is_safe(
+                    candidate, workspace_uid=workspace_uid, is_final=is_final))
 
 
 if __name__ == "__main__":

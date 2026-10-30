@@ -17,6 +17,7 @@ from pathlib import Path
 import pwd
 import re
 import select
+import stat
 import subprocess
 import sys
 import tempfile
@@ -256,11 +257,9 @@ def _claim_availability(capture, account, boot_epoch: int) -> Dict[str, Any]:
             continue
         except OSError:
             raise NativeCaptureError("SHARED_CLAIM_PATH_UNSAFE")
-        if (current_path.is_symlink() or not current_path.is_dir() or
-                info.st_uid != account.pw_uid or info.st_mode & 0o022):
-            raise NativeCaptureError("SHARED_CLAIM_PATH_UNSAFE")
-        if (component == capture.CLAIM_RELATIVE.parts[-1] and
-                info.st_mode & 0o077):
+        is_final = component == capture.CLAIM_RELATIVE.parts[-1]
+        if not _claim_directory_component_is_safe(
+                info, workspace_uid=account.pw_uid, is_final=is_final):
             raise NativeCaptureError("SHARED_CLAIM_PATH_UNSAFE")
     current = claim_dir / ("boot-" + str(boot_epoch) + ".json")
     for candidate in capture._legacy_claims(claim_dir, boot_epoch):
@@ -274,6 +273,18 @@ def _claim_availability(capture, account, boot_epoch: int) -> Dict[str, Any]:
         "claim_filename": current.name,
         "path_logged": False,
     }
+
+
+def _claim_directory_component_is_safe(info, *, workspace_uid: int,
+                                        is_final: bool) -> bool:
+    """Accept root/user-owned claim dirs, while keeping symlink/write gates."""
+    mode = info.st_mode
+    if (not stat.S_ISDIR(mode) or info.st_uid not in (0, workspace_uid) or
+            mode & 0o022):
+        return False
+    if is_final and mode & 0o077:
+        return False
+    return True
 
 
 def _custom_loaded_identity(capture, build_report_path: Path, expected: str) -> Dict[str, Any]:
