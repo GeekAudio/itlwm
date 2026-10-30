@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "a8c30ed5b5a480ca7c60dceea3b89bbb62b4bf1c4478ccfbfce97248b02e814b"
+      "sha256": "c657dbef0f1e238b9b431b225d0c3807e3cc348d4e478df13a08128d5940ded6"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "5348aac3db08df1fe3df9009674ded8dcf5cb6fe9b4b5ee7e3697c4bfc691663"
+      "sha256": "211f3b090fcad951bf2c57fe6f952d49a09d3ddfa3a22724c35b40573ba3b298"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -30,7 +30,7 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "980393e8547624472e15d7d208ed90255f517335dec77c21124c86ae29258db9"
+      "sha256": "0714424c6594a3e4d8e0a3d86d72a4c5e7d9c6735f7ebd7de5c2084fdc39544b"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-31T05:51:56.055799+08:00",
-  "runtime_scope": "Test091 loaded successfully. A 300.002-second/54-sample Wi-Fi baseline and a later 120.004-second/23-sample observation passed, along with interface-bound HTTP/HTTPS requests. Early boot still recorded two RUN-to-INIT retirements and a firmware software error; long-term stability and DNS resolution were not established. RX149 preflight stopped before helper, claim, ARM or sender because data-input readiness remained disabled. Source and independent review support a sticky input fence after an earlier error; safe versioned recovery remains to be implemented. No RF receipt, native inbound data or AirDrop acceptance is claimed. Current matrix: 4 passed, 1 partial, 35 uncovered, 0 failed; historical 24/40 retained, net new 0. No EFI or router configuration changes this turn."
+  "updated_at": "2026-10-31T05:56:56.539719+08:00",
+  "runtime_scope": "Test091 loaded successfully. A 300.002-second/54-sample Wi-Fi baseline and a later 120.004-second/23-sample observation passed, along with interface-bound HTTP/HTTPS requests. Early boot still recorded two RUN-to-INIT retirements and a firmware software error; long-term stability and DNS resolution were not established. RX149 preflight stopped before helper, claim, ARM or sender because data-input readiness remained disabled. Source and independent review support a sticky input fence after an earlier error; safe versioned recovery remains to be implemented. No RF receipt, native inbound data or AirDrop acceptance is claimed. Current matrix: 4 passed, 2 partial, 34 uncovered, 0 failed; historical 24/40 retained, net new 0. No EFI or router configuration changes this turn. A subsequent user-confirmed manual Wi-Fi off/on restored association and IPv4. The user reported a short interval of unjoinable saved networks and slow scanning; exact scan/recovery latency is unmeasured. The manual shutdown is not a spontaneous disconnect, and its recovery counter growth is not a hardware-fault count."
 }
