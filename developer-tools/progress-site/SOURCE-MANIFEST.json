@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "c657dbef0f1e238b9b431b225d0c3807e3cc348d4e478df13a08128d5940ded6"
+      "sha256": "4583b2b7c0ef9f04f3106b761fec1b6403c5d9d4cec7ea6443cd908e9d86e083"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "211f3b090fcad951bf2c57fe6f952d49a09d3ddfa3a22724c35b40573ba3b298"
+      "sha256": "a85d0800baefad6619d69ae326eb1d2da99ba8e40d61120d77d67d1a40c43287"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -30,7 +30,7 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "0714424c6594a3e4d8e0a3d86d72a4c5e7d9c6735f7ebd7de5c2084fdc39544b"
+      "sha256": "f27617f5cefdc9856fe5ebe3ff6b691e293214fa9d0a9c35728b7c84aa3a44b5"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-31T05:56:56.539719+08:00",
-  "runtime_scope": "Test091 loaded successfully. A 300.002-second/54-sample Wi-Fi baseline and a later 120.004-second/23-sample observation passed, along with interface-bound HTTP/HTTPS requests. Early boot still recorded two RUN-to-INIT retirements and a firmware software error; long-term stability and DNS resolution were not established. RX149 preflight stopped before helper, claim, ARM or sender because data-input readiness remained disabled. Source and independent review support a sticky input fence after an earlier error; safe versioned recovery remains to be implemented. No RF receipt, native inbound data or AirDrop acceptance is claimed. Current matrix: 4 passed, 2 partial, 34 uncovered, 0 failed; historical 24/40 retained, net new 0. No EFI or router configuration changes this turn. A subsequent user-confirmed manual Wi-Fi off/on restored association and IPv4. The user reported a short interval of unjoinable saved networks and slow scanning; exact scan/recovery latency is unmeasured. The manual shutdown is not a spontaneous disconnect, and its recovery counter growth is not a hardware-fault count."
+  "updated_at": "2026-10-31T06:35:05.980193+08:00",
+  "runtime_scope": "Test092 is deployed and awaiting reboot after fixed-source independent review, full Release build, 21 host validation groups and 35 compile profiles. It adds fault-versioned AWDL input recovery and bounded Wi-Fi Busy scan/join retries, preserving an existing connection until a new Join is admitted. Full EFI backup and remounted readback passed. The machine still runs Test091; an additional 300.003-second/52-sample passive observation passed for that running build. Current-runtime matrix remains Test091: 4 passed, 2 partial, 34 uncovered, 0 regressed; historical 24/40, net new 0. Test092 boot, scan/reconnect latency, native awdl0 inbound data and AirDrop remain unverified."
 }
