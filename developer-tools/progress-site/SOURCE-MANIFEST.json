@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "597bf2d3fd501ae70ebab30e5a141547fce6f3a87e3731d7f55279a379e19d01"
+      "sha256": "eca8157ad32188109b973d24c63c1a427e2b3d744053b4d75d5229711a4d7e0e"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "ce391576dd362230f1750a2e7e494add3cf15aa3480a772320eb0a7d96400d4b"
+      "sha256": "3d7484d9c0abe12b428f97730d6c3e8eae5dd42e447c0a56f0637571f3606e2c"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -30,7 +30,7 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "b4b71149e281f38d3031ebed284e387aee286f27dae0f2c30a55038661544c88"
+      "sha256": "8e21b4b70385e40baa5eb4e887cd8ceaf7d0ea23900a9b4181955ba2bcd3c7de"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-31T03:49:22.438808+08:00",
-  "runtime_scope": "Test090 code and targeted offline checks passed; Release signed candidate deployed with full EFI backup. Current running driver remains Test087 until reboot. Repairs preserve BSD IFF_UP on link down, reclaim only owned STA management/data queue ranges with 16-bit SSN normalization, and reject prequeue CCMP EBUSY as EAGAIN. No runtime repair, native AWDL data ingress, or AirDrop success is claimed. The fixed firmware snapshot remains isolated and is not in this candidate. Current acceptance remains 7 passed, 3 partial, 29 uncovered, 1 failed. No WAN/LAN changes."
+  "updated_at": "2026-10-31T04:15:37.277321+08:00",
+  "runtime_scope": "Test090 boot identity matched. Passive Wi-Fi baseline failed at 371.446 seconds / 68 samples with link and IPv4 loss while IFF_UP remained set; reset=5, stop=2, watchdog=0 unchanged across saved failure/recovery stages. User reports no manual action. Reassociation and en1-bound gateway HTTP plus two HTTPS requests passed afterward. Initial trigger remains unknown; near-hourly recurrence is only a clue. No Intel ARM/ROC, router sender, EFI write or WAN/LAN change in this turn. Current acceptance: 4 passed, 0 partial, 35 uncovered, 1 failed; previous passes not inherited. Native AWDL data return and AirDrop remain unproven."
 }
