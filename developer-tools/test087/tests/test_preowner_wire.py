@@ -230,6 +230,12 @@ class TestPreownerWire(unittest.TestCase):
             snapshot_start + preowner_decode.SNAPSHOT_FIELD_INDEX["totalEvents"],
             0x1_0000_0000,
         )
+        closed_empty = self.records[1]
+        early_deadline = replace_word(
+            closed_empty,
+            snapshot_start + preowner_decode.SNAPSHOT_FIELD_INDEX["closeReason"],
+            1,
+        )
         malformed_cases = (
             ("enum", bad_kind),
             ("boolean", bad_boolean),
@@ -237,6 +243,7 @@ class TestPreownerWire(unittest.TestCase):
             ("counter-relation", bad_total),
             ("time-bound", bad_end),
             ("u32-overflow", bad_u32),
+            ("early-deadline-close", early_deadline),
         )
         for name, malformed in malformed_cases:
             with self.subTest(name=name):

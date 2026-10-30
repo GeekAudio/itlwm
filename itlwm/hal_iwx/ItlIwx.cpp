@@ -1717,9 +1717,7 @@ detach(IOPCIDevice *device)
 #ifdef AIRPORT_TAHOE
     __atomic_store_n(&nativeLifecycleTearingDown_, 1u, __ATOMIC_RELEASE);
 #if defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
-    if (__atomic_load_n(&nativeRxPreOwnerArmed_, __ATOMIC_ACQUIRE))
-        (void)nativeRxPreOwner_.close(tahoeMonotonicNs() / 1000ULL,
-                                    NativeRxPreOwner::CloseReason::Stop);
+    tahoeRxPreOwnerStop();
 #endif
     tahoeScanOnline(false);
     tahoeDriverEvent(ITL_TAHOE_EVT_DRIVER_STOPPED);
@@ -5013,9 +5011,7 @@ int ItlIwx::
 iwx_stop_device(struct iwx_softc *sc)
 {
 #if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
-    if (__atomic_load_n(&nativeRxPreOwnerArmed_, __ATOMIC_ACQUIRE))
-        (void)nativeRxPreOwner_.close(tahoeMonotonicNs() / 1000ULL,
-                                    NativeRxPreOwner::CloseReason::Stop);
+    tahoeRxPreOwnerStop();
 #endif
 #if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
     NativeAwdlBSD::revokeRx149DataInput();
@@ -7655,6 +7651,16 @@ drop:
 }
 
 #ifdef AIRPORT_TAHOE
+void ItlIwx::tahoeRxPreOwnerStop()
+{
+    // Also invalidate an ARM that has started but has not yet published Armed.
+    (void)__atomic_fetch_add(&nativeRxPreOwnerStopSerial_, uint64_t(1),
+                             __ATOMIC_ACQ_REL);
+    if (__atomic_load_n(&nativeRxPreOwnerArmed_, __ATOMIC_ACQUIRE))
+        (void)nativeRxPreOwner_.close(tahoeMonotonicNs() / 1000ULL,
+                                    NativeRxPreOwner::CloseReason::Stop);
+}
+
 void ItlIwx::tahoeRxPreOwnerIrq(uint32_t cause, bool msix)
 {
     if (!nativeRxPreOwner_.enabled())
@@ -15837,9 +15843,7 @@ iwx_stop(struct _ifnet *ifp, IwxResetTrace::ResetReason reason)
 #ifdef AIRPORT_TAHOE
     const uint32_t linkResetOldState = static_cast<uint32_t>(ic->ic_state);
 #if defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
-    if (__atomic_load_n(&nativeRxPreOwnerArmed_, __ATOMIC_ACQUIRE))
-        (void)nativeRxPreOwner_.close(tahoeMonotonicNs() / 1000ULL,
-                                    NativeRxPreOwner::CloseReason::Stop);
+    tahoeRxPreOwnerStop();
 #endif
     const uint32_t linkResetReason = static_cast<uint32_t>(reason);
     const uint32_t linkResetSequence = tahoeRecordReset(reason, sc);

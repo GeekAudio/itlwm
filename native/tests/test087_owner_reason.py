@@ -69,11 +69,14 @@ HARNESS = r'''#include <cstdint>
 #include <vector>
 
 #include "native/awdl_rx_entry_telemetry.hpp"
+#include "native/awdl_rx_event_timeline.hpp"
 #include "native/intel_roc_event_state.hpp"
 #include "native/p2p_rx149_observation.hpp"
 #include "native/rx_preowner_observation.hpp"
 
+#define ITL_NATIVE_AWDL_RX149_OBSERVATION_25G332 1
 #define IWX_SESSION_PROTECT_CONF_P2P_GO_NEGOTIATION 3
+#define IWX_SESSION_PROTECT_CONF_P2P_DEVICE_DISCOV 2
 #define IWX_P2P_ROC_SESSION_ACKED 8
 
 template <typename T> struct Tracked {
@@ -116,6 +119,15 @@ struct SessionReducerStub {
     }
 };
 
+struct TraceTimelineStub {
+    NativeAwdlRxTrace::Snapshot value{};
+    uint32_t calls = 0;
+    NativeAwdlRxTrace::Snapshot snapshot() {
+        ++calls;
+        return value;
+    }
+};
+
 static uint32_t *gClockReads = nullptr;
 static uint64_t gNowUs = 1001;
 static uint64_t tahoeP2pRxMonotonicUs() {
@@ -129,6 +141,9 @@ public:
     uint32_t nativeP2pProbeGeneration_ = 7;
     uint32_t nativeP2pRocGeneration_ = 7;
     SessionReducerStub nativeP2pRocEvents_{};
+    TraceTimelineStub nativeAwdlRxEventTimeline_{};
+    NativeP2PRx149Observation::RocEvidence rx149Evidence_{};
+    uint32_t rx149EvidenceCalls_ = 0;
     bool mainGate_ = true;
     uint32_t gateCalls = 0;
     bool tahoeP2pOnMainGate() {
@@ -140,6 +155,28 @@ public:
     bool legacyCurrentRxDiagnosticEpochs(
         struct iwx_softc *, NativeAwdlRxEntry::Epochs *);
 };
+
+static NativeP2PRx149Observation::RocEvidence currentRx149ActionEvidence(
+    ItlIwx *owner, struct iwx_softc *sc,
+    const IntelP2PRx::LeaseSnapshot &, uint16_t,
+    const IntelROCEvent::SessionSnapshot &session,
+    const NativeAwdlRxTrace::Snapshot &)
+{
+    if (!owner || !sc)
+        return {};
+    ++owner->rx149EvidenceCalls_;
+    auto evidence = owner->rx149Evidence_;
+    evidence.commandReturned = session.commandReturned;
+    evidence.commandSucceeded = session.commandReturned &&
+        session.commandResult == 0;
+    evidence.deviceDiscoveryConfiguration = session.configuration ==
+        IWX_SESSION_PROTECT_CONF_P2P_DEVICE_DISCOV;
+    evidence.startSeen = session.startSeen;
+    evidence.startSucceeded = session.startSeen && session.startStatus == 1;
+    evidence.endSeen = session.endSeen;
+    evidence.outcomeUnknown = session.outcomeUnknown;
+    return evidence;
+}
 
 struct Fixture {
     ItlIwx owner{};
@@ -188,6 +225,25 @@ struct Fixture {
         s.startSeen = true;
         owner.nativeP2pProbeGeneration_ = 7;
         owner.nativeP2pRocGeneration_ = 7;
+        auto &evidence = owner.rx149Evidence_;
+        evidence.profileSelected = true;
+        evidence.receiveObservationOnly = true;
+        evidence.requestedChannel149 = true;
+        evidence.actualRocChannel149 = true;
+        evidence.rxChannel149 = false; // This branch supplies no packet channel.
+        evidence.leaseActive = true;
+        evidence.ownerCurrent = true;
+        evidence.epochsMatch = true;
+        evidence.tokenMatches = true;
+        evidence.commandReturned = true;
+        evidence.commandSucceeded = true;
+        evidence.deviceDiscoveryConfiguration = true;
+        evidence.startSeen = true;
+        evidence.startSucceeded = true;
+        evidence.endSeen = false;
+        evidence.endConfirmed = false;
+        evidence.outcomeUnknown = false;
+        owner.rx149EvidenceCalls_ = 0;
         owner.mainGate_ = true;
         owner.gateCalls = 0;
         output = {91, 92, 93, 94};
@@ -240,6 +296,9 @@ static void compareScenario(const Scenario &test) {
     const uint32_t oldGateCalls = legacy.owner.gateCalls;
     const uint32_t oldLeaseReads = legacy.leaseReads;
     const uint32_t oldSnapshots = legacy.owner.nativeP2pRocEvents_.calls;
+    const uint32_t oldTraceSnapshots =
+        legacy.owner.nativeAwdlRxEventTimeline_.calls;
+    const uint32_t oldEvidenceCalls = legacy.owner.rx149EvidenceCalls_;
     const uint32_t oldClockReads = legacy.clockReads;
 
     uint32_t reason = 0xffffffffu;
@@ -249,6 +308,9 @@ static void compareScenario(const Scenario &test) {
     const uint32_t newGateCalls = withReason.owner.gateCalls;
     const uint32_t newLeaseReads = withReason.leaseReads;
     const uint32_t newSnapshots = withReason.owner.nativeP2pRocEvents_.calls;
+    const uint32_t newTraceSnapshots =
+        withReason.owner.nativeAwdlRxEventTimeline_.calls;
+    const uint32_t newEvidenceCalls = withReason.owner.rx149EvidenceCalls_;
     const uint32_t newClockReads = withReason.clockReads;
 
     gClockReads = &nullReason.clockReads;
@@ -258,6 +320,9 @@ static void compareScenario(const Scenario &test) {
     const uint32_t noReasonGateCalls = nullReason.owner.gateCalls;
     const uint32_t noReasonLeaseReads = nullReason.leaseReads;
     const uint32_t noReasonSnapshots = nullReason.owner.nativeP2pRocEvents_.calls;
+    const uint32_t noReasonTraceSnapshots =
+        nullReason.owner.nativeAwdlRxEventTimeline_.calls;
+    const uint32_t noReasonEvidenceCalls = nullReason.owner.rx149EvidenceCalls_;
     const uint32_t noReasonClockReads = nullReason.clockReads;
     gClockReads = nullptr;
 
@@ -271,8 +336,21 @@ static void compareScenario(const Scenario &test) {
           "lease read order/count unchanged");
     check(oldSnapshots == newSnapshots && oldSnapshots == noReasonSnapshots,
           "ROC snapshot order/count unchanged");
+    check(oldTraceSnapshots == newTraceSnapshots &&
+          oldTraceSnapshots == noReasonTraceSnapshots,
+          "RX149 trace snapshot order/count unchanged");
+    check(oldEvidenceCalls == newEvidenceCalls &&
+          oldEvidenceCalls == noReasonEvidenceCalls,
+          "RX149 owner-evidence evaluation order/count unchanged");
     check(oldClockReads == newClockReads && oldClockReads == noReasonClockReads,
           "host clock read order/count unchanged");
+    const bool rx149Configuration =
+        withReason.owner.nativeP2pRocEvents_.value.configuration ==
+        IWX_SESSION_PROTECT_CONF_P2P_DEVICE_DISCOV;
+    const uint32_t expectedRx149Calls = rx149Configuration ? 1u : 0u;
+    check(newTraceSnapshots == expectedRx149Calls &&
+          newEvidenceCalls == expectedRx149Calls,
+          "RX149 config branch is compiled and exercised");
     check(testSameEpochs(legacy.output, withReason.output) &&
           testSameEpochs(legacy.output, nullReason.output), "epoch output differential");
     if (!oldResult) {
@@ -323,6 +401,11 @@ int main() {
         {"token mismatch precedes phase", R::RocTokenMismatch, false, [](Fixture &f) { f.sc.sc_p2p_roc.token++; f.sc.sc_p2p_roc.phase = 0; }},
         {"phase mismatch", R::RocPhaseNotAcked, false, [](Fixture &f) { f.sc.sc_p2p_roc.phase = 0; }},
         {"qualified", R::Qualified, true, [](Fixture &) {}},
+        {"RX149 config2 qualified", R::Qualified, true, [](Fixture &f) { f.owner.nativeP2pRocEvents_.value.configuration = IWX_SESSION_PROTECT_CONF_P2P_DEVICE_DISCOV; }},
+        {"RX149 config2 not STARTed", R::RocWindowNotQualified, false, [](Fixture &f) { f.owner.nativeP2pRocEvents_.value.configuration = IWX_SESSION_PROTECT_CONF_P2P_DEVICE_DISCOV; f.owner.nativeP2pRocEvents_.value.startSeen = false; f.owner.nativeP2pRocEvents_.value.startStatus = 0; }},
+        {"RX149 config2 ended", R::RocWindowNotQualified, false, [](Fixture &f) { f.owner.nativeP2pRocEvents_.value.configuration = IWX_SESSION_PROTECT_CONF_P2P_DEVICE_DISCOV; f.owner.nativeP2pRocEvents_.value.endSeen = true; f.owner.nativeP2pRocEvents_.value.endStatus = 1; }},
+        {"RX149 config2 exact 100ms boundary", R::RocWindowNotQualified, false, [](Fixture &f) { f.owner.nativeP2pRocEvents_.value.configuration = IWX_SESSION_PROTECT_CONF_P2P_DEVICE_DISCOV; gNowUs = 101000; }},
+        {"RX149 config2 owner evidence failure", R::RocWindowNotQualified, false, [](Fixture &f) { f.owner.nativeP2pRocEvents_.value.configuration = IWX_SESSION_PROTECT_CONF_P2P_DEVICE_DISCOV; f.owner.rx149Evidence_.ownerCurrent = false; }},
     };
     for (const auto &test : cases) compareScenario(test);
     check(gChecks > 0, "checks executed");

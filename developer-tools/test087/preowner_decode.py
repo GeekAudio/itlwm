@@ -337,7 +337,10 @@ def _validate_snapshot(snapshot: Dict[str, Any]) -> None:
     if snapshot["active"]:
         if end != 0 or snapshot["closeReason"] != "None":
             raise DecodeError("active capture carries closed-only fields")
-    elif end < begin or end > deadline or snapshot["closeReason"] == "None":
+    elif (
+        end < begin or end > deadline or snapshot["closeReason"] == "None" or
+        (snapshot["closeReason"] == "Deadline" and end != deadline)
+    ):
         raise DecodeError("closed capture has invalid end time or close reason")
 
     kind_counts = snapshot["kindCounts"]
@@ -525,4 +528,3 @@ def compare_three_reads(reads: Sequence[Optional[bytes]]) -> Dict[str, Any]:
         "readByteLengths": lengths,
         "decoded": decoded,
     }
-

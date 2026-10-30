@@ -500,6 +500,7 @@ public:
         uint32_t = UINT32_MAX, uint32_t = UINT32_MAX,
         uint32_t = UINT32_MAX, uint32_t = 0, uint32_t = 0);
     void tahoeRxPreOwnerIrq(uint32_t cause, bool msix);
+    void tahoeRxPreOwnerStop();
     void tahoeRxPreOwnerPublish(IOEthernetController *);
     void tahoeP2pSyncRxDiagnosticOwner(bool closeOnly);
     void tahoeP2pPublishRxStageCounters(IOEthernetController *);
@@ -583,6 +584,7 @@ public:
     NativeAwdlRxEntry::Telemetry nativeAwdlRxEntryTelemetry_{};
     NativeRxPreOwner::Observer nativeRxPreOwner_{};
     uint32_t nativeRxPreOwnerArmed_ {0};
+    uint64_t nativeRxPreOwnerStopSerial_ {0};
     bool nativeRxPreOwnerPublished_ {false};
     NativeRxPreOwner::Snapshot nativeRxPreOwnerPublishSnapshot_{};
     uint64_t nativeRxPreOwnerPublishWords_[1024] {};

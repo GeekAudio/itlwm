@@ -7894,6 +7894,10 @@ void ItlIwx::tahoeP2pPublishRocState()
 
 IOReturn ItlIwx::nativeP2pArmProbe()
 {
+#if defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+    const uint64_t observerStopSerial = __atomic_load_n(
+        &nativeRxPreOwnerStopSerial_, __ATOMIC_ACQUIRE);
+#endif
     if (__atomic_load_n(&nativeP2pProbeRunAllocationFailed_, __ATOMIC_ACQUIRE))
         return kIOReturnNoMemory;
     IOEthernetController *controller = getController();
@@ -7920,9 +7924,16 @@ IOReturn ItlIwx::nativeP2pArmProbe()
             absolutetime_to_nanoseconds(absolute, &nanos);
             const bool observed = nativeRxPreOwner_.begin(nanos / 1000ULL,
                 uint32_t(__atomic_load_n(&com.sc_generation, __ATOMIC_ACQUIRE)));
-            __atomic_store_n(&nativeRxPreOwnerArmed_, observed ? 1u : 0u,
-                             __ATOMIC_RELEASE);
-            controller->setProperty("NativeRxPreOwnerArmAccepted", observed ? 1u : 0u, 32);
+            if (observed)
+                __atomic_store_n(&nativeRxPreOwnerArmed_, 1u, __ATOMIC_RELEASE);
+            if (observed &&
+                (observerStopSerial != __atomic_load_n(
+                     &nativeRxPreOwnerStopSerial_, __ATOMIC_ACQUIRE) ||
+                 __atomic_load_n(&nativeLifecycleTearingDown_, __ATOMIC_ACQUIRE)))
+                (void)nativeRxPreOwner_.close(nanos / 1000ULL,
+                    NativeRxPreOwner::CloseReason::Stop);
+            const bool observerReady = observed && nativeRxPreOwner_.enabled();
+            controller->setProperty("NativeRxPreOwnerArmAccepted", observerReady ? 1u : 0u, 32);
         }
 #endif
         publishRx149ProfileState(this, true, false, true);

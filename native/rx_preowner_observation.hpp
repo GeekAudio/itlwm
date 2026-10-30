@@ -681,75 +681,76 @@ private:
 
     void fillSnapshotLocked(uint64_t snapshotUs, Snapshot *out) const noexcept
     {
-        Snapshot value{};
-        value.schemaVersion = kSchemaVersion;
-        value.captureSerial = kCaptureSerial;
-        value.driverGeneration = driverGeneration_;
-        value.beginUs = beginUs_;
-        value.endUs = endUs_;
-        value.deadlineUs = deadlineUs_;
-        value.snapshotUs = snapshotUs;
-        value.active = __atomic_load_n(&active_, __ATOMIC_ACQUIRE);
-        value.closed = value.active ? 0u : 1u;
-        value.closeReason = closeReason_;
-        value.totalEvents = totalEvents_;
+        // The caller owns preallocated storage. Zero and fill it in place to
+        // avoid a multi-kilobyte Snapshot temporary on the watchdog stack.
+        __builtin_memset(out, 0, sizeof(*out));
+        out->schemaVersion = kSchemaVersion;
+        out->captureSerial = kCaptureSerial;
+        out->driverGeneration = driverGeneration_;
+        out->beginUs = beginUs_;
+        out->endUs = endUs_;
+        out->deadlineUs = deadlineUs_;
+        out->snapshotUs = snapshotUs;
+        out->active = __atomic_load_n(&active_, __ATOMIC_ACQUIRE);
+        out->closed = out->active ? 0u : 1u;
+        out->closeReason = closeReason_;
+        out->totalEvents = totalEvents_;
         for (uint32_t i = 0; i < kEventKindCount; ++i)
-            value.kindCounts[i] = kindCounts_[i];
+            out->kindCounts[i] = kindCounts_[i];
         for (uint32_t i = 0; i < kRxClassCount; ++i)
-            value.rxClassCounts[i] = rxClassCounts_[i];
-        value.dispatchCount = dispatchCount_;
-        value.mpduEntryCount = mpduEntryCount_;
-        value.awdlCandidateCount = awdlCandidateCount_;
-        value.ownerQualifiedCount = ownerQualifiedCount_;
-        value.ownerFailedCount = ownerFailedCount_;
+            out->rxClassCounts[i] = rxClassCounts_[i];
+        out->dispatchCount = dispatchCount_;
+        out->mpduEntryCount = mpduEntryCount_;
+        out->awdlCandidateCount = awdlCandidateCount_;
+        out->ownerQualifiedCount = ownerQualifiedCount_;
+        out->ownerFailedCount = ownerFailedCount_;
         for (uint32_t i = 0; i < kOwnerReasonCount; ++i)
-            value.ownerReasonCounts[i] = ownerReasonCounts_[i];
+            out->ownerReasonCounts[i] = ownerReasonCounts_[i];
         const uint64_t lockLoss =
             __atomic_load_n(&lockContentionLoss_, __ATOMIC_RELAXED);
-        value.lockContentionLoss = lockLoss > UINT32_MAX ? UINT32_MAX :
+        out->lockContentionLoss = lockLoss > UINT32_MAX ? UINT32_MAX :
             static_cast<uint32_t>(lockLoss);
-        value.invalidSampleLoss = invalidSampleLoss_;
-        value.generationMismatchLoss = generationMismatchLoss_;
-        value.deadlineRejectCount = deadlineRejectCount_;
-        value.clockReversalLoss = clockReversalLoss_;
-        value.witness149Overflow = witness149Overflow_;
-        value.witnessNon149Overflow = witnessNon149Overflow_;
-        value.overflow = __atomic_load_n(&overflow_, __ATOMIC_ACQUIRE);
-        value.counterOverflow =
+        out->invalidSampleLoss = invalidSampleLoss_;
+        out->generationMismatchLoss = generationMismatchLoss_;
+        out->deadlineRejectCount = deadlineRejectCount_;
+        out->clockReversalLoss = clockReversalLoss_;
+        out->witness149Overflow = witness149Overflow_;
+        out->witnessNon149Overflow = witnessNon149Overflow_;
+        out->overflow = __atomic_load_n(&overflow_, __ATOMIC_ACQUIRE);
+        out->counterOverflow =
             __atomic_load_n(&counterOverflow_, __ATOMIC_ACQUIRE);
         if (lockLoss > UINT32_MAX) {
-            value.overflow = 1;
-            value.counterOverflow = 1;
+            out->overflow = 1;
+            out->counterOverflow = 1;
         }
         bool lossOverflow = false;
-        value.lossCount = value.lockContentionLoss;
-        value.lossCount = saturatingAddTracked(value.lossCount,
-                                               value.invalidSampleLoss,
+        out->lossCount = out->lockContentionLoss;
+        out->lossCount = saturatingAddTracked(out->lossCount,
+                                               out->invalidSampleLoss,
                                                &lossOverflow);
-        value.lossCount = saturatingAddTracked(value.lossCount,
-                                               value.generationMismatchLoss,
+        out->lossCount = saturatingAddTracked(out->lossCount,
+                                               out->generationMismatchLoss,
                                                &lossOverflow);
-        value.lossCount = saturatingAddTracked(value.lossCount,
-                                               value.deadlineRejectCount,
+        out->lossCount = saturatingAddTracked(out->lossCount,
+                                               out->deadlineRejectCount,
                                                &lossOverflow);
-        value.lossCount = saturatingAddTracked(value.lossCount,
-                                               value.clockReversalLoss,
+        out->lossCount = saturatingAddTracked(out->lossCount,
+                                               out->clockReversalLoss,
                                                &lossOverflow);
-        value.lossCount = saturatingAddTracked(value.lossCount,
-                                               value.witness149Overflow,
+        out->lossCount = saturatingAddTracked(out->lossCount,
+                                               out->witness149Overflow,
                                                &lossOverflow);
-        value.lossCount = saturatingAddTracked(value.lossCount,
-                                               value.witnessNon149Overflow,
+        out->lossCount = saturatingAddTracked(out->lossCount,
+                                               out->witnessNon149Overflow,
                                                &lossOverflow);
         if (lossOverflow)
-            value.overflow = 1;
-        value.witness149Count = witness149Count_;
-        value.witnessNon149Count = witnessNon149Count_;
+            out->overflow = 1;
+        out->witness149Count = witness149Count_;
+        out->witnessNon149Count = witnessNon149Count_;
         for (uint32_t i = 0; i < kWitnessBankCapacity; ++i) {
-            value.channel149Witnesses[i] = channel149Witnesses_[i];
-            value.non149Witnesses[i] = non149Witnesses_[i];
+            out->channel149Witnesses[i] = channel149Witnesses_[i];
+            out->non149Witnesses[i] = non149Witnesses_[i];
         }
-        *out = value;
     }
 
     void zeroCounters() noexcept
