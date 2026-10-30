@@ -11,6 +11,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 ART = ROOT.parent / 'IntelWirelessNative/research/test065-rx-entry-host-verification-private.json'
 HEADER = ROOT / 'native/awdl_rx_entry_telemetry.hpp'
+RX149_POLICY = ROOT / 'native/p2p_rx149_observation.hpp'
 FIXTURE = Path(__file__).with_name('awdl_rx_entry_telemetry_test.cpp')
 PUBLISHER_HEADER = ROOT / 'native/awdl_rx_entry_publisher.hpp'
 PUBLISHER_FIXTURE = Path(__file__).with_name('awdl_rx_entry_publisher_test.cpp')
@@ -22,6 +23,7 @@ STAGE_TEST = ROOT / 'native/tests/test057_rx_stage_counters.py'
 
 def source_contracts():
     header = HEADER.read_text()
+    rx149_policy = RX149_POLICY.read_text()
     publisher_header = PUBLISHER_HEADER.read_text()
     cpp = ITL_CPP.read_text()
     itl_header = ITL_HEADER.read_text()
@@ -32,10 +34,16 @@ def source_contracts():
     diagnostic_epoch_fn = rx_cpp[
         rx_cpp.index('bool ItlIwx::tahoeP2pCurrentRxDiagnosticEpochs('):
         rx_cpp.index('IOReturn ItlIwx::tahoeP2pRxDrainAction(')]
+    diagnostic_window_fn = rx_cpp[
+        rx_cpp.index('static bool rxDiagnosticSessionWindowQualified('):
+        rx_cpp.index('bool ItlIwx::tahoeP2pCurrentRxDiagnosticEpochs(')]
+    rx149_window_fn = rx_cpp[
+        rx_cpp.index('static bool withinRx149DiagnosticWindow('):
+        rx_cpp.index('static bool rxDiagnosticSessionWindowQualified(')]
     publisher = rx_cpp[
         rx_cpp.index('void ItlIwx::tahoeP2pPublishRxEntryTelemetry('):
         rx_cpp.index('void ItlIwx::tahoePublishResetTrace(')]
-    drain_start = rx_cpp.index('void ItlIwx::tahoeP2pRxDrain()')
+    drain_start = rx_cpp.index('void ItlIwx::tahoeP2pRxConsume()')
     drain = rx_cpp[drain_start:rx_cpp.index('\nvoid ItlIwx::', drain_start + 1)]
 
     assert 'size_t actualPayloadLength, bool rpaEnabled' in rx_entry
@@ -78,10 +86,38 @@ def source_contracts():
     assert 'counters.beginOwner(41);' in STAGE_TEST.read_text()
     assert 'same still-active lease' in STAGE_TEST.read_text()
     assert 'session.generation != currentRoc' in diagnostic_epoch_fn
-    assert '!session.startSeen || session.startStatus != 1' in diagnostic_epoch_fn
-    assert 'session.endSeen || session.outcomeUnknown' in diagnostic_epoch_fn
-    assert 'NativeAwdlRxEntry::withinDiagnosticWindow(' in diagnostic_epoch_fn
+    assert 'lease.contextGeneration != lease.currentContextGeneration' in diagnostic_epoch_fn
     assert 'lease.powerGeneration != uint32_t(sc->sc_p2p.fw_generation)' in diagnostic_epoch_fn
+    assert 'lease.stationGeneration != currentStation' in diagnostic_epoch_fn
+    assert 'session.generation != lease.contextGeneration' in diagnostic_epoch_fn
+    assert '!session.commandReturned' in diagnostic_epoch_fn
+    assert 'session.commandResult != 0' in diagnostic_epoch_fn
+    assert 'sc->sc_p2p_roc.token != session.generation' in diagnostic_epoch_fn
+    assert 'sc->sc_p2p_roc.phase != IWX_P2P_ROC_SESSION_ACKED' in diagnostic_epoch_fn
+    assert '!session.startSeen || session.startStatus != 1' not in diagnostic_epoch_fn
+    assert 'session.endSeen || session.outcomeUnknown' not in diagnostic_epoch_fn
+    assert 'NativeAwdlRxEntry::withinDiagnosticWindow(' not in diagnostic_epoch_fn
+
+    # START/END and the profile-specific timing are enforced by the extracted
+    # production window helper, while the caller retains all common lease,
+    # epoch, firmware, token, ROC phase, and main-gate checks above.
+    assert '!session.startSeen || session.startStatus != 1' in diagnostic_window_fn
+    assert 'session.endSeen || session.outcomeUnknown' in diagnostic_window_fn
+    assert 'session.configuration ==' in diagnostic_window_fn
+    assert ('if (session.configuration ==\n'
+            '        IWX_SESSION_PROTECT_CONF_P2P_GO_NEGOTIATION)\n'
+            '        return NativeAwdlRxEntry::withinDiagnosticWindow(') in diagnostic_window_fn
+    assert '#if defined(ITL_NATIVE_AWDL_RX149_OBSERVATION_25G332)' in diagnostic_window_fn
+    assert ('if (session.configuration ==\n'
+            '            IWX_SESSION_PROTECT_CONF_P2P_DEVICE_DISCOV &&\n'
+            '        rx149Owner &&\n'
+            '        NativeP2PRx149Observation::validStartedOwner(*rx149Owner))') in diagnostic_window_fn
+    assert 'withinRx149DiagnosticWindow(' in diagnostic_window_fn
+    assert 'kSessionDurationMs' in rx149_window_fn
+    assert 'NativeP2PRx149Observation::kSessionDurationMs' in rx149_window_fn
+    assert 'kSessionDurationMs = 100' in rx149_policy
+    assert 'startUs != 0 && nowUs >= startUs' in rx149_window_fn
+    assert 'nowUs - startUs < windowUs' in rx149_window_fn
     assert '!tahoeP2pOnMainGate()' in diagnostic_epoch_fn
     assert 'setProperty(' not in rx_entry
     assert 'OSNumber' not in rx_entry
@@ -113,10 +149,10 @@ def main():
         subprocess.run([str(publisher_binary)], check=True, timeout=5,
                        capture_output=True, text=True)
 
-    source_paths = [HEADER, FIXTURE, PUBLISHER_HEADER, PUBLISHER_FIXTURE,
+    source_paths = [HEADER, RX149_POLICY, FIXTURE, PUBLISHER_HEADER, PUBLISHER_FIXTURE,
                     Path(__file__), ITL_HEADER, ITL_CPP, RX_CPP, STAGE_TEST]
     report = {
-        'schema': 'test065-rx-entry-host-v2',
+        'schema': 'test065-rx-entry-host-v3',
         'offline_host_tests_passed': True,
         'source_contracts_passed': True,
         'sanitizers': ['address', 'undefined'],
@@ -132,7 +168,7 @@ def main():
         'integration_contracts': {
             'notification_payload_length': 'iwx_rx_packet_payload_len(pkt), distinct from DMA remaining maxlen',
             'roc_epoch_source': 'nativeP2pRocGeneration_ and SessionSnapshot.generation, both equal context generation',
-            'window': 'main gate, matching active lease/context/power/station/ROC epochs, confirmed ROC START, half-open [0, 900 ms)',
+            'window': 'cfg3 keeps confirmed START and half-open [0, 900 ms); cfg2 is feature-gated to a selected current RX149 observation owner and half-open [0, 100 ms); common lease/epoch/FW/token/phase/main-gate checks stay in the caller',
             'filter_match': 'raw numeric only and only when RPA enabled with bounded family-specific offset',
             'published_values': 'numeric only; no frame/payload/address storage',
             'publication': 'injected failure tests prove Begin gating, no End after body failure, matching even version, no state advance on failure, and retry success',
@@ -151,6 +187,7 @@ def main():
             'overrun rejected', 'RPA disabled leaves filter_match unavailable',
             'pre-padding action body is not classified as PSF/MIF',
             'exact 900 ms ROC boundary rejected',
+            'RX149 cfg2 window expires at 100 ms from START',
             'publisher Begin, middle body and End failure leave published state unchanged',
         ],
         'positive_cases': [

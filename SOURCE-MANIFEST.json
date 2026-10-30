@@ -1,5 +1,5 @@
 {
-  "candidate": "25G332-Test083",
+  "candidate": "25G332-Test084",
   "upstream_base": "53c51c2cdd6e4b69beb91f310d74c53422b0f8bd",
   "parent_release_commit": "0b292eb",
   "frozen_build_source_sha256": {
@@ -8,7 +8,7 @@
     "AirportItlwm/AirportAWDL.cpp": "49ff2f1cf8eacb451337417ed4ba70d55913bcfe1b42b609b984c7e22a81213c",
     "AirportItlwm/AirportItlwm-Monterey-Info.plist": "17059e95003950f7cd0a83ab8327d4773b30899351c66d41870265b2593651db",
     "AirportItlwm/AirportItlwm-Sonoma-Info.plist": "5e10e18f572b8eed9c85e34275932a326d520bc7576eb33b7d52cd8a45401dba",
-    "AirportItlwm/AirportItlwm-Tahoe-Info.plist": "31d10eb12408afa75a8ecb70f7f78aadc6a1ec31381d2968ba6a7202411f703a",
+    "AirportItlwm/AirportItlwm-Tahoe-Info.plist": "5d1b59448cd9ff516b56475243582c00fb3a96088b5c63ff8de478f988eebf23",
     "AirportItlwm/AirportItlwm.cpp": "24f1cd21812f7ba22df2f8f0c8e4245481a70631134ee8c4964ef0b61e4eebf8",
     "AirportItlwm/AirportItlwm.hpp": "f39c1e8e66bd99f3aafcf52231c0191310bb76aac86c362884ae231d4c061722",
     "AirportItlwm/AirportItlwmEthernetInterface.cpp": "68730f6ccd50aad769cc7db794c4d8c4a5ea6df83ad1fdce579415a4d18f4381",
@@ -259,7 +259,7 @@
     "itlwm/hal_iwx/ItlIwxP2PPeer.cpp": "ca24d3c748e6cc014cbd6d8a180295a6286bf88392624efe789bf1ae66953b74",
     "itlwm/hal_iwx/ItlIwxP2PProbe.cpp": "628f2ad46e545ac17495d26022993a5f3d692851f05c22bae517f4c7fe15f772",
     "itlwm/hal_iwx/ItlIwxP2PRoc.cpp": "5a926159e3d757a37e885f52ed16b266edbbd1a73b8cd90b4b2261e59f811adb",
-    "itlwm/hal_iwx/ItlIwxP2PRx.cpp": "3a3248c730fe7fc2fbd3d61393280c5adb746e112877ab4339503594f8c25ab2",
+    "itlwm/hal_iwx/ItlIwxP2PRx.cpp": "9b8ac17674d25642cb7195a26dd5526144cfd0698d2fb286204cc5bf79deff88",
     "itlwm/hal_iwx/ItlIwxP2PTx.cpp": "e5711a48c3e0ab7b2c5c56615ffe9d577d9af54be6d5f6830a935d92ad963768",
     "itlwm/hal_iwx/ItlIwxP2PTx.hpp": "16f463e21f75f1c666ac557be5670f00a5e1b067248893d3c671bab19fd78a53",
     "itlwm/hal_iwx/IwxTxRate.hpp": "607e2dd724230c556e78c6f3fde3bcb928bd142499e29dfc984c20480348ef8b",
@@ -406,7 +406,7 @@
     "AirportItlwm/AirportAWDL.cpp": "49ff2f1cf8eacb451337417ed4ba70d55913bcfe1b42b609b984c7e22a81213c",
     "AirportItlwm/AirportItlwm-Monterey-Info.plist": "17059e95003950f7cd0a83ab8327d4773b30899351c66d41870265b2593651db",
     "AirportItlwm/AirportItlwm-Sonoma-Info.plist": "5e10e18f572b8eed9c85e34275932a326d520bc7576eb33b7d52cd8a45401dba",
-    "AirportItlwm/AirportItlwm-Tahoe-Info.plist": "31d10eb12408afa75a8ecb70f7f78aadc6a1ec31381d2968ba6a7202411f703a",
+    "AirportItlwm/AirportItlwm-Tahoe-Info.plist": "5d1b59448cd9ff516b56475243582c00fb3a96088b5c63ff8de478f988eebf23",
     "AirportItlwm/AirportItlwm.cpp": "24f1cd21812f7ba22df2f8f0c8e4245481a70631134ee8c4964ef0b61e4eebf8",
     "AirportItlwm/AirportItlwm.hpp": "f39c1e8e66bd99f3aafcf52231c0191310bb76aac86c362884ae231d4c061722",
     "AirportItlwm/AirportItlwmEthernetInterface.cpp": "68730f6ccd50aad769cc7db794c4d8c4a5ea6df83ad1fdce579415a4d18f4381",
@@ -529,6 +529,19 @@
     "developer-tools/test083/tools/run_test083_router_observation_once.py": "3a07dcc99c0636592592a155e65e999b5ad26d5a2c7cfba59071764b60475ce1",
     "developer-tools/test083/tools/test_run_test083_router_observation_once.py": "44d89f8388eb887f3b77c96dbaac49d8667c7e23de8d4f6e9c7a42b1c1ef5331",
     "developer-tools/test083/tools/test_test083_receive149_once.py": "bc9a865e25b1cf52951c5ea44513d2a95ca0cce2c1c19ae09fe7ebb1cf61ce2f",
+    "developer-tools/test084/README.md": "5397e9de752341e82b0535194ecc92721c244fd44dcc39e6a73ceb5d55c9661a",
+    "developer-tools/test084/SOURCE-MANIFEST.json": "33e95926f0996e3a1664ea6675a1be94a08ab6e5755bb49cb84e94af05af7105",
+    "developer-tools/test084/arm_p2p_rx149_test084.swift": "e4ff345e91dc2736f3f85d5d974b5fe29905a8f48bb787798a20e5701974934c",
+    "developer-tools/test084/capture_test076_resident_data_once.py": "ec718f504e2b0d092b69798e86bc55a458c6b9c4ce4925d5f3551a9d9862fa2b",
+    "developer-tools/test084/capture_test084_receive149_once.py": "b8421e80510a6f128304d7cf8b193ebbc45b6b1bdd89658d5aac72eedec6cf93",
+    "developer-tools/test084/probe_p2p_result.py": "7d41e4c5d236325e4cfe235717048030ab80d8f97392ac37307c9bf82603a732",
+    "developer-tools/test084/probe_wifi_rate.py": "6e802a71ebeb5b9010ae0e0f7f0edd6f2782c51e50d8a5d566492c996efd9ca0",
+    "developer-tools/test084/tests/test084_rx_entry_guard.py": "34c2b62eb36fc934e3dde121317b84c238e4b8cc09bfc8042cfb113a736027f2",
+    "developer-tools/test084/tools/awdl_ioreg_u32.py": "4a4fef3e2ac9189ab53fe93a39a5f183c6081a1b10c69a5901d06b495f1d3ff3",
+    "developer-tools/test084/tools/openwrt_capture_once.py": "7c7b750604acf3c18372600084bcf6a899f3b8c2e0c364ebb6a1129d77dbeac2",
+    "developer-tools/test084/tools/run_test084_router_observation_once.py": "e4ed0edfa4bb0754e942fd158c5293d4db873fad37e43c28f1d652a35c6cec31",
+    "developer-tools/test084/tools/test_run_test084_router_observation_once.py": "9dfdf135604190a426eabc0c4620512fb6e4d40712405f770f9aa449fbdd156b",
+    "developer-tools/test084/tools/test_test084_receive149_once.py": "e12f78673a17b617715bbd57c4d088e55fb4e7ff7fbe0f8a3230317015a6c12a",
     "include/Airport/Apple80211.h": "3e21b510d72f3683a9d4afe3b88cec9797774bc585b28dbde04dde48c0e82196",
     "include/Airport/CCDataPipe.h": "4732f795d36e80381f74c9d0e8e345cba51e5c0f21c35a00ff9521e9bea1b722",
     "include/Airport/CCLogPipe.h": "cac801ed5d15bcbed43ff6898247857098724d126d854a8752971da9ca7b3944",
@@ -762,7 +775,7 @@
     "itlwm/hal_iwx/ItlIwxP2PPeer.cpp": "ca24d3c748e6cc014cbd6d8a180295a6286bf88392624efe789bf1ae66953b74",
     "itlwm/hal_iwx/ItlIwxP2PProbe.cpp": "628f2ad46e545ac17495d26022993a5f3d692851f05c22bae517f4c7fe15f772",
     "itlwm/hal_iwx/ItlIwxP2PRoc.cpp": "5a926159e3d757a37e885f52ed16b266edbbd1a73b8cd90b4b2261e59f811adb",
-    "itlwm/hal_iwx/ItlIwxP2PRx.cpp": "3a3248c730fe7fc2fbd3d61393280c5adb746e112877ab4339503594f8c25ab2",
+    "itlwm/hal_iwx/ItlIwxP2PRx.cpp": "9b8ac17674d25642cb7195a26dd5526144cfd0698d2fb286204cc5bf79deff88",
     "itlwm/hal_iwx/ItlIwxP2PTx.cpp": "e5711a48c3e0ab7b2c5c56615ffe9d577d9af54be6d5f6830a935d92ad963768",
     "itlwm/hal_iwx/ItlIwxP2PTx.hpp": "16f463e21f75f1c666ac557be5670f00a5e1b067248893d3c671bab19fd78a53",
     "itlwm/hal_iwx/IwxTxRate.hpp": "607e2dd724230c556e78c6f3fde3bcb928bd142499e29dfc984c20480348ef8b",
@@ -1035,7 +1048,7 @@
     "native/tests/test064_native_discovery_queue.cpp": "a8abbc56a1e0c2cd1ca20426ea4a12d871dca172b1d86c57b118bdf757166697",
     "native/tests/test064_native_discovery_queue.py": "c4ff99ee73b2b090a09633c5f62443ba14e363949476cae6f23e16bc84247f6f",
     "native/tests/test064_tx_deadline.py": "f8e9ddec5cfa37cae80b514a25ec4b8a97ee5a2252ccb28e702b575e212b0fcf",
-    "native/tests/test065_rx_entry_telemetry.py": "06254ec542d6fa613599698671d188bb5e2392603a18b089aeefeeb158a3468a",
+    "native/tests/test065_rx_entry_telemetry.py": "7beb29edebc2ef6741ed80536783bb22787f32bcc835a933b468ff3dfcd45956",
     "native/tests/test066_callsite_structure.py": "64bf9099c388e2f6417c72c0144bab2f9f79fda014476dac2f662fdde0c04e60",
     "native/tests/test068_discovery_mif_hold.py": "8b2b2c25b2cba533860f0927be036b21403b6bff07c5a5b2824af3b2dc468e21",
     "native/tests/test069_mif_current_admission.py": "a0d9ceba864b9a2ce39894c97174bbcd7e1b0478f73e38a65885fe008c8c0046",
@@ -1078,6 +1091,7 @@
     "native/tests/test083_hcmd_metadata_lifetime.py": "bdf8934ec50106e0b0dca40c10403d3dc06b9c6f2a33ca9e2ad5094e855b6cb8",
     "native/tests/test083_passive_listen_policy.py": "2a347d7e4f9bbadb6f368cb5d6ebc1ae7a8978bdc83d86138b3dbc5e9172e21c",
     "native/tests/test083_session_protection.py": "2237522bedada6ecbac1a8b223aa9fe9a7a8cb86a9a0e120249613ecebe1e0c0",
+    "native/tests/test084_rx_owner_telemetry.py": "d3b5e46615335a07dd639cadae91d4cf88db26ecca3d05ab369a51c78080161c",
     "native/tests/test_address_quiesce.py": "602c7acab7de85c93c211e4eed9a34949a6f311ec0eee6babd5c427c6d37b659",
     "native/tests/test_awdl_callback_call_abi.py": "10be9fd261dd6ffd239d3a8e027b54df16dc5c3b4a8206d2ed49f0ae8a405809",
     "native/tests/test_awdl_native_abi.cpp": "4e9f4a89d909e8b198f4c1d4497d30d53c43f646f22b351f7292d06ab22abb71",
@@ -1130,29 +1144,39 @@
     "tests/iwx_tx_rate_test.cpp": "ad09e302f2ad7dda0e3201324ef1aa83f61958222badeea7110491c70877d664"
   },
   "artifact": {
-    "mach_o_uuid": "2AD6C97B-050E-3A9F-9A32-7C31632A330D",
-    "binary_sha256": "d9ceaa2ef28cecef7580f439d314e3001f4c6e116f4e96278b4d210d3778c2d7",
-    "archive_sha256": "a7fea3eac620f6f11a7b3d80ddf2cfc11c95a2be334dd0555be5d5c3696e16d9",
+    "mach_o_uuid": "BD248EFB-E82A-3023-9E54-8DCE6B11DD7B",
+    "binary_sha256": "ceed53dace297b24956b67ad699ff933dead45128a31a0439be704195e9589f1",
+    "archive_sha256": "d1878f84cb489fa89372856e1273d8668d90c5a85a3d71f2242911d9d318d50b",
     "profile": "native_awdl_rx149_observation_only",
     "full_build_passed": true,
     "strict_signature_passed": true
   },
   "notes": [
-    "Merged Test083 source and offline tests; private runtime evidence and identities excluded.",
-    "RX149 passive observation keeps the PASSIVE flag and requires explicit P2P_DEVICE/cfg2/nonDFS/100ms ownership and restore gates.",
-    "A retained trace window can be complete even if lifetime history has wrapped; fields do not prove firmware ownership or peer receipt.",
-    "This experimental candidate does not change the existing public binary release."
+    "Test084 admits RX-entry telemetry for a feature-gated cfg2 RX149 owner before100ms; cfg3 retains its900ms observation window.",
+    "Actual descriptor channel is preserved. No new transmission, forwarding or ROC permission was added.",
+    "Private boot/build/deployment evidence, full EFI backups and device identities are excluded.",
+    "The existing public Wi-Fi binary release is unchanged."
   ],
-  "baseline": "25G332-Test082",
-  "build_production_commit": "d2217858e9136fe0cca3ac269b05ac2ae8be091c",
+  "baseline": "25G332-Test083",
+  "build_production_commit": "ae50f8b7dce24d348f3fc4ec5b92b5c83a92e70a",
   "offline_validation": {
-    "directed_groups": 25,
+    "directed_groups": 27,
     "host_mock_tests": 31,
+    "public_snapshot_mock_tests": 31,
     "compatibility_compile_cases": 15,
-    "independent_source_review": "STA/TU, bounded error capture, trace ring/decoder, RX149 admission and command metadata lifetime reviewed; narrow blockers resolved.",
-    "scope": "Driver build tests are the original frozen Test083 validation. Host collector31 directed mocks passed after RX snapshot alias fix; no new binary was built."
+    "rx_owner_window_checks": 38,
+    "actual_owner_glue_checks": 102,
+    "independent_source_review": "cfg2 scope/PHY/trace owner/hot-path bounded metadata reviewed; cfg3 semantics preserved.",
+    "scope": "Offline only. Test084 is not loaded and has no actual receive or AirDrop proof."
   },
   "runtime_validation": {
+    "candidate": "25G332-Test084",
+    "boot_observed": false,
+    "peer_data_return_verified": false,
+    "airdrop_verified": false,
+    "scope": "Awaiting deployment and a new boot; current measured candidate remains Test083."
+  },
+  "baseline_runtime_validation": {
     "candidate": "25G332-Test083",
     "boot_observed": true,
     "wifi_baseline_seconds": 300.002,
@@ -1178,37 +1202,16 @@
     "net_new_historical_acceptance": 0,
     "scope": "Only bounded observed windows; no long-term/sleep/peer data or AirDrop completion proof."
   },
-  "baseline_runtime_validation": {
-    "candidate": "25G332-Test082",
-    "development_observation_seconds": 600.003,
-    "window_passed": true,
-    "scope": "A 600.003-second window was clean. A later Test082 watchdog/recovery was observed; long-term stability is not passed.",
-    "later_watchdog_count_delta": 1,
-    "later_reset_count": [
-      5,
-      10
-    ],
-    "later_stopped_count": [
-      2,
-      5
-    ]
-  },
   "deployment_validation": {
-    "candidate": "25G332-Test083",
-    "state": "test083_runtime_observed_disarmed",
-    "installed": true,
+    "candidate": "25G332-Test084",
+    "state": "offline_merged_ready_for_backup_deployment",
+    "installed": false,
     "reboot_ready": false,
-    "diagnostics_armed": false,
-    "full_efi_backup_verified": true,
-    "only_airportitlwm_replaced": true,
-    "other_efi_files_unchanged": true,
-    "automatic_reboot": false,
-    "runtime_verified": true
+    "automatic_reboot": false
   },
   "known_runtime_observation_gaps": [
-    "The saved host measurement originally failed on a non-existent RX trace alias; original report retained and separate reanalysis accepted the actually published schema.",
-    "RX-entry descriptor telemetry only recognizes cfg3, while this observation is cfg2. Zero owner/counters do not disprove RX. A next candidate is being prepared.",
-    "PCAP packets and95.176ms host START/END interval lack a proved clock mapping.",
-    "Firmware error tables remain unavailable; zero-filled aliases are not proof of zero firmware errors."
+    "Test083 fixed the missing trace-alias false negative through saved-snapshot reanalysis; original measurements retained.",
+    "Test084 fixes cfg2 RX-entry observation eligibility but needs actual boot/descriptor validation.",
+    "Same-window PCAP/driver clock correlation, native peer data return and AirDrop remain unverified."
   ]
 }

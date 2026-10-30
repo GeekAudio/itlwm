@@ -1,0 +1,134 @@
+{
+  "schema_version": 1,
+  "package": "Test084 developer tools source snapshot",
+  "candidate": "25G332-Test084",
+  "baseline": "25G332-Test083",
+  "artifact_status": "Verified offline experimental build; no binary included in this source snapshot, and the kext has not been loaded or runtime-tested.",
+  "files": [
+    {
+      "role": "source",
+      "source_relative_path": "IntelWirelessNative/arm_p2p_rx149_test084.swift",
+      "snapshot_path": "arm_p2p_rx149_test084.swift",
+      "size_bytes": 5242,
+      "source_sha256": "e4ff345e91dc2736f3f85d5d974b5fe29905a8f48bb787798a20e5701974934c",
+      "snapshot_sha256": "e4ff345e91dc2736f3f85d5d974b5fe29905a8f48bb787798a20e5701974934c"
+    },
+    {
+      "role": "source",
+      "source_relative_path": "IntelWirelessNative/capture_test084_receive149_once.py",
+      "snapshot_path": "capture_test084_receive149_once.py",
+      "size_bytes": 69699,
+      "source_sha256": "b8421e80510a6f128304d7cf8b193ebbc45b6b1bdd89658d5aac72eedec6cf93",
+      "snapshot_sha256": "b8421e80510a6f128304d7cf8b193ebbc45b6b1bdd89658d5aac72eedec6cf93"
+    },
+    {
+      "role": "python_import_dependency",
+      "source_relative_path": "IntelWirelessNative/capture_test076_resident_data_once.py",
+      "snapshot_path": "capture_test076_resident_data_once.py",
+      "size_bytes": 174367,
+      "source_sha256": "ec718f504e2b0d092b69798e86bc55a458c6b9c4ce4925d5f3551a9d9862fa2b",
+      "snapshot_sha256": "ec718f504e2b0d092b69798e86bc55a458c6b9c4ce4925d5f3551a9d9862fa2b"
+    },
+    {
+      "role": "python_import_dependency",
+      "source_relative_path": "IntelWirelessNative/probe_p2p_result.py",
+      "snapshot_path": "probe_p2p_result.py",
+      "size_bytes": 26919,
+      "source_sha256": "7d41e4c5d236325e4cfe235717048030ab80d8f97392ac37307c9bf82603a732",
+      "snapshot_sha256": "7d41e4c5d236325e4cfe235717048030ab80d8f97392ac37307c9bf82603a732"
+    },
+    {
+      "role": "python_import_dependency",
+      "source_relative_path": "IntelWirelessNative/probe_wifi_rate.py",
+      "snapshot_path": "probe_wifi_rate.py",
+      "size_bytes": 5684,
+      "source_sha256": "6e802a71ebeb5b9010ae0e0f7f0edd6f2782c51e50d8a5d566492c996efd9ca0",
+      "snapshot_sha256": "6e802a71ebeb5b9010ae0e0f7f0edd6f2782c51e50d8a5d566492c996efd9ca0"
+    },
+    {
+      "role": "runtime_subprocess_dependency",
+      "source_relative_path": "IntelWirelessNative/tools/run_test084_router_observation_once.py",
+      "snapshot_path": "tools/run_test084_router_observation_once.py",
+      "size_bytes": 20447,
+      "source_sha256": "e4ed0edfa4bb0754e942fd158c5293d4db873fad37e43c28f1d652a35c6cec31",
+      "snapshot_sha256": "e4ed0edfa4bb0754e942fd158c5293d4db873fad37e43c28f1d652a35c6cec31"
+    },
+    {
+      "role": "runtime_subprocess_dependency",
+      "source_relative_path": "IntelWirelessNative/tools/openwrt_capture_once.py",
+      "snapshot_path": "tools/openwrt_capture_once.py",
+      "size_bytes": 54243,
+      "source_sha256": "7c7b750604acf3c18372600084bcf6a899f3b8c2e0c364ebb6a1129d77dbeac2",
+      "snapshot_sha256": "7c7b750604acf3c18372600084bcf6a899f3b8c2e0c364ebb6a1129d77dbeac2"
+    },
+    {
+      "role": "python_import_dependency",
+      "source_relative_path": "IntelWirelessNative/tools/awdl_ioreg_u32.py",
+      "snapshot_path": "tools/awdl_ioreg_u32.py",
+      "size_bytes": 10477,
+      "source_sha256": "4a4fef3e2ac9189ab53fe93a39a5f183c6081a1b10c69a5901d06b495f1d3ff3",
+      "snapshot_sha256": "4a4fef3e2ac9189ab53fe93a39a5f183c6081a1b10c69a5901d06b495f1d3ff3"
+    },
+    {
+      "role": "test",
+      "source_relative_path": "IntelWirelessNative/tools/test_test084_receive149_once.py",
+      "snapshot_path": "tools/test_test084_receive149_once.py",
+      "size_bytes": 31288,
+      "source_sha256": "dab312dd814d16b7b62eaabd00436bf2bdc0207694318783fae12690b13af8a3",
+      "snapshot_sha256": "e12f78673a17b617715bbd57c4d088e55fb4e7ff7fbe0f8a3230317015a6c12a",
+      "sanitization": "Synthetic MAC-shaped fixture values replaced with neutral test-only labels; assertions retained."
+    },
+    {
+      "role": "test",
+      "source_relative_path": "IntelWirelessNative/tools/test_run_test084_router_observation_once.py",
+      "snapshot_path": "tools/test_run_test084_router_observation_once.py",
+      "size_bytes": 5275,
+      "source_sha256": "9dfdf135604190a426eabc0c4620512fb6e4d40712405f770f9aa449fbdd156b",
+      "snapshot_sha256": "9dfdf135604190a426eabc0c4620512fb6e4d40712405f770f9aa449fbdd156b"
+    },
+    {
+      "role": "test",
+      "source_relative_path": "IntelWirelessNative/tests/test084_rx_entry_guard.py",
+      "snapshot_path": "tests/test084_rx_entry_guard.py",
+      "size_bytes": 5923,
+      "source_sha256": "5ac1b2ec3ff9ec9d7002dd237d7ddcec7a4d32df6d83cbdd6646bbb97e0ca5f8",
+      "snapshot_sha256": "34c2b62eb36fc934e3dde121317b84c238e4b8cc09bfc8042cfb113a736027f2",
+      "sanitization": "Removed import and assertions for private metadata generator; retained the three public RX trace/RXEntry tests."
+    }
+  ],
+  "excluded": [
+    "kexts, firmware, archives, and other build outputs",
+    "private build/deployment/next-boot metadata files and EFI contents or identifiers",
+    "raw logs, crash reports, PCAP/PCAPNG captures, and private evidence",
+    "router credentials, live addresses, and hardware/peer identities",
+    "personal absolute filesystem paths and unrelated workspace files"
+  ],
+  "notes": [
+    "This snapshot is copied from the actual Test084 IWN tools; it is not a global rename of the Test083 public package.",
+    "The collector depends on the published RX trace schema and does not require an unpublished SnapshotComplete property.",
+    "RXEntry telemetry is evaluated only as a stable scalar observation window bound to a successful channel-149 DISCOV configuration-2 ROC.",
+    "Zero counters do not prove RF silence, peer absence, packet receipt, or AirDrop success.",
+    "Synthetic MAC-shaped mock values were replaced with neutral labels. The private metadata-generator test was excluded from the public source snapshot while all three runtime RX mocks remain.",
+    "The 31 focused offline mock tests passed from this snapshot; they do not prove kext loading, over-the-air receive, peer return, or AirDrop."
+  ],
+  "focused_offline_tests": {
+    "total": 31,
+    "passed": 31,
+    "failed": 0,
+    "groups": {
+      "collector_mock": 22,
+      "coordinator_mock": 6,
+      "rx_trace_and_rx_entry_mock": 3
+    }
+  },
+  "build_status": "Full offline build and strict signature verification passed; 394 production inputs matched the frozen source manifest. EFI deployment, kext load, runtime RX, peer receipt, and AirDrop remain unverified.",
+  "build_production_source_file_count": 394,
+  "build_production_source_manifest_sha256": "5d583aacc936f92d94c0eb4b55cc0424470bfd7231906ecc8dbec00b5f15d60f",
+  "artifact": {
+    "mach_o_uuid": "BD248EFB-E82A-3023-9E54-8DCE6B11DD7B",
+    "binary_sha256": "ceed53dace297b24956b67ad699ff933dead45128a31a0439be704195e9589f1",
+    "archive_sha256": "d1878f84cb489fa89372856e1273d8668d90c5a85a3d71f2242911d9d318d50b",
+    "profile": "native_awdl_rx149_observation_only",
+    "evidence_scope": "Offline build identity only; no EFI load or runtime validation."
+  }
+}
