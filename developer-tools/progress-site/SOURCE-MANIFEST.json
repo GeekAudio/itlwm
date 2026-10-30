@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "3d770fa08c577572773177d68648f4393dd3c5cc98b546c0cdd729471d8fc7fe"
+      "sha256": "597bf2d3fd501ae70ebab30e5a141547fce6f3a87e3731d7f55279a379e19d01"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "71f6f12e75ebce9b857b4f048405e15cb04dfe9e79573b51e9b8bcba068f444e"
+      "sha256": "ce391576dd362230f1750a2e7e494add3cf15aa3480a772320eb0a7d96400d4b"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -30,7 +30,7 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "48bfa4eda4074c591f6f64f11a6c8a07bea49edfe1f616be692b861b3d6b16ba"
+      "sha256": "b4b71149e281f38d3031ebed284e387aee286f27dae0f2c30a55038661544c88"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-31T03:16:41.326848+08:00",
-  "runtime_scope": "Test089 offline tools ready; no new RF test or EFI deployment. The same Test087 boot passed earlier 600s and 120s windows, then a separate 574.754s/102-sample observation stopped on a real interface-down event. Association loss preceded the observed interface-down; watchdog/reset counts were unchanged at that first failure. Recovery later recorded two TX watchdogs, ten reset and six stop increments. User reports no manual network or sleep action. Initial link-loss cause and later TX completion gap remain separate unresolved questions. Current acceptance: 7 passed, 3 partial, 29 uncovered, 1 failed; historical coverage 24/40, net-new 0. AWDL data ingress and AirDrop are not newly proven. No WAN/LAN changes; existing backup retained."
+  "updated_at": "2026-10-31T03:49:22.438808+08:00",
+  "runtime_scope": "Test090 code and targeted offline checks passed; Release signed candidate deployed with full EFI backup. Current running driver remains Test087 until reboot. Repairs preserve BSD IFF_UP on link down, reclaim only owned STA management/data queue ranges with 16-bit SSN normalization, and reject prequeue CCMP EBUSY as EAGAIN. No runtime repair, native AWDL data ingress, or AirDrop success is claimed. The fixed firmware snapshot remains isolated and is not in this candidate. Current acceptance remains 7 passed, 3 partial, 29 uncovered, 1 failed. No WAN/LAN changes."
 }
