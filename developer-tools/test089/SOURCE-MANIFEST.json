@@ -1,0 +1,74 @@
+{
+  "schema": 1,
+  "tool_revision": "Test089",
+  "status": "built_offline_not_run",
+  "recorded_on": "2026-10-31",
+  "scope": {
+    "test088_sender_modified": false,
+    "production_driver_modified": false,
+    "intel_driver_armed": false,
+    "efi_written": false,
+    "router_tool_executed": false,
+    "rf_transmission_performed": false,
+    "wan_lan_changed": false,
+    "probe_frames_per_invocation": 1,
+    "observer_window_ms": 2000
+  },
+  "source_files_sha256": {
+    "developer-tools/test089/README.md": "77f5c84a1858dbacf310e99b22cc144a1c8767ce38ca14bac6cf08df5ab4b6ad",
+    "developer-tools/test089/router_tx_status_once.py": "5f5f440eb25449241f392c7477c2d48819d2de71ebcc4ed77a61f6c9ae421401",
+    "developer-tools/test089/test_router_tx_status_once.py": "bd69737eac1adf0bfddada61b9b26a45926bde002866e803937fc5022bd232c7",
+    "developer-tools/test089/txstatus-observer/Makefile": "b6699e2938ba205b904d8b21ad7dd09dbed4fdb97a5161f47081a93f0e45da21",
+    "developer-tools/test089/txstatus-observer/README.md": "133afd93a211b26cb56dfa417be430a88567d7959648146fd16c804870ad919a",
+    "developer-tools/test089/txstatus-observer/probe_frame.c": "6f4ad23b24b6563063f152c8b933ede045ace960e2eec26d909ab2867c583f6b",
+    "developer-tools/test089/txstatus-observer/probe_frame.h": "ccd30227c6c504ed4e6290ee530e30aca0ab1a3d4a7bbf5464c4758c6bfac3e9",
+    "developer-tools/test089/txstatus-observer/radiotap_parser.c": "6015a069513c5c4cd3dac4caf4e4d6a1a0e23af9a79aa1fa1b8da9d59d245dcf",
+    "developer-tools/test089/txstatus-observer/radiotap_parser.h": "46cb5ddc86d7793ff4db418485894d9a1bf41dcb5e278d1588a7efe7127cc4b2",
+    "developer-tools/test089/txstatus-observer/test_host.c": "746b82b1e7ba5eff519b8f67b2f6c548dda2a302487824deff747151993b74b1",
+    "developer-tools/test089/txstatus-observer/test_source_parity.py": "0a6653e8f0c3b7b43a660fc8c3d72004d495a4d2e2bdc159df4c3074f7844c82",
+    "developer-tools/test089/txstatus-observer/txstatus_observer.c": "ca6e892d90f4c488c4f36e9b1bb9d582678cb95cc7b8a88737e40d59cb4ad4f3"
+  },
+  "reused_test087_test086_dependencies": {
+    "developer-tools/test087/run_controlled_probe_once.py": "3dac10d838093c8a7e83270dada59f9bd6c238fa4d070190a78a68c2a218b831",
+    "developer-tools/test087/test087_controlled.py": "44f15b4e1e7b4d9b1d4d20d8aebfdbffbda1b5acaa06ad29afe1077f585df16a",
+    "developer-tools/test086/tools/openwrt_capture_once.py": "7c7b750604acf3c18372600084bcf6a899f3b8c2e0c364ebb6a1129d77dbeac2"
+  },
+  "frozen_test088_probe_inputs": {
+    "developer-tools/test088/afpacket-sender/awdl_probe_sender.c": "cb16148ce088709ca5f435db5061b7911aaa0359012eb5c2a588d63e54e88aa7",
+    "developer-tools/test088/afpacket-sender/fixtures/probe-spec.json": "6b6f784461de4409e34da05e59e17203f970400935977ed6a43c1a3aa5d82b1b",
+    "developer-tools/test088/SOURCE-MANIFEST.json": "13371048e9efd8e153af1afa2615d9355c39f01c313b0ca24cb2daf38ca92448"
+  },
+  "build_artifact": {
+    "path": "developer-tools/test089/txstatus-observer/build/test089-txstatus-observer-aarch64-linux-musl",
+    "sha256": "91465b9f4959b0ab794c7f512111ec86062a9e774df6942125b2c9e5975c1519",
+    "format": "ELF 64-bit LSB ARM aarch64, statically linked Linux musl",
+    "toolchain": "Zig 0.17.0",
+    "runtime_tested": false,
+    "tracked_or_committed": false
+  },
+  "offline_validation": {
+    "host_parser_frame_tests": {
+      "status": "passed",
+      "command": "make -C developer-tools/test089/txstatus-observer host-test",
+      "includes_test088_source_manifest_byte_parity": true
+    },
+    "wrapper_unit_tests": {
+      "status": "passed",
+      "test_count": 13,
+      "command": "PYTHONDONTWRITEBYTECODE=1 python3 developer-tools/test089/test_router_tx_status_once.py"
+    },
+    "aarch64_static_build": {
+      "status": "passed",
+      "command": "make -C developer-tools/test089/txstatus-observer aarch64 ZIG=/path/to/zig"
+    }
+  },
+  "evidence_limits": {
+    "run_token_is_local_only_not_in_frame": true,
+    "tx_flags_requested": "NOACK|NOSEQNO",
+    "host_driver_completion_candidate_proves_firmware_tx_status": false,
+    "host_driver_completion_candidate_proves_rf_delivery": false,
+    "host_driver_completion_candidate_proves_ack": false,
+    "empty_or_nonstatus_window_proves_frame_drop": false
+  },
+  "manifest_self_hash": "omitted to avoid recursive hashing"
+}

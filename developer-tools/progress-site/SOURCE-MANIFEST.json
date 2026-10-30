@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "d89f845c9a9f1d7b4c248ab1896c9ceb4c0de36f46f63dd37aba753d8c61ed49"
+      "sha256": "3d770fa08c577572773177d68648f4393dd3c5cc98b546c0cdd729471d8fc7fe"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "61f5c25e07ba85ea690b6ad83af9124a19e17e2d05e8b3b5b2475380e16fef57"
+      "sha256": "71f6f12e75ebce9b857b4f048405e15cb04dfe9e79573b51e9b8bcba068f444e"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -30,7 +30,7 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "f129c77339525530540aee95bcc6557291a263da782f8e6ade005640a339cd27"
+      "sha256": "48bfa4eda4074c591f6f64f11a6c8a07bea49edfe1f616be692b861b3d6b16ba"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-31T02:47:32.801858+08:00",
-  "runtime_scope": "Test088 saved-report runtime review, using unchanged Test087 driver. Ten-minute Wi-Fi baseline and two-minute post-window passed. ROC 95.264 ms; 274 MPDU entries include two admitted channel-149 Beacons, zero AWDL candidates. Sixteen local send returns succeeded; one nominal interval falls inside ROC but strict send attribution and RF transmission remain unknown. Native data capture, decode, delivery and listener datagrams are zero; per-packet ifnet receipt is unpublished. Current acceptance: 7 passed, 4 partial, 29 uncovered, 0 failed; history 24/40, net-new 0. No EFI or WAN/LAN changes; existing backup retained."
+  "updated_at": "2026-10-31T03:16:41.326848+08:00",
+  "runtime_scope": "Test089 offline tools ready; no new RF test or EFI deployment. The same Test087 boot passed earlier 600s and 120s windows, then a separate 574.754s/102-sample observation stopped on a real interface-down event. Association loss preceded the observed interface-down; watchdog/reset counts were unchanged at that first failure. Recovery later recorded two TX watchdogs, ten reset and six stop increments. User reports no manual network or sleep action. Initial link-loss cause and later TX completion gap remain separate unresolved questions. Current acceptance: 7 passed, 3 partial, 29 uncovered, 1 failed; historical coverage 24/40, net-new 0. AWDL data ingress and AirDrop are not newly proven. No WAN/LAN changes; existing backup retained."
 }
