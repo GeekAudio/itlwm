@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "4583b2b7c0ef9f04f3106b761fec1b6403c5d9d4cec7ea6443cd908e9d86e083"
+      "sha256": "8808c712a450cec6f2d6f3d727c20c06e6fa0a39b75b6580053bb2a6bf6b89d1"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "a85d0800baefad6619d69ae326eb1d2da99ba8e40d61120d77d67d1a40c43287"
+      "sha256": "2a9525acb92abcc2ba9544661f4ea58bd57771086aae91b751a8f4472ab34d9b"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -30,7 +30,7 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "f27617f5cefdc9856fe5ebe3ff6b691e293214fa9d0a9c35728b7c84aa3a44b5"
+      "sha256": "654c81385fecdb73ff96c8a7cfa317320500552116ef3520d2034b0a7c9d82be"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-31T06:35:05.980193+08:00",
-  "runtime_scope": "Test092 is deployed and awaiting reboot after fixed-source independent review, full Release build, 21 host validation groups and 35 compile profiles. It adds fault-versioned AWDL input recovery and bounded Wi-Fi Busy scan/join retries, preserving an existing connection until a new Join is admitted. Full EFI backup and remounted readback passed. The machine still runs Test091; an additional 300.003-second/52-sample passive observation passed for that running build. Current-runtime matrix remains Test091: 4 passed, 2 partial, 34 uncovered, 0 regressed; historical 24/40, net new 0. Test092 boot, scan/reconnect latency, native awdl0 inbound data and AirDrop remain unverified."
+  "updated_at": "2026-10-31T07:41:33.237406+08:00",
+  "runtime_scope": "Test092 is loaded and its UUID matches the deployed build. A 300.085-second/60-sample passive Wi-Fi observation and en1-bound gateway HTTP plus two Apple HTTPS requests passed without counter growth; DNS and long-term stability were not tested. The user still reports delayed power-off UI, brief off/on appearance during enable and slow network-list scans. One off operation took 14.035 seconds before/including a 0.029895-second driver power call; its preceding disassociation wait remains unlocalized. Private-address restarts can emit power changes but exact UI causation is unproven. Current matrix: 4 passed, 2 partial, 34 uncovered, 0 regressed. RX149 input profile is enabled, but fault recovery, peer reception, native inbound delivery and AirDrop were not tested. No new candidate or EFI modification in this runtime investigation."
 }
