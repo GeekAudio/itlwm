@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "608416c201f5f5842a893f7b49f8ffb726178255d2b2f35ac70d40267a52d623"
+      "sha256": "c299ef451a8e68f85e7d625d9cd6f8551a764546d615d71a406f1657558565eb"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "f9fd6910998571a7627e4c6bfc95b4c1660fcc2e9ba61e19ec140842f4326caa"
+      "sha256": "f533cf55d5a7a5ea061eb473853c64d7688ed82f251a2e2f2de0e54dabfa54ea"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -30,7 +30,7 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "c55b8a2e625884ef7ae364b364e47769168a861fafcd4709218918ebc4c8984a"
+      "sha256": "bc831eddc5c0a809f7220fac4e63abe4911647677ea1fc3bf2045013b4927628"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-30T10:35:39.539008+08:00",
-  "runtime_scope": "Test082 remains the running measured candidate. Test083 was fully backed up and deployed, waiting for reboot; diagnostics remain disarmed. No Test083 boot,149 receive,native peer data return or AirDrop success evidence. Later Test082 watchdog/recovery remains recorded."
+  "updated_at": "2026-10-30T11:08:10.515189+08:00",
+  "runtime_scope": "Test083 boot observed:300-second Wi-Fi baseline and90-second post-session window clean; interface-bound Apple HTTPS passed;149 cfg2 START/END firmware reports valid. Current149 is ACTIVE, not a PASSIVE exception proof. Saved trace reanalysis corrects a host alias false negative. Descriptor RX telemetry cfg2 blind spot remains; native peer data return and AirDrop unverified."
 }

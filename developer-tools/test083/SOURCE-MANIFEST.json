@@ -15,9 +15,9 @@
       "role": "source",
       "source_relative_path": "IntelWirelessNative/capture_test083_receive149_once.py",
       "snapshot_path": "capture_test083_receive149_once.py",
-      "size_bytes": 65902,
-      "source_sha256": "8a0897f7920d821d853716c75761b9616f6473818152b54e95fe44b382d04a6c",
-      "snapshot_sha256": "8a0897f7920d821d853716c75761b9616f6473818152b54e95fe44b382d04a6c"
+      "size_bytes": 67168,
+      "source_sha256": "3f2a3040aa8bbf302bed228f36a874de1c7219b04d975cc5f0a1110dda7cafd8",
+      "snapshot_sha256": "3f2a3040aa8bbf302bed228f36a874de1c7219b04d975cc5f0a1110dda7cafd8"
     },
     {
       "role": "python_import_dependency",
@@ -71,9 +71,9 @@
       "role": "test",
       "source_relative_path": "IntelWirelessNative/tools/test_test083_receive149_once.py",
       "snapshot_path": "tools/test_test083_receive149_once.py",
-      "size_bytes": 31309,
-      "source_sha256": "5f38076b0420f9df92202c9b679a8c949227ed5f3eab1299594edc241211c665",
-      "snapshot_sha256": "db0518c0fe28f2bfb66a1c4e4b0ea002ba502f41c3c59e35e7bc11719ab823c9",
+      "size_bytes": 31271,
+      "source_sha256": "52c041dbcb8e0ef6de26755d677713b99c785158d4c30b4468ebbd0387995316",
+      "snapshot_sha256": "bc9a865e25b1cf52951c5ea44513d2a95ca0cce2c1c19ae09fe7ebb1cf61ce2f",
       "sanitization": "Synthetic fixture address/token values replaced with neutral/generated test-only placeholders; test assertions retained."
     },
     {
@@ -84,6 +84,14 @@
       "source_sha256": "705781fbf96c147799091b2a81ac193811c3b5f5cbbba6d8bc2dbb58aff31ccc",
       "snapshot_sha256": "44d89f8388eb887f3b77c96dbaac49d8667c7e23de8d4f6e9c7a42b1c1ef5331",
       "sanitization": "Synthetic fixture address/token values replaced with neutral/generated test-only placeholders; test assertions retained."
+    },
+    {
+      "role": "test",
+      "source_relative_path": "IntelWirelessNative/tests/test083_rx_trace_guard.py",
+      "snapshot_path": "tests/test083_rx_trace_guard.py",
+      "size_bytes": 3521,
+      "source_sha256": "2c3b9922e9ca33c2bd3590caa65235b21204dd6c148b6c25048963f48e8950fd",
+      "snapshot_sha256": "2c3b9922e9ca33c2bd3590caa65235b21204dd6c148b6c25048963f48e8950fd"
     }
   ],
   "excluded": [
@@ -95,10 +103,11 @@
   ],
   "notes": [
     "The snapshot contains the bounded NativeHcmdRxTrace decoder and its numeric alias checks.",
-    "28 offline mock tests passed from this snapshot; they do not prove runtime or RF behavior.",
-    "Fixture identifiers are synthetic; the snapshot does not contain real access tokens or peer addresses.",
+    "28 existing offline mock tests plus 3 Test083 RX trace guard tests passed from this snapshot; they do not prove runtime or RF behavior.",
+    "Fixture identifiers are synthetic; the snapshot does not contain real access tokens, peer addresses, or private absolute paths.",
     "Trace rows are diagnostic evidence only and do not establish firmware ownership, peer receipt, or AirDrop success.",
-    "A complete ring window can coexist with truncated lifetime history; the collector exposes history_truncated separately and requires the post-window to cover a reported delta."
+    "A complete ring window can coexist with truncated lifetime history; the collector exposes history_truncated separately and requires the post-window to cover a reported delta.",
+    "RX trace completeness is derived from the producer-closed state, schema, three-read stable snapshot, and matching even seqlock versions; no unpublished SnapshotComplete property is required."
   ],
   "build_status": "Full build, strict signature verification and 15 compatibility compile cases passed; boot and RF remain untested.",
   "build_production_commit": "d2217858e9136fe0cca3ac269b05ac2ae8be091c",

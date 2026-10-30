@@ -432,13 +432,13 @@
     "developer-tools/continuity/tests/test_observe_continuity_window.py": "fc41200a8c4221de7396c4a8e93dc128dbe5d4872cefcb3154343d25d14c790f",
     "developer-tools/continuity/tools/observe_continuity_window.py": "24aaa6dc89c8ecff0f009850cf36d74b20fb6be483db46853040cb74d12d4007",
     "developer-tools/progress-site/README.md": "bc45538986622364e2891a85a6e93e297967229d5305032cd91e187287ad04b2",
-    "developer-tools/progress-site/SOURCE-MANIFEST.json": "73d441f20f38b8c3bf80bbc263077b3a3c80a38fd29d5e76be8bbb424f284740",
+    "developer-tools/progress-site/SOURCE-MANIFEST.json": "a63fdc8d85c7b188480d15c654bb9660c9bbd3328fab486af77b798b3f35d27a",
     "developer-tools/progress-site/dist/assets/site.css": "4348ea93c013b95d6d00aa729ddb230a630830b4220c9e6bfa1db19c59de6a99",
     "developer-tools/progress-site/dist/assets/site.js": "db2af24f6b933e1eabc9f4ec0eebd90920ea21249ae164012f2b477759bb5a90",
-    "developer-tools/progress-site/dist/assets/test-records.js": "c55b8a2e625884ef7ae364b364e47769168a861fafcd4709218918ebc4c8984a",
-    "developer-tools/progress-site/dist/data.js": "f9fd6910998571a7627e4c6bfc95b4c1660fcc2e9ba61e19ec140842f4326caa",
+    "developer-tools/progress-site/dist/assets/test-records.js": "bc831eddc5c0a809f7220fac4e63abe4911647677ea1fc3bf2045013b4927628",
+    "developer-tools/progress-site/dist/data.js": "f533cf55d5a7a5ea061eb473853c64d7688ed82f251a2e2f2de0e54dabfa54ea",
     "developer-tools/progress-site/dist/index.html": "38276cf10b5e8539721e2bc321d5f6093fd7e30997791cb5a2d0f71ec966057f",
-    "developer-tools/progress-site/dist/milestones.html": "608416c201f5f5842a893f7b49f8ffb726178255d2b2f35ac70d40267a52d623",
+    "developer-tools/progress-site/dist/milestones.html": "c299ef451a8e68f85e7d625d9cd6f8551a764546d615d71a406f1657558565eb",
     "developer-tools/progress-site/tools/publish_github_pages.py": "7c05efb77487e503bacbb8056906822ea04569085bddc968699dd2bd7b3c6359",
     "developer-tools/progress-site/tools/refresh_data.py": "b00856ca206585daba1883e08fb6ecc4738dada058635c559dd6b62ac9f9feef",
     "developer-tools/rx-stimulus/README.md": "b889968fe61dd6967053e6582bd3a701dd507de4a1ec9d4ec1f80618a040e8ce",
@@ -516,18 +516,19 @@
     "developer-tools/test082/tools/run_test082_router_observation_once.py": "14dc158090cebaf05c300fade6f4598495dccb0323a117f9f1a37311e99916bc",
     "developer-tools/test082/tools/test_run_test082_router_observation_once.py": "cc931ff1aa6922100fe9671e9a19e8d75a23dcd3621b57b9cbd0477a2a39c2f7",
     "developer-tools/test082/tools/test_test082_receive149_once.py": "e539213a64b10e15d749862352ce945c66d8507015b885ff80dd3b788e597350",
-    "developer-tools/test083/README.md": "763d58a7a59b0f517f6c41650c1aae7059c11d210b92bae50d4a80bf656e2dca",
-    "developer-tools/test083/SOURCE-MANIFEST.json": "38a7ddeebbe6bc3a38baca6d645c442f2ede02517c86efb37f2587e2a1451ec5",
+    "developer-tools/test083/README.md": "4f77808d47ba4602289d77fbe6e0a2899c94720367652796153346c2dc93bd5e",
+    "developer-tools/test083/SOURCE-MANIFEST.json": "db558023c7ee190f4fdb87927d7de44d150e7e2475f3b60f83bf7bc1679beb58",
     "developer-tools/test083/arm_p2p_rx149_test083.swift": "c62d93ac4fd03584abd3742a9e88915a319ba16531d112cb2cb95e703ed7508a",
     "developer-tools/test083/capture_test076_resident_data_once.py": "ec718f504e2b0d092b69798e86bc55a458c6b9c4ce4925d5f3551a9d9862fa2b",
-    "developer-tools/test083/capture_test083_receive149_once.py": "8a0897f7920d821d853716c75761b9616f6473818152b54e95fe44b382d04a6c",
+    "developer-tools/test083/capture_test083_receive149_once.py": "3f2a3040aa8bbf302bed228f36a874de1c7219b04d975cc5f0a1110dda7cafd8",
     "developer-tools/test083/probe_p2p_result.py": "7d41e4c5d236325e4cfe235717048030ab80d8f97392ac37307c9bf82603a732",
     "developer-tools/test083/probe_wifi_rate.py": "6e802a71ebeb5b9010ae0e0f7f0edd6f2782c51e50d8a5d566492c996efd9ca0",
+    "developer-tools/test083/tests/test083_rx_trace_guard.py": "2c3b9922e9ca33c2bd3590caa65235b21204dd6c148b6c25048963f48e8950fd",
     "developer-tools/test083/tools/awdl_ioreg_u32.py": "4a4fef3e2ac9189ab53fe93a39a5f183c6081a1b10c69a5901d06b495f1d3ff3",
     "developer-tools/test083/tools/openwrt_capture_once.py": "7c7b750604acf3c18372600084bcf6a899f3b8c2e0c364ebb6a1129d77dbeac2",
     "developer-tools/test083/tools/run_test083_router_observation_once.py": "3a07dcc99c0636592592a155e65e999b5ad26d5a2c7cfba59071764b60475ce1",
     "developer-tools/test083/tools/test_run_test083_router_observation_once.py": "44d89f8388eb887f3b77c96dbaac49d8667c7e23de8d4f6e9c7a42b1c1ef5331",
-    "developer-tools/test083/tools/test_test083_receive149_once.py": "db0518c0fe28f2bfb66a1c4e4b0ea002ba502f41c3c59e35e7bc11719ab823c9",
+    "developer-tools/test083/tools/test_test083_receive149_once.py": "bc9a865e25b1cf52951c5ea44513d2a95ca0cce2c1c19ae09fe7ebb1cf61ce2f",
     "include/Airport/Apple80211.h": "3e21b510d72f3683a9d4afe3b88cec9797774bc585b28dbde04dde48c0e82196",
     "include/Airport/CCDataPipe.h": "4732f795d36e80381f74c9d0e8e345cba51e5c0f21c35a00ff9521e9bea1b722",
     "include/Airport/CCLogPipe.h": "cac801ed5d15bcbed43ff6898247857098724d126d854a8752971da9ca7b3944",
@@ -1146,17 +1147,36 @@
   "build_production_commit": "d2217858e9136fe0cca3ac269b05ac2ae8be091c",
   "offline_validation": {
     "directed_groups": 25,
-    "host_mock_tests": 28,
+    "host_mock_tests": 31,
     "compatibility_compile_cases": 15,
     "independent_source_review": "STA/TU, bounded error capture, trace ring/decoder, RX149 admission and command metadata lifetime reviewed; narrow blockers resolved.",
-    "scope": "Offline only. Test083 has no boot, stability, radio receive, native data return or AirDrop success evidence."
+    "scope": "Driver build tests are the original frozen Test083 validation. Host collector31 directed mocks passed after RX snapshot alias fix; no new binary was built."
   },
   "runtime_validation": {
     "candidate": "25G332-Test083",
-    "hardware_tested": false,
-    "rf_tested": false,
+    "boot_observed": true,
+    "wifi_baseline_seconds": 300.002,
+    "wifi_post_rx149_seconds": 90.005,
+    "bounded_wifi_windows_passed": true,
+    "wifi_bound_apple_https_passed": true,
+    "roc_149_cfg2_start_end_reported_success": true,
+    "requested_duration_ms": 100,
+    "host_event_spacing_us": 95176,
+    "channel149_active_in_applied_firmware_profile": true,
+    "passive149_exception_runtime_tested": false,
+    "host_experiment_frame_tx_counters_remained_zero": true,
+    "native_awdl0_resident": true,
+    "kernel_output_software_queue_acceptance_observed": true,
+    "native_awdl0_wire_data_return_verified": false,
     "airdrop_verified": false,
-    "scope": "Not loaded yet; Test082 measured results are retained separately."
+    "current_fixed40": {
+      "passed": 8,
+      "partial": 5,
+      "not_covered": 27,
+      "regressed": 0
+    },
+    "net_new_historical_acceptance": 0,
+    "scope": "Only bounded observed windows; no long-term/sleep/peer data or AirDrop completion proof."
   },
   "baseline_runtime_validation": {
     "candidate": "25G332-Test082",
@@ -1175,14 +1195,20 @@
   },
   "deployment_validation": {
     "candidate": "25G332-Test083",
-    "state": "deployed_waiting_reboot_disarmed",
+    "state": "test083_runtime_observed_disarmed",
     "installed": true,
-    "reboot_ready": true,
+    "reboot_ready": false,
     "diagnostics_armed": false,
     "full_efi_backup_verified": true,
     "only_airportitlwm_replaced": true,
     "other_efi_files_unchanged": true,
     "automatic_reboot": false,
-    "runtime_verified": false
-  }
+    "runtime_verified": true
+  },
+  "known_runtime_observation_gaps": [
+    "The saved host measurement originally failed on a non-existent RX trace alias; original report retained and separate reanalysis accepted the actually published schema.",
+    "RX-entry descriptor telemetry only recognizes cfg3, while this observation is cfg2. Zero owner/counters do not disprove RX. A next candidate is being prepared.",
+    "PCAP packets and95.176ms host START/END interval lack a proved clock mapping.",
+    "Firmware error tables remain unavailable; zero-filled aliases are not proof of zero firmware errors."
+  ]
 }

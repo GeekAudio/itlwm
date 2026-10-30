@@ -902,10 +902,15 @@ def prepare_trace_evidence(samples, schema=None):
 
 
 def rx_trace_snapshot_complete(trace_evidence, post):
-    """Require producer closure, stable snapshot, drain, and no trace loss."""
+    """Require producer closure, the published seqlock, drain, and no loss.
+
+    The production publisher exposes SchemaVersion and an even, matching
+    SnapshotVersionBegin/End pair. There is no separate SnapshotComplete
+    property; stable completeness is derived by guarded_rx_trace_evidence.
+    """
     trace_values = trace_evidence.get('values', {}) if isinstance(trace_evidence, dict) else {}
     required = {
-        'NativeP2PRxTraceSnapshotComplete': 1,
+        'NativeP2PRxTraceSchemaVersion': 1,
         'NativeP2PRxTraceProducerClosed': 1,
         'NativeP2PRxTraceActive': 0,
         'NativeP2PRxTracePendingDrainCount': 0,
@@ -918,9 +923,26 @@ def rx_trace_snapshot_complete(trace_evidence, post):
     }
     values_valid = all(type(post.get(key)) is int and post.get(key) == expected
                        for key, expected in required.items())
-    event_count = trace_values.get('NativeP2PRxTraceEventCount')
-    return (trace_evidence.get('valid') is True and values_valid and
-            type(event_count) is int and event_count >= 0)
+    begin = post.get('NativeP2PRxTraceSnapshotVersionBegin')
+    end = post.get('NativeP2PRxTraceSnapshotVersionEnd')
+    revision = post.get('NativeP2PRxTraceRevision')
+    event_count = post.get('NativeP2PRxTraceEventCount')
+    evidence_revision = trace_values.get('NativeP2PRxTraceRevision')
+    evidence_event_count = trace_values.get('NativeP2PRxTraceEventCount')
+    event_capacity = trace_evidence.get('event_capacity')
+    version_valid = (type(begin) is int and type(end) is int and
+                     begin > 0 and begin == end and begin % 2 == 0)
+    evidence_matches = (
+        type(revision) is int and revision >= 0 and revision == evidence_revision and
+        type(event_capacity) is int and event_capacity >= 0 and
+        type(event_count) is int and 0 <= event_count <= event_capacity and
+        event_count == evidence_event_count and
+        type(trace_evidence.get('event_count')) is int and
+        event_count == trace_evidence.get('event_count'))
+    return (trace_evidence.get('valid') is True and
+            trace_evidence.get('stable_complete_snapshot') is True and
+            trace_evidence.get('trace_coverage_complete') is True and
+            values_valid and version_valid and evidence_matches)
 
 
 def fresh_observation_id(value):

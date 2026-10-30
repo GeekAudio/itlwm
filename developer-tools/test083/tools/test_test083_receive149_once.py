@@ -18,6 +18,10 @@ SPEC = importlib.util.spec_from_file_location(
     'capture_test083_receive149_once', ROOT / 'capture_test083_receive149_once.py')
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
+TRACE_GUARD_SPEC = importlib.util.spec_from_file_location(
+    'test083_rx_trace_guard_fixture', ROOT / 'tests' / 'test083_rx_trace_guard.py')
+TRACE_GUARD_FIXTURE = importlib.util.module_from_spec(TRACE_GUARD_SPEC)
+TRACE_GUARD_SPEC.loader.exec_module(TRACE_GUARD_FIXTURE)
 
 
 class Test083ReceiveOnlyGateTests(unittest.TestCase):
@@ -395,25 +399,17 @@ class Test083ReceiveOnlyGateTests(unittest.TestCase):
                       MODULE.roc_session_problems(values))
 
     def test_session_completion_requires_closed_stable_rx_trace(self):
-        trace_values = {'NativeP2PRxTraceEventCount': 0}
-        evidence = {'valid': True, 'values': trace_values}
-        post = {
-            'NativeP2PRxTraceSnapshotComplete': 1,
-            'NativeP2PRxTraceProducerClosed': 1,
-            'NativeP2PRxTraceActive': 0,
-            'NativeP2PRxTracePendingDrainCount': 0,
-            'NativeP2PRxTraceUntrackedPendingDrainCount': 0,
-            'NativeP2PRxTraceUntrackedPendingIdentityOverflowCount': 0,
-            'NativeP2PRxTraceDroppedEventCount': 0,
-            'NativeP2PRxTraceStaleCompletionCount': 0,
-            'NativeP2PRxTraceSourceTableFullCount': 0,
-            'NativeP2PRxTraceTimeEventNotificationDroppedCount': 0,
-        }
+        reads = TRACE_GUARD_FIXTURE.closed_zero_event_reads()
+        evidence = TRACE_GUARD_FIXTURE.EVIDENCE.guarded_rx_trace_evidence(*reads)
+        post = dict(reads[-1])
+        self.assertNotIn('NativeP2PRxTraceSnapshotComplete', post)
         self.assertTrue(MODULE.rx_trace_snapshot_complete(evidence, post))
         self.assertFalse(MODULE.rx_trace_snapshot_complete(
             evidence, dict(post, NativeP2PRxTracePendingDrainCount=None)))
         self.assertFalse(MODULE.rx_trace_snapshot_complete(
             dict(evidence, valid=False), post))
+        self.assertFalse(MODULE.rx_trace_snapshot_complete(
+            evidence, dict(post, NativeP2PRxTraceSnapshotVersionEnd=5)))
 
     def test_immutable_mode_latch_distinguishes_rx149_from_legacy(self):
         samples = [
