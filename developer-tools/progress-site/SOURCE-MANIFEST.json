@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "8b9d3e42b1e1e1a7284684f31179756e534b241e1035a9d8b9376c2173db0e7a"
+      "sha256": "d5e20474fd102c43c71143a8603b2e88a258ff9fc6e8dee611fe81fbfacc8174"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "e5d2aab6c00b810153845db45b56a593c283052f485f3fe38d85dc6e92624a6a"
+      "sha256": "c19ef0abecdf97886d8af30d4bce014640c5a5636a3d2478b02adf64623917b7"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -30,7 +30,7 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "f0042a6b67089276d8afce6e9842b2aea2af2f8678ce27f9bb08c2a03990e2fc"
+      "sha256": "361a24798f41b8bf0b1d7cfabae71c289a2c2851ccdea326b08f1a82658d2de8"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-30T21:36:25.110070+08:00",
-  "runtime_scope": "Test087 runtime: 300-second Wi-Fi baseline and 120-second post-diagnostic observation passed. Stable pre-owner snapshot recorded 238 MPDU entries: 237 STA and one channel-149 Beacon that qualified for the existing owner recorder. No target AWDL data or awdl0 UDP receipt. Router accepted 16 local writes, without RF proof. 7/40 passed,4 partial,29 uncovered,0 failed; historical24/40,net-new0. No EFI or WAN/LAN changes. The prior complete EFI backup remains available."
+  "updated_at": "2026-10-30T22:31:10.903498+08:00",
+  "runtime_scope": "Test088 updates diagnostic tools only; production driver and EFI remain Test087. Offline sender/parser/coordinator validation does not add runtime passes. Current Test087 acceptance remains 7 passed, 4 partial, 29 uncovered, 0 failed; history 24/40, net-new 0. An extra passive observation stopped on interface-counter read failure and is not a stability pass. The prior full EFI backup is retained; WAN/LAN unchanged."
 }

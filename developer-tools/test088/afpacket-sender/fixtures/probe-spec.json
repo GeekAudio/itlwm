@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "kind": "synthetic offline byte specification; never transmitted",
+  "all_addresses_synthetic_or_protocol_constants": true,
+  "wifi_sequence_number": 291,
+  "awdl_sequence_number": 34305,
+  "mpdu_length_without_fcs": 96,
+  "mpdu_hex": "08000000333300000001028600000001002500ff94733012aaaa030017f2080003040186000086dd6000000000101101fe80000000000000008600fffe000001ff020000000000000000000000000001c000c001001073d05430383652583031",
+  "mpdu_sha256": "f491f5e03662572d5ef135c4c4dbb47d60715201fec48f8d62f4189912ad5f7b",
+  "radiotap_tx_flags": "0x0018",
+  "radiotap_hex": "00000a00008000001800",
+  "packet_socket_payload_length": 106,
+  "packet_socket_payload_sha256": "8d905cbefa81f7a0e0ca2cb17ca23070d56d641b0bc897db933b24ef96828ca2",
+  "ipv6_length": 56,
+  "udp_checksum": "0x73d0",
+  "marker_ascii": "T086RX01",
+  "rf_performed": false,
+  "device_calls_performed": false
+}
