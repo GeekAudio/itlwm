@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "e872e38d248d283449a0a44303039fffa3535a1d860bf0884315b9059d8697fe"
+      "sha256": "8b9d3e42b1e1e1a7284684f31179756e534b241e1035a9d8b9376c2173db0e7a"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "e772d55a5f349048ebf394ca3fd805cec0c7624cea4d43b3e02fa5d5eb0643cc"
+      "sha256": "e5d2aab6c00b810153845db45b56a593c283052f485f3fe38d85dc6e92624a6a"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -30,7 +30,7 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "c1f5012d5e4ad5b2bf22c01afbe306c6f6b3d081aefeaf811cf5ac54045172b7"
+      "sha256": "f0042a6b67089276d8afce6e9842b2aea2af2f8678ce27f9bb08c2a03990e2fc"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-30T20:36:55.795685+08:00",
-  "runtime_scope": "Test087 built, independently reviewed and deployed with a full EFI backup; existing config changes retained. Awaiting reboot. Current runtime acceptance remains Test086: 7 passed,4 partial,29 uncovered,0 failed; history24/40,net-new0. New independent4-second numeric RX observation precedes owner admission, preserving100ms RX149 and existing C28 data-input profile. Current Test086 Wi-Fi300.004s/56 samples passed and followup counters unchanged. No Test087 RF/native data/AirDrop success claimed. WAN/LAN untouched; old boot logs archived outside ESP."
+  "updated_at": "2026-10-30T21:36:25.110070+08:00",
+  "runtime_scope": "Test087 runtime: 300-second Wi-Fi baseline and 120-second post-diagnostic observation passed. Stable pre-owner snapshot recorded 238 MPDU entries: 237 STA and one channel-149 Beacon that qualified for the existing owner recorder. No target AWDL data or awdl0 UDP receipt. Router accepted 16 local writes, without RF proof. 7/40 passed,4 partial,29 uncovered,0 failed; historical24/40,net-new0. No EFI or WAN/LAN changes. The prior complete EFI backup remains available."
 }
