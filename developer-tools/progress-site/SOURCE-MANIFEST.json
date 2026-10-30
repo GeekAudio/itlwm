@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "4daf406ce17a2c38164a7be908540869c45f18683ca466cfa27161c1d33ab1ae"
+      "sha256": "8b9c1ab92ee1f3ae03f45a7ecd2e58b0593a597c5f65511d5b1bada227b6e010"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "ca55a637f4c448b97527cf86f4da9bd97d5ef8c0e3a40e260e1f94a80aff4e7f"
+      "sha256": "1bd9f7b0aa5f8553b1f4487a7743669b769a8b74f40b1b936340acd20b4263b9"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -30,7 +30,7 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "16c11f4bf6b32389ec93a7fdea52b464919e9c432aaa346ed1d91b394cacbcb9"
+      "sha256": "c1f5012d5e4ad5b2bf22c01afbe306c6f6b3d081aefeaf811cf5ac54045172b7"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-30T15:34:58.992234+08:00",
-  "runtime_scope": "Test086 current runtime unchanged:9 passed,6 partial,25 uncovered,0 failed; historical24/40, net-new0. Controlled96B tooling prepared for a new boot with the existing C28 driver. Real OpenWrt READY-to-ABORT verified0 sends and cleanup; real awdl0 UDP listener READY without stimulus. Offline Python38 passed/1 local ash skip and sender host9 passed. No additional native arm, probe transmission, EFI write, data-input or AirDrop proof."
+  "updated_at": "2026-10-30T16:26:48.126313+08:00",
+  "runtime_scope": "Test086 boot1793346889:7 passed,4 partial,29 uncovered,0 failed; history24/40,net-new0. Approximately five-minute Wi-Fi baseline and separate two-minute post-window passed. Native149 ROC95.2ms completed with one ordinary beacon; no MIF/data. OpenWrt mt76 kernel panic interrupted sender receipts; send count and cleanup unknown. Exact module NULL dereference confirmed offline; probe causality unproven. No EFI write or repeat injection; reboot not requested."
 }
