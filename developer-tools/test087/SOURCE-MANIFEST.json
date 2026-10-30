@@ -51,7 +51,7 @@
     "policy": "Frozen source dependencies are hash-pinned; no Test086 source is copied or modified by this manifest."
   },
   "offline_test_fixtures": {
-    "native/rx_preowner_observation.hpp": "fd9cded795f10d458383e597f02c7fc3e57cedac7959e44277e5b7d41147b248",
+    "native/rx_preowner_observation.hpp": "e80b60339d4933c1be382c483ad74b9724be80f11b528491cea7d2c7408af1d0",
     "native/rx_preowner_wire.hpp": "3aaeed745a7ef8887366cbdde2b209416a3d1545bbb9840e5dd9f980d0279594",
     "native/tests/test087_preowner_wire.cpp": "27cc0ab8b2842c9b2cdccdbf362162e0c2dc65450057a26919ce0141cabbe496"
   },
