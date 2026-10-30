@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "c299ef451a8e68f85e7d625d9cd6f8551a764546d615d71a406f1657558565eb"
+      "sha256": "6d2263c3e726b46a3994d1ef20fc6b69e524663aa65fdd06371422ec78462d1f"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "f533cf55d5a7a5ea061eb473853c64d7688ed82f251a2e2f2de0e54dabfa54ea"
+      "sha256": "eec46102f9b1e3cac224700cf324e3b356204168a26733d35e6f044fe4051cb1"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -30,7 +30,7 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "bc831eddc5c0a809f7220fac4e63abe4911647677ea1fc3bf2045013b4927628"
+      "sha256": "7d0eaf14e7cc27c0a3b0401ff6e4ca5b8ca2ea0672cc96741c70e7a7bcc32d1f"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-30T11:08:10.515189+08:00",
-  "runtime_scope": "Test083 boot observed:300-second Wi-Fi baseline and90-second post-session window clean; interface-bound Apple HTTPS passed;149 cfg2 START/END firmware reports valid. Current149 is ACTIVE, not a PASSIVE exception proof. Saved trace reanalysis corrects a host alias false negative. Descriptor RX telemetry cfg2 blind spot remains; native peer data return and AirDrop unverified."
+  "updated_at": "2026-10-30T11:19:11.916516+08:00",
+  "runtime_scope": "Current Test083 measured results remain8 passed/5 partial/27 uncovered. Test084 only extends bounded cfg2 RX-entry observation; full EFI backup and deployment completed, awaiting reboot. No Test084 runtime,RX or AirDrop proof."
 }
