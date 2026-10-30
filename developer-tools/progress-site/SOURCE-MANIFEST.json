@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "178dbc1cb418e00637d1ff7c59f3125eb118acd5824e168002452508ca7b0b67"
+      "sha256": "608416c201f5f5842a893f7b49f8ffb726178255d2b2f35ac70d40267a52d623"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "6e2b260d0a4bf8673d9d0508fcbea10e0f1e63ec0a12e6a0010df14c70010953"
+      "sha256": "f9fd6910998571a7627e4c6bfc95b4c1660fcc2e9ba61e19ec140842f4326caa"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-30T10:33:48.121558+08:00",
+  "updated_at": "2026-10-30T10:35:39.539008+08:00",
   "runtime_scope": "Test082 remains the running measured candidate. Test083 was fully backed up and deployed, waiting for reboot; diagnostics remain disarmed. No Test083 boot,149 receive,native peer data return or AirDrop success evidence. Later Test082 watchdog/recovery remains recorded."
 }
