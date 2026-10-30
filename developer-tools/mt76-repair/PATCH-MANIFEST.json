@@ -1,0 +1,31 @@
+{
+  "schema": "mt76-null-vif-repair/v1",
+  "upstream": "https://github.com/openwrt/mt76",
+  "base_commit": "8f301a5c5fe3d998b50666bde1d35d412833be89",
+  "scope": "Move NULL-vif checks before dereferences in the connac rate selector and shared default-rate helper. Preserve valid-vif PHY/context selection and rate-table behavior.",
+  "source_files": [
+    {
+      "source": "mt76_connac_mac.c",
+      "patch": "patches/001-mt76_connac_mac-null-vif.patch",
+      "patch_sha256": "be72bd808710c1bf067daec337603bcb6f723981b8ee6d477ec5f8e7df90ff9f",
+      "base_sha256": "da9ea1f6523c6d0fc624f3954e0dc93775111131f344b9a9adc0d187814622ad",
+      "proposed_sha256": "599ad52eaf3ec698317ce3c5024059f9d1d8937803b3c12807d51c0f4d80fdd7"
+    },
+    {
+      "source": "mac80211.c",
+      "patch": "patches/002-mac80211-null-vif.patch",
+      "patch_sha256": "470d45ea7947bb9dc73f9cfda0a99c178390b3fa0294fff33fcaa0f2bc7a8ced",
+      "base_sha256": "7d26674fc12f433af2d9ff81b036611e15412164231433972b1b749ce51cc189",
+      "proposed_sha256": "c763f74e4c4c029d92df4c07259a0288993e70a28627654e48bc550429d9388d"
+    }
+  ],
+  "source_test_inputs": {
+    "mt76.h": "25b0a6e758eabca24c5ca86ce0118f0369357178aaa2fcbfccd4e59b76b2b015",
+    "mt76_connac2_mac.h": "9591978283d7afc86f736cf4101a6de24f5b4694bfc96e2f38d137f23af2bdee"
+  },
+  "exact_elf_inputs_for_instruction_candidate": {
+    "mt76.ko": "36e955a618339bcd05bcafba1b475cd99f063944e65384bf045465bf78ba31ec",
+    "mt76-connac-lib.ko": "f537050e5df1cb6b2f0263a0faa5bc1effbd5789a11b085e7e261129ee3bef9d"
+  },
+  "limits": "This source patch is not a built kernel module. The ELF instruction candidate is only for the exact hash-pinned inputs and is not a general build or install package. No Intel receive or AirDrop success is claimed."
+}

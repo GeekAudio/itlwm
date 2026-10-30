@@ -1,0 +1,27 @@
+diff --git a/mac80211.c b/mac80211.c
+--- a/mac80211.c
++++ b/mac80211.c
+@@ -1757,15 +1757,19 @@
+ EXPORT_SYMBOL_GPL(mt76_init_queue);
+ 
+ u16 mt76_calculate_default_rate(struct mt76_phy *phy,
+ 				struct ieee80211_vif *vif, int rateidx)
+ {
+-	struct mt76_vif *mvif = (struct mt76_vif *)vif->drv_priv;
+-	struct cfg80211_chan_def *chandef = mvif->ctx ?
+-					    &mvif->ctx->def :
+-					    &phy->chandef;
++	struct cfg80211_chan_def *chandef = &phy->chandef;
+ 	int offset = 0;
++
++	if (vif) {
++		struct mt76_vif *mvif = (struct mt76_vif *)vif->drv_priv;
++
++		if (mvif->ctx)
++			chandef = &mvif->ctx->def;
++	}
+ 
+ 	if (chandef->chan->band != NL80211_BAND_2GHZ)
+ 		offset = 4;
+ 
+ 	/* pick the lowest rate for hidden nodes */
