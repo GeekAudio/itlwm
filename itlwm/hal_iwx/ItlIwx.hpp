@@ -149,6 +149,7 @@
 #include "../../native/awdl_rx_event_timeline.hpp"
 #include "../../native/awdl_data_frame.hpp"
 #include "../../native/awdl_rx_entry_telemetry.hpp"
+#include "../../native/rx_preowner_observation.hpp"
 #include "../../native/p2p_rx149_data_input.hpp"
 #include "../../native/awdl_rx_entry_publisher.hpp"
 #include "../../native/awdl_peer_observer.hpp"
@@ -494,7 +495,12 @@ public:
     void tahoeP2pRxDrain();
     static IOReturn tahoeP2pRxDrainAction(OSObject *, void *, void *, void *, void *);
     bool tahoeP2pCurrentRxDiagnosticEpochs(
-        struct iwx_softc *, NativeAwdlRxEntry::Epochs *);
+        struct iwx_softc *, NativeAwdlRxEntry::Epochs *, uint32_t * = nullptr);
+    void tahoeRxPreOwnerEvent(NativeRxPreOwner::EventKind,
+        uint32_t = UINT32_MAX, uint32_t = UINT32_MAX,
+        uint32_t = UINT32_MAX, uint32_t = 0, uint32_t = 0);
+    void tahoeRxPreOwnerIrq(uint32_t cause, bool msix);
+    void tahoeRxPreOwnerPublish(IOEthernetController *);
     void tahoeP2pSyncRxDiagnosticOwner(bool closeOnly);
     void tahoeP2pPublishRxStageCounters(IOEthernetController *);
     void tahoeP2pPublishRxEntryTelemetry(IOEthernetController *);
@@ -575,6 +581,11 @@ public:
     TahoeAwdlRxStageCounters::Snapshot tahoe_awdl_rx_stage_published_{};
     bool tahoe_awdl_rx_stage_published_once_ {false};
     NativeAwdlRxEntry::Telemetry nativeAwdlRxEntryTelemetry_{};
+    NativeRxPreOwner::Observer nativeRxPreOwner_{};
+    uint32_t nativeRxPreOwnerArmed_ {0};
+    bool nativeRxPreOwnerPublished_ {false};
+    NativeRxPreOwner::Snapshot nativeRxPreOwnerPublishSnapshot_{};
+    uint64_t nativeRxPreOwnerPublishWords_[1024] {};
     NativeAwdlRxEntry::Snapshot nativeAwdlRxEntryPublished_{};
     uint32_t nativeAwdlRxEntryAttemptVersion_ {0};
     uint32_t nativeAwdlRxEntryPublishVersion_ {0};

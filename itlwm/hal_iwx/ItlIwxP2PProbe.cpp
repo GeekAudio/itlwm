@@ -11,6 +11,7 @@
 #include "../../native/awdl_mif_pacing.hpp"
 #include "../../native/awdl_psf_tx_gate.hpp"
 #include "../../native/p2p_rx149_observation.hpp"
+#include "../../native/rx_preowner_wire.hpp"
 #if defined(ITL_NATIVE_AWDL_LIFECYCLE_25G332)
 #include "../../native/awdl_native_lifecycle_25G332.hpp"
 #if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
@@ -7912,6 +7913,18 @@ IOReturn ItlIwx::nativeP2pArmProbe()
                                          false,
                                          __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
             return kIOReturnBusy;
+#if defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+        if (controller->getProperty("NativeRxPreOwnerObservation") == kOSBooleanTrue) {
+            uint64_t absolute = 0, nanos = 0;
+            clock_get_uptime(&absolute);
+            absolutetime_to_nanoseconds(absolute, &nanos);
+            const bool observed = nativeRxPreOwner_.begin(nanos / 1000ULL,
+                uint32_t(__atomic_load_n(&com.sc_generation, __ATOMIC_ACQUIRE)));
+            __atomic_store_n(&nativeRxPreOwnerArmed_, observed ? 1u : 0u,
+                             __ATOMIC_RELEASE);
+            controller->setProperty("NativeRxPreOwnerArmAccepted", observed ? 1u : 0u, 32);
+        }
+#endif
         publishRx149ProfileState(this, true, false, true);
         return kIOReturnSuccess;
     }
@@ -7972,6 +7985,55 @@ static bool nativeInitObservationHandled(IOEthernetController *controller)
 #endif
 }
 
+void ItlIwx::tahoeRxPreOwnerPublish(IOEthernetController *controller)
+{
+#if defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+    // The watchdog uses a different workloop. Never wait on the main gate;
+    // the observer provides a nonblocking, internally consistent copy.
+    if (!controller || nativeRxPreOwnerPublished_ ||
+        !__atomic_load_n(&nativeRxPreOwnerArmed_, __ATOMIC_ACQUIRE))
+        return;
+    uint64_t absolute = 0, nanos = 0;
+    clock_get_uptime(&absolute);
+    absolutetime_to_nanoseconds(absolute, &nanos);
+    const uint64_t nowUs = nanos / 1000ULL;
+    auto &snapshot = nativeRxPreOwnerPublishSnapshot_;
+    if (!nativeRxPreOwner_.snapshot(nowUs, &snapshot))
+        return;
+    if (snapshot.active && snapshot.driverGeneration !=
+        uint32_t(__atomic_load_n(&com.sc_generation, __ATOMIC_ACQUIRE))) {
+        (void)nativeRxPreOwner_.close(nowUs,
+            NativeRxPreOwner::CloseReason::GenerationChanged);
+        if (!nativeRxPreOwner_.snapshot(nowUs, &snapshot))
+            return;
+    }
+    if (snapshot.active || !snapshot.closed)
+        return;
+    const size_t words = NativeRxPreOwnerWire::encode(snapshot,
+        nativeRxPreOwnerPublishWords_,
+        sizeof(nativeRxPreOwnerPublishWords_) / sizeof(uint64_t));
+    if (words == 0)
+        return;
+    // Allocate and publish only after the independent window has closed.
+    // The payload contains explicit numeric words, never C++ struct padding.
+    OSData *data = OSData::withBytes(nativeRxPreOwnerPublishWords_,
+        unsigned(words * sizeof(uint64_t)));
+    if (!data)
+        return;
+    const bool complete =
+        controller->setProperty("NativeRxPreOwnerPublished", uint64_t(0), 32) &&
+        controller->setProperty("NativeRxPreOwnerRevision", uint64_t(1), 32) &&
+        controller->setProperty("NativeRxPreOwnerSchema", uint64_t(1), 32) &&
+        controller->setProperty("NativeRxPreOwnerSnapshot", data) &&
+        controller->setProperty("NativeRxPreOwnerRevision", uint64_t(2), 32) &&
+        controller->setProperty("NativeRxPreOwnerPublished", uint64_t(1), 32);
+    data->release();
+    nativeRxPreOwnerPublished_ = complete;
+#else
+    (void)controller;
+#endif
+}
+
 void ItlIwx::nativeP2pTick()
 {
     tahoeP2pRxDrain();
@@ -7985,6 +8047,7 @@ void ItlIwx::nativeP2pTick()
 #endif
 
     IOEthernetController *controller = getController();
+    tahoeRxPreOwnerPublish(controller);
     tahoePublishMccSnapshot(controller);
     publishRx149ProfileAvailabilityOnce(this, controller);
     if (rx149ObservationOnlyRequested(controller))

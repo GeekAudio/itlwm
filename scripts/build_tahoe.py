@@ -16,6 +16,8 @@ PROJECT = Path(__file__).resolve().parents[1]
 
 def receive149_profile_errors(args):
     data_input = getattr(args, 'native_awdl_rx149_data_input', False)
+    if getattr(args, 'native_rx_preowner_observation', False) and not data_input:
+        return ['Pre-owner observation requires the isolated RX149 data-input profile']
     if data_input and not args.native_awdl_rx149_observation_only:
         return ['RX149 data input requires the isolated RX149 manual receive profile']
     if not args.native_awdl_rx149_observation_only:
@@ -48,6 +50,8 @@ def resident_build_flags(args):
         flags += ' -DITL_NATIVE_AWDL_RX149_OBSERVATION_25G332=1'
     if getattr(args, 'native_awdl_rx149_data_input', False):
         flags += ' -DITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332=1'
+    if getattr(args, 'native_rx_preowner_observation', False):
+        flags += ' -DITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332=1'
     return flags
 
 
@@ -69,6 +73,7 @@ def apply_artifact_profile(personality, args):
         'NativeAwdlDiscoveryCurrentAwFallbackEnabled': bool(args.native_awdl_discovery_current_aw_fallback),
         'NativeP2PRx149ObservationOnly': bool(args.native_awdl_rx149_observation_only),
         'NativeP2PRx149DataInputExperiment': bool(getattr(args, 'native_awdl_rx149_data_input', False)),
+        'NativeRxPreOwnerObservation': bool(getattr(args, 'native_rx_preowner_observation', False)),
     })
 
 
@@ -118,6 +123,8 @@ def main():
                         help='Test080: one manual 100ms channel149 receive observation; no host management/data TX')
     parser.add_argument('--native-awdl-rx149-data-input', action='store_true',
                         help='Test086: allow bounded channel149 inbound data into native awdl0; host frame TX remains blocked')
+    parser.add_argument('--native-rx-preowner-observation', action='store_true',
+                        help='Test087: independent bounded numeric RX observation before owner admission; no RX/TX policy changes')
     args = parser.parse_args()
     for error in receive149_profile_errors(args):
         parser.error(error)
@@ -205,7 +212,7 @@ def main():
         undefined = subprocess.check_output(
             ['xcrun', 'nm', '-u', str(bundle / 'Contents/MacOS/AirportItlwm')],
             text=True)
-        own_names = ('NativeWifi', 'NativeAwdl', 'NativeP2PProbe', 'IntelP2PRx',
+        own_names = ('NativeWifi', 'NativeAwdl', 'NativeRxPreOwner', 'NativeP2PProbe', 'IntelP2PRx',
                      'IntelAwdl', 'IntelAwdlElection', 'IntelROCEvent', 'IntelP2PTx', 'IntelP2PAction',
                      'IntelP2PFirmware', 'IntelGp2Clock',
                      'iwx_tahoe_p2p', 'IwxTxRate', 'IwxResetTrace', 'AirportItlwm',
@@ -242,6 +249,7 @@ def main():
                           'native_awdl_discovery_current_aw_fallback': args.native_awdl_discovery_current_aw_fallback,
                           'native_awdl_rx149_observation_only': args.native_awdl_rx149_observation_only,
                           'native_awdl_rx149_data_input': args.native_awdl_rx149_data_input,
+                          'native_rx_preowner_observation': args.native_rx_preowner_observation,
                           'test_build': build_tag, 'mach_o_uuid': match.group(1),
                           'log': str(log_path)}, ensure_ascii=False))
 

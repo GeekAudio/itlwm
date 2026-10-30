@@ -1291,31 +1291,52 @@ static bool rxDiagnosticSessionWindowQualified(
 }
 
 bool ItlIwx::tahoeP2pCurrentRxDiagnosticEpochs(
-    struct iwx_softc *sc, NativeAwdlRxEntry::Epochs *epochs)
+    struct iwx_softc *sc, NativeAwdlRxEntry::Epochs *epochs,
+    uint32_t *reason)
 {
-    if (!sc || !epochs || !tahoeP2pOnMainGate())
+    const auto reject = [reason](NativeRxPreOwner::OwnerReason value) {
+        if (reason)
+            *reason = static_cast<uint32_t>(value);
         return false;
+    };
+    if (!sc)
+        return reject(NativeRxPreOwner::OwnerReason::InvalidInput);
+    if (!epochs)
+        return reject(NativeRxPreOwner::OwnerReason::InvalidInput);
+    if (!tahoeP2pOnMainGate())
+        return reject(NativeRxPreOwner::OwnerReason::MainGate);
     const auto &lease = tahoe_p2p_rx_lease_;
     // Most RX traffic has no active manual P2P lease. Reject it before
     // sampling the ROC reducer or host clock.
-    if (!lease.active || lease.contextGeneration == 0 ||
-        lease.powerGeneration == 0 || lease.stationGeneration == 0 ||
-        lease.contextGeneration != lease.currentContextGeneration ||
-        lease.contextGeneration != nativeP2pProbeGeneration_ ||
-        lease.powerGeneration != lease.currentPowerGeneration ||
-        lease.stationGeneration != lease.currentStationGeneration)
-        return false;
+    if (!lease.active)
+        return reject(NativeRxPreOwner::OwnerReason::LeaseInactive);
+    if (lease.contextGeneration == 0)
+        return reject(NativeRxPreOwner::OwnerReason::LeaseContextZero);
+    if (lease.powerGeneration == 0)
+        return reject(NativeRxPreOwner::OwnerReason::LeasePowerZero);
+    if (lease.stationGeneration == 0)
+        return reject(NativeRxPreOwner::OwnerReason::LeaseStationZero);
+    if (lease.contextGeneration != lease.currentContextGeneration)
+        return reject(NativeRxPreOwner::OwnerReason::LeaseContextMismatchCurrent);
+    if (lease.contextGeneration != nativeP2pProbeGeneration_)
+        return reject(NativeRxPreOwner::OwnerReason::LeaseContextMismatchProbe);
+    if (lease.powerGeneration != lease.currentPowerGeneration)
+        return reject(NativeRxPreOwner::OwnerReason::LeasePowerMismatchLeaseCurrent);
+    if (lease.stationGeneration != lease.currentStationGeneration)
+        return reject(NativeRxPreOwner::OwnerReason::LeaseStationMismatchLeaseCurrent);
     const uint32_t currentPower = uint32_t(sc->sc_generation);
     const uint32_t currentStation = __atomic_load_n(
         &sc->sc_tx_rate_generation, __ATOMIC_ACQUIRE);
-    if (lease.powerGeneration != currentPower ||
-        lease.powerGeneration != uint32_t(sc->sc_p2p.fw_generation) ||
-        lease.stationGeneration != currentStation)
-        return false;
+    if (lease.powerGeneration != currentPower)
+        return reject(NativeRxPreOwner::OwnerReason::PowerMismatchScGeneration);
+    if (lease.powerGeneration != uint32_t(sc->sc_p2p.fw_generation))
+        return reject(NativeRxPreOwner::OwnerReason::PowerMismatchFwGeneration);
+    if (lease.stationGeneration != currentStation)
+        return reject(NativeRxPreOwner::OwnerReason::StationMismatchScGeneration);
     const uint32_t currentRoc = __atomic_load_n(
         &nativeP2pRocGeneration_, __ATOMIC_ACQUIRE);
     if (currentRoc == 0)
-        return false;
+        return reject(NativeRxPreOwner::OwnerReason::RocMissing);
     const auto session = nativeP2pRocEvents_.snapshot();
     const uint64_t nowUs = tahoeP2pRxMonotonicUs();
     NativeP2PRx149Observation::RocEvidence rx149OwnerEvidence{};
@@ -1333,18 +1354,27 @@ bool ItlIwx::tahoeP2pCurrentRxDiagnosticEpochs(
         rx149Owner = &rx149OwnerEvidence;
     }
 #endif
-    if (session.generation != lease.contextGeneration ||
-        session.generation != currentRoc || !session.commandReturned ||
-        session.commandResult != 0 ||
-        !rxDiagnosticSessionWindowQualified(session, nowUs, rx149Owner) ||
-        sc->sc_p2p_roc.token != session.generation ||
-        sc->sc_p2p_roc.phase != IWX_P2P_ROC_SESSION_ACKED)
-        return false;
+    if (session.generation != lease.contextGeneration)
+        return reject(NativeRxPreOwner::OwnerReason::RocGenerationMismatchLease);
+    if (session.generation != currentRoc)
+        return reject(NativeRxPreOwner::OwnerReason::RocGenerationMismatchCurrent);
+    if (!session.commandReturned)
+        return reject(NativeRxPreOwner::OwnerReason::RocCommandPending);
+    if (session.commandResult != 0)
+        return reject(NativeRxPreOwner::OwnerReason::RocCommandFailed);
+    if (!rxDiagnosticSessionWindowQualified(session, nowUs, rx149Owner))
+        return reject(NativeRxPreOwner::OwnerReason::RocWindowNotQualified);
+    if (sc->sc_p2p_roc.token != session.generation)
+        return reject(NativeRxPreOwner::OwnerReason::RocTokenMismatch);
+    if (sc->sc_p2p_roc.phase != IWX_P2P_ROC_SESSION_ACKED)
+        return reject(NativeRxPreOwner::OwnerReason::RocPhaseNotAcked);
 
     epochs->contextGeneration = uint32_t(lease.contextGeneration);
     epochs->powerGeneration = uint32_t(lease.powerGeneration);
     epochs->stationGeneration = uint32_t(lease.stationGeneration);
     epochs->rocGeneration = session.generation;
+    if (reason)
+        *reason = static_cast<uint32_t>(NativeRxPreOwner::OwnerReason::Qualified);
     return true;
 }
 
