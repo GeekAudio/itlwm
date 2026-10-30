@@ -318,7 +318,10 @@ setLinkState(IO80211LinkState state)
         ifnet_set_flags(getIfnet(), ifnet_flags(getIfnet()) | (IFF_UP | IFF_RUNNING), (IFF_UP | IFF_RUNNING));
     } else {
 #ifdef AIRPORT_TAHOE
-        ifnet_set_flags(getIfnet(), 0, IFF_UP | IFF_RUNNING);
+        // A link drop is not an administrative interface-down request.
+        // Preserve IFF_UP so the system can keep the interface enabled and
+        // reconnect; only clear the running/link-state bit here.
+        ifnet_set_flags(getIfnet(), 0, IFF_RUNNING);
 #else
         ifnet_set_flags(getIfnet(), ifnet_flags(getIfnet()) & ~(IFF_UP | IFF_RUNNING), 0);
 #endif

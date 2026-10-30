@@ -10534,7 +10534,7 @@ iwx_flush_sta_tids(struct iwx_softc *sc, int sta_id, uint16_t tids)
         uint16_t qid = le16toh(queue_info->queue_num);
         struct iwx_tx_ring *txq;
         
-        if (qid >= nitems(sc->txq) || tid >= nitems(sc->sc_tid_data))
+        if (qid >= nitems(sc->txq))
             continue;
 #ifdef AIRPORT_TAHOE
         if (iwx_tahoe_p2p_tvqm_queue_owned(&nativeP2pTxQueue_, qid)) {
@@ -10542,13 +10542,29 @@ iwx_flush_sta_tids(struct iwx_softc *sc, int sta_id, uint16_t tids)
             continue;
         }
 #endif
-        if (sc->sc_tid_data[tid].qid != qid)
-            continue;
+        /*
+         * The firmware reports the station management queue as TID 15,
+         * while sc_tid_data contains only TIDs 0..7 plus a host-side
+         * management slot at index IWX_MAX_TID_COUNT.  Do not index that
+         * array with the firmware TID: management flush ownership is the
+         * single fixed first_data_qid selected by iwx_enable_mgmt_queue().
+         */
+        const bool managementQueue = sta_id == IWX_STATION_ID &&
+            tid == IWX_MGMT_TID &&
+            qid == sc->first_data_qid;
+        if (!managementQueue) {
+            if (tid >= nitems(sc->sc_tid_data) ||
+                sc->sc_tid_data[tid].qid != qid)
+                continue;
+        }
         txq = &sc->txq[qid];
         uint16_t reclaimIndex = 0;
         if (!IwxTxRingCapacity::flushQueueCanReclaim(
                 qid, txq->qid, txq->ring_count, nitems(txq->data),
-                read_after, &reclaimIndex))
+                read_after, &reclaimIndex) ||
+            !IwxTxRingCapacity::reclaimIndexWithinQueuedRange(
+                txq->ring_count, txq->queued, txq->cur, txq->tail,
+                reclaimIndex))
             continue;
         iwx_ampdu_txq_advance(sc, txq, reclaimIndex);
 #ifdef AIRPORT_TAHOE
@@ -14399,8 +14415,17 @@ iwx_set_key(struct ieee80211com *ic, struct ieee80211_node *ni,
     
     cmd.transmit_seq_cnt = htole64(k->k_tsc);
     
-    return that->iwx_send_cmd_pdu(sc, IWX_ADD_STA_KEY, IWX_CMD_ASYNC,
-                            sizeof(cmd), &cmd);
+    const int error = that->iwx_send_cmd_pdu(sc, IWX_ADD_STA_KEY,
+        IWX_CMD_ASYNC, sizeof(cmd), &cmd);
+#ifdef AIRPORT_TAHOE
+    // net80211 treats EBUSY from key installation as an accepted async
+    // request and may commit the key/port state.  The Tahoe command gate's
+    // pre-ring ownership fence means this request was not enqueued; report a
+    // retryable failure instead.  Preserve legacy errno behavior elsewhere.
+    if (error == EBUSY)
+        return EAGAIN;
+#endif
+    return error;
 }
 
 void ItlIwx::

@@ -94,8 +94,11 @@ def check_production_wiring() -> None:
     flush_guard_pos = flush_body.index(
         "IwxTxRingCapacity::flushQueueCanReclaim("
     )
+    flush_range_pos = flush_body.index(
+        "IwxTxRingCapacity::reclaimIndexWithinQueuedRange("
+    )
     flush_reclaim_pos = flush_body.index("iwx_ampdu_txq_advance(sc, txq, reclaimIndex)")
-    assert flush_p2p_pos < flush_mapping_pos < flush_guard_pos < flush_reclaim_pos
+    assert flush_p2p_pos < flush_mapping_pos < flush_guard_pos < flush_range_pos < flush_reclaim_pos
     assert "nitems(txq->data)" in flush_body[flush_guard_pos:flush_reclaim_pos]
     assert "IWX_TFD_QUEUE_SIZE_MAX" not in flush_body
 
@@ -382,6 +385,7 @@ CPP_EXTRACTED_HARNESS = r"""
 #define le16toh(value) (value)
 #define IWX_AGG_SSN_TO_TXQ_IDX(value, count) ((value) & ((count) - 1))
 #define IWX_STATION_ID 1
+#define IWX_MGMT_TID 15
 #define IEEE80211_FC0_TYPE_DATA 8
 #define IWX_TX_PROGRESS_ORDINARY_RECLAIM 1
 #define IWX_TX_PROGRESS_FLUSH_RECLAIM 2
@@ -411,7 +415,8 @@ struct iwx_tx_ring {
 struct iwx_tid_data { uint16_t qid; };
 struct iwx_softc {
     iwx_tx_ring txq[8];
-    iwx_tid_data sc_tid_data[8];
+    iwx_tid_data sc_tid_data[9];
+    int first_data_qid = 1;
     int sc_tx_timer;
     uint32_t sc_tx_output_epoch;
     unsigned watchdogClears;
@@ -508,6 +513,7 @@ static void runFlushLoop(iwx_softc *sc,
                          int num_flushed_queues) {
     int i;
     int err = 0;
+    int sta_id = IWX_STATION_ID;
 @@FLUSH_LOOP@@
     (void)err;
 }
@@ -634,12 +640,18 @@ static void testExtractedFlushLoop() {
     sc.sc_tid_data[0].qid = 1;
     rsp.queues[0] = {0, 255, 1};
     initRing(&sc, 1, 256);
+    sc.txq[1].tail = 254;
+    sc.txq[1].queued = 2;
+    sc.txq[1].cur = 0;
     resetEffects(&sc);
     runFlushLoop(&sc, &rsp, 1);
     assert(sc.reclaims == 1 && sc.lastReclaimIndex == 255);
 
     rsp.queues[0] = {0, 4095, 1};
     initRing(&sc, 1, 1024);
+    sc.txq[1].tail = 1022;
+    sc.txq[1].queued = 2;
+    sc.txq[1].cur = 0;
     resetEffects(&sc);
     runFlushLoop(&sc, &rsp, 1);
     assert(sc.reclaims == 1 && sc.lastReclaimIndex == 1023);

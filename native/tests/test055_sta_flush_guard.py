@@ -24,11 +24,15 @@ def extract_function(source: str, marker: str) -> str:
 source = SOURCE.read_text()
 production = extract_function(source, "int ItlIwx::\niwx_flush_sta_tids(")
 # These assertions ensure the test remains bound to the production safety gates.
-assert "qid >= nitems(sc->txq) || tid >= nitems(sc->sc_tid_data)" in production
+assert "if (qid >= nitems(sc->txq))" in production
 assert production.index("tid >= nitems(sc->sc_tid_data)") < production.index(
     "sc->sc_tid_data[tid].qid")
 assert production.index("iwx_tahoe_p2p_tvqm_queue_owned") < production.index(
-    "txq = &sc->txq[qid]")
+    "const bool managementQueue")
+assert "sta_id == IWX_STATION_ID" in production
+assert "qid == sc->first_data_qid" in production
+assert production.index("reclaimIndexWithinQueuedRange(") < production.index(
+    "iwx_ampdu_txq_advance(sc, txq, reclaimIndex)")
 
 cases = r"""
 int main() {
@@ -36,7 +40,7 @@ int main() {
 
     // Firmware TID and qid bounds must be checked before indexing host tables.
     resetFixture(owner, sc); gResponse.num_flushed_queues = 1;
-    setQueue(0, 17, 2, 3); sc.sc_tid_data[17 - 1].qid = 2;
+    setQueue(0, 17, 2, 3);
     run(owner, sc, 0, 0);
     resetFixture(owner, sc); gResponse.num_flushed_queues = 1;
     setQueue(0, 1, 8, 3); sc.sc_tid_data[1].qid = 8;
@@ -45,7 +49,7 @@ int main() {
     // An owned P2P qid is skipped and reported without touching its ring.
     resetFixture(owner, sc); gResponse.num_flushed_queues = 1;
     owner.nativeP2pTxQueue_ = {true, 3};
-    setQueue(0, 15, 3, 4); sc.sc_tid_data[15].qid = 3;
+    setQueue(0, 15, 3, 4);
     const int ownedTail = sc.txq[3].tail;
     run(owner, sc, EBUSY, 0);
     assert(sc.txq[3].tail == ownedTail);
@@ -54,7 +58,8 @@ int main() {
     resetFixture(owner, sc); gResponse.num_flushed_queues = 2;
     owner.nativeP2pTxQueue_ = {true, 3};
     setQueue(0, 2, 1, 5); sc.sc_tid_data[2].qid = 1;
-    setQueue(1, 15, 3, 4); sc.sc_tid_data[15].qid = 3;
+    setQueue(1, 15, 3, 4);
+    sc.txq[1].tail = 4; sc.txq[1].queued = 2; sc.txq[1].cur = 6;
     run(owner, sc, EBUSY, 1);
     assert(gLastAdvancedQid == 1 && gLastAdvancedIndex == 5);
     assert(sc.txq[3].tail == 0);
@@ -87,6 +92,7 @@ int main() {
     // The ordinary valid STA case still advances exactly to read_after_flush.
     resetFixture(owner, sc); gResponse.num_flushed_queues = 1;
     setQueue(0, 4, 2, 6); sc.sc_tid_data[4].qid = 2;
+    sc.txq[2].tail = 5; sc.txq[2].queued = 2; sc.txq[2].cur = 7;
     run(owner, sc, 0, 1);
     assert(gLastAdvancedQid == 2 && gLastAdvancedIndex == 6);
     return 0;
@@ -101,6 +107,7 @@ def main() -> None:
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include "iwx_tx_ring_capacity.hpp"
 #define AIRPORT_TAHOE 1
 #define IWX_CMD_FAILED_MSK 0x80
 #define IWX_CMD_WANT_RESP 1
@@ -108,6 +115,15 @@ def main() -> None:
 #define IWX_TX_FLUSH_QUEUE_RSP 16
 #define IWX_TFD_QUEUE_SIZE_MAX 256
 #define IWX_INVALID_QUEUE 0xffff
+#define IWX_STATION_ID 0
+#define IWX_MGMT_TID 15
+#define IWX_TX_PROGRESS_FLUSH_RECLAIM 1
+#define IWX_TX_PROGRESS_HAS_QID 1
+#define IWX_TX_PROGRESS_HAS_INDEX 2
+#define IWX_TX_PROGRESS_HAS_RING_COUNT 4
+#define IWX_TX_PROGRESS_HAS_QUEUED 8
+#define IWX_TX_PROGRESS_HAS_CUR 16
+#define IWX_TX_PROGRESS_HAS_TAIL 32
 #define nitems(a) (sizeof(a) / sizeof((a)[0]))
 #define IWX_AGG_SSN_TO_TXQ_IDX(ssn, count) ((ssn) & ((count) - 1))
 static uint16_t hostLittle16(uint16_t v) { return v; }
@@ -122,11 +138,13 @@ struct iwx_cmd_header { uint8_t group_id = 0; };
 struct iwx_rx_packet { iwx_cmd_header hdr{}; uint8_t data[sizeof(iwx_tx_path_flush_cmd_rsp)]{}; size_t payloadLength = sizeof(iwx_tx_path_flush_cmd_rsp); };
 struct iwx_host_cmd { uint32_t id = 0; size_t len[1]{}; void *data[1]{}; uint32_t flags = 0; size_t resp_pkt_len = 0; iwx_rx_packet *resp_pkt = nullptr; };
 static size_t iwx_rx_packet_payload_len(const iwx_rx_packet *p) { return p ? p->payloadLength : 0; }
-struct iwx_tx_ring { uint16_t qid = IWX_INVALID_QUEUE; uint16_t ring_count = 0; int tail = 0; };
+struct iwx_tx_ring { uint16_t qid = IWX_INVALID_QUEUE; uint16_t ring_count = 0; int queued = 0, cur = 0, tail = 0; uint8_t data[8]{}; };
 struct iwx_tid_data { uint16_t qid = IWX_INVALID_QUEUE; };
-struct iwx_softc { iwx_tx_ring txq[8]{}; iwx_tid_data sc_tid_data[17]{}; };
+struct iwx_softc { iwx_tx_ring txq[8]{}; iwx_tid_data sc_tid_data[9]{}; int first_data_qid = 1; };
 struct TahoeP2PTxQueueLease { bool owned = false; uint16_t qid = IWX_INVALID_QUEUE; };
 static bool iwx_tahoe_p2p_tvqm_queue_owned(TahoeP2PTxQueueLease *lease, uint16_t qid) { return lease && lease->owned && lease->qid == qid; }
+static void recordTxProgressEvent(iwx_softc *, uint32_t, uint32_t, uint32_t,
+    uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t, bool) {}
 static iwx_rx_packet gPacket{};
 static iwx_tx_path_flush_cmd_rsp gResponse{};
 static size_t gPayloadLength = sizeof(iwx_tx_path_flush_cmd_rsp);
@@ -154,7 +172,8 @@ static void run(ItlIwx &owner,iwx_softc &sc,int expectedResult,unsigned expected
         subprocess.run([
             "xcrun", "clang++", "-std=c++14", "-Wall", "-Wextra", "-Werror",
             "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
-            "-Wno-unused-function", "-Wno-unused-variable", "-o", str(binary),
+            "-Wno-unused-function", "-Wno-unused-variable",
+            "-I", str(ROOT / "native"), "-o", str(binary),
             str(source_file),
         ], cwd=ROOT, check=True)
         subprocess.run([str(binary)], cwd=ROOT, check=True)

@@ -68,6 +68,35 @@ static inline bool flushQueueCanReclaim(uint32_t queueId, int ringQid,
                          readAfter, reclaimIndexOut);
 }
 
+// A firmware flush pointer may reclaim only the descriptors currently
+// submitted between the host tail and write pointer. cur is a 16-bit SSN
+// modulo the device queue size, not a physical ring index; reduce it to the
+// ring before checking the submitted interval. readAfter is likewise mapped
+// from its 16-bit SSN by flushQueueCanReclaim(). This ring implementation
+// reserves at least one slot at its high-water mark, so a full ring is an
+// invalid host snapshot.
+static inline bool reclaimIndexWithinQueuedRange(size_t ringCount,
+                                                 int queued, int cur, int tail,
+                                                 uint16_t reclaimIndex)
+{
+    if (ringCount == 0 || (ringCount & (ringCount - 1)) != 0 ||
+        queued < 0 || static_cast<size_t>(queued) >= ringCount ||
+        cur < 0 || cur > UINT16_MAX ||
+        tail < 0 || static_cast<size_t>(tail) >= ringCount ||
+        static_cast<size_t>(reclaimIndex) >= ringCount)
+        return false;
+
+    const size_t curIndex = static_cast<size_t>(cur) % ringCount;
+    const size_t expectedCur =
+        (static_cast<size_t>(tail) + static_cast<size_t>(queued)) % ringCount;
+    if (curIndex != expectedCur)
+        return false;
+
+    const size_t distance = (static_cast<size_t>(reclaimIndex) + ringCount -
+                             static_cast<size_t>(tail)) % ringCount;
+    return distance <= static_cast<size_t>(queued);
+}
+
 } // namespace IwxTxRingCapacity
 
 #endif // GEEK_IWX_TX_RING_CAPACITY_HPP
