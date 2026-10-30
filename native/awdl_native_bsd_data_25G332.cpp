@@ -25,9 +25,19 @@ struct Tx {
     bool discoveryEligible=false;
     uint8_t discoveryClass=0;
 };
-struct Rx {uint16_t length=0;uint32_t generation=0;uint8_t bytes[2048]{};};
+struct Rx {
+    uint16_t length=0;
+    uint32_t generation=0;
+    uint64_t interfaceIncarnation=0;
+    uint64_t rx149GuardVersion=0;
+    uint64_t rx149ReceiptSequence=0;
+    bool rx149PermitPresent=false;
+    NativeP2PRx149DataInput::Permit rx149Permit{};
+    uint8_t bytes[2048]{};
+};
 IOSimpleLock *lock;
 uint32_t attachClaimed=0;
+uint64_t interfaceIncarnation=0;
 AttachTraceLedger attachTrace;
 Ring<Tx,QueueDepth> tx;
 Ring<Rx,QueueDepth> rx;
@@ -41,9 +51,17 @@ uint32_t radioGeneration=0;
 uint16_t dataSequence=0;
 bool closing=false,detached=false,radio=false;
 uint32_t closingRequested=0;
+NativeP2PRx149DataInput::Lease activeRx149Lease{};
+bool activeRx149LeaseValid=false;
+uint64_t activeRx149Version=0;
+uint64_t rx149OwnerSerialHighWater=0;
+uint64_t rx149ReceiptSequence=0;
+Rx149InputReceipt rx149Receipt{};
 IOSimpleLock *bridgeLock() {
     return __atomic_load_n(&lock,__ATOMIC_ACQUIRE);
 }
+void add(Counter c);
+void set(Counter c,uint64_t n);
 Counter mdnsAttemptCounter(NativeAwdlData::MdnsQueryClass value) {
     static const Counter countersByClass[]={TxMdnsUnknownAttempts,TxMdnsLegacyAttempts,
         TxMdnsQuAttempts,TxMdnsQmAttempts,TxMdnsOtherAttempts};
@@ -129,6 +147,160 @@ bool removeTxAt(size_t offset,Tx *removed) {
     --tx.count;
     return true;
 }
+bool removeRxAt(size_t offset,Rx *removed) {
+    if(!removed||offset>=rx.count)return false;
+    const size_t selected=(rx.head+offset)%QueueDepth;
+    *removed=rx.values[selected];
+    // Fixed-size metadata and bytes only; no packet/KPI ownership changes.
+    for(size_t index=offset;index+1<rx.count;++index) {
+        const size_t destination=(rx.head+index)%QueueDepth;
+        const size_t source=(rx.head+index+1)%QueueDepth;
+        rx.values[destination]=rx.values[source];
+    }
+    const size_t last=(rx.head+rx.count-1)%QueueDepth;
+    rx.values[last]=Rx{};
+    rx.tail=last;
+    --rx.count;
+    return true;
+}
+bool sameRx149LeaseIdentity(
+    const NativeP2PRx149DataInput::Lease &left,
+    const NativeP2PRx149DataInput::Lease &right) {
+    return left.ownerSerial==right.ownerSerial&&
+        left.startUs==right.startUs&&
+        NativeP2PRx149DataInput::sameEpochs(left.epochs,right.epochs);
+}
+bool sameRx149PermitIdentity(
+    const NativeP2PRx149DataInput::Lease &lease,
+    const NativeP2PRx149DataInput::Permit &permit) {
+    return lease.ownerSerial==permit.ownerSerial&&
+        lease.startUs==permit.startUs&&
+        NativeP2PRx149DataInput::sameEpochs(lease.epochs,permit.epochs);
+}
+void recordRx149ReceiptLocked(const Rx &,uint32_t,uint64_t,uint32_t,bool,int);
+size_t removeRx149ItemsLocked(bool all,uint64_t version,
+                              uint64_t ownerSerial,
+                              const NativeP2PRx149DataInput::Epochs *epochs,
+                              uint64_t nowUsValue) {
+    size_t removedCount=0;
+    for(size_t offset=0;offset<rx.count;) {
+        const size_t index=(rx.head+offset)%QueueDepth;
+        const Rx &item=rx.values[index];
+        const bool match=item.rx149PermitPresent&&
+            (all||(item.rx149GuardVersion==version&&
+             item.rx149Permit.ownerSerial==ownerSerial&&epochs&&
+             NativeP2PRx149DataInput::sameEpochs(
+                 item.rx149Permit.epochs,*epochs)));
+        if(match) {
+            Rx discarded{};
+            if(removeRxAt(offset,&discarded)) {
+                recordRx149ReceiptLocked(discarded,
+                    Rx149ReceiptStaleOrInvalid,nowUsValue,0,false,0);
+                ++removedCount;
+            }
+        } else {
+            ++offset;
+        }
+    }
+    set(RxPending,rx.count);
+    return removedCount;
+}
+bool activateRx149LeaseLocked(
+    const NativeP2PRx149DataInput::Lease &lease,
+    size_t *discardedCount,uint64_t nowUsValue) {
+    if(discardedCount)*discardedCount=0;
+    if(!NativeP2PRx149DataInput::leaseCurrent(lease,lease.nowUs))
+        return false;
+    if(!activeRx149LeaseValid||
+       !sameRx149LeaseIdentity(activeRx149Lease,lease)) {
+        // Owner serials are monotonically increasing for the lifetime of the
+        // RX trace timeline. Reject a copied pre-END lease instead of letting
+        // a worker snapshot reopen a tombstoned owner.
+        if(lease.ownerSerial<=rx149OwnerSerialHighWater)
+            return false;
+        if(activeRx149Version==UINT64_MAX) {
+            activeRx149LeaseValid=false;
+            if(discardedCount)
+                *discardedCount=removeRx149ItemsLocked(true,0,0,nullptr,nowUsValue);
+            else
+                (void)removeRx149ItemsLocked(true,0,0,nullptr,nowUsValue);
+            return false;
+        }
+        ++activeRx149Version;
+        if(discardedCount)
+            *discardedCount=removeRx149ItemsLocked(true,0,0,nullptr,nowUsValue);
+        else
+            (void)removeRx149ItemsLocked(true,0,0,nullptr,nowUsValue);
+        activeRx149Lease=lease;
+        activeRx149LeaseValid=true;
+        rx149OwnerSerialHighWater=lease.ownerSerial;
+        return true;
+    }
+    activeRx149Lease=lease; // refresh numeric evidence without changing identity
+    return true;
+}
+size_t revokeRx149LeaseLocked(
+    uint64_t ownerSerial,const NativeP2PRx149DataInput::Epochs *epochs,
+    uint64_t nowUsValue) {
+    if(!activeRx149LeaseValid||!ownerSerial||!epochs||
+       activeRx149Lease.ownerSerial!=ownerSerial||
+       !NativeP2PRx149DataInput::sameEpochs(activeRx149Lease.epochs,*epochs))
+        return 0;
+    activeRx149LeaseValid=false;
+    activeRx149Lease=NativeP2PRx149DataInput::Lease{};
+    if(ownerSerial>rx149OwnerSerialHighWater)
+        rx149OwnerSerialHighWater=ownerSerial;
+    if(activeRx149Version==UINT64_MAX) {
+        // Exhaustion is terminal for this owner; never alias a prior version.
+        return removeRx149ItemsLocked(true,0,0,nullptr,nowUsValue);
+    }
+    ++activeRx149Version;
+    return removeRx149ItemsLocked(false,activeRx149Version-1,
+                                  ownerSerial,epochs,nowUsValue);
+}
+void recordRx149ReceiptLocked(const Rx &item,uint32_t disposition,
+                             uint64_t inputUs,uint32_t decodedCount,
+                             bool inputResultPresent,int inputResult) {
+    if(!item.rx149ReceiptSequence||
+       rx149Receipt.sequence!=item.rx149ReceiptSequence)
+        return; // a newer captured MPDU owns the single latest receipt
+    rx149Receipt.disposition=disposition;
+    rx149Receipt.inputUs=inputUs;
+    rx149Receipt.decodedIpv6Count=decodedCount;
+    rx149Receipt.ifnetInputResultPresent=inputResultPresent?1u:0u;
+    rx149Receipt.ifnetInputResult=inputResult;
+}
+Rx149InputReceipt makeRx149Receipt(const Rx &item,uint64_t sequence,
+                                    uint32_t disposition) {
+    Rx149InputReceipt receipt{};
+    receipt.schemaVersion=1;
+    receipt.disposition=disposition;
+    receipt.sequence=sequence;
+    receipt.ownerSerial=item.rx149Permit.ownerSerial;
+    receipt.interfaceIncarnation=item.interfaceIncarnation;
+    receipt.contextGeneration=item.rx149Permit.epochs.context;
+    receipt.powerGeneration=item.rx149Permit.epochs.power;
+    receipt.stationGeneration=item.rx149Permit.epochs.station;
+    receipt.rocGeneration=item.rx149Permit.epochs.roc;
+    receipt.captureUs=item.rx149Permit.capturedUs;
+    receipt.deadlineUs=item.rx149Permit.deadlineUs;
+    receipt.ieeeChannel=item.rx149Permit.ieeeChannel;
+    receipt.macIndexPresent=1;
+    receipt.macIndex=item.rx149Permit.macIndex;
+    receipt.macPhyDecodeMode=item.rx149Permit.decodeMode;
+    receipt.originalRxStatus=item.rx149Permit.originalRawStatus;
+    receipt.mpduLength=item.length;
+    return receipt;
+}
+void recordRx149Receipt(const Rx &item,uint32_t disposition,
+                        uint64_t inputUs,uint32_t decodedCount=0,
+                        bool inputResultPresent=false,int inputResult=0) {
+    if(!bridgeLock())return;
+    auto irq=IOSimpleLockLockDisableInterrupt(lock);
+    recordRx149ReceiptLocked(item,disposition,inputUs,decodedCount,
+                             inputResultPresent,inputResult);
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+}
 void add(Counter c){__atomic_fetch_add(&counters[c],uint64_t(1),__ATOMIC_RELAXED);}
 void set(Counter c,uint64_t n){__atomic_store_n(&counters[c],n,__ATOMIC_RELEASE);}
 mbuf_t packetWithHeader() {
@@ -170,6 +342,17 @@ int configureLinkLocal(ifnet_t dev,const uint8_t mac[6]) {
     return result==0&&!hasLinkLocal(dev)?EADDRNOTAVAIL:result;
 }
 errno_t output(void *,ifnet_t dev,protocol_family_t family,mbuf_t *packet) {
+#if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+    // This isolated profile is receive-only for its entire lifetime. The
+    // runtime experiment flag controls RX admission but can never open TX.
+    (void)nextToken;
+    (void)dataSequence;
+    (void)dev;
+    (void)family;
+    if(!packet||!*packet)return EINVAL;
+    add(TxRejected);
+    return EOPNOTSUPP; // preserve caller ownership; do not queue or finalize
+#else
     if(!bridgeLock()||!packet||!*packet)return EINVAL;
     if(!(mbuf_flags(*packet)&MBUF_PKTHDR)){add(TxRejected);return EINVAL;}
     // AF_INET6 only. Reject other traffic on this AWDL role, never send it to STA.
@@ -208,6 +391,7 @@ errno_t output(void *,ifnet_t dev,protocol_family_t family,mbuf_t *packet) {
     IOSimpleLockUnlockEnableInterrupt(lock,irq);
     if(!accepted){add(TxRejected);return ENOBUFS;}
     add(TxAccepted);return EJUSTRETURN; // filter now owns the consumed mbuf
+#endif
 }
 void detachedCallback(void *,ifnet_t) {
     auto stateLock=bridgeLock();if(!stateLock)return;
@@ -273,8 +457,12 @@ bool attach(ifnet_t dev,const uint8_t mac[6]) {
     }
     auto irq=IOSimpleLockLockDisableInterrupt(lock);
     const bool canAttach=!interface&&!closing&&
-        !__atomic_load_n(&closingRequested,__ATOMIC_ACQUIRE);
-    if(canAttach)interface=dev;
+        !__atomic_load_n(&closingRequested,__ATOMIC_ACQUIRE)&&
+        interfaceIncarnation!=UINT64_MAX;
+    if(canAttach) {
+        interface=dev;
+        ++interfaceIncarnation;
+    }
     IOSimpleLockUnlockEnableInterrupt(lock,irq);
     attachTrace.recordCanAttach(canAttach);
     if(!canAttach){ifnet_release(dev);attachTrace.finishFailure();return false;}
@@ -345,6 +533,45 @@ bool address(uint32_t expectedPowerGeneration,uint8_t out[6]) {
     if(!addressMatches||!stillCurrent)return false;
     memcpy(out,actual,sizeof(actual));return true;
 }
+void publishRx149DataInputLease(
+    const NativeP2PRx149DataInput::Lease &lease) {
+    if(!bridgeLock())return;
+    size_t discarded=0;
+    const uint64_t now=nowUs();
+    auto irq=IOSimpleLockLockDisableInterrupt(lock);
+    if(NativeP2PRx149DataInput::leaseCurrent(lease,now))
+        (void)activateRx149LeaseLocked(lease,&discarded,now);
+    else if(lease.ownerSerial&&
+            NativeP2PRx149DataInput::validEpochs(lease.epochs))
+        discarded=revokeRx149LeaseLocked(lease.ownerSerial,&lease.epochs,now);
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+    for(size_t i=0;i<discarded;++i)add(RxRejected);
+}
+void revokeRx149DataInput(uint64_t ownerSerial,
+    const NativeP2PRx149DataInput::Epochs &epochs) {
+    if(!bridgeLock()||!ownerSerial)return;
+    const uint64_t now=nowUs();
+    auto irq=IOSimpleLockLockDisableInterrupt(lock);
+    const size_t discarded=revokeRx149LeaseLocked(ownerSerial,&epochs,now);
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+    for(size_t i=0;i<discarded;++i)add(RxRejected);
+}
+void revokeRx149DataInput() {
+    if(!bridgeLock())return;
+    const uint64_t now=nowUs();
+    auto irq=IOSimpleLockLockDisableInterrupt(lock);
+    size_t discarded=0;
+    if(activeRx149LeaseValid) {
+        const uint64_t ownerSerial=activeRx149Lease.ownerSerial;
+        const auto epochs=activeRx149Lease.epochs;
+        discarded=revokeRx149LeaseLocked(ownerSerial,&epochs,now);
+    } else {
+        discarded=removeRx149ItemsLocked(true,0,0,nullptr,now);
+        if(activeRx149Version!=UINT64_MAX)++activeRx149Version;
+    }
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+    for(size_t i=0;i<discarded;++i)add(RxRejected);
+}
 void cancelQueued() {
     if(!bridgeLock())return;
     Tx item{};
@@ -361,6 +588,10 @@ void poll(bool ready,uint32_t generation) {
     auto irq=IOSimpleLockLockDisableInterrupt(lock);
     const bool changed=radioGeneration&&radioGeneration!=generation;
     discardQueued=!ready||changed;
+#if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+    // This build is receive-only regardless of runtime RX-profile state.
+    discardQueued=true;
+#endif
     if(discardQueued) {
         Tx item{};
         while(tx.pop(&item))retiredTx.push(item);
@@ -385,10 +616,20 @@ void poll(bool ready,uint32_t generation) {
         if(!old)break;mbuf_freem(expired.packet);add(TxExpired);
     }
     if(!dev)return;
-    // RX was copied only from a current, bounded hardware ROC lease.
+    // Legacy RX was copied only from its current, bounded hardware ROC lease.
+    // Keep Test086 permit-bearing packets for the dedicated worker drain.
     for(unsigned i=0;i<QueueDepth;++i) {
         Rx item{};irq=IOSimpleLockLockDisableInterrupt(lock);
-        const bool have=rx.pop(&item);set(RxPending,rx.count);
+        size_t selected=rx.count;
+        for(size_t offset=0;offset<rx.count;++offset) {
+            const size_t index=(rx.head+offset)%QueueDepth;
+            if(!rx.values[index].rx149PermitPresent) {
+                selected=offset;
+                break;
+            }
+        }
+        const bool have=selected<rx.count&&removeRxAt(selected,&item);
+        set(RxPending,rx.count);
         IOSimpleLockUnlockEnableInterrupt(lock,irq);if(!have)break;
         NativeAwdlData::DecodedFrame parsed{};
         if(!ready||item.generation!=generation||NativeAwdlData::decodeIpv6DataMpdu(item.bytes,item.length,&parsed)!=NativeAwdlData::Status::Ok){add(RxRejected);continue;}
@@ -409,6 +650,157 @@ void poll(bool ready,uint32_t generation) {
     }
     irq=IOSimpleLockLockDisableInterrupt(lock);--inputCalls;IOSimpleLockUnlockEnableInterrupt(lock,irq);
 }
+void poll(bool ready,uint32_t generation,
+          const NativeP2PRx149DataInput::Lease *rx149Lease) {
+    if(!bridgeLock())return;
+
+    ifnet_t dev=nullptr;
+    uint8_t expectedAddress[6]{};
+    auto irq=IOSimpleLockLockDisableInterrupt(lock);
+    const bool interfaceReady=interface&&!closing&&!detached&&radio&&
+        __atomic_load_n(&closingRequested,__ATOMIC_ACQUIRE)==0&&
+        __atomic_load_n(&counters[Attached],__ATOMIC_ACQUIRE)!=0&&
+        radioGeneration==generation;
+    if(interfaceReady) {
+        dev=interface;
+        memcpy(expectedAddress,own,sizeof(expectedAddress));
+        ++inputCalls;
+    }
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+
+    // This overload is exclusively the bounded Test086 worker drain. The
+    // passed lease is only a snapshot: it cannot activate or refresh the
+    // authoritative main-gate lease, and a revoked owner cannot be reopened.
+    for(unsigned i=0;i<QueueDepth;++i) {
+        Rx item{};
+        NativeP2PRx149DataInput::Lease authoritativeLease{};
+        bool authoritativeMatch=false;
+        irq=IOSimpleLockLockDisableInterrupt(lock);
+        size_t selected=rx.count;
+        for(size_t offset=0;offset<rx.count;++offset) {
+            const size_t index=(rx.head+offset)%QueueDepth;
+            if(rx.values[index].rx149PermitPresent) {
+                selected=offset;
+                break;
+            }
+        }
+        const bool have=selected<rx.count&&removeRxAt(selected,&item);
+        if(have&&rx149Lease&&activeRx149LeaseValid&&
+           item.rx149GuardVersion==activeRx149Version&&
+           item.interfaceIncarnation==interfaceIncarnation&&
+           sameRx149LeaseIdentity(activeRx149Lease,*rx149Lease)&&
+           sameRx149PermitIdentity(activeRx149Lease,item.rx149Permit)) {
+            authoritativeLease=activeRx149Lease;
+            authoritativeMatch=true;
+        }
+        set(RxPending,rx.count);
+        IOSimpleLockUnlockEnableInterrupt(lock,irq);
+        if(!have)break;
+
+        const uint64_t firstNow=nowUs();
+        const bool permitCurrent=ready&&dev&&rx149Lease&&
+            item.generation==generation&&
+            item.generation==rx149Lease->epochs.power&&
+            item.interfaceIncarnation!=0&&
+            authoritativeMatch&&
+            NativeP2PRx149DataInput::stillCurrent(
+                item.rx149Permit,authoritativeLease,firstNow)&&
+            NativeP2PRx149DataInput::stillCurrent(
+                item.rx149Permit,*rx149Lease,firstNow);
+        if(!permitCurrent) {
+            recordRx149Receipt(item,Rx149ReceiptStaleOrInvalid,firstNow);
+            add(RxRejected);
+            continue;
+        }
+
+        NativeAwdlData::DecodedFrame parsed{};
+        if(NativeAwdlData::decodeIpv6DataMpdu(
+                item.bytes,item.length,&parsed)!=NativeAwdlData::Status::Ok) {
+            recordRx149Receipt(item,Rx149ReceiptDecodeRejected,firstNow);
+            add(RxRejected);
+            continue;
+        }
+        add(RxDecoded);
+        for(size_t n=0;n<parsed.packetCount;++n) {
+            const auto &packet=parsed.packets[n];
+            if(!acceptsRx(packet,expectedAddress)) {
+                recordRx149Receipt(item,Rx149ReceiptAddressRejected,
+                                   firstNow,uint32_t(parsed.packetCount));
+                add(RxRejected);
+                continue;
+            }
+            mbuf_t m=packetWithHeader();
+            if(!m) {
+                recordRx149Receipt(item,Rx149ReceiptMbufAllocationFailed,
+                                   firstNow,uint32_t(parsed.packetCount));
+                add(RxInputFailed);
+                continue;
+            }
+            uint8_t *bytes=static_cast<uint8_t *>(mbuf_data(m));
+            memcpy(bytes,packet.destinationAddress,6);
+            memcpy(bytes+6,packet.sourceAddress,6);
+            bytes[12]=0x86;
+            bytes[13]=0xdd;
+            memcpy(bytes+14,packet.ipv6Packet,packet.ipv6Length);
+            mbuf_setlen(m,packet.ipv6Length+14);
+            mbuf_pkthdr_setlen(m,packet.ipv6Length+14);
+            mbuf_pkthdr_setrcvif(m,dev);
+            mbuf_pkthdr_setheader(m,bytes);
+            mbuf_adj(m,14);
+
+            // Packet allocation/decoding happen outside the lock. Recheck the
+            // permit immediately before DLIL input so END, owner replacement,
+            // radio invalidation, or deadline expiry drops the unconsumed mbuf.
+            const uint64_t finalNow=nowUs();
+            irq=IOSimpleLockLockDisableInterrupt(lock);
+            const bool stillAttached=interface==dev&&!closing&&!detached&&
+                radio&&__atomic_load_n(&closingRequested,__ATOMIC_ACQUIRE)==0&&
+                __atomic_load_n(&counters[Attached],__ATOMIC_ACQUIRE)!=0&&
+                radioGeneration==generation&&
+                interfaceIncarnation==item.interfaceIncarnation;
+            const bool permitStillCurrent=stillAttached&&rx149Lease&&
+                activeRx149LeaseValid&&
+                item.rx149GuardVersion==activeRx149Version&&
+                sameRx149LeaseIdentity(activeRx149Lease,*rx149Lease)&&
+                sameRx149LeaseIdentity(activeRx149Lease,authoritativeLease)&&
+                NativeP2PRx149DataInput::leaseCurrent(
+                    activeRx149Lease,finalNow)&&
+                NativeP2PRx149DataInput::stillCurrent(
+                    item.rx149Permit,activeRx149Lease,finalNow);
+            // Count a per-MPDU input ticket while holding the same lock that
+            // validates the owner/epochs/incarnation. close() waits for both
+            // the worker pin and each in-flight DLIL call to retire.
+            if(permitStillCurrent)++inputCalls;
+            IOSimpleLockUnlockEnableInterrupt(lock,irq);
+            if(!permitStillCurrent) {
+                mbuf_freem(m);
+                recordRx149Receipt(item,Rx149ReceiptStaleOrInvalid,
+                                   finalNow,uint32_t(parsed.packetCount));
+                add(RxRejected);
+                continue;
+            }
+            // The lock-linearized permit ticket above is the boundary: an
+            // already acquired ticket may finish if END arrives immediately
+            // afterward. DLIL itself always runs outside the bridge lock.
+            const int inputResult=ifnet_input(dev,m,nullptr);
+            recordRx149Receipt(item,
+                inputResult==0?Rx149ReceiptIfnetInputSucceeded:
+                              Rx149ReceiptIfnetInputFailed,
+                finalNow,uint32_t(parsed.packetCount),true,inputResult);
+            irq=IOSimpleLockLockDisableInterrupt(lock);
+            if(inputCalls)--inputCalls;
+            IOSimpleLockUnlockEnableInterrupt(lock,irq);
+            if(inputResult==0)add(RxDelivered);
+            else add(RxInputFailed);
+        }
+    }
+
+    if(dev) {
+        irq=IOSimpleLockLockDisableInterrupt(lock);
+        if(inputCalls)--inputCalls;
+        IOSimpleLockUnlockEnableInterrupt(lock,irq);
+    }
+}
 CaptureResult capture(const uint8_t *bytes,size_t length,bool protectedFrame,bool leaseCurrent,uint32_t generation) {
     if(!bytes||!NativeAwdlData::isAwdlDataCandidate(bytes,length))
         return CaptureResult::NotAwdlDataCandidate;
@@ -425,9 +817,102 @@ CaptureResult capture(const uint8_t *bytes,size_t length,bool protectedFrame,boo
     if(!current){add(RxRejected);return CaptureResult::Rejected;}
     add(RxQueueFull);return CaptureResult::QueueFull;
 }
+CaptureResult captureRx149Data(
+    const uint8_t *bytes,size_t length,bool protectedFrame,
+    const NativeP2PRx149DataInput::Lease &lease,
+    const NativeP2PRx149DataInput::Permit &permit,uint32_t generation) {
+    if(!bytes||!NativeAwdlData::isAwdlDataCandidate(bytes,length))
+        return CaptureResult::NotAwdlDataCandidate;
+    if(!bridgeLock()) {
+        add(RxRejected);
+        return CaptureResult::Rejected;
+    }
+    const uint64_t captureNow=nowUs();
+    if(protectedFrame||length>2048||!permit.valid||
+       !NativeP2PRx149DataInput::stillCurrent(permit,lease,captureNow)||
+       generation!=permit.epochs.power) {
+        add(RxRejected);
+        return CaptureResult::Rejected;
+    }
+
+    Rx item{};
+    item.length=uint16_t(length);
+    item.generation=generation;
+    item.rx149PermitPresent=true;
+    item.rx149Permit=permit;
+    memcpy(item.bytes,bytes,length);
+
+    size_t expired=0;
+    auto irq=IOSimpleLockLockDisableInterrupt(lock);
+    // Expired scoped entries never block a fresh packet behind them. This is
+    // a bounded fixed-ring compaction and performs no packet/KPI operation.
+    for(size_t offset=0;offset<rx.count;) {
+        const size_t index=(rx.head+offset)%QueueDepth;
+        const auto &queued=rx.values[index];
+        const bool old=queued.rx149PermitPresent&&
+            (captureNow<queued.rx149Permit.capturedUs||
+             captureNow>=queued.rx149Permit.deadlineUs);
+        if(old) {
+            Rx removed{};
+            if(removeRxAt(offset,&removed))++expired;
+        } else {
+            ++offset;
+        }
+    }
+    const bool authorityCurrent=activeRx149LeaseValid&&
+        activeRx149Version!=0&&sameRx149LeaseIdentity(activeRx149Lease,lease)&&
+        sameRx149PermitIdentity(activeRx149Lease,permit)&&
+        NativeP2PRx149DataInput::leaseCurrent(activeRx149Lease,captureNow)&&
+        NativeP2PRx149DataInput::stillCurrent(
+            permit,activeRx149Lease,captureNow);
+    const bool current=authorityCurrent&&interfaceIncarnation!=0&&
+        interface&&!closing&&!detached&&radio&&
+        __atomic_load_n(&closingRequested,__ATOMIC_ACQUIRE)==0&&
+        radioGeneration==generation&&
+        __atomic_load_n(&counters[Attached],__ATOMIC_ACQUIRE)!=0;
+    item.interfaceIncarnation=interfaceIncarnation;
+    item.rx149GuardVersion=activeRx149Version;
+    const bool sequenceAvailable=rx149ReceiptSequence!=UINT64_MAX;
+    const bool spaceAvailable=rx.count<QueueDepth;
+    const bool accepted=current&&sequenceAvailable&&spaceAvailable;
+    if(accepted) {
+        item.rx149ReceiptSequence=++rx149ReceiptSequence;
+        rx149Receipt=makeRx149Receipt(
+            item,item.rx149ReceiptSequence,Rx149ReceiptCaptured);
+        (void)rx.push(item); // spaceAvailable was checked under this same lock
+    } else if(current&&sequenceAvailable) {
+        item.rx149ReceiptSequence=++rx149ReceiptSequence;
+        rx149Receipt=makeRx149Receipt(
+            item,item.rx149ReceiptSequence,Rx149ReceiptQueueFull);
+    }
+    set(RxPending,rx.count);
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+    for(size_t index=0;index<expired;++index)add(RxRejected);
+    if(accepted) {
+        add(RxCaptured);
+        return CaptureResult::Captured;
+    }
+    if(!current) {
+        add(RxRejected);
+        return CaptureResult::Rejected;
+    }
+    if(!sequenceAvailable) {
+        add(RxRejected);
+        return CaptureResult::Rejected;
+    }
+    add(RxQueueFull);
+    return CaptureResult::QueueFull;
+}
 namespace {
 mbuf_t nextTxImpl(uint16_t sequence,uint64_t *token,
                   const DiscoveryTxSnapshot *expected,bool *consumed) {
+#if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+    (void)sequence;
+    (void)expected;
+    if(token)*token=0;
+    if(consumed)*consumed=false;
+    return nullptr;
+#else
     if(consumed)*consumed=false;
     if(!bridgeLock()||!token||(expected&&!consumed))return nullptr;
     const bool discovery=expected!=nullptr;
@@ -538,6 +1023,7 @@ mbuf_t nextTxImpl(uint16_t sequence,uint64_t *token,
         if(discovery)++dataSequence;
         *token=item.token;add(TxEncoded);return m;}
     submitted(item.token,EINVAL);add(TxExpired);return nullptr;
+#endif
 }
 }
 mbuf_t nextTx(uint16_t sequence,uint64_t *token) {
@@ -545,6 +1031,11 @@ mbuf_t nextTx(uint16_t sequence,uint64_t *token) {
 }
 bool peekDiscoveryTx(uint32_t expectedPowerGeneration,
                      DiscoveryTxSnapshot *out) {
+#if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+    (void)expectedPowerGeneration;
+    (void)out;
+    return false;
+#else
     if(!out||!expectedPowerGeneration||!bridgeLock())return false;
     const uint64_t now=nowUs();DiscoveryTxSnapshot candidate{};
     auto irq=IOSimpleLockLockDisableInterrupt(lock);
@@ -572,6 +1063,7 @@ bool peekDiscoveryTx(uint32_t expectedPowerGeneration,
     if(!valid||candidate.generation!=expectedPowerGeneration||
        !discoveryAgeCurrent(candidate.bornUs,now))return false;
     *out=candidate;return true;
+#endif
 }
 mbuf_t nextDiscoveryTx(uint16_t sequence,
                        const DiscoveryTxSnapshot &expected,
@@ -605,6 +1097,7 @@ void gateObservation(uint32_t blockers) {
 bool close() {
     if(!bridgeLock())return true;
     publishClosing();
+    revokeRx149DataInput();
     auto irq=IOSimpleLockLockDisableInterrupt(lock);
     auto ref=filter;IOSimpleLockUnlockEnableInterrupt(lock,irq);
     if(ref)iflt_detach(ref);
@@ -626,7 +1119,17 @@ void publishClosing() {
     closing=true;radio=false;set(Closing,1);set(LinkReady,0);
     IOSimpleLockUnlockEnableInterrupt(lock,irq);
 }
-Snapshot snapshot(){Snapshot s{};for(unsigned i=0;i<Count;++i)s.value[i]=__atomic_load_n(&counters[i],__ATOMIC_ACQUIRE);return s;}
+Snapshot snapshot(){
+    Snapshot s{};
+    for(unsigned i=0;i<Count;++i)
+        s.value[i]=__atomic_load_n(&counters[i],__ATOMIC_ACQUIRE);
+    if(bridgeLock()) {
+        auto irq=IOSimpleLockLockDisableInterrupt(lock);
+        s.rx149Input=rx149Receipt;
+        IOSimpleLockUnlockEnableInterrupt(lock,irq);
+    }
+    return s;
+}
 AttachTraceSnapshot attachSnapshot(){return attachTrace.snapshot();}
 void noteResidentLookupResult(int result){attachTrace.noteResidentLookupResult(result);}
 }

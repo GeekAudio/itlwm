@@ -107,6 +107,9 @@
  */
 
 #include "ItlIwx.hpp"
+#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+#include "../../native/awdl_native_bsd_data_25G332.hpp"
+#endif
 #include "../../native/iwx_stop_retirement.hpp"
 #include "../../native/iwx_dma_info_lifecycle.hpp"
 #include "../../native/iwx_tx_ring_capacity.hpp"
@@ -5001,6 +5004,9 @@ void ItlIwx::tahoeRetireStoppedQueuesAfterSoftStop(
 int ItlIwx::
 iwx_stop_device(struct iwx_softc *sc)
 {
+#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+    NativeAwdlBSD::revokeRx149DataInput();
+#endif
     XYLog("%s\n", __FUNCTION__);
     int qid;
     
@@ -7136,7 +7142,8 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
              struct mbuf_list *ml
 #ifdef AIRPORT_TAHOE
              , uint32_t rxStageOwnerGeneration, uint8_t rxStageKind,
-             uint32_t rxMacPhyIndex, bool rxMacPhyIndexPresent
+             uint32_t rxMacPhyIndex, bool rxMacPhyIndexPresent,
+             const NativeP2PRx149DataInput::OriginalDescriptor *originalData
 #endif
              )
 {
@@ -7157,6 +7164,16 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
     if ((rxi->rxi_flags & IEEE80211_RXI_HWDEC) &&
         iwx_ccmp_decap(sc, m, ni, rxi) != 0) {
         ifp->netStat->inputErrors++;
+#ifdef AIRPORT_TAHOE
+        // This second (CCMP decapsulation) rejection happens before the tap.
+        // Preserve the data-path boundary without treating an absent capture
+        // as RF silence or weakening the protected-frame policy.
+        if (rxStageOwnerGeneration && NativeAwdlData::isAwdlDataCandidate(
+                mtod(m, const uint8_t *), mbuf_len(m)))
+            tahoe_awdl_rx_stage_counters_.recordData(
+                rxStageOwnerGeneration,
+                TahoeAwdlRxStageCounters::kDataDecryptRejected);
+#endif
         mbuf_freem(m);
         ieee80211_release_node(ic, ni);
         return;
@@ -7229,7 +7246,7 @@ iwx_rx_frame(struct iwx_softc *sc, mbuf_t m, int chanidx,
     tahoeP2pTapAction(sc, mtod(m, const uint8_t *), mbuf_len(m),
                       p2pFrameWasProtected, uint16_t(chanidx),
                       device_timestamp, true, rxMacPhyIndex,
-                      rxMacPhyIndexPresent);
+                      rxMacPhyIndexPresent, originalData);
 #endif
     ieee80211_inputm(IC2IFP(ic), m, ni, rxi, ml);
     ieee80211_release_node(ic, ni);
@@ -7830,6 +7847,16 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
     }
 
 #ifdef AIRPORT_TAHOE
+    // These values belong to this MPDU before hardware deaggregation and
+    // decryption can rewrite its header. Reorder callers without this exact
+    // provenance retain a null default and cannot use the 149 data path.
+    const NativeP2PRx149DataInput::OriginalDescriptor originalData {
+        true,
+        mbuf_len(m) >= 2 && (mtod(m, const uint8_t *)[1] &
+                            IEEE80211_FC1_PROTECTED) != 0,
+        (desc->mac_flags2 & IWX_RX_MPDU_MFLG2_AMSDU) != 0,
+        le32toh(desc->status)
+    };
     // The descriptor-entry witness above is pre-padding and intentionally
     // records only FC/type/BSSID booleans. Preserve PSF/MIF classification at
     // this existing post-padding stage, where the action body is correctly
@@ -7987,7 +8014,7 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
                  rate_n_flags, device_timestamp, &rxi, ml
 #ifdef AIRPORT_TAHOE
                  , rxStageOwnerGeneration, rxStageKind,
-                 uint32_t(desc->mac_phy_idx), true
+                 uint32_t(desc->mac_phy_idx), true, &originalData
 #endif
                  );
 }
@@ -12510,6 +12537,9 @@ iwx_mcc_update(struct iwx_softc *sc, struct iwx_mcc_chub_notif *notif)
 {
     if (!sc || !notif)
         return;
+#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+    NativeAwdlBSD::revokeRx149DataInput();
+#endif
 #ifdef AIRPORT_TAHOE
     const uint32_t noticeMcc = le16toh(notif->mcc);
     const uint32_t noticeSource = notif->source_id;
@@ -14560,6 +14590,9 @@ iwx_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
     
 #ifdef AIRPORT_TAHOE
     if (nstate != IEEE80211_S_RUN || ic->ic_state != IEEE80211_S_RUN) {
+#if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+        NativeAwdlBSD::revokeRx149DataInput();
+#endif
         uint32_t generation = __atomic_add_fetch(
             &sc->sc_tx_rate_generation, 1u, __ATOMIC_ACQ_REL);
         if (generation == 0)

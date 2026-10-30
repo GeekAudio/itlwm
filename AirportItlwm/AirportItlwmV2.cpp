@@ -232,6 +232,8 @@ IOReturn AirportItlwm::setProperties(OSObject *properties)
                     request->getObject("NativeP2PAwdlMifFollowup") ||
                     request->getObject("NativeP2PGp2Observation") ||
                     request->getObject("NativeP2PRx149ObservationOnly") ||
+                    request->getObject("NativeP2PRx149DataInputExperiment") ||
+                    request->getObject("NativeP2PRx149DataInputProfileEnabled") ||
                     request->getObject("NativeP2PRx149ProfileEnabled") ||
                     request->getObject("NativeP2PRx149Selected") ||
                     request->getObject("NativeP2PRx149HostTxBlocked") ||

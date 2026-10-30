@@ -5,6 +5,7 @@
 #include <sys/mbuf.h>
 #include <net/kpi_interface.h>
 #include "awdl_bsd_attach_trace.hpp"
+#include "p2p_rx149_data_input.hpp"
 namespace NativeAwdlBSD {
 enum Counter : unsigned {
     Attached, Closing, Detached, LinkReady, TxAccepted, TxRejected,
@@ -35,7 +36,46 @@ enum Counter : unsigned {
     TxMdnsLastQuestionCount, TxMdnsLastTargetPtrInQuestionCount,
     TxMdnsLastQuQuestionMask, TxMdnsLastAttemptToken, Count
 };
-struct Snapshot {uint64_t value[Count];};
+enum Rx149InputDisposition : uint32_t {
+    Rx149ReceiptNone=0,
+    Rx149ReceiptCaptured=1,
+    Rx149ReceiptStaleOrInvalid=2,
+    Rx149ReceiptDecodeRejected=3,
+    Rx149ReceiptAddressRejected=4,
+    Rx149ReceiptMbufAllocationFailed=5,
+    Rx149ReceiptIfnetInputSucceeded=6,
+    Rx149ReceiptIfnetInputFailed=7,
+    Rx149ReceiptQueueFull=8
+};
+// One bounded, payload-free receipt for the latest Test086 MPDU. This proves
+// local queue/decode/DLIL attempts only; it is not proof of RF peer receipt.
+struct Rx149InputReceipt {
+    uint32_t schemaVersion=1;
+    uint32_t disposition=Rx149ReceiptNone;
+    uint64_t sequence=0;
+    uint64_t ownerSerial=0;
+    uint64_t interfaceIncarnation=0;
+    uint32_t contextGeneration=0;
+    uint32_t powerGeneration=0;
+    uint32_t stationGeneration=0;
+    uint32_t rocGeneration=0;
+    uint64_t captureUs=0;
+    uint64_t inputUs=0; // lock-linearized DLIL admission ticket time
+    uint64_t deadlineUs=0;
+    uint32_t ieeeChannel=0;
+    uint32_t macIndexPresent=0;
+    uint32_t macIndex=0;
+    uint32_t macPhyDecodeMode=0;
+    uint32_t originalRxStatus=0;
+    uint32_t mpduLength=0;
+    uint32_t decodedIpv6Count=0;
+    uint32_t ifnetInputResultPresent=0;
+    int32_t ifnetInputResult=0;
+};
+struct Snapshot {
+    uint64_t value[Count];
+    Rx149InputReceipt rx149Input;
+};
 // Numeric-only capability for the exact selected eligible QM packet. This snapshot
 // exposes no mbuf, address, or payload and is revalidated before dequeue.
 struct DiscoveryTxSnapshot {
@@ -62,7 +102,24 @@ bool close(); // outside radio gate; waits only for outstanding filter/input cal
 // radio generation. The KPI call runs without IOSimpleLock held.
 bool address(uint32_t expectedPowerGeneration, uint8_t out[6]);
 void poll(bool radioReady,uint32_t powerGeneration);
+// Scoped Test086 worker drain. Unlike the legacy two-argument poll, this
+// overload consumes only channel-149 packets carrying a fresh RX permit. The
+// caller supplies a freshly sampled main-gate lease; nullptr is fail-closed.
+void poll(bool radioReady,uint32_t powerGeneration,
+          const NativeP2PRx149DataInput::Lease *rx149Lease);
 CaptureResult capture(const uint8_t *,size_t,bool protectedFrame,bool leaseCurrent,uint32_t powerGeneration);
+CaptureResult captureRx149Data(const uint8_t *,size_t,bool protectedFrame,
+          const NativeP2PRx149DataInput::Lease &,
+          const NativeP2PRx149DataInput::Permit &,uint32_t powerGeneration);
+// Only the main-gate lease publisher may activate/refresh a lease. Worker
+// drains validate this authority and can never reopen it from a copied guard.
+void publishRx149DataInputLease(
+          const NativeP2PRx149DataInput::Lease &lease);
+// Revoke only if the numeric owner tuple still names the active permit. The
+// unconditional overload is for terminal cancellation/reset paths.
+void revokeRx149DataInput();
+void revokeRx149DataInput(uint64_t ownerSerial,
+          const NativeP2PRx149DataInput::Epochs &epochs);
 mbuf_t nextTx(uint16_t wifiSequence,uint64_t *token);
 // Reads bounded immutable queue metadata and returns the earliest current
 // strict-QM item, which may be behind unrelated FIFO entries. A successful

@@ -220,6 +220,67 @@ bool rx149PropertyIsOne(IOEthernetController *controller, const char *name)
     return value && value->unsigned32BitValue() == 1u;
 }
 
+#if defined(ITL_NATIVE_AWDL_RESIDENT_25G332) && \
+    defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+void publishRx149InputReceipt(
+    IOEthernetController *controller,
+    const NativeAwdlBSD::Rx149InputReceipt &receipt)
+{
+    if (!controller)
+        return;
+    static const char *kSchema =
+        "NativeAwdlDataRx149ReceiptSchemaVersion";
+    static const char *kSequence = "NativeAwdlDataRx149ReceiptSequence";
+    auto prior = OSDynamicCast(OSNumber, controller->getProperty(kSequence));
+    const bool changed = !prior ||
+        prior->unsigned64BitValue() != receipt.sequence;
+    if (!changed && receipt.sequence != 0)
+        return;
+    controller->setProperty(kSchema, receipt.schemaVersion, 32);
+    controller->setProperty("NativeAwdlDataRx149ReceiptDisposition",
+                            receipt.disposition, 32);
+    controller->setProperty("NativeAwdlDataRx149ReceiptOwnerSerial",
+                            receipt.ownerSerial, 64);
+    controller->setProperty("NativeAwdlDataRx149ReceiptInterfaceIncarnation",
+                            receipt.interfaceIncarnation, 64);
+    controller->setProperty("NativeAwdlDataRx149ReceiptContextGeneration",
+                            receipt.contextGeneration, 32);
+    controller->setProperty("NativeAwdlDataRx149ReceiptPowerGeneration",
+                            receipt.powerGeneration, 32);
+    controller->setProperty("NativeAwdlDataRx149ReceiptStationGeneration",
+                            receipt.stationGeneration, 32);
+    controller->setProperty("NativeAwdlDataRx149ReceiptRocGeneration",
+                            receipt.rocGeneration, 32);
+    controller->setProperty("NativeAwdlDataRx149ReceiptCaptureMonotonicUs",
+                            receipt.captureUs, 64);
+    controller->setProperty("NativeAwdlDataRx149ReceiptInputMonotonicUs",
+                            receipt.inputUs, 64);
+    controller->setProperty("NativeAwdlDataRx149ReceiptDeadlineMonotonicUs",
+                            receipt.deadlineUs, 64);
+    controller->setProperty("NativeAwdlDataRx149ReceiptIeeeChannel",
+                            receipt.ieeeChannel, 32);
+    controller->setProperty("NativeAwdlDataRx149ReceiptMacIndexPresent",
+                            receipt.macIndexPresent, 32);
+    controller->setProperty("NativeAwdlDataRx149ReceiptMacIndex",
+                            receipt.macIndex, 32);
+    controller->setProperty("NativeAwdlDataRx149ReceiptMacPhyDecodeMode",
+                            receipt.macPhyDecodeMode, 32);
+    controller->setProperty("NativeAwdlDataRx149ReceiptOriginalRxStatus",
+                            receipt.originalRxStatus, 32);
+    controller->setProperty("NativeAwdlDataRx149ReceiptMpduLength",
+                            receipt.mpduLength, 32);
+    controller->setProperty("NativeAwdlDataRx149ReceiptDecodedIpv6Count",
+                            receipt.decodedIpv6Count, 32);
+    controller->setProperty("NativeAwdlDataRx149ReceiptIfnetInputResultPresent",
+                            receipt.ifnetInputResultPresent, 32);
+    controller->setProperty("NativeAwdlDataRx149ReceiptIfnetInputResult",
+                            static_cast<uint32_t>(receipt.ifnetInputResult), 32);
+    // Publish sequence last. Readers can sample it before/after the numeric
+    // fields to reject a torn update without copying packet payload.
+    controller->setProperty(kSequence, receipt.sequence, 64);
+}
+#endif
+
 bool rx149StationAndPhyOwnerCurrent(const struct iwx_softc *sc)
 {
     if (!sc || sc->sc_ic.ic_state != IEEE80211_S_RUN ||
@@ -960,11 +1021,79 @@ void ItlIwx::tahoeP2pTapTimeEvent(struct iwx_softc *sc,
     }
 }
 
+bool ItlIwx::tahoeP2pRx149DataLease(
+    NativeP2PRx149DataInput::Lease *out)
+{
+    if (!out)
+        return false;
+    *out = NativeP2PRx149DataInput::Lease{};
+    if (!tahoeP2pOnMainGate())
+        return false;
+
+#if defined(ITL_NATIVE_AWDL_RESIDENT_25G332) && \
+    defined(ITL_NATIVE_AWDL_RX149_OBSERVATION_25G332) && \
+    defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+    auto *sc = &com;
+    auto *controller = tahoeP2pController();
+    const auto &lease = tahoe_p2p_rx_lease_;
+    const auto session = nativeP2pRocEvents_.snapshot();
+    const auto traceOwner = nativeAwdlRxEventTimeline_.snapshot();
+    const auto evidence = currentRx149ActionEvidence(
+        this, sc, lease,
+        static_cast<uint16_t>(NativeP2PRx149Observation::kIeeeChannel),
+        session, traceOwner);
+    const uint64_t nowUs = tahoeP2pRxMonotonicUs();
+
+    out->compiled = true;
+    out->runtimeEnabled = controller &&
+        controller->getProperty("NativeP2PRx149DataInputExperiment") ==
+            kOSBooleanTrue;
+    out->profileEnabled = rx149PropertyIsOne(
+        controller, "NativeP2PRx149DataInputProfileEnabled");
+    out->profileSelected = evidence.profileSelected;
+    out->receiveObservationOnly = evidence.receiveObservationOnly;
+    out->leaseActive = evidence.leaseActive;
+    out->ownerCurrent = evidence.ownerCurrent &&
+        __atomic_load_n(&nativeP2pCancelRequested_, __ATOMIC_ACQUIRE) == 0 &&
+        (sc->sc_flags & (IWX_FLAG_HW_ERR | IWX_FLAG_SHUTDOWN |
+                         IWX_FLAG_RFKILL)) == 0;
+    out->epochsMatch = evidence.epochsMatch;
+    out->tokenMatches = evidence.tokenMatches;
+    out->commandReturned = evidence.commandReturned;
+    out->commandSucceeded = evidence.commandSucceeded;
+    out->deviceDiscoveryConfiguration =
+        evidence.deviceDiscoveryConfiguration;
+    out->startSeen = evidence.startSeen;
+    out->startSucceeded = evidence.startSucceeded;
+    out->endSeen = evidence.endSeen;
+    out->outcomeUnknown = evidence.outcomeUnknown;
+    out->epochs.context = uint32_t(lease.contextGeneration);
+    out->epochs.power = uint32_t(lease.powerGeneration);
+    out->epochs.station = uint32_t(lease.stationGeneration);
+    out->epochs.roc = session.generation;
+    out->ownerSerial = traceOwner.ownerSerial;
+    out->startUs = session.startObservedMonotonicUs;
+    out->nowUs = nowUs;
+
+    if (NativeP2PRx149DataInput::leaseCurrent(*out, nowUs)) {
+        // This call is deliberately restricted to the main gate: worker
+        // snapshots may consume a permit but can never reopen a revoked one.
+        NativeAwdlBSD::publishRx149DataInputLease(*out);
+        return true;
+    }
+    if (out->ownerSerial &&
+        NativeP2PRx149DataInput::validEpochs(out->epochs))
+        NativeAwdlBSD::revokeRx149DataInput(out->ownerSerial,out->epochs);
+#endif
+    return false;
+}
+
 void ItlIwx::tahoeP2pTapAction(struct iwx_softc *sc, const uint8_t *frame,
                              size_t length, bool wasProtected, uint16_t channel,
                              uint32_t gp2TimestampUs, bool gp2TimestampPresent,
                              uint32_t rxMacPhyIndex,
-                             bool rxMacPhyIndexPresent)
+                             bool rxMacPhyIndexPresent,
+                             const NativeP2PRx149DataInput::OriginalDescriptor *originalData)
 {
     if (!sc || !getMainWorkLoop() || !getMainWorkLoop()->inGate())
         return;
@@ -1038,10 +1167,53 @@ void ItlIwx::tahoeP2pTapAction(struct iwx_softc *sc, const uint8_t *frame,
         traceToken = nativeAwdlRxEventTimeline_.recordActionTap(tap);
     }
 
-    // The RX descriptor's mac_phy_idx has not yet been proven to carry the
-    // complete MAC ID/color. Preserve unknown affinity, never infer it from
-    // an AWDL vendor body or from the infrastructure BSSID.
+    // The descriptor witness can identify its MAC-index nibble, but not the
+    // complete MAC ID/color or PHY for API59. Never infer either from payload.
 #if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
+#if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+    if (rx149ProfilePath) {
+        NativeP2PRx149DataInput::Lease inputLease{};
+        const bool leaseReady=tahoeP2pRx149DataLease(&inputLease);
+        if (leaseReady&&originalData&&originalData->present&&frame&&
+            length<=UINT32_MAX&&channel<nitems(sc->sc_ic.ic_channels)) {
+            NativeP2PRx149DataInput::Descriptor descriptor{};
+            descriptor.channelPresent=true;
+            descriptor.ieeeChannel=ieee80211_chan2ieee(
+                &sc->sc_ic,&sc->sc_ic.ic_channels[channel]);
+            descriptor.macPhyIndexPresent=rxMacPhyIndexPresent;
+            descriptor.macPhyIndex=static_cast<uint8_t>(rxMacPhyIndex);
+            descriptor.decodeModePresent=true;
+            descriptor.decodeMode=isset(sc->sc_ucode_api,
+                IWX_UCODE_TLV_API_BAND_IN_RX_DATA) ?
+                NativeAwdlRxEntry::MacPhyDecodeBandInRx :
+                NativeAwdlRxEntry::MacPhyDecodeLegacy;
+            descriptor.protectedFrame=wasProtected||
+                originalData->protectedFrame;
+            descriptor.awdlDataCandidate=
+                NativeAwdlData::isAwdlDataCandidate(frame,length);
+            descriptor.originalDescriptorPresent=originalData->present;
+            descriptor.hardwareDeaggregated=
+                originalData->hardwareDeaggregated;
+            descriptor.originalRawStatus=originalData->rawStatus;
+            NativeP2PRx149DataInput::Permit permit{};
+            if (NativeP2PRx149DataInput::makePermit(
+                    inputLease,descriptor,&permit)) {
+                const auto capture=NativeAwdlBSD::captureRx149Data(
+                    frame,length,descriptor.protectedFrame,inputLease,permit,
+                    uint32_t(sc->sc_generation));
+                if(capture==NativeAwdlBSD::CaptureResult::Rejected||
+                   capture==NativeAwdlBSD::CaptureResult::QueueFull)
+                    tahoe_awdl_rx_stage_counters_.recordData(
+                        uint32_t(lease.contextGeneration),
+                        TahoeAwdlRxStageCounters::kDataTapRejected);
+            } else if(descriptor.awdlDataCandidate) {
+                tahoe_awdl_rx_stage_counters_.recordData(
+                    uint32_t(lease.contextGeneration),
+                    TahoeAwdlRxStageCounters::kDataTapRejected);
+            }
+        }
+    }
+#else
     const auto session=nativeP2pRocEvents_.snapshot();
     const bool current=NativeP2PRx149Observation::nativeDataPathAllowed(
             rx149ProfilePath) &&
@@ -1059,6 +1231,7 @@ void ItlIwx::tahoeP2pTapAction(struct iwx_softc *sc, const uint8_t *frame,
         tahoe_awdl_rx_stage_counters_.recordData(
             uint32_t(lease.contextGeneration),
             TahoeAwdlRxStageCounters::kDataTapRejected);
+#endif
 #endif
     IntelP2PRx::ParseObservation parseObservation{};
     const IntelP2PRx::RouteResult route =
@@ -1206,6 +1379,22 @@ void ItlIwx::tahoeP2pSyncRxDiagnosticOwner(bool closeOnly)
 {
     if (!tahoeP2pOnMainGate())
         return;
+#if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+    if (closeOnly) {
+        const auto &rxLease = tahoe_p2p_rx_lease_;
+        const uint32_t currentRoc = __atomic_load_n(
+            &nativeP2pRocGeneration_, __ATOMIC_ACQUIRE);
+        const auto traceOwner = nativeAwdlRxEventTimeline_.snapshot();
+        const NativeP2PRx149DataInput::Epochs inputEpochs{
+            uint32_t(rxLease.contextGeneration),
+            uint32_t(rxLease.powerGeneration),
+            uint32_t(rxLease.stationGeneration), currentRoc};
+        // Revoke before any lease/epoch early return. The BSD function checks
+        // this exact serial+tuple, so a stale close cannot revoke a newer run.
+        NativeAwdlBSD::revokeRx149DataInput(
+            traceOwner.ownerSerial, inputEpochs);
+    }
+#endif
     if (!closeOnly) {
         NativeAwdlRxEntry::Epochs current{};
         const bool eligible =
@@ -1384,6 +1573,9 @@ void ItlIwx::tahoeP2pRxDrain()
         auto prior=OSDynamicCast(OSNumber,controller->getProperty(names[i]));
         if(!prior||prior->unsigned64BitValue()!=data.value[i])controller->setProperty(names[i],data.value[i],64);
     }
+#if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+    publishRx149InputReceipt(controller,data.rx149Input);
+#endif
 #endif
 #if defined(ITL_NATIVE_AWDL_LIFECYCLE_25G332)
     const auto lifecycle=NativeAwdlLifecycle::snapshot();

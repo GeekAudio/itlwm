@@ -5,12 +5,15 @@ from pathlib import Path
 import shlex
 import subprocess
 
-UNITS = ('ItlIwxP2PProbe.cpp', 'ItlIwxP2PRoc.cpp',
-         'ItlIwxP2PRx.cpp', 'ItlIwxP2PTx.cpp', 'AirportItlwmV2.cpp')
+UNITS = ('ItlIwx.cpp', 'ItlIwxP2PProbe.cpp', 'ItlIwxP2PRoc.cpp',
+         'ItlIwxP2PRx.cpp', 'ItlIwxP2PTx.cpp', 'AirportItlwmV2.cpp',
+         'awdl_native_bsd_data_25G332.cpp')
 PROFILES = {
     'ordinary_wifi': (),
     'resident': ('LIFECYCLE', 'RESIDENT'),
     'discovery': ('LIFECYCLE', 'RESIDENT', 'TX_EVIDENCE', 'DISCOVERY_EXPERIMENT'),
+    'rx149_observation': ('LIFECYCLE', 'RESIDENT', 'TX_EVIDENCE', 'DISCOVERY_EXPERIMENT', 'RX149_OBSERVATION'),
+    'rx149_data_input': ('LIFECYCLE', 'RESIDENT', 'TX_EVIDENCE', 'DISCOVERY_EXPERIMENT', 'RX149_OBSERVATION', 'RX149_DATA_INPUT'),
 }
 
 def expand_response_files(arguments):

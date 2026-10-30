@@ -149,6 +149,7 @@
 #include "../../native/awdl_rx_event_timeline.hpp"
 #include "../../native/awdl_data_frame.hpp"
 #include "../../native/awdl_rx_entry_telemetry.hpp"
+#include "../../native/p2p_rx149_data_input.hpp"
 #include "../../native/awdl_rx_entry_publisher.hpp"
 #include "../../native/awdl_peer_observer.hpp"
 #include "../../native/awdl_peer_runtime_table.hpp"
@@ -486,7 +487,9 @@ public:
     void tahoeRetireStoppedQueuesAfterSoftStop(struct iwx_softc *, int);
     void tahoeP2pTapTimeEvent(struct iwx_softc *, const uint8_t *, size_t);
     void tahoeP2pTapAction(struct iwx_softc *, const uint8_t *, size_t, bool,
-                           uint16_t, uint32_t, bool, uint32_t, bool);
+                           uint16_t, uint32_t, bool, uint32_t, bool,
+                           const NativeP2PRx149DataInput::OriginalDescriptor * = nullptr);
+    bool tahoeP2pRx149DataLease(NativeP2PRx149DataInput::Lease *);
     void tahoeP2pRxConsume();
     void tahoeP2pRxDrain();
     static IOReturn tahoeP2pRxDrainAction(OSObject *, void *, void *, void *, void *);
@@ -764,7 +767,8 @@ public:
            , uint32_t rxStageOwnerGeneration = 0,
            uint8_t rxStageKind = TahoeAwdlRxStageCounters::kNotAwdl,
            uint32_t rxMacPhyIndex = 0,
-           bool rxMacPhyIndexPresent = false
+           bool rxMacPhyIndexPresent = false,
+           const NativeP2PRx149DataInput::OriginalDescriptor *originalData = nullptr
 #endif
            );
     void iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,

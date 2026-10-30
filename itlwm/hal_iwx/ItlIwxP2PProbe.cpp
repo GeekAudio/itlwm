@@ -576,6 +576,9 @@ struct RocEventRun {
     P2PTxDiagnosticSnapshot txSnapshot;
     bool txSnapshotValid;
     bool rxDrainComplete;
+#if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+    NativeP2PRx149DataInput::Lease rx149DataLease{};
+#endif
 };
 
 enum P2PFrameKind : uint32_t {
@@ -736,6 +739,22 @@ static NativeP2PRx149Observation::ProfileStatus rx149ProfileStatus(
         rx149ProfileInput(owner, controller));
 }
 
+static void publishRx149DataInputAvailability(
+    IOEthernetController *controller, bool profileEnabled)
+{
+    if (!controller)
+        return;
+#if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+    const bool available = profileEnabled && controller->getProperty(
+        "NativeP2PRx149DataInputExperiment") == kOSBooleanTrue;
+#else
+    const bool available = false;
+    (void)profileEnabled;
+#endif
+    controller->setProperty("NativeP2PRx149DataInputProfileEnabled",
+                            available ? 1u : 0u, 32);
+}
+
 static void publishRx149ProfileAvailabilityOnce(
     ItlIwx *owner, IOEthernetController *controller)
 {
@@ -752,6 +771,7 @@ static void publishRx149ProfileAvailabilityOnce(
     controller->setProperty("NativeP2PRx149Selected",
                              selected ? 1u : 0u, 32);
     controller->setProperty("NativeP2PRx149HostTxBlocked", uint32_t(1), 32);
+    publishRx149DataInputAvailability(controller, enabled);
 }
 
 static bool psfObservationProfileEnabled(IOEthernetController *controller)
@@ -1107,6 +1127,7 @@ static void publishRx149ProfileState(ItlIwx *owner, bool enabled,
                             selected ? 1u : 0u, 32);
     controller->setProperty("NativeP2PRx149HostTxBlocked",
                             hostTxBlocked ? 1u : 0u, 32);
+    publishRx149DataInputAvailability(controller, enabled && hostTxBlocked);
 }
 
 static bool rx149PropertyAbsentOrZero(IOEthernetController *controller,
@@ -7290,6 +7311,11 @@ IOReturn ItlIwx::tahoeP2pRocEventAction(OSObject *, void *opaque,
             action->txSnapshotValid = captureP2PTxSnapshot(
                 owner, &action->txSnapshot);
         }
+#if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+        action->rx149DataLease = {};
+        if (probe->rx149ObservationOnly)
+            (void)owner->tahoeP2pRx149DataLease(&action->rx149DataLease);
+#endif
         if (action->consumeRxAfterRead && probe->rx149ObservationOnly) {
             const auto evidence = rx149RocEvidence(probe, action->snapshot);
             if (NativeP2PRx149Observation::validStartedOwner(evidence) &&
@@ -7455,6 +7481,26 @@ void ItlIwx::tahoeP2pTapSessionEvent(struct iwx_softc *sc,
     }
 }
 
+static void drainRx149NativeDataOutsideMainGate(
+    P2PProbeRun *probe, const RocEventRun &event)
+{
+#if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+    auto *owner = probe ? probe->owner : nullptr;
+    if (!owner || owner->tahoeP2pOnMainGate())
+        return;
+    const auto &sc = owner->com;
+    const bool radioReady = sc.sc_ic.ic_state == IEEE80211_S_RUN &&
+        !(sc.sc_flags & (IWX_FLAG_HW_ERR | IWX_FLAG_SHUTDOWN | IWX_FLAG_RFKILL));
+    // No firmware command, TX dequeue or main-gate KPI callback. The BSD
+    // queue independently checks this permit and its current clock at input.
+    NativeAwdlBSD::poll(radioReady, uint32_t(sc.sc_generation),
+                        &event.rx149DataLease);
+#else
+    (void)probe;
+    (void)event;
+#endif
+}
+
 static int exerciseRx149Observation(P2PProbeRun *probe)
 {
     if (!probe || !probe->owner || !probe->rx149ObservationOnly ||
@@ -7540,6 +7586,8 @@ static int exerciseRx149Observation(P2PProbeRun *probe)
         event.operation = kRocRead;
         event.consumeRxAfterRead = true;
         error = readRocState(probe, &event, true);
+        if (!error)
+            drainRx149NativeDataOutsideMainGate(probe, event);
         if (error)
             break;
         if (event.snapshot.endSeen || event.snapshot.outcomeUnknown) {
@@ -7552,6 +7600,8 @@ static int exerciseRx149Observation(P2PProbeRun *probe)
         event.operation = kRocRead;
         event.consumeRxAfterRead = true;
         error = readRocState(probe, &event, true);
+        if (!error)
+            drainRx149NativeDataOutsideMainGate(probe, event);
         ended = !error && event.snapshot.endSeen;
     }
     if (!error && !ended)
@@ -8214,6 +8264,9 @@ IOReturn ItlIwx::tahoeP2pCancelAction(OSObject *, void *contextArg,
         __atomic_load_n(&owner->nativeP2pProbeOwner_, __ATOMIC_ACQUIRE) != nullptr ||
         __atomic_load_n(&owner->nativeP2pNswqPaused_, __ATOMIC_ACQUIRE))
         return kIOReturnBusy;
+#if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+    NativeAwdlBSD::revokeRx149DataInput();
+#endif
     __atomic_store_n(&owner->nativeP2pCancelRequested_, 1u, __ATOMIC_RELEASE);
     return kIOReturnSuccess;
 }
@@ -8386,6 +8439,9 @@ IOReturn ItlIwx::tahoeP2pResetAction(OSObject *, void *contextArg,
     if (!reset || !reset->owner || !reset->softc)
         return kIOReturnBadArgument;
     ItlIwx *owner = reset->owner;
+#if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+    NativeAwdlBSD::revokeRx149DataInput();
+#endif
 #if defined(ITL_NATIVE_AWDL_TX_EVIDENCE_25G332)
     // ResetDrained is dispatched on the main gate after the caller proved the
     // firmware/RX drain. Retire any unmatched doorbelled evidence here, where
@@ -8666,6 +8722,9 @@ int ItlIwx::tahoeP2pStopBeforeReset(struct iwx_softc *sc)
 {
     if (sc != &com)
         return EINVAL;
+#if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+    NativeAwdlBSD::revokeRx149DataInput();
+#endif
     // Any P2P MAC/binding/PHY/station/queue lease may still be referenced by
     // firmware. A soft stop does not prove all associated DMA has drained.
     if (nativeP2pResourcesRetained())

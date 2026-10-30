@@ -15,6 +15,9 @@ PROJECT = Path(__file__).resolve().parents[1]
 
 
 def receive149_profile_errors(args):
+    data_input = getattr(args, 'native_awdl_rx149_data_input', False)
+    if data_input and not args.native_awdl_rx149_observation_only:
+        return ['RX149 data input requires the isolated RX149 manual receive profile']
     if not args.native_awdl_rx149_observation_only:
         return []
     errors = []
@@ -43,6 +46,8 @@ def resident_build_flags(args):
         flags += ' -DITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332=1'
     if args.native_awdl_rx149_observation_only:
         flags += ' -DITL_NATIVE_AWDL_RX149_OBSERVATION_25G332=1'
+    if getattr(args, 'native_awdl_rx149_data_input', False):
+        flags += ' -DITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332=1'
     return flags
 
 
@@ -63,6 +68,7 @@ def apply_artifact_profile(personality, args):
         'NativeAwdlDiscoveryMifCurrentSlotEnabled': bool(args.native_awdl_discovery_mif_current_slot),
         'NativeAwdlDiscoveryCurrentAwFallbackEnabled': bool(args.native_awdl_discovery_current_aw_fallback),
         'NativeP2PRx149ObservationOnly': bool(args.native_awdl_rx149_observation_only),
+        'NativeP2PRx149DataInputExperiment': bool(getattr(args, 'native_awdl_rx149_data_input', False)),
     })
 
 
@@ -110,6 +116,8 @@ def main():
                         help='Test077: try the current AW only after the original next-AW planner reports an empty conservative window')
     parser.add_argument('--native-awdl-rx149-observation-only', action='store_true',
                         help='Test080: one manual 100ms channel149 receive observation; no host management/data TX')
+    parser.add_argument('--native-awdl-rx149-data-input', action='store_true',
+                        help='Test086: allow bounded channel149 inbound data into native awdl0; host frame TX remains blocked')
     args = parser.parse_args()
     for error in receive149_profile_errors(args):
         parser.error(error)
@@ -233,6 +241,7 @@ def main():
                           'native_awdl_discovery_mif_current_slot': args.native_awdl_discovery_mif_current_slot,
                           'native_awdl_discovery_current_aw_fallback': args.native_awdl_discovery_current_aw_fallback,
                           'native_awdl_rx149_observation_only': args.native_awdl_rx149_observation_only,
+                          'native_awdl_rx149_data_input': args.native_awdl_rx149_data_input,
                           'test_build': build_tag, 'mach_o_uuid': match.group(1),
                           'log': str(log_path)}, ensure_ascii=False))
 
