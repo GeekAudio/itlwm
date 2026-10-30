@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "6d2263c3e726b46a3994d1ef20fc6b69e524663aa65fdd06371422ec78462d1f"
+      "sha256": "dec9560dc38daeebc908294afcfc3cab028b152f4f58ceace0b1a0eada803507"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "eec46102f9b1e3cac224700cf324e3b356204168a26733d35e6f044fe4051cb1"
+      "sha256": "4726ead74938d08c6f0bbe9b13c657d4cd5ad114289983e1c3d3507de5731efe"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -30,7 +30,7 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "7d0eaf14e7cc27c0a3b0401ff6e4ca5b8ca2ea0672cc96741c70e7a7bcc32d1f"
+      "sha256": "235fe299582b1d86920cc30e998ff56e77d5e3efc1087cbe0cf682d9bcbcc270"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-30T11:19:11.916516+08:00",
-  "runtime_scope": "Current Test083 measured results remain8 passed/5 partial/27 uncovered. Test084 only extends bounded cfg2 RX-entry observation; full EFI backup and deployment completed, awaiting reboot. No Test084 runtime,RX or AirDrop proof."
+  "updated_at": "2026-10-30T11:51:16.481498+08:00",
+  "runtime_scope": "Test084 boot measured: 7 passed,6 partial,27 uncovered,new historical0. Wi-Fi300s and bound HTTPS passed; PASSIVE149 cfg2 firmware START/END and RX-entry owner telemetry completed. Only one channel36 beacon descriptor; no149 peer RX or AirDrop proof. Native metadata disarmed; no EFI write this round."
 }
