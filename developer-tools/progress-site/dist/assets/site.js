@@ -6,7 +6,7 @@
   const $ = (selector, root = document) => root.querySelector(selector);
   let activeFilter = "all";
   const referenceRuntime = String(data?.deploymentState || "").startsWith("brcm_reference_runtime");
-  const evidenceScope = referenceRuntime ? data?.evidenceScopeLabel : null;
+  const evidenceScope = data?.evidenceScopeLabel || null;
 
   function node(tag, className, value) {
     const element = document.createElement(tag);
@@ -287,7 +287,7 @@
     const updated = $("#updated-at");
     const deployment = $("#deployment-label");
     const version = $("#current-version");
-    if (version) version.textContent = (referenceRuntime && data?.currentRuntimeLabel) || data?.runningCandidate || "当前版本待核对";
+    if (version) version.textContent = data?.currentRuntimeLabel || data?.runningCandidate || "当前版本待核对";
     if (data?.updatedAt) {
       const date = new Date(data.updatedAt);
       updated.dateTime = data.updatedAt;

@@ -10,17 +10,17 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "d5e20474fd102c43c71143a8603b2e88a258ff9fc6e8dee611fe81fbfacc8174"
+      "sha256": "d89f845c9a9f1d7b4c248ab1896c9ceb4c0de36f46f63dd37aba753d8c61ed49"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "c19ef0abecdf97886d8af30d4bce014640c5a5636a3d2478b02adf64623917b7"
+      "sha256": "61f5c25e07ba85ea690b6ad83af9124a19e17e2d05e8b3b5b2475380e16fef57"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
       "snapshot_path": "dist/assets/site.js",
-      "sha256": "db2af24f6b933e1eabc9f4ec0eebd90920ea21249ae164012f2b477759bb5a90"
+      "sha256": "5a525f91e05d53005716542ba5ccd66242b15f16c1d64a9b5523a79f30135dfd"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.css",
@@ -30,7 +30,7 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "361a24798f41b8bf0b1d7cfabae71c289a2c2851ccdea326b08f1a82658d2de8"
+      "sha256": "f129c77339525530540aee95bcc6557291a263da782f8e6ade005640a339cd27"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-30T22:31:10.903498+08:00",
-  "runtime_scope": "Test088 updates diagnostic tools only; production driver and EFI remain Test087. Offline sender/parser/coordinator validation does not add runtime passes. Current Test087 acceptance remains 7 passed, 4 partial, 29 uncovered, 0 failed; history 24/40, net-new 0. An extra passive observation stopped on interface-counter read failure and is not a stability pass. The prior full EFI backup is retained; WAN/LAN unchanged."
+  "updated_at": "2026-10-31T02:47:32.801858+08:00",
+  "runtime_scope": "Test088 saved-report runtime review, using unchanged Test087 driver. Ten-minute Wi-Fi baseline and two-minute post-window passed. ROC 95.264 ms; 274 MPDU entries include two admitted channel-149 Beacons, zero AWDL candidates. Sixteen local send returns succeeded; one nominal interval falls inside ROC but strict send attribution and RF transmission remain unknown. Native data capture, decode, delivery and listener datagrams are zero; per-packet ifnet receipt is unpublished. Current acceptance: 7 passed, 4 partial, 29 uncovered, 0 failed; history 24/40, net-new 0. No EFI or WAN/LAN changes; existing backup retained."
 }
