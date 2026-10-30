@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "34b023a433efe1c9aa21c789b84f1937b6a467e64b371086c728931175a99543"
+      "sha256": "248ea70f34a35e7bb36ccd9c43e34482d2847db87f7bbf85e145ed69ba30fce6"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "e2eddb7a3a731bc8128e136490edf228aff5b6d4414bd4f71588b995e6de1079"
+      "sha256": "f780405fab7c8a4825db777c1a6842b0c0d52f05c5406b64316b509979a654dc"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -30,7 +30,7 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "3ec60de9923f30f1c35c77e2066c162894ca50a280404e1ea57f8105fa125019"
+      "sha256": "4a090f3f52e5145e8827ba97ece76f71ee94ba37fe2dae3e578dc746a641fe22"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-30T13:58:26.012900+08:00",
-  "runtime_scope": "Current Test085 remains 9 passed/6 partial/25 uncovered/0 failed; historical24/40, net new0. Test086 source/build/35 profiles/32 regression groups/17 sanitizer cases/TSAN/55 host mocks passed offline; full EFI backup and Intel-only deployment completed, awaiting reboot. New 149 RX-to-ifnet path is manual100ms; host AWDL TX blocked; actual data input, peer return and AirDrop unverified."
+  "updated_at": "2026-10-30T14:41:16.932153+08:00",
+  "runtime_scope": "Current Test086 boot1793340271:9 passed/6 partial/25 uncovered/0 failed, historical24/40, net-new0. Separate300.003s/56-sample and120.004s/23-sample Wi-Fi windows plus en1 HTTP/HTTPS passed. One100ms149 ROC completed; one MIF uniquely matched to router PCAP. Data/QoS candidates and native capture/decode/delivered all0, receipt unpublished. Derived strict U32 review repaired management-trace false negative; 5 new plus55 prior host cases passed. Phone logs and separate router-only browse windows retained; no native rearm, no EFI write or driver change. Controlled96B probe is preparation only; no input/AirDrop proof."
 }
