@@ -8302,8 +8302,14 @@ IOReturn ItlIwx::tahoeP2pFinishAction(OSObject *, void *contextArg,
             const uint32_t reason = run->canceled ? 3u : 2u;
             rxProducerClosed = owner->nativeAwdlRxEventTimeline_.closeProducer(
                 owner->nativeAwdlRxEventOwnerSerial_, trace.epochs, reason);
-            if (rxProducerClosed)
+            if (rxProducerClosed) {
+                // Timeout/cancel/unknown can finish without a canonical END.
+                // Close only an existing current Entry owner so its numeric
+                // evidence remains publishable. This neither proves END nor
+                // authorizes radio cleanup, and cannot begin/reopen an owner.
+                owner->tahoeP2pSyncRxDiagnosticOwner(true);
                 owner->tahoeP2pRxConsume();
+            }
             const auto closedTrace =
                 owner->nativeAwdlRxEventTimeline_.snapshot();
             rxDrainComplete = rxProducerClosed && closedTrace.producerClosed &&

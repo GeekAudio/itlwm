@@ -1,0 +1,148 @@
+{
+  "schema_version": 1,
+  "package": "Test085 developer-tools source snapshot",
+  "candidate": "25G332-Test085",
+  "artifact_status": "Test085 offline candidate; this snapshot contains no binary; the kext is not loaded or RF-tested.",
+  "files": [
+    {
+      "role": "source",
+      "source_relative_path": "IntelWirelessNative/arm_p2p_rx149_test085.swift",
+      "snapshot_path": "arm_p2p_rx149_test085.swift",
+      "size_bytes": 5242,
+      "source_sha256": "ed1c622fe47386b8c1c46a9c9b2273e89ea4c2013ac00cf5211e46eb6184b923",
+      "snapshot_sha256": "ed1c622fe47386b8c1c46a9c9b2273e89ea4c2013ac00cf5211e46eb6184b923",
+      "sanitization": null
+    },
+    {
+      "role": "source",
+      "source_relative_path": "IntelWirelessNative/capture_test085_receive149_once.py",
+      "snapshot_path": "capture_test085_receive149_once.py",
+      "size_bytes": 94185,
+      "source_sha256": "d8bbc231322acd89663b5e28e3f1bb7b33560ad38632eaede05ffe74c69078f8",
+      "snapshot_sha256": "d8bbc231322acd89663b5e28e3f1bb7b33560ad38632eaede05ffe74c69078f8",
+      "sanitization": null
+    },
+    {
+      "role": "runtime_subprocess_dependency",
+      "source_relative_path": "IntelWirelessNative/tools/run_test085_router_observation_once.py",
+      "snapshot_path": "tools/run_test085_router_observation_once.py",
+      "size_bytes": 22139,
+      "source_sha256": "4a22bed31d6b470ce051b73a5c961e8b45a6b090b758eddd5da9e44cd3c40a8d",
+      "snapshot_sha256": "4a22bed31d6b470ce051b73a5c961e8b45a6b090b758eddd5da9e44cd3c40a8d",
+      "sanitization": null
+    },
+    {
+      "role": "python_import_dependency",
+      "source_relative_path": "IntelWirelessNative/capture_test076_resident_data_once.py",
+      "snapshot_path": "capture_test076_resident_data_once.py",
+      "size_bytes": 174367,
+      "source_sha256": "ec718f504e2b0d092b69798e86bc55a458c6b9c4ce4925d5f3551a9d9862fa2b",
+      "snapshot_sha256": "ec718f504e2b0d092b69798e86bc55a458c6b9c4ce4925d5f3551a9d9862fa2b",
+      "sanitization": null
+    },
+    {
+      "role": "python_import_dependency",
+      "source_relative_path": "IntelWirelessNative/probe_p2p_result.py",
+      "snapshot_path": "probe_p2p_result.py",
+      "size_bytes": 26919,
+      "source_sha256": "7d41e4c5d236325e4cfe235717048030ab80d8f97392ac37307c9bf82603a732",
+      "snapshot_sha256": "7d41e4c5d236325e4cfe235717048030ab80d8f97392ac37307c9bf82603a732",
+      "sanitization": null
+    },
+    {
+      "role": "python_import_dependency",
+      "source_relative_path": "IntelWirelessNative/probe_wifi_rate.py",
+      "snapshot_path": "probe_wifi_rate.py",
+      "size_bytes": 5684,
+      "source_sha256": "6e802a71ebeb5b9010ae0e0f7f0edd6f2782c51e50d8a5d566492c996efd9ca0",
+      "snapshot_sha256": "6e802a71ebeb5b9010ae0e0f7f0edd6f2782c51e50d8a5d566492c996efd9ca0",
+      "sanitization": null
+    },
+    {
+      "role": "python_import_dependency",
+      "source_relative_path": "IntelWirelessNative/tools/awdl_ioreg_u32.py",
+      "snapshot_path": "tools/awdl_ioreg_u32.py",
+      "size_bytes": 10477,
+      "source_sha256": "4a4fef3e2ac9189ab53fe93a39a5f183c6081a1b10c69a5901d06b495f1d3ff3",
+      "snapshot_sha256": "4a4fef3e2ac9189ab53fe93a39a5f183c6081a1b10c69a5901d06b495f1d3ff3",
+      "sanitization": null
+    },
+    {
+      "role": "runtime_subprocess_dependency",
+      "source_relative_path": "IntelWirelessNative/tools/openwrt_capture_once.py",
+      "snapshot_path": "tools/openwrt_capture_once.py",
+      "size_bytes": 54243,
+      "source_sha256": "7c7b750604acf3c18372600084bcf6a899f3b8c2e0c364ebb6a1129d77dbeac2",
+      "snapshot_sha256": "7c7b750604acf3c18372600084bcf6a899f3b8c2e0c364ebb6a1129d77dbeac2",
+      "sanitization": null
+    },
+    {
+      "role": "test",
+      "source_relative_path": "IntelWirelessNative/tools/test_test085_receive149_once.py",
+      "snapshot_path": "tools/test_test085_receive149_once.py",
+      "size_bytes": 32937,
+      "source_sha256": "2a25a7de1e8e6b3018082fa73fa581303ffc2510fc7a3dc8f1ab820f631e2113",
+      "snapshot_sha256": "91828d392e22b5a2e3e9812d08f67cc5bea4adad17b79a7ba315cc3720527c9b",
+      "sanitization": "Replaced synthetic MAC-shaped fixture strings with neutral TEST_PEER_N labels; matching fixture expectations were updated identically and assertions were retained."
+    },
+    {
+      "role": "test",
+      "source_relative_path": "IntelWirelessNative/tools/test_run_test085_router_observation_once.py",
+      "snapshot_path": "tools/test_run_test085_router_observation_once.py",
+      "size_bytes": 5992,
+      "source_sha256": "bd7ab5c4ac02e16c85afd38a273aab19cbcca480d79926b4f6acdb3024271c73",
+      "snapshot_sha256": "bd7ab5c4ac02e16c85afd38a273aab19cbcca480d79926b4f6acdb3024271c73",
+      "sanitization": null
+    },
+    {
+      "role": "test",
+      "source_relative_path": "IntelWirelessNative/tests/test085_rx_entry_guard.py",
+      "snapshot_path": "tests/test085_rx_entry_guard.py",
+      "size_bytes": 14108,
+      "source_sha256": "8c54d00e8fa5eb00903ef394ccd26a2416d8c0fdded201c82766f5291b77735b",
+      "snapshot_sha256": "787ff824c467844fb693472bcad99612fb0f9a39bc4415f98fe31f43b0b4c288",
+      "sanitization": "Removed the private metadata-generator import and metadata-only receipt assertions; retained all RX-entry runtime assertions."
+    }
+  ],
+  "excluded": [
+    "kexts, firmware, archives, and build outputs",
+    "private build/deployment metadata and metadata-generator source",
+    "EFI contents, identifiers, personal absolute paths, real MAC/IP addresses, keys, logs, and PCAP/PCAPNG captures"
+  ],
+  "optional_files_excluded": [
+    {
+      "source_relative_path": "IntelWirelessNative/tests/test085_metadata.py",
+      "size_bytes": 5664,
+      "source_sha256": "4df720a3841e62ec5cf865aa90ab518021fa7195c10f09817045a5182690207c",
+      "reason": "Excluded because this host test depends on a private metadata generator."
+    }
+  ],
+  "notes": [
+    "This explicit allowlist contains Test085 helper, collector, coordinator, necessary import/runtime dependencies, and offline host tests only.",
+    "Test fixture identity sanitization is recorded per file; test assertions are preserved.",
+    "The probe keeps its 198.18.0.0/15 fake-DNS detection range constant; it is not a router or device address.",
+    "All tests run from this public copy and are offline mocks; they do not establish hardware or RF behavior."
+  ],
+  "focused_offline_tests": {
+    "total": 39,
+    "passed": 39,
+    "failed": 0,
+    "groups": [
+      {
+        "command": "/Applications/Xcode.app/Contents/Developer/usr/bin/python3 -m unittest discover -s tools -p test_*test085*.py",
+        "exit_code": 0,
+        "tests_run": 31,
+        "tests_failed": 0,
+        "passed": true
+      },
+      {
+        "command": "/Applications/Xcode.app/Contents/Developer/usr/bin/python3 -m unittest discover -s tests -p test085_rx_entry_guard.py",
+        "exit_code": 0,
+        "tests_run": 8,
+        "tests_failed": 0,
+        "passed": true
+      }
+    ],
+    "scope": "Public-copy offline mocks only; no RF actions."
+  }
+}
