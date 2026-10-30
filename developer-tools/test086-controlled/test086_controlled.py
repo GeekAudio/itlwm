@@ -496,6 +496,13 @@ def _b64_no_wrap(data: bytes) -> str:
     return base64.b64encode(data).decode("ascii")
 
 
+def validate_ap_interface(ap: str) -> str:
+    """Preserve the existing shell-safe Linux interface-name contract."""
+    if not isinstance(ap, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,15}", ap):
+        raise ControlledProbeError("INVALID_INTERFACE_NAME")
+    return ap
+
+
 def build_remote_monitor_sender_script(*, binary: bytes, binary_sha256: str,
                                        run_token: str, ap: str = "wlan1",
                                        monitor: str = "iwawdl0") -> str:
@@ -506,7 +513,8 @@ def build_remote_monitor_sender_script(*, binary: bytes, binary_sha256: str,
         raise ControlledProbeError("SENDER_BINARY_HASH_MISMATCH")
     if not binary or len(binary) > 2 * 1024 * 1024:
         raise ControlledProbeError("SENDER_BINARY_SIZE_INVALID")
-    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,15}", ap) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,15}", monitor):
+    validate_ap_interface(ap)
+    if not re.fullmatch(r"[A-Za-z0-9_.-]{1,15}", monitor):
         raise ControlledProbeError("INVALID_INTERFACE_NAME")
     binary_data = _b64_no_wrap(binary)
     # AP, monitor, run token and binary digest are strictly validated above.

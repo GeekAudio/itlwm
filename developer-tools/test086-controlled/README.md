@@ -10,6 +10,10 @@ waits for the sender's `READY`, sends `ABORT` before `GO`, and requires a
 zero-send result plus verified monitor/AP/temp-file cleanup. This mode does
 not read or change Test086 metadata, inspect the kext, consume the shared boot
 claim, start the listener, arm the native probe, or send a frame.
+Both the readiness runner and full coordinator accept `--ap wlan7` to select
+the current live AP interface; the default remains `wlan1`. The monitor PHY is
+derived from that AP's current `iw dev <ap> info` output, while the channel-149
+and 80 MHz gates remain enforced.
 
 The test OpenWrt router's 2024 `mt76-connac` module panicked on a NULL pointer.
 These host-side budget and receipt fixes do not repair that router driver;

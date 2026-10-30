@@ -239,6 +239,7 @@ class ProtocolTests(unittest.TestCase):
         script = protocol.build_remote_monitor_sender_script(
             binary=binary, binary_sha256=digest,
             run_token="0123456789abcdef0123456789abcdef")
+        self.assertIn("AP=wlan1", script)
         result = subprocess.run(["sh", "-n"], input=script, text=True,
                                 capture_output=True, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
@@ -257,6 +258,25 @@ class ProtocolTests(unittest.TestCase):
             protocol.build_remote_monitor_sender_script(
                 binary=binary, binary_sha256="0" * 64,
                 run_token="0123456789abcdef0123456789abcdef")
+
+    def test_dynamic_ap_script_uses_wlan7_phy7_and_channel149(self):
+        binary = b"offline fixture only"
+        digest = hashlib.sha256(binary).hexdigest()
+        script = protocol.build_remote_monitor_sender_script(
+            binary=binary, binary_sha256=digest,
+            run_token="0123456789abcdef0123456789abcdef", ap="wlan7")
+        self.assertIn("AP=wlan7", script)
+        self.assertIn('iw dev "$AP" info', script)
+        self.assertIn('AP_PHY="$(printf', script)
+        self.assertIn('iw phy "phy$AP_PHY" interface add', script)
+        self.assertIn('"$AP_PHY:$AP_CHANNEL:$AP_FREQUENCY:$AP_WIDTH"', script)
+        self.assertIn('[ "$AP_CHANNEL" != 149 ]', script)
+
+    def test_ap_interface_name_uses_existing_strict_safe_name_contract(self):
+        for invalid in ("wlan7;reboot", "wlan 7", "wlan/7", "x" * 16, ""):
+            with self.subTest(invalid=invalid), self.assertRaises(
+                    protocol.ControlledProbeError):
+                protocol.validate_ap_interface(invalid)
 
     def test_openwrt_ash_stdin_reproduction_when_available(self):
         script = ROOT / "tests/test_openwrt_ash_stdin.sh"

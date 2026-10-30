@@ -465,8 +465,12 @@ def _private_default_run_dir(account) -> Path:
 
 def run_controlled_once(*, host: str, control_path: str, metadata_path: Path,
                         sender_binary: Path, sender_sha256: str,
-                        output_dir: Path) -> Dict[str, Any]:
+                        output_dir: Path, ap: str = "wlan1") -> Dict[str, Any]:
     protocol, router = _modules()
+    try:
+        protocol.validate_ap_interface(ap)
+    except protocol.ControlledProbeError as error:
+        raise CoordinatorError(error.code)
     account = _workspace_account()
     try:
         router.validate_transport(host, control_path)
@@ -557,7 +561,7 @@ def run_controlled_once(*, host: str, control_path: str, metadata_path: Path,
         try:
             sender, monitor_ready, sender_ready = router.RouterSenderSession.start(
                 host=host, control_path=control_path, sender_binary=sender_binary,
-                sender_sha256=sender_sha256, run_token=run_token)
+                sender_sha256=sender_sha256, run_token=run_token, ap=ap)
         except protocol.ControlledProbeError as error:
             raise CoordinatorError(error.code, error.evidence)
         report["monitor_ready"] = monitor_ready
@@ -849,6 +853,8 @@ def main(argv=None) -> int:
     parser.add_argument("--metadata", type=Path, default=DEFAULT_METADATA)
     parser.add_argument("--sender-binary", type=Path, default=DEFAULT_SENDER_BINARY)
     parser.add_argument("--sender-sha256", default=DEFAULT_SENDER_SHA256)
+    parser.add_argument("--ap", default="wlan1",
+                        help="live OpenWrt AP interface (default: wlan1)")
     parser.add_argument("--output-dir", type=Path)
     args = parser.parse_args(argv)
     if not args.run:
@@ -867,7 +873,8 @@ def main(argv=None) -> int:
         report = run_controlled_once(
             host=args.host, control_path=args.control_path,
             metadata_path=args.metadata, sender_binary=args.sender_binary,
-            sender_sha256=args.sender_sha256, output_dir=output_dir)
+            sender_sha256=args.sender_sha256, output_dir=output_dir,
+            ap=args.ap)
         _atomic_report(report_path, report, account)
         if report.get("complete") is True and report.get("status") == "captured_no_peer_or_airdrop_proof":
             print("CONTROLLED_RUN_CAPTURED")

@@ -5,19 +5,20 @@
   "production_driver_uuid": "C28DBCB5-DB75-3C08-B09C-05354B5D2B57",
   "production_driver_changed": false,
   "files": {
-    "README.md": "8f2d37582973a760c212d712e41c4c9c6d257d588307d467d8b412868f69a740",
+    "README.md": "9fa7a79a694e4445ca55df57416b0f927df9cdcad43dd916bb8207a1336a4f75",
     "afpacket-sender/Makefile": "54be64969a3116e0def07ed8940c9ec7ff116c3fafaab05e1d8b2f88987ebd70",
     "afpacket-sender/README.md": "23bebc4ddbcb41a78bc5c591a1e50f17255f840b6fd88cb5bde1bb264b3b5da0",
     "afpacket-sender/awdl_probe_sender.c": "2d0e15d144164f76df08b1ad0f44638719605be6050ac882004f769661139d1c",
     "afpacket-sender/fixtures/probe-spec.json": "6b6f784461de4409e34da05e59e17203f970400935977ed6a43c1a3aa5d82b1b",
     "afpacket-sender/test_sender_host_negative.py": "d378f88e1969bf4ed319d2861a6e011125066e67512d3d4136f3987a2103f33d",
     "awdl0_udp_probe_listener.c": "0cba44b3faf635ddb6f33d62f5d7bc46e75bb2dfea7b8bd2f54e1b80a7c8273f",
-    "controlled_run_coordinator.py": "dcbc0762292205cf78ced21cbc9930391a20d7690c9a7f01e889516af23614e4",
+    "controlled_run_coordinator.py": "d00fcf18930fdf7e83cb158bfd7ec0f957fff3e7178a058ba59c1431e23bc1d6",
     "native_controlled_capture.py": "485ac3cc938c00d76e7c3130ffdc815c51434bb1abf6596a7c3b9aa6ce37f03e",
-    "run_controlled_probe_once.py": "0989760e4bbae1d37deb852184787e0e1c128e4079871940eb59a29d25271a4f",
-    "test086_controlled.py": "c3fa72046964bf740a9c43c2e72029153a74fdcf431bc448e08ebc045b82405a",
-    "tests/test_controlled.py": "98431d058502ff79cdc108a67d10cc5e7142ca63ff2e71da88875886906a2f67",
-    "tests/test_coordinator_e2e.py": "0397dc7b7e4731c931a776e83f0c6304a13266ae28ef7471df482446d824d4c2",
+    "run_controlled_probe_once.py": "fd8f3e85a20fa48d54213c1624eb4f69042a9e8a3f2f22082b0b1afcd1108435",
+    "test086_controlled.py": "600fd0e3de11e1b9f9b355bb269880b50db334247db09a62e03921d5a0fd3c74",
+    "tests/test_ap_wiring.py": "db212f15fe0e6077804a8790b4c4f76b446860f1dad8a948f721e2437e609161",
+    "tests/test_controlled.py": "aa128290deaea71db5d177305fc6f6456bdaf2ab4e3dd08b47e3a0af535ba4c8",
+    "tests/test_coordinator_e2e.py": "bcd900f66ae54f9fc4266488016ec7ece1eaac0da435fc922e0521f1c3b6c80e",
     "tests/test_full_coordinator.py": "e34d9a3fbe2a8dafabea631b6f8f319c4124dbcabf9a29dd6af7edc7acd615ab",
     "tests/test_native_capture.py": "d464ff5b79486357811b90a5d7d20727a110d1766c9fb4c2378c2db0db4c8ab7",
     "tests/test_openwrt_ash_stdin.sh": "b36c5f7cc3152087b607fffa046ad458701aa0c82e7c8c4f39f8b66541cda559"
@@ -30,11 +31,12 @@
     "credentials"
   ],
   "validation": {
-    "python_suite_passed": 38,
+    "python_suite_passed": 48,
     "python_suite_skipped": 1,
     "skip_reason": "BusyBox ash not installed locally; actual OpenWrt READY/ABORT checked separately",
     "sender_host_only_passed": 9,
     "scope": "Offline tool tests only; no data input or AirDrop proof",
-    "post_freeze_targeted_validation": "Existing root-owned claim directories are accepted without changing permissions; 11 native actor tests passed. Full suite was not repeated."
+    "post_freeze_targeted_validation": "Existing root-owned claim directories are accepted without changing permissions; 11 native actor tests passed. Full suite was not repeated.",
+    "post_dynamic_ap_wiring_validation": "49 offline Python tests run: 48 passed, 1 skipped; covers wlan7 script/session/CLI wiring, phy7 mapping, channel 149 gates, and unsafe AP-name rejection"
   }
 }

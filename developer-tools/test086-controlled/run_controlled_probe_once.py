@@ -165,7 +165,9 @@ class RouterSenderSession:
 
     @classmethod
     def start(cls, *, host: str, control_path: str, sender_binary: Path,
-              sender_sha256: str, run_token: Optional[str] = None):
+              sender_sha256: str, run_token: Optional[str] = None,
+              ap: str = "wlan1"):
+        protocol.validate_ap_interface(ap)
         if not protocol.SHA_RE.fullmatch(sender_sha256):
             raise protocol.ControlledProbeError("INVALID_SENDER_SHA256")
         sender_binary = Path(sender_binary)
@@ -179,7 +181,7 @@ class RouterSenderSession:
         if not protocol.TOKEN_RE.fullmatch(token):
             raise protocol.ControlledProbeError("INVALID_RUN_TOKEN")
         script = protocol.build_remote_monitor_sender_script(
-            binary=binary, binary_sha256=actual_sha, run_token=token)
+            binary=binary, binary_sha256=actual_sha, run_token=token, ap=ap)
         argv = build_bootstrap_argv(host, control_path)
         if len(script.encode("utf-8")) > MAX_REMOTE_SCRIPT_BYTES:
             raise protocol.ControlledProbeError("REMOTE_SCRIPT_SIZE_INVALID")
@@ -329,7 +331,7 @@ class RouterSenderSession:
 
 
 def run_readiness_only(*, host: str, control_path: str, sender_binary: Path,
-                       sender_sha256: str) -> Dict[str, Any]:
+                       sender_sha256: str, ap: str = "wlan1") -> Dict[str, Any]:
     session = None
     records: Dict[str, Any] = {
         "schema": "test086-controlled-readiness-private/v1",
@@ -352,7 +354,7 @@ def run_readiness_only(*, host: str, control_path: str, sender_binary: Path,
     try:
         session, monitor_ready, ready = RouterSenderSession.start(
             host=host, control_path=control_path, sender_binary=sender_binary,
-            sender_sha256=sender_sha256)
+            sender_sha256=sender_sha256, ap=ap)
         records["run_token"] = session.run_token
         records["sender_ready"] = True
         records["monitor_ready"] = monitor_ready
@@ -440,8 +442,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument("--control-path")
     parser.add_argument("--sender-binary", type=Path)
     parser.add_argument("--sender-sha256")
+    parser.add_argument("--ap", default="wlan1",
+                        help="live OpenWrt AP interface (default: wlan1)")
     parser.add_argument("--report", type=Path)
     args = parser.parse_args(argv)
+    try:
+        protocol.validate_ap_interface(args.ap)
+    except protocol.ControlledProbeError as exc:
+        print("ERROR: " + exc.code, file=sys.stderr)
+        return 2
     if not args.readiness_only:
         print(json.dumps({
             "mode": "plan",
@@ -465,7 +474,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         report_prepared = True
         result = run_readiness_only(
             host=args.host, control_path=args.control_path,
-            sender_binary=args.sender_binary, sender_sha256=args.sender_sha256)
+            sender_binary=args.sender_binary, sender_sha256=args.sender_sha256,
+            ap=args.ap)
         protocol.private_atomic_write(args.report, result)
         print("READINESS_ONLY_OK")
         return 0

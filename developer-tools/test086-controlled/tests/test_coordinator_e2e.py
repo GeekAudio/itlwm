@@ -242,6 +242,7 @@ class FakePipe:
 class FakeRouterSession:
     scenario = "success"
     event_trace = []
+    last_ap = None
 
     def __init__(self, token):
         self.run_token = token
@@ -252,7 +253,8 @@ class FakeRouterSession:
 
     @classmethod
     def start(cls, *, host, control_path, sender_binary, sender_sha256,
-              run_token=None):
+              run_token=None, ap="wlan1"):
+        cls.last_ap = ap
         session = cls(run_token)
         monitor = protocol.parse_monitor_ready(MONITOR_LINE)
         sender = protocol.parse_sender_ready(READY_LINE)
@@ -340,7 +342,8 @@ class ControlledCoordinatorIntegrationTests(unittest.TestCase):
                     result = coordinator.run_controlled_once(
                         host="root@router", control_path="/private/tmp/fake.sock",
                         metadata_path=root / "metadata.json", sender_binary=sender_binary,
-                        sender_sha256=sender_sha, output_dir=output_dir / "run")
+                        sender_sha256=sender_sha, output_dir=output_dir / "run",
+                        ap="wlan7")
                     return result, None, list(FakePipe.event_trace)
                 except coordinator.CoordinatorError as error:
                     return None, error, list(FakePipe.event_trace)
@@ -355,6 +358,7 @@ class ControlledCoordinatorIntegrationTests(unittest.TestCase):
             "listener:LISTENER_RESULT",
         ])
         self.assertEqual(report["status"], "captured_no_peer_or_airdrop_proof")
+        self.assertEqual(FakeRouterSession.last_ap, "wlan7")
         self.assertTrue(report["complete"])
         self.assertFalse(report["partial"])
         self.assertTrue(report["boot_claim_consumed"])
@@ -485,12 +489,14 @@ class ControlledCoordinatorIntegrationTests(unittest.TestCase):
                 with mock.patch.object(coordinator, "_workspace_account",
                                        return_value=account), \
                         mock.patch.object(coordinator, "run_controlled_once",
-                                          return_value=result), \
+                                          return_value=result) as run_mock, \
                         contextlib.redirect_stdout(stdout):
                     code = coordinator.main([
                         "--run", "--host", "root@router", "--control-path",
-                        "/tmp/fake.sock", "--output-dir", str(output_dir)])
+                        "/tmp/fake.sock", "--ap", "wlan7",
+                        "--output-dir", str(output_dir)])
                 self.assertEqual(code, 2)
+                self.assertEqual(run_mock.call_args.kwargs["ap"], "wlan7")
                 self.assertEqual(stdout.getvalue().strip(), "CONTROLLED_RUN_PARTIAL")
                 saved = json.loads((output_dir / "controlled-run-private.json").read_text())
                 self.assertEqual(saved["status"], status)

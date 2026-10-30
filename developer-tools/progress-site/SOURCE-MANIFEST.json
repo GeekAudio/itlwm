@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "fcb059435d8b5caad493ea8db98aed1a3511ef50b04e2408534939afdc09f8d8"
+      "sha256": "16b631b2b2b6065ed7798d2ec1d5ac4becd2b40e6d91ca767f48769b8a871400"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "c7eb99baf2e575bb7be5fc4cf72e2129e84b75b160a00516f11b8bbf7d84cd9c"
+      "sha256": "754358dc32cd820de557ff9280bf1000afa6672cd379eca12cf5c23d00f4fa05"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-30T16:35:05.815082+08:00",
-  "runtime_scope": "Test086 boot1793346889:7 passed,4 partial,29 uncovered,0 failed; history24/40,net-new0. Approximately five-minute Wi-Fi baseline and separate two-minute post-window passed. Native149 ROC95.2ms completed with one ordinary beacon; no MIF/data. OpenWrt mt76 kernel panic interrupted sender receipts; send count and cleanup unknown. Exact module NULL dereference confirmed offline; probe causality unproven. No EFI write or repeat injection; reboot not requested. Host coordinator deadlines and completed-result collection fixed offline:25 targeted tests,24 passed,1 BusyBox environment skip. No additional runtime trial."
+  "updated_at": "2026-10-30T17:48:59.051957+08:00",
+  "runtime_scope": "Test086 current Intel acceptance remains 7 passed,4 partial,29 uncovered,0 failed; history24/40,net-new0. Paired mt76 NULL-vif source repair and exact ELF patch independently reviewed. Temporary router module load passed after dynamic AP-name fix; first attempt rolled back to stock. One local AF_PACKET frame accepted with no new panic and verified cleanup. Separate 16-second149 capture restored:161 records,160 decoded,1 invalid radiotap,0 AWDL data. Two separate120-second Wi-Fi observations passed. WAN/LAN and installed router module files unchanged; patch is RAM-only. EFI unchanged. Next Mac boot needed for new native receiver window; do not reboot router. No Intel data ingress or AirDrop proof."
 }
