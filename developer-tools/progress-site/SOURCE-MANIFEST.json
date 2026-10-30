@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "9a35e7d74afd2098a1e6009ff1fc60b057feaa38ffd1e1c064471c30e831217b"
+      "sha256": "bf1fadb4d82999f763c0e11c63de2f9ad5c13daf90fd62c43a254dbcea5f0860"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "6aaeb850d4bf775ba0681956397d506e2f066f86671214c89a6ae7f1535967f5"
+      "sha256": "e52572b71fa3501be4b9faef59cfa66ac70fbb88f085aeba3740d8083ea44e78"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -30,7 +30,7 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "0ccf696d44149c17f827a921f1bfa16de678fe94a7fed6236951b857fabdeb85"
+      "sha256": "2259186ba06edd44ee8c9a186930a829194dca6cce3d5b40f913ec8af4ac5d3b"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-30T12:25:36.467537+08:00",
-  "runtime_scope": "Current Test084:7 passed/5 partial/27 uncovered/1 failed; late watchdog found after a passed300s window. Test085 built/reviewed and backed-up deployed, awaiting reboot; no Test085 runtime/RX/AirDrop proof."
+  "updated_at": "2026-10-30T13:02:34.256637+08:00",
+  "runtime_scope": "Current Test085:9 passed/6 partial/25 uncovered/0 failed. Same-epoch channel149 MIF received, decoded and admitted; one unique router-PCAP/native packet tuple matched. Current firmware reports US MCC and ACTIVE149; experiment remains RX-only. Separate300s and120s Wi-Fi windows passed; long-term stability, native data return and AirDrop unverified. Historical24/40; new historical acceptance0."
 }
