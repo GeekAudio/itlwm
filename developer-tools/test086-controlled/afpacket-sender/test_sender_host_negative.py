@@ -72,9 +72,9 @@ class SenderHostNegativeTests(unittest.TestCase):
         self.assertEqual(array('radiotap_base'), bytes.fromhex(spec['radiotap_hex']))
         self.assertEqual(len(array('mpdu_base')), 96)
         self.assertEqual(len(array('radiotap_base')), 10)
-        run = self.run_sender(['--count', '3', '--interval-ms', '50'])
+        run = self.run_sender(['--count', '3', '--interval-ms', '80'])
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertIn('mode=dry-run frames=3 interval_ms=50', run.stdout)
+        self.assertIn('mode=dry-run frames=3 interval_ms=80', run.stdout)
         self.assertIn('frame=1 wifi_seq=291 awdl_seq=34305 bytes=106', run.stdout)
         self.assertIn('frame=2 wifi_seq=292 awdl_seq=34306 bytes=106', run.stdout)
         self.assertIn('frame=3 wifi_seq=293 awdl_seq=34307 bytes=106', run.stdout)
@@ -84,7 +84,8 @@ class SenderHostNegativeTests(unittest.TestCase):
     def test_default_invocation_is_dry_run_and_never_sends(self):
         run = self.run_sender()
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertIn('mode=dry-run frames=16 interval_ms=50', run.stdout)
+        self.assertIn('mode=dry-run frames=16 interval_ms=80', run.stdout)
+        self.assertIn('frames=16 interval_ms=80', run.stdout)
         self.assertEqual(run.stdout.count('frame='), 16)
         self.assertNotIn('READY', run.stdout)
         self.assertNotIn('SENDER_RESULT', run.stdout)
@@ -109,7 +110,7 @@ class SenderHostNegativeTests(unittest.TestCase):
         invalid = (
             ['--count', '0'], ['--count', '17'], ['--count', '-1'],
             ['--count', '1x'], ['--count', '1', '--count', '2'],
-            ['--interval-ms', '-1'], ['--interval-ms', '51'],
+            ['--interval-ms', '-1'], ['--interval-ms', '81'],
             ['--interval-ms', '5x'], ['--interval-ms', '1', '--interval-ms', '2'],
             ['--interface', 'name-too-long-123'], ['--interface', 'mon/0'],
             ['--interface', 'mon0', '--interface', 'mon1'],
@@ -129,7 +130,7 @@ class SenderHostNegativeTests(unittest.TestCase):
     def test_abort_before_go_reports_zero_frames_and_no_send(self):
         run = self.run_sender(self.send_args(), stdin='ABORT\n')
         self.assertEqual(run.returncode, 0, run.stderr)
-        self.assertIn('READY frames=16 interval_ms=50 mpdu_bytes=96', run.stdout)
+        self.assertIn('READY frames=16 interval_ms=80 mpdu_bytes=96', run.stdout)
         lines = [line for line in run.stdout.splitlines()
                  if line.startswith('{"event":"SENDER_RESULT"')]
         self.assertEqual(len(lines), 1)

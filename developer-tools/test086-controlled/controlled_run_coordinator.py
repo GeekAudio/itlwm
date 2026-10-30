@@ -4,8 +4,9 @@
 Default invocation is a static plan. ``--run`` is deliberately explicit and
 requires the private Test086 bundle plus an existing authenticated OpenWrt
 ControlMaster. The coordinator waits for native, router-sender, and awdl0
-listener readiness before the one shared boot claim is consumed. After the
-native actor confirms the claim, it sends the matching sender GO immediately.
+listener readiness before one shared boot claim is consumed. After the native
+actor confirms the claim and a successful helper property-set result, it sends
+the matching sender GO.
 """
 from __future__ import annotations
 
@@ -31,9 +32,10 @@ from typing import Any, Dict, List, Optional, Tuple
 TOOL_DIR = Path(__file__).resolve().parent
 ROOT = TOOL_DIR.parents[1]
 PRIVATE_ROOT = ROOT.parent / "IntelWirelessNative/research/test086-controlled-preparation-private"
+SENDER_BUILD_ROOT = ROOT.parent / "IntelWirelessNative/research/test086-boot1793355959-private/host-timing-tools/build"
 DEFAULT_METADATA = PRIVATE_ROOT / "native-controlled-probe-private.json"
-DEFAULT_SENDER_BINARY = PRIVATE_ROOT / "afpacket-sender/build/awdl_probe_sender-aarch64-linux-musl"
-DEFAULT_SENDER_SHA256 = "1864e8ada5857a86254d3bd2dfef1933568118828f91c950ded117e72b882aba"
+DEFAULT_SENDER_BINARY = SENDER_BUILD_ROOT / "awdl_probe_sender-aarch64-linux-musl"
+DEFAULT_SENDER_SHA256 = "1aaa5bafc0e6ddb2bb3fbd74d29d53612d3ab5cc72b65eb68d49e340e3c77a5f"
 DEFAULT_BUILD_RECEIPT = PRIVATE_ROOT / "native-build-report-private.json"
 NATIVE_WORKER = TOOL_DIR / "native_controlled_capture.py"
 LISTENER_SOURCE = TOOL_DIR / "awdl0_udp_probe_listener.c"
@@ -41,10 +43,16 @@ BUILD = "25G332-Test086"
 UUID = "C28DBCB5-DB75-3C08-B09C-05354B5D2B57"
 PROFILE = "native_awdl_rx149_data_input_only"
 SOURCE_KIND = "controlled_probe"
+HOST_PROBE_PROTOCOL = "setter_success_before_go_v2"
+SENDER_PROFILE = {
+    "frames_max": 16,
+    "interval_ms": 80,
+    "hard_deadline_ms": 2000,
+}
 TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
 MAX_LINE_BYTES = 16384
 NATIVE_READY_TIMEOUT = 75.0
-NATIVE_ARM_TIMEOUT = 5.0
+NATIVE_ARM_TIMEOUT = 6.0
 NATIVE_RESULT_TIMEOUT = 15.0
 LISTENER_READY_TIMEOUT = 5.0
 RUN_TOTAL_TIMEOUT = 50.0
@@ -201,6 +209,11 @@ NATIVE_ARMED_KEYS = {
     "event", "run_token", "claim_consumed", "retry_allowed",
     "helper_invocation_pending", "arm_property_accepted", "roc_start_observed",
 }
+NATIVE_ARM_FAILED_KEYS = {
+    "event", "run_token", "claim_consumed", "retry_allowed",
+    "helper_invocation_pending", "arm_property_accepted", "failure_code",
+    "helper_error_type",
+}
 NATIVE_ARM_RESULT_KEYS = {
     "event", "run_token", "exit_code", "arm_property_accepted", "helper_summary",
     "stderr_present", "helper_error_type",
@@ -237,11 +250,37 @@ def _parse_native_armed(line: str, token: str) -> Dict[str, Any]:
     value = _event_json(line, "NATIVE_ARMED", NATIVE_ARMED_KEYS)
     if (value.get("run_token") != token or value.get("claim_consumed") is not True or
             value.get("retry_allowed") is not False or
-            value.get("helper_invocation_pending") is not True or
-            value.get("arm_property_accepted") is not None or
+            value.get("helper_invocation_pending") is not False or
+            value.get("arm_property_accepted") is not True or
             value.get("roc_start_observed") is not False):
         raise CoordinatorError("NATIVE_ARMED_ACK_INVALID")
     return value
+
+
+def _parse_native_arm_failed(line: str, token: str) -> Dict[str, Any]:
+    value = _event_json(line, "NATIVE_ARM_FAILED", NATIVE_ARM_FAILED_KEYS)
+    failure_codes = {
+        "HELPER_EXIT_NONZERO", "ARM_PROPERTY_REJECTED",
+        "HELPER_RESULT_INVALID", "HELPER_INVOCATION_ERROR",
+    }
+    helper_error_type = value.get("helper_error_type")
+    failure_code = value.get("failure_code")
+    accepted = value.get("arm_property_accepted")
+    if (value.get("run_token") != token or
+            value.get("claim_consumed") is not True or
+            value.get("retry_allowed") is not False or
+            value.get("helper_invocation_pending") is not False or
+            not isinstance(failure_code, str) or failure_code not in failure_codes or
+            (accepted is not None and type(accepted) is not bool) or
+            (accepted is True and
+             failure_code != "HELPER_EXIT_NONZERO") or
+            (failure_code == "ARM_PROPERTY_REJECTED" and
+             accepted is not False) or
+            (helper_error_type is not None and
+             (not isinstance(helper_error_type, str) or
+              not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,79}", helper_error_type)))):
+        raise CoordinatorError("NATIVE_ARM_FAILED_INVALID")
+    return {key: value.get(key) for key in NATIVE_ARM_FAILED_KEYS}
 
 
 def _parse_native_arm_result(line: str, token: str) -> Dict[str, Any]:
@@ -463,6 +502,21 @@ def _private_default_run_dir(account) -> Path:
     return PRIVATE_ROOT / ("controlled-run-" + stamp)
 
 
+def _append_parent_clock_event(report: Dict[str, Any], event: str,
+                               clock: Any) -> None:
+    """Keep the legacy process clock and add a bounded Mach boot-clock pair."""
+    sample = clock.sample_pair()
+    process_ns = sample.get("process_monotonic_ns")
+    if type(process_ns) is not int or process_ns < 0:
+        # Preserve the existing field's source and semantics if a diagnostic
+        # sample cannot read Python's local monotonic clock.
+        process_ns = time.monotonic_ns()
+    report["events_parent_monotonic_ns"].append({
+        "event": event, "monotonic_ns": process_ns})
+    report["events_parent_boot_monotonic_ns"].append({
+        **sample, "event": event})
+
+
 def run_controlled_once(*, host: str, control_path: str, metadata_path: Path,
                         sender_binary: Path, sender_sha256: str,
                         output_dir: Path, ap: str = "wlan1") -> Dict[str, Any]:
@@ -489,21 +543,30 @@ def run_controlled_once(*, host: str, control_path: str, metadata_path: Path,
         raise CoordinatorError("SENDER_BINARY_NOT_FROZEN")
     _prepare_run_dir(output_dir, account)
     listener_binary = _compile_listener(output_dir)
+    clock_module = _load_module(
+        "test086_host_clock_domain", TOOL_DIR / "host_clock_domain.py")
+    parent_clock = clock_module.MachBootClock()
     run_token = __import__("secrets").token_hex(16)
     report: Dict[str, Any] = {
         "schema": "test086-controlled-run-private/v1",
         "candidate": BUILD,
         "source_ready_kind": SOURCE_KIND,
+        "host_probe_protocol": HOST_PROBE_PROTOCOL,
+        "sender_profile": dict(SENDER_PROFILE),
         "profile": PROFILE,
         "build_receipt_sha256": receipt_sha,
         "run_token": run_token,
         "boot_epoch": None,
         "events_parent_monotonic_ns": [],
+        "events_parent_boot_monotonic_ns": [],
+        "parent_clock": parent_clock.descriptor(),
+        "clock_samples": {"pre": parent_clock.sample_pair(), "post": None},
         "native_ready": None,
         "monitor_ready": None,
         "sender_ready": None,
         "listener_ready": None,
         "native_armed_ack": None,
+        "native_arm_failed": None,
         "sender_result": None,
         "sender_cleanup": None,
         "native_arm_result": None,
@@ -555,8 +618,7 @@ def run_controlled_once(*, host: str, control_path: str, metadata_path: Path,
         report["native_ready"] = {key: native_ready[key] for key in NATIVE_READY_KEYS
                                   if key != "event"}
         report["boot_epoch"] = native_ready["boot_epoch"]
-        report["events_parent_monotonic_ns"].append({
-            "event": "NATIVE_READY", "monotonic_ns": time.monotonic_ns()})
+        _append_parent_clock_event(report, "NATIVE_READY", parent_clock)
 
         try:
             sender, monitor_ready, sender_ready = router.RouterSenderSession.start(
@@ -566,8 +628,7 @@ def run_controlled_once(*, host: str, control_path: str, metadata_path: Path,
             raise CoordinatorError(error.code, error.evidence)
         report["monitor_ready"] = monitor_ready
         report["sender_ready"] = sender_ready
-        report["events_parent_monotonic_ns"].append({
-            "event": "ROUTER_SENDER_READY", "monotonic_ns": time.monotonic_ns()})
+        _append_parent_clock_event(report, "ROUTER_SENDER_READY", parent_clock)
 
         listener = ManagedPipe([str(listener_binary), "--listen", "T086RX01",
                                 "--run-token", run_token, "--recv-anyif"])
@@ -598,8 +659,7 @@ def run_controlled_once(*, host: str, control_path: str, metadata_path: Path,
             raise CoordinatorError(error.code, error.evidence)
         report["listener_ready"] = {key: value for key, value in listener_ready.items()
                                     if not key.endswith("_parsed")}
-        report["events_parent_monotonic_ns"].append({
-            "event": "AWDL_LISTENER_READY", "monotonic_ns": time.monotonic_ns()})
+        _append_parent_clock_event(report, "AWDL_LISTENER_READY", parent_clock)
 
         boot = native_ready["boot_epoch"]
         if (native_ready["claim_available"] is not True or
@@ -616,6 +676,17 @@ def run_controlled_once(*, host: str, control_path: str, metadata_path: Path,
         report["claim_outcome"] = "unknown_after_arm_request_no_retry"
         native.send_line("ARM " + run_token)
         armed_line = native.read_line(NATIVE_ARM_TIMEOUT)
+        if armed_line and armed_line.startswith("NATIVE_ARM_FAILED "):
+            arm_failed = _parse_native_arm_failed(armed_line, run_token)
+            report["native_arm_failed"] = arm_failed
+            report["boot_claim_consumed"] = True
+            report["claim_outcome"] = "consumed_no_retry"
+            armed = True
+            _append_parent_clock_event(report, "NATIVE_ARM_FAILED", parent_clock)
+            raise CoordinatorError("NATIVE_ARM_FAILED_NO_GO", {
+                "failure_code": arm_failed["failure_code"],
+                "arm_property_accepted": arm_failed["arm_property_accepted"],
+            })
         if armed_line is None or not armed_line.startswith("NATIVE_ARMED "):
             # The sender has not received GO. Do not consume another attempt.
             rejected = _parse_native_rejected(armed_line or "", run_token)
@@ -653,19 +724,19 @@ def run_controlled_once(*, host: str, control_path: str, metadata_path: Path,
         report["native_armed_ack"] = armed_ack
         report["boot_claim_consumed"] = True
         report["claim_outcome"] = "consumed_no_retry"
-        report["events_parent_monotonic_ns"].append({
-            "event": "NATIVE_ARMED_CLAIMED", "monotonic_ns": time.monotonic_ns()})
+        _append_parent_clock_event(report, "NATIVE_ARMED_ACK", parent_clock)
 
-        # The claim ACK is flushed before Swift helper invocation. Release
-        # sender GO immediately to overlap the 750 ms burst with helper start.
+        # NATIVE_ARMED now proves the helper returned KERN_SUCCESS for the
+        # property setter. It does not prove ROC START or peer/RF reception.
         try:
-            sender_completion = sender.go_once()
+            sender_completion = sender.go_once(on_control_write=lambda phase:
+                _append_parent_clock_event(
+                    report, "ROUTER_GO_WRITE_" + phase, parent_clock))
         except protocol.ControlledProbeError as error:
             raise CoordinatorError(error.code, error.evidence)
         report["sender_result"] = sender_completion["sender_result"]
         report["sender_cleanup"] = sender_completion["cleanup"]
-        report["events_parent_monotonic_ns"].append({
-            "event": "ROUTER_GO_RESULT", "monotonic_ns": time.monotonic_ns()})
+        _append_parent_clock_event(report, "ROUTER_GO_RESULT", parent_clock)
 
         arm_result_line = native.read_line(NATIVE_RESULT_TIMEOUT)
         if arm_result_line is None:
@@ -684,8 +755,7 @@ def run_controlled_once(*, host: str, control_path: str, metadata_path: Path,
                 listener_result_line, run_token=run_token)
         except protocol.ControlledProbeError as error:
             raise CoordinatorError(error.code, error.evidence)
-        report["events_parent_monotonic_ns"].append({
-            "event": "ALL_RESULTS_CAPTURED", "monotonic_ns": time.monotonic_ns()})
+        _append_parent_clock_event(report, "ALL_RESULTS_CAPTURED", parent_clock)
         report["ifnet_input_kpi_accepted"] = report["native_result"].get(
             "ifnet_input_kpi_accepted")
         report["udp_marker_received"] = report["listener_result"].get("marker_match") is True
@@ -807,6 +877,7 @@ def run_controlled_once(*, host: str, control_path: str, metadata_path: Path,
                 listener.terminate()
         if sender is not None and not sender.closed:
             router._terminate_process(sender.process)
+        report["clock_samples"]["post"] = parent_clock.sample_pair()
 
 
 def plan() -> Dict[str, Any]:
@@ -814,10 +885,12 @@ def plan() -> Dict[str, Any]:
         "mode": "plan",
         "candidate": BUILD,
         "source_ready_kind": SOURCE_KIND,
+        "host_probe_protocol": HOST_PROBE_PROTOCOL,
         "requires_phone_ready": False,
         "single_boot_claim": True,
         "sender_frames_max": 16,
-        "sender_interval_ms": 50,
+        "sender_interval_ms": 80,
+        "sender_profile": dict(SENDER_PROFILE),
         "sender_host_transmit_allowed": False,
         "no_argument_action": "none",
         "native_worker_source_available": NATIVE_WORKER.is_file(),

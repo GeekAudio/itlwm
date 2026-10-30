@@ -36,6 +36,11 @@ def native_ready(**changes):
 
 
 class FullCoordinatorTests(unittest.TestCase):
+    def test_six_second_ack_wait_leaves_grace_after_five_second_helper(self):
+        native_source = (TOOL_DIR / "native_controlled_capture.py").read_text()
+        self.assertEqual(coordinator.NATIVE_ARM_TIMEOUT, 6.0)
+        self.assertRegex(native_source, r"capture_output=True, text=True, timeout=5\)")
+
     def test_native_ready_requires_all_identity_and_safety_gates(self):
         ready = coordinator._parse_native_ready(native_ready())
         self.assertEqual(ready["boot_epoch"], 1793341000)
@@ -56,7 +61,7 @@ class FullCoordinatorTests(unittest.TestCase):
         value = {
             "event": "NATIVE_ARMED", "run_token": token,
             "claim_consumed": True, "retry_allowed": False,
-            "helper_invocation_pending": True, "arm_property_accepted": None,
+            "helper_invocation_pending": False, "arm_property_accepted": True,
             "roc_start_observed": False,
         }
         line = "NATIVE_ARMED " + json.dumps(value, separators=(",", ":"))
@@ -67,6 +72,35 @@ class FullCoordinatorTests(unittest.TestCase):
         with self.assertRaises(coordinator.CoordinatorError):
             coordinator._parse_native_armed(
                 "NATIVE_ARMED " + json.dumps(value, separators=(",", ":")), token)
+
+    def test_native_arm_failed_is_claim_consumed_and_non_retryable(self):
+        token = "0123456789abcdef0123456789abcdef"
+        value = {
+            "event": "NATIVE_ARM_FAILED", "run_token": token,
+            "claim_consumed": True, "retry_allowed": False,
+            "helper_invocation_pending": False, "arm_property_accepted": False,
+            "failure_code": "ARM_PROPERTY_REJECTED", "helper_error_type": None,
+        }
+        line = "NATIVE_ARM_FAILED " + json.dumps(value, separators=(",", ":"))
+        self.assertEqual(coordinator._parse_native_arm_failed(line, token)["failure_code"],
+                         "ARM_PROPERTY_REJECTED")
+        after_setter_failure = dict(
+            value, failure_code="HELPER_EXIT_NONZERO", arm_property_accepted=True)
+        self.assertTrue(coordinator._parse_native_arm_failed(
+            "NATIVE_ARM_FAILED " + json.dumps(
+                after_setter_failure, separators=(",", ":")), token)[
+                    "arm_property_accepted"])
+        for changes in ({"claim_consumed": False}, {"retry_allowed": True},
+                        {"helper_invocation_pending": True},
+                        {"arm_property_accepted": True},
+                        {"arm_property_accepted": 1}, {"failure_code": []},
+                        {"run_token": "f" * 32}):
+            invalid = dict(value, **changes)
+            with self.subTest(changes=changes), self.assertRaises(
+                    coordinator.CoordinatorError):
+                coordinator._parse_native_arm_failed(
+                    "NATIVE_ARM_FAILED " + json.dumps(
+                        invalid, separators=(",", ":")), token)
 
     def test_native_result_never_promotes_peer_or_airdrop(self):
         token = "0123456789abcdef0123456789abcdef"
@@ -122,6 +156,11 @@ class FullCoordinatorTests(unittest.TestCase):
         plan = json.loads(result.stdout)
         self.assertEqual(plan["mode"], "plan")
         self.assertEqual(plan["no_argument_action"], "none")
+        self.assertEqual(plan["host_probe_protocol"],
+                         "setter_success_before_go_v2")
+        self.assertEqual(plan["sender_profile"], {
+            "frames_max": 16, "interval_ms": 80, "hard_deadline_ms": 2000,
+        })
         self.assertFalse(plan["peer_receipt_proven"])
         self.assertFalse(plan["airdrop_proven"])
 

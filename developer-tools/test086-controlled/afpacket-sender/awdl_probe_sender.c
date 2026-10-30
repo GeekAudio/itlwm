@@ -23,7 +23,7 @@
 #endif
 
 #define MAX_FRAMES 16U
-#define MAX_INTERVAL_MS 50U
+#define MAX_INTERVAL_MS 80U
 #define TX_BUDGET_NS UINT64_C(2000000000)
 #define GO_TIMEOUT_MS 30000
 #define IFNAME_MAX_BYTES 15U
@@ -108,7 +108,7 @@ static bool parse_uint(const char *value, unsigned minimum, unsigned maximum,
 
 static void usage(FILE *stream, const char *program) {
     (void)fprintf(stream,
-        "Usage: %s [--count 1..16] [--interval-ms 0..50] "
+        "Usage: %s [--count 1..16] [--interval-ms 0..80] "
         "[--send --interface NAME --nonce 32hex --wait-go]\n"
         "Default: dry-run only. Sending requires explicit --send and gated nonce.\n",
         program);
@@ -118,7 +118,7 @@ static bool parse_options(int argc, char **argv, struct options *out,
                           bool *help_requested) {
     bool seen_send = false, seen_if = false, seen_count = false, seen_nonce = false;
     bool seen_interval = false, seen_wait = false;
-    *out = (struct options){.count = MAX_FRAMES, .interval_ms = 50U};
+    *out = (struct options){.count = MAX_FRAMES, .interval_ms = 80U};
     *help_requested = false;
     for (int i = 1; i < argc; ++i) {
         const char *arg = argv[i];

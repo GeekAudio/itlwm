@@ -37,7 +37,7 @@ router = load_module(
 
 TOKEN = "0123456789abcdef0123456789abcdef"
 READY_LINE = (
-    "READY frames=16 interval_ms=50 mpdu_bytes=96 radiotap_bytes=10 "
+    "READY frames=16 interval_ms=80 mpdu_bytes=96 radiotap_bytes=10 "
     "packet_bytes=106 udp_payload_bytes=8 tx_flags=NOACK|NOSEQNO "
     "hardware_honoring=unknown")
 MONITOR_LINE = (
@@ -103,8 +103,8 @@ def native_result_line(token, *, saved=True, status=None):
 def native_arm_result_line(token):
     return "NATIVE_ARM_RESULT " + json.dumps({
         "event": "NATIVE_ARM_RESULT", "run_token": token,
-        "exit_code": 0, "arm_property_accepted": False,
-        "helper_summary": {"arm_property_accepted": False},
+        "exit_code": 0, "arm_property_accepted": True,
+        "helper_summary": {"arm_property_accepted": True},
         "stderr_present": False, "helper_error_type": None,
         "arm_property_acceptance_is_not_roc_start": True,
         "retry_allowed": False,
@@ -115,8 +115,17 @@ def native_armed_line(token):
     return "NATIVE_ARMED " + json.dumps({
         "event": "NATIVE_ARMED", "run_token": token,
         "claim_consumed": True, "retry_allowed": False,
-        "helper_invocation_pending": True, "arm_property_accepted": None,
+        "helper_invocation_pending": False, "arm_property_accepted": True,
         "roc_start_observed": False,
+    }, separators=(",", ":"))
+
+
+def native_arm_failed_line(token, *, code="ARM_PROPERTY_REJECTED"):
+    return "NATIVE_ARM_FAILED " + json.dumps({
+        "event": "NATIVE_ARM_FAILED", "run_token": token,
+        "claim_consumed": True, "retry_allowed": False,
+        "helper_invocation_pending": False, "arm_property_accepted": False,
+        "failure_code": code, "helper_error_type": None,
     }, separators=(",", ":"))
 
 
@@ -204,6 +213,10 @@ class FakePipe:
             token = line.split(" ", 1)[1]
             if self.scenario == "ack_missing":
                 self.process.returncode = 2
+            elif self.scenario == "native_arm_failed":
+                self.lines.extend([native_arm_failed_line(token),
+                                   native_arm_result_line(token),
+                                   native_result_line(token)])
             elif self.scenario == "native_hang":
                 self.lines.extend([native_armed_line(token),
                                    native_arm_result_line(token)])
@@ -219,6 +232,7 @@ class FakePipe:
                     "terminal_unknown": "session_terminal_unknown_no_retry",
                     "post_capture_unknown": "post_capture_unknown_no_retry",
                 }.get(self.scenario)
+                self.event_trace.append("native:HELPER_COMPLETE")
                 self.lines.extend([native_armed_line(token),
                                    native_arm_result_line(token),
                                    native_result_line(token,
@@ -274,7 +288,7 @@ class FakeRouterSession:
             "sent": 0 if control == "ABORT" else 16,
             "payload_bytes": 96, "mpdu_bytes": 96, "radiotap_bytes": 10,
             "packet_bytes": 106, "udp_payload_bytes": 8,
-            "elapsed_ms": 0 if control == "ABORT" else 750,
+            "elapsed_ms": 0 if control == "ABORT" else 1200,
             "deadline_hit": False, "error_count": 0, "last_errno": 0,
             "stop_reason": "aborted_before_go" if control == "ABORT" else "complete",
             "tx_flags_requested": "NOACK|NOSEQNO", "hardware_honoring": "unknown",
@@ -291,13 +305,20 @@ class FakeRouterSession:
     def abort(self):
         return self._finish("ABORT")
 
-    def go_once(self):
+    def go_once(self, *, on_control_write=None):
         if self.scenario == "sender_error_native_exited":
             self.control_consumed = True
             self.closed = True
             self.event_trace.append("router:GO_ERROR")
             raise protocol.ControlledProbeError("REMOTE_PROTOCOL_TIMEOUT")
-        return self._finish("GO")
+        if on_control_write is not None:
+            on_control_write("BEGIN")
+        self.event_trace.append("router:GO_WRITE_BEGIN")
+        result = self._finish("GO")
+        self.event_trace.append("router:GO_WRITE_END")
+        if on_control_write is not None:
+            on_control_write("END")
+        return result
 
 
 class ControlledCoordinatorIntegrationTests(unittest.TestCase):
@@ -353,11 +374,24 @@ class ControlledCoordinatorIntegrationTests(unittest.TestCase):
         self.assertIsNone(error)
         self.assertEqual(events, [
             "native:NATIVE_READY", "router:MONITOR_READY", "router:SENDER_READY",
-            "listener:LISTENER_READY", "native:ARM", "native:NATIVE_ARMED",
-            "router:GO", "native:NATIVE_ARM_RESULT", "native:NATIVE_RESULT",
+            "listener:LISTENER_READY", "native:ARM", "native:HELPER_COMPLETE",
+            "native:NATIVE_ARMED",
+            "router:GO_WRITE_BEGIN", "router:GO", "router:GO_WRITE_END",
+            "native:NATIVE_ARM_RESULT", "native:NATIVE_RESULT",
             "listener:LISTENER_RESULT",
         ])
+        self.assertLess(events.index("native:HELPER_COMPLETE"),
+                        events.index("native:NATIVE_ARMED"))
+        boot_events = [item["event"] for item in
+                       report["events_parent_boot_monotonic_ns"]]
+        self.assertLess(boot_events.index("ROUTER_GO_WRITE_BEGIN"),
+                        boot_events.index("ROUTER_GO_WRITE_END"))
         self.assertEqual(report["status"], "captured_no_peer_or_airdrop_proof")
+        self.assertEqual(report["host_probe_protocol"],
+                         "setter_success_before_go_v2")
+        self.assertEqual(report["sender_profile"], {
+            "frames_max": 16, "interval_ms": 80, "hard_deadline_ms": 2000,
+        })
         self.assertEqual(FakeRouterSession.last_ap, "wlan7")
         self.assertTrue(report["complete"])
         self.assertFalse(report["partial"])
@@ -413,9 +447,26 @@ class ControlledCoordinatorIntegrationTests(unittest.TestCase):
         self.assertEqual(events, [
             "native:NATIVE_READY", "router:MONITOR_READY", "router:SENDER_READY",
             "listener:LISTENER_READY", "native:ARM", "native:NATIVE_ARMED",
-            "router:GO", "native:NATIVE_ARM_RESULT", "native:TERMINATE",
+            "router:GO_WRITE_BEGIN", "router:GO", "router:GO_WRITE_END",
+            "native:NATIVE_ARM_RESULT", "native:TERMINATE",
             "listener:LISTENER_RESULT",
         ])
+
+    def test_arm_failure_consumes_claim_aborts_sender_and_never_goes(self):
+        report, error, events = self.run_fake("native_arm_failed")
+        self.assertIsNone(report)
+        self.assertIsNotNone(error)
+        partial = error.partial_report
+        self.assertIn("NATIVE_ARM_FAILED_NO_GO", error.code)
+        self.assertTrue(partial["boot_claim_consumed"])
+        self.assertEqual(partial["claim_outcome"], "consumed_no_retry")
+        self.assertEqual(partial["native_arm_failed"]["failure_code"],
+                         "ARM_PROPERTY_REJECTED")
+        self.assertEqual(partial["sender_result"]["status"], "aborted")
+        self.assertEqual(partial["sender_result"]["sent"], 0)
+        self.assertNotIn("router:GO", events)
+        self.assertNotIn("router:GO_WRITE_BEGIN", events)
+        self.assertIn("router:ABORT", events)
 
     def test_sender_error_drains_exited_native_receipts_and_listener_result(self):
         report, error, events = self.run_fake("sender_error_native_exited")
@@ -454,8 +505,9 @@ class ControlledCoordinatorIntegrationTests(unittest.TestCase):
         self.assertTrue(report["partial"])
         self.assertFalse(report["native_result"]["report_saved"])
         self.assertEqual(report["listener_result"]["status"], "timeout_or_unmatched")
-        self.assertEqual(events[4:7], [
-            "native:ARM", "native:NATIVE_ARMED", "router:GO"])
+        self.assertEqual(events[4:9], [
+            "native:ARM", "native:HELPER_COMPLETE", "native:NATIVE_ARMED",
+            "router:GO_WRITE_BEGIN", "router:GO"])
 
     def test_unknown_native_runtime_status_stays_partial(self):
         for scenario, expected in (

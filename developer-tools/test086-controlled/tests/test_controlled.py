@@ -99,8 +99,14 @@ class ProtocolTests(unittest.TestCase):
         go_match = re.search(r"#define GO_TIMEOUT_MS (\d+)", sender_source)
         tx_match = re.search(r"#define TX_BUDGET_NS UINT64_C\((\d+)\)",
                              sender_source)
+        interval_match = re.search(r"#define MAX_INTERVAL_MS (\d+)U", sender_source)
+        default_match = re.search(r"\.interval_ms = (\d+)U", sender_source)
         self.assertIsNotNone(go_match)
         self.assertIsNotNone(tx_match)
+        self.assertIsNotNone(interval_match)
+        self.assertIsNotNone(default_match)
+        self.assertEqual(protocol.SENDER_INTERVAL_MS, int(interval_match.group(1)))
+        self.assertEqual(protocol.SENDER_INTERVAL_MS, int(default_match.group(1)))
         self.assertEqual(runner.READINESS_TIMEOUT_SECONDS, 24.0)
         self.assertEqual(runner.SENDER_GO_TIMEOUT_SECONDS * 1000,
                          int(go_match.group(1)))
@@ -115,7 +121,7 @@ class ProtocolTests(unittest.TestCase):
 
     def test_sender_ready_exact_contract(self):
         ready = protocol.parse_sender_ready(
-            "READY frames=16 interval_ms=50 mpdu_bytes=96 radiotap_bytes=10 "
+            "READY frames=16 interval_ms=80 mpdu_bytes=96 radiotap_bytes=10 "
             "packet_bytes=106 udp_payload_bytes=8 tx_flags=NOACK|NOSEQNO "
             "hardware_honoring=unknown")
         self.assertEqual(ready["send_started"], False)
@@ -124,6 +130,19 @@ class ProtocolTests(unittest.TestCase):
                 "READY frames=16 interval_ms=5 mpdu_bytes=96 radiotap_bytes=10 "
                 "packet_bytes=106 udp_payload_bytes=8 tx_flags=NOACK|NOSEQNO "
                 "hardware_honoring=unknown")
+        with self.assertRaises(protocol.ControlledProbeError):
+            protocol.parse_sender_ready(
+                "READY frames=16 interval_ms=50 mpdu_bytes=96 radiotap_bytes=10 "
+                "packet_bytes=106 udp_payload_bytes=8 tx_flags=NOACK|NOSEQNO "
+                "hardware_honoring=unknown")
+
+    def test_16_by_80ms_train_fits_unchanged_two_second_deadline(self):
+        self.assertEqual(protocol.SENDER_FRAMES, 16)
+        self.assertEqual(protocol.SENDER_INTERVAL_MS, 80)
+        self.assertEqual(protocol.SENDER_DEADLINE_SECONDS, 2.0)
+        span_ms = (protocol.SENDER_FRAMES - 1) * protocol.SENDER_INTERVAL_MS
+        self.assertEqual(span_ms, 1200)
+        self.assertLess(span_ms, protocol.SENDER_DEADLINE_SECONDS * 1000)
 
     def test_monitor_channel_direct_and_same_phy_fallback(self):
         fallback = (
@@ -174,6 +193,18 @@ class ProtocolTests(unittest.TestCase):
         failed = sender_result(status="failed", stop_reason="send_errno", error_count=1,
                                last_errno=5)
         self.assertEqual(protocol.parse_sender_result(failed)["status"], "failed")
+        with self.assertRaises(protocol.ControlledProbeError) as caught:
+            protocol.parse_sender_result(sender_result(
+                status="complete", frames_attempted=16, frames_completed=16,
+                sent=16, elapsed_ms=2001, stop_reason="complete"))
+        self.assertEqual(caught.exception.code,
+                         "SENDER_RESULT_DEADLINE_CONTRADICTION")
+        deadline_failure = sender_result(
+            status="failed", frames_attempted=1, frames_completed=1, sent=1,
+            elapsed_ms=2001, deadline_hit=True, error_count=1,
+            stop_reason="send_completed_after_budget")
+        self.assertEqual(protocol.parse_sender_result(deadline_failure)["status"],
+                         "failed")
 
     def test_cleanup_contract_rejects_mismatched_token(self):
         token = "0123456789abcdef0123456789abcdef"
@@ -244,6 +275,7 @@ class ProtocolTests(unittest.TestCase):
                                 capture_output=True, check=False)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("--wait-go", script)
+        self.assertIn("--interval-ms 80", script)
         self.assertNotIn('printf \'GO', script)
         self.assertNotIn("uci set", script)
         self.assertNotIn("set channel", script)

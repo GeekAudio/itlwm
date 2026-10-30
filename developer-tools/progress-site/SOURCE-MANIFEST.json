@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "16b631b2b2b6065ed7798d2ec1d5ac4becd2b40e6d91ca767f48769b8a871400"
+      "sha256": "b109c432eab2e473928b5e30deb6719c034cc0355879095c72189abb156fcbed"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "754358dc32cd820de557ff9280bf1000afa6672cd379eca12cf5c23d00f4fa05"
+      "sha256": "200168880838eb86445e709334e3ff18ee80ce202a8580d73e6c66787cc9bc8e"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-30T17:48:59.051957+08:00",
-  "runtime_scope": "Test086 current Intel acceptance remains 7 passed,4 partial,29 uncovered,0 failed; history24/40,net-new0. Paired mt76 NULL-vif source repair and exact ELF patch independently reviewed. Temporary router module load passed after dynamic AP-name fix; first attempt rolled back to stock. One local AF_PACKET frame accepted with no new panic and verified cleanup. Separate 16-second149 capture restored:161 records,160 decoded,1 invalid radiotap,0 AWDL data. Two separate120-second Wi-Fi observations passed. WAN/LAN and installed router module files unchanged; patch is RAM-only. EFI unchanged. Next Mac boot needed for new native receiver window; do not reboot router. No Intel data ingress or AirDrop proof."
+  "updated_at": "2026-10-30T19:07:02.382323+08:00",
+  "runtime_scope": "Test086 boot1793355959: 7 passed,4 partial,29 uncovered,0 failed; history24/40,net-new0. Wi-Fi300.002s/55 samples, en1 connectivity and separate120.001s/23 samples passed. Repaired router accepted16 local AF_PACKET writes over750ms, no error, cleanup and module/AP invariants passed. Owned149 ROC95.196ms contained an ordinary beacon descriptor; data counters and UDP remain0, per-packet receipt unpublished. Old process-local Python clocks cannot establish sender/ROC overlap. Host-only tools now setter_success_before_go_v2: setter-confirmed ACK before report I/O,16x80ms separately built sender,2s unchanged deadline, explicit Mach clock fields and independent empty-timeline classification. Python65 passed/1 environment skip, C9 passed; new runtime pending next Mac boot. No EFI/WAN/LAN changes; router RAM patch retained."
 }

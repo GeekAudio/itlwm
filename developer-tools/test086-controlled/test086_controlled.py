@@ -21,7 +21,11 @@ MINIMUM_BOOT_EPOCH_EXCLUSIVE = 1793340271
 PROFILE = "native_awdl_rx149_data_input_only"
 SOURCE_KIND = "controlled_probe"
 SENDER_FRAMES = 16
-SENDER_INTERVAL_MS = 50
+SENDER_INTERVAL_MS = 80
+# The metadata is part of the frozen native-kext build record. Its 50 ms
+# sender field remains historical; the separate private host sender binary
+# is pinned by its own SHA-256 and reports the 80 ms runtime contract.
+FROZEN_METADATA_SENDER_INTERVAL_MS = 50
 SENDER_DEADLINE_SECONDS = 2.0
 MPDU_BYTES = 96
 RADIOTAP_BYTES = 10
@@ -261,6 +265,9 @@ def parse_sender_result(line: str) -> Dict[str, Any]:
         raise ControlledProbeError("SENDER_RESULT_INVALID_COUNTER")
     if type(value.get("deadline_hit")) is not bool:
         raise ControlledProbeError("SENDER_RESULT_INVALID_DEADLINE")
+    if (value["elapsed_ms"] > int(SENDER_DEADLINE_SECONDS * 1000) and
+            value["deadline_hit"] is False):
+        raise ControlledProbeError("SENDER_RESULT_DEADLINE_CONTRADICTION")
     if value.get("stop_reason") not in {
             "aborted_before_go", "complete", "gate_eof_timeout_or_invalid_token",
             "post_go_control_or_stdin_closed", "send_errno", "short_write",
@@ -450,7 +457,7 @@ def validate_private_metadata(template: Dict[str, Any], *, boot_epoch: int,
         sender = {}
     if sender.get("frames_max") != SENDER_FRAMES:
         errors.append("sender_frame_limit")
-    if sender.get("interval_ms") != SENDER_INTERVAL_MS:
+    if sender.get("interval_ms") != FROZEN_METADATA_SENDER_INTERVAL_MS:
         errors.append("sender_interval")
     if sender.get("max_elapsed_seconds") != SENDER_DEADLINE_SECONDS:
         errors.append("sender_deadline")
@@ -700,7 +707,7 @@ if ! exec 3<&0; then
   printf 'REMOTE_ERROR code=sender_control_pipe_dup_failed\\n'
   exit 2
 fi
-"$BIN" --send --interface "$MON" --count 16 --interval-ms 50 --nonce "$RUN_TOKEN" --wait-go <&3 &
+"$BIN" --send --interface "$MON" --count 16 --interval-ms 80 --nonce "$RUN_TOKEN" --wait-go <&3 &
 SENDER_PID=$!
 wait "$SENDER_PID"
 SENDER_STATUS=$?

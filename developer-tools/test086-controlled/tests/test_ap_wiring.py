@@ -37,7 +37,7 @@ MONITOR_LINE = (
     "phy_single_channel_constraints_count=1 active_same_phy_channel_count=1 "
     "active_same_phy_channels=149 active_same_phy_frequencies_mhz=5745")
 SENDER_LINE = (
-    "READY frames=16 interval_ms=50 mpdu_bytes=96 radiotap_bytes=10 "
+    "READY frames=16 interval_ms=80 mpdu_bytes=96 radiotap_bytes=10 "
     "packet_bytes=106 udp_payload_bytes=8 tx_flags=NOACK|NOSEQNO "
     "hardware_honoring=unknown")
 

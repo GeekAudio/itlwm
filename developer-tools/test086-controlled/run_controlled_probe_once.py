@@ -258,7 +258,7 @@ class RouterSenderSession:
                 process.stdout.close()
             raise
 
-    def finish(self, control: str) -> Dict[str, Any]:
+    def finish(self, control: str, *, on_control_write=None) -> Dict[str, Any]:
         if self.closed or self.control_consumed:
             raise protocol.ControlledProbeError("SENDER_CONTROL_ALREADY_CONSUMED")
         if control not in {"ABORT", "GO"}:
@@ -267,8 +267,12 @@ class RouterSenderSession:
         try:
             assert self.process.stdin is not None
             tokenized = "ABORT\n" if control == "ABORT" else "GO " + self.run_token + "\n"
+            if on_control_write is not None:
+                on_control_write("BEGIN")
             self.process.stdin.write(tokenized.encode("ascii"))
             self.process.stdin.flush()
+            if on_control_write is not None:
+                on_control_write("END")
             result_line = _read_protocol_line(
                 self.selector, self.process, self.read_state, self.deadline)
             if result_line is None:
@@ -326,8 +330,8 @@ class RouterSenderSession:
     def abort(self) -> Dict[str, Any]:
         return self.finish("ABORT")
 
-    def go_once(self) -> Dict[str, Any]:
-        return self.finish("GO")
+    def go_once(self, *, on_control_write=None) -> Dict[str, Any]:
+        return self.finish("GO", on_control_write=on_control_write)
 
 
 def run_readiness_only(*, host: str, control_path: str, sender_binary: Path,

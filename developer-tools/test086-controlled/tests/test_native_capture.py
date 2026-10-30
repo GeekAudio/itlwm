@@ -23,6 +23,35 @@ SPEC.loader.exec_module(native)
 
 
 class NativeControlledCaptureTests(unittest.TestCase):
+    def test_arm_ack_is_success_only_after_helper_result_and_failures_are_terminal(self):
+        token = "0123456789abcdef0123456789abcdef"
+        event, fields = native._arm_gate_event(token, {
+            "exit_code": 0, "arm_property_accepted": True,
+            "helper_error_type": None,
+        })
+        self.assertEqual(event, "NATIVE_ARMED")
+        self.assertEqual(fields["run_token"], token)
+        self.assertTrue(fields["arm_property_accepted"])
+        self.assertFalse(fields["helper_invocation_pending"])
+        self.assertFalse(fields["roc_start_observed"])
+        for result, expected_code in (
+                ({"exit_code": 0, "arm_property_accepted": False,
+                  "helper_error_type": None}, "ARM_PROPERTY_REJECTED"),
+                ({"exit_code": None, "arm_property_accepted": None,
+                  "helper_error_type": "TimeoutExpired"},
+                 "HELPER_INVOCATION_ERROR"),
+                ({"exit_code": 0, "arm_property_accepted": None,
+                  "helper_error_type": None}, "HELPER_RESULT_INVALID"),
+                ({"exit_code": 1, "arm_property_accepted": True,
+                  "helper_error_type": None}, "HELPER_EXIT_NONZERO")):
+            with self.subTest(result=result):
+                event, fields = native._arm_gate_event(token, result)
+                self.assertEqual(event, "NATIVE_ARM_FAILED")
+                self.assertEqual(fields["failure_code"], expected_code)
+                self.assertTrue(fields["claim_consumed"])
+                self.assertFalse(fields["retry_allowed"])
+                self.assertFalse(fields["helper_invocation_pending"])
+
     def test_default_plan_does_not_start_native_worker(self):
         original = native._worker
         native._worker = lambda _args: self.fail("plan called worker")
@@ -96,6 +125,9 @@ class NativeControlledCaptureTests(unittest.TestCase):
         self.assertTrue(result["data_receipt"]["final"]["local_ifnet_input_kpi_accepted"])
         self.assertIsNone(native._guarded_ifnet_input_kpi(result))
         self.assertFalse(result["management_trace_u32"]["combined_valid"])
+        self.assertEqual(result["controlled_trace_review"]["status"],
+                         "invalid_or_not_applicable")
+        self.assertFalse(result["controlled_trace_review"]["airdrop_proven"])
 
     def test_ifnet_kpi_requires_valid_triplet_aggregate(self):
         evidence = {"data_receipt": {

@@ -67,6 +67,43 @@ def _json_line(event: str, fields: Dict[str, Any]) -> None:
           flush=True)
 
 
+def _arm_gate_event(run_token: str, helper_result: Dict[str, Any]
+                    ) -> Tuple[str, Dict[str, Any]]:
+    """Build the coordinator gate only from a completed Swift helper result."""
+    accepted = helper_result.get("arm_property_accepted")
+    exit_code = helper_result.get("exit_code")
+    helper_error_type = helper_result.get("helper_error_type")
+    common = {
+        "run_token": run_token,
+        "claim_consumed": True,
+        "retry_allowed": False,
+        "helper_invocation_pending": False,
+    }
+    if (exit_code == 0 and accepted is True and helper_error_type is None):
+        return "NATIVE_ARMED", {
+            **common,
+            "arm_property_accepted": True,
+            "roc_start_observed": False,
+        }
+    if exit_code is None:
+        failure_code = "HELPER_INVOCATION_ERROR"
+    elif exit_code != 0:
+        failure_code = "HELPER_EXIT_NONZERO"
+    elif accepted is False:
+        failure_code = "ARM_PROPERTY_REJECTED"
+    else:
+        failure_code = "HELPER_RESULT_INVALID"
+    if (not isinstance(helper_error_type, str) or
+            not re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,79}", helper_error_type)):
+        helper_error_type = None
+    return "NATIVE_ARM_FAILED", {
+        **common,
+        "arm_property_accepted": accepted if type(accepted) is bool else None,
+        "failure_code": failure_code,
+        "helper_error_type": helper_error_type,
+    }
+
+
 def plan() -> Dict[str, Any]:
     """Pure plan; deliberately does not import the hardware collector."""
     return {
@@ -492,10 +529,25 @@ def _derive_evidence(capture, trace_tool, post_samples):
             "peer_receipt_proven": False,
             "airdrop_proven": False,
         }
-    # Deliberately return all three products without using management-trace
+    management_review = None
+    try:
+        review_tool = _load_module(
+            "test086_controlled_trace_report",
+            TOOL_DIR / "controlled_trace_report.py")
+        management_review = review_tool.derive_controlled_trace_report(management)
+    except Exception as error:
+        management_review = {
+            "combined_valid": False,
+            "status": "controlled_trace_review_unavailable",
+            "error_type": type(error).__name__,
+            "peer_receipt_proven": False,
+            "airdrop_proven": False,
+        }
+    # Deliberately return independent data products without using management-trace
     # validity as a condition for retaining the data counters or receipt.
     return {"data_rx": data_rx, "data_receipt": receipt,
-            "management_trace_u32": management}
+            "management_trace_u32": management,
+            "controlled_trace_review": management_review}
 
 
 def _guarded_ifnet_input_kpi(evidence: Dict[str, Any]) -> Optional[bool]:
@@ -679,20 +731,6 @@ def _worker(args) -> int:
         report["boot_attempt_claim_filename"] = claim_path.name
         report["status"] = "claim_consumed_helper_pending"
         report["native_helper_invocation_pending"] = True
-        # This ACK is flushed after the one-boot claim exists and before the
-        # Swift helper starts. Do not make the one-time ACK depend on a second
-        # disk write: the atomic shared claim file is the durable claim record.
-        # The coordinator should immediately send GO with this same token;
-        # this message does not assert IORegistry arm success.
-        _json_line("NATIVE_ARMED", {
-            "run_token": run_token,
-            "claim_consumed": True,
-            "retry_allowed": False,
-            "helper_invocation_pending": True,
-            "arm_property_accepted": None,
-            "roc_start_observed": False,
-        })
-
         report["native_helper_invoked"] = True
         report["native_helper_invocation_pending"] = False
         report["status"] = "swift_helper_running_no_retry"
@@ -726,7 +764,15 @@ def _worker(args) -> int:
                 "helper_error_type": type(error).__name__,
             }
         report["swift_helper_result"] = helper_result
-        report["status"] = "helper_returned_sampling_post_state_no_retry"
+        arm_event, arm_fields = _arm_gate_event(run_token, helper_result)
+        report["status"] = (
+            "helper_returned_arm_accepted_no_retry" if arm_event == "NATIVE_ARMED"
+            else "helper_returned_arm_failed_no_retry")
+        report["native_arm_gate_result"] = {"event": arm_event, **arm_fields}
+        # The coordinator may send GO only after this success event. A failed
+        # setter produces a consumed-claim failure event, so the router gate
+        # is aborted and the boot claim remains spent.
+        _json_line(arm_event, arm_fields)
         try:
             _save_report(capture, report_path, report, account)
         except NativeCaptureError as error:
@@ -746,6 +792,7 @@ def _worker(args) -> int:
             report["native_awdl_data_rx_evidence"] = evidence["data_rx"]
             report["native_awdl_data_rx149_receipt_evidence"] = evidence["data_receipt"]
             report["management_trace_u32_evidence"] = evidence["management_trace_u32"]
+            report["controlled_trace_review"] = evidence["controlled_trace_review"]
             report["ifnet_input_kpi_accepted"] = _guarded_ifnet_input_kpi(evidence)
             report["current_owner_and_epochs_after"] = _read_current_owner(post_samples[-1])
             report["session_terminal_observed"] = _session_terminal(post_samples[-1])
