@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "b109c432eab2e473928b5e30deb6719c034cc0355879095c72189abb156fcbed"
+      "sha256": "a0c4adfbd3ab95617ee889e49b3f40dfb203cd4a8db5f7c28639e9d99c1b9251"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "200168880838eb86445e709334e3ff18ee80ce202a8580d73e6c66787cc9bc8e"
+      "sha256": "d2fd9da0e2054a6fc1bd2549de3c73c000c54a72d751d31dffbbcf1667731797"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-30T19:07:02.382323+08:00",
-  "runtime_scope": "Test086 boot1793355959: 7 passed,4 partial,29 uncovered,0 failed; history24/40,net-new0. Wi-Fi300.002s/55 samples, en1 connectivity and separate120.001s/23 samples passed. Repaired router accepted16 local AF_PACKET writes over750ms, no error, cleanup and module/AP invariants passed. Owned149 ROC95.196ms contained an ordinary beacon descriptor; data counters and UDP remain0, per-packet receipt unpublished. Old process-local Python clocks cannot establish sender/ROC overlap. Host-only tools now setter_success_before_go_v2: setter-confirmed ACK before report I/O,16x80ms separately built sender,2s unchanged deadline, explicit Mach clock fields and independent empty-timeline classification. Python65 passed/1 environment skip, C9 passed; new runtime pending next Mac boot. No EFI/WAN/LAN changes; router RAM patch retained."
+  "updated_at": "2026-10-30T19:32:41.801942+08:00",
+  "runtime_scope": "Test086 boot1793358806: 7 passed,4 partial,29 uncovered,0 failed; history24/40,net-new0. Wi-Fi300.003s/55 samples, en1 connectivity and separate120.003s/23 samples passed. Host protocol setter_success_before_go_v2 confirmed accepted setter ACK before GO. Router accepted16 local AF_PACKET writes over1200ms, no error, cleanup and module/AP invariants passed. Mach GO/response envelope contains the95.200ms ROC; per-packet RF overlap unknown. All owner-qualified RX entry/descriptor/data counts zero, no beacon this run, per-packet receipt not published, listener0. Next: offline owner-independent RX dispatch ledger and source RF evidence review; no further reboot requested. No EFI/WAN/LAN changes; router RAM patch and original backups retained."
 }
