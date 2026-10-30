@@ -15,6 +15,24 @@ constexpr uint64_t kCaptureSerial = 1ULL;
 constexpr uint32_t kWitnessBankCapacity = 8;
 constexpr uint32_t kWitnessCapacity = kWitnessBankCapacity * 2;
 
+// Marks the entire stop operation, including nested stop-device calls.
+// A fresh ARM must not infer idleness from an unchanged stop serial.
+class StopActivity {
+public:
+    explicit StopActivity(uint32_t *depth) noexcept : depth_(depth)
+    {
+        (void)__atomic_fetch_add(depth_, 1u, __ATOMIC_ACQ_REL);
+    }
+    ~StopActivity()
+    {
+        (void)__atomic_fetch_sub(depth_, 1u, __ATOMIC_RELEASE);
+    }
+    StopActivity(const StopActivity &) = delete;
+    StopActivity &operator=(const StopActivity &) = delete;
+private:
+    uint32_t *depth_;
+};
+
 enum class EventKind : uint32_t {
     Irq = 0,
     Drain = 1,

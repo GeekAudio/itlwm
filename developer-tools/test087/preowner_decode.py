@@ -118,6 +118,18 @@ SNAPSHOT_FIELD_INDEX = {
     "closed": 8,
     "closeReason": 9,
     "totalEvents": 10,
+    "lockContentionLoss": 56,
+    "invalidSampleLoss": 57,
+    "generationMismatchLoss": 58,
+    "deadlineRejectCount": 59,
+    "clockReversalLoss": 60,
+    "witness149Overflow": 61,
+    "witnessNon149Overflow": 62,
+    "lossCount": 63,
+    "overflow": 64,
+    "counterOverflow": 65,
+    "witness149Count": 66,
+    "witnessNon149Count": 67,
 }
 EVENT_FIELD_INDEX = {name: index for index, (name, _) in enumerate(EVENT_FIELDS)}
 assert EVENT_WORDS == 39
@@ -383,9 +395,10 @@ def _validate_snapshot(snapshot: Dict[str, Any]) -> None:
         "witness149Overflow",
         "witnessNon149Overflow",
     )
-    expected_loss = 0
+    loss_sum = 0
     for field in loss_fields:
-        expected_loss = _saturating_add(expected_loss, snapshot[field])
+        loss_sum += snapshot[field]
+    expected_loss = min(0xFFFFFFFF, loss_sum)
     if snapshot["lossCount"] != expected_loss:
         raise DecodeError("loss counters do not match lossCount")
 
@@ -393,7 +406,11 @@ def _validate_snapshot(snapshot: Dict[str, Any]) -> None:
         snapshot["witness149Overflow"] > 0 or
         snapshot["witnessNon149Overflow"] > 0
     )
-    if snapshot["overflow"] != (snapshot["counterOverflow"] or overflow_by_witness):
+    expected_overflow = (
+        snapshot["counterOverflow"] or overflow_by_witness or
+        loss_sum > 0xFFFFFFFF
+    )
+    if snapshot["overflow"] != expected_overflow:
         raise DecodeError("overflow flag disagrees with loss counters")
     if snapshot["counterOverflow"]:
         counters = list(kind_counts.values()) + list(class_counts.values())

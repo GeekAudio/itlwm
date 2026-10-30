@@ -7922,14 +7922,20 @@ IOReturn ItlIwx::nativeP2pArmProbe()
             uint64_t absolute = 0, nanos = 0;
             clock_get_uptime(&absolute);
             absolutetime_to_nanoseconds(absolute, &nanos);
-            const bool observed = nativeRxPreOwner_.begin(nanos / 1000ULL,
+            const auto observerStopActive = [this]() {
+                return __atomic_load_n(&nativeRxPreOwnerStopDepth_, __ATOMIC_ACQUIRE) != 0 ||
+                    (__atomic_load_n(&com.sc_flags, __ATOMIC_ACQUIRE) & IWX_FLAG_SHUTDOWN) != 0 ||
+                    __atomic_load_n(&nativeLifecycleTearingDown_, __ATOMIC_ACQUIRE) != 0;
+            };
+            const bool observed = !observerStopActive() &&
+                nativeRxPreOwner_.begin(nanos / 1000ULL,
                 uint32_t(__atomic_load_n(&com.sc_generation, __ATOMIC_ACQUIRE)));
             if (observed)
                 __atomic_store_n(&nativeRxPreOwnerArmed_, 1u, __ATOMIC_RELEASE);
             if (observed &&
                 (observerStopSerial != __atomic_load_n(
                      &nativeRxPreOwnerStopSerial_, __ATOMIC_ACQUIRE) ||
-                 __atomic_load_n(&nativeLifecycleTearingDown_, __ATOMIC_ACQUIRE)))
+                 observerStopActive()))
                 (void)nativeRxPreOwner_.close(nanos / 1000ULL,
                     NativeRxPreOwner::CloseReason::Stop);
             const bool observerReady = observed && nativeRxPreOwner_.enabled();

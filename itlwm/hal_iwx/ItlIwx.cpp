@@ -1717,6 +1717,7 @@ detach(IOPCIDevice *device)
 #ifdef AIRPORT_TAHOE
     __atomic_store_n(&nativeLifecycleTearingDown_, 1u, __ATOMIC_RELEASE);
 #if defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+    NativeRxPreOwner::StopActivity observerStopActivity(&nativeRxPreOwnerStopDepth_);
     tahoeRxPreOwnerStop();
 #endif
     tahoeScanOnline(false);
@@ -5011,6 +5012,7 @@ int ItlIwx::
 iwx_stop_device(struct iwx_softc *sc)
 {
 #if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+    NativeRxPreOwner::StopActivity observerStopActivity(&nativeRxPreOwnerStopDepth_);
     tahoeRxPreOwnerStop();
 #endif
 #if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
@@ -15843,6 +15845,7 @@ iwx_stop(struct _ifnet *ifp, IwxResetTrace::ResetReason reason)
 #ifdef AIRPORT_TAHOE
     const uint32_t linkResetOldState = static_cast<uint32_t>(ic->ic_state);
 #if defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+    NativeRxPreOwner::StopActivity observerStopActivity(&nativeRxPreOwnerStopDepth_);
     tahoeRxPreOwnerStop();
 #endif
     const uint32_t linkResetReason = static_cast<uint32_t>(reason);

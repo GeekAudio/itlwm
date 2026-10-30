@@ -585,6 +585,7 @@ public:
     NativeRxPreOwner::Observer nativeRxPreOwner_{};
     uint32_t nativeRxPreOwnerArmed_ {0};
     uint64_t nativeRxPreOwnerStopSerial_ {0};
+    uint32_t nativeRxPreOwnerStopDepth_ {0};
     bool nativeRxPreOwnerPublished_ {false};
     NativeRxPreOwner::Snapshot nativeRxPreOwnerPublishSnapshot_{};
     uint64_t nativeRxPreOwnerPublishWords_[1024] {};

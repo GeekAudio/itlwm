@@ -250,6 +250,26 @@ class TestPreownerWire(unittest.TestCase):
                 with self.assertRaises(preowner_decode.DecodeError):
                     preowner_decode.decode_blob(malformed)
 
+    def test_aggregate_loss_sum_overflow_matches_cpp_snapshot_contract(self) -> None:
+        mixed = self.records[0]
+        snapshot_start = preowner_decode.HEADER_WORDS
+
+        def with_field(blob: bytes, field: str, value: int) -> bytes:
+            return replace_word(
+                blob,
+                snapshot_start + preowner_decode.SNAPSHOT_FIELD_INDEX[field],
+                value,
+            )
+
+        aggregate_overflow = with_field(mixed, "lockContentionLoss", 0x80000000)
+        aggregate_overflow = with_field(aggregate_overflow, "invalidSampleLoss", 0x80000000)
+        aggregate_overflow = with_field(aggregate_overflow, "lossCount", 0xFFFFFFFF)
+        aggregate_overflow = with_field(aggregate_overflow, "overflow", 1)
+        decoded = preowner_decode.decode_blob(aggregate_overflow)["snapshot"]
+        self.assertFalse(decoded["counterOverflow"])
+        self.assertEqual(decoded["lossCount"], 0xFFFFFFFF)
+        self.assertTrue(decoded["overflow"])
+
 
 if __name__ == "__main__":
     unittest.main()

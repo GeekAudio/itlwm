@@ -1,0 +1,80 @@
+{
+  "candidate": "25G332-Test087",
+  "excluded": [
+    "private build and runtime receipts",
+    "generated disarmed runtime metadata",
+    "compiled sender/listener binaries and kext archives",
+    "device logs, captures, and evidence blobs",
+    "EFI configuration and backups",
+    "router credentials or connection profiles",
+    "machine-specific absolute paths and boot identifiers"
+  ],
+  "frozen_test086_dependencies": {
+    "files": {
+      "developer-tools/test086-controlled/afpacket-sender/Makefile": {
+        "sha256": "54be64969a3116e0def07ed8940c9ec7ff116c3fafaab05e1d8b2f88987ebd70",
+        "use": "Frozen sender build recipe; compiled router binary is private and excluded."
+      },
+      "developer-tools/test086-controlled/afpacket-sender/awdl_probe_sender.c": {
+        "sha256": "c10926f5e9a177dc7b6820b63513b0cf72489db9c76387f91290ee2079381c4b",
+        "use": "Frozen AF_PACKET sender source; compiled router binary is private and excluded."
+      },
+      "developer-tools/test086-controlled/awdl0_udp_probe_listener.c": {
+        "sha256": "0cba44b3faf635ddb6f33d62f5d7bc46e75bb2dfea7b8bd2f54e1b80a7c8273f",
+        "use": "Frozen UDP listener source compiled by the Test087 coordinator."
+      },
+      "developer-tools/test086/capture_test076_resident_data_once.py": {
+        "sha256": "ec718f504e2b0d092b69798e86bc55a458c6b9c4ce4925d5f3551a9d9862fa2b",
+        "use": "Transitive frozen parser/guard helpers imported by the Test086 helper module."
+      },
+      "developer-tools/test086/capture_test086_receive149_once.py": {
+        "sha256": "1d321854e12e23655589784b2d511f2da70d2ea7558c0752046284698eb82c8a",
+        "use": "Frozen helper surface reused for properties, guarded evidence, claims, helper compilation, and private report handling; Test087 does not call the Test086 hardware preflight."
+      },
+      "developer-tools/test086/probe_p2p_result.py": {
+        "sha256": "7d41e4c5d236325e4cfe235717048030ab80d8f97392ac37307c9bf82603a732",
+        "use": "Transitive frozen identity parsing dependency."
+      },
+      "developer-tools/test086/probe_wifi_rate.py": {
+        "sha256": "6e802a71ebeb5b9010ae0e0f7f0edd6f2782c51e50d8a5d566492c996efd9ca0",
+        "use": "Transitive frozen property-reading dependency."
+      },
+      "developer-tools/test086/tools/awdl_ioreg_u32.py": {
+        "sha256": "4a4fef3e2ac9189ab53fe93a39a5f183c6081a1b10c69a5901d06b495f1d3ff3",
+        "use": "Frozen read-only IORegistry scalar normalization imported by the Test087 collector."
+      },
+      "developer-tools/test086/tools/openwrt_capture_once.py": {
+        "sha256": "7c7b750604acf3c18372600084bcf6a899f3b8c2e0c364ebb6a1129d77dbeac2",
+        "use": "Frozen OpenWrt transport/session support used by the Test087 sender coordinator."
+      }
+    },
+    "policy": "Frozen source dependencies are hash-pinned; no Test086 source is copied or modified by this manifest."
+  },
+  "offline_test_fixtures": {
+    "native/rx_preowner_observation.hpp": "fd9cded795f10d458383e597f02c7fc3e57cedac7959e44277e5b7d41147b248",
+    "native/rx_preowner_wire.hpp": "3aaeed745a7ef8887366cbdde2b209416a3d1545bbb9840e5dd9f980d0279594",
+    "native/tests/test087_preowner_wire.cpp": "27cc0ab8b2842c9b2cdccdbf362162e0c2dc65450057a26919ce0141cabbe496"
+  },
+  "runtime_sources": {
+    "developer-tools/test087/README.md": "92d143ee7afda1e5e30e857af3416cb5e28671cc2f7d3faa319dea2b4691d16e",
+    "developer-tools/test087/arm_p2p_rx149_test087.swift": "54336cda1946c6b4b0dbdefbfc6112a4ee76352179a141545caee7d656ee9e31",
+    "developer-tools/test087/controlled_run_coordinator.py": "34b68952a836b4acb31f5fae845bfbf3cc07238c4e256263228028b76cff9d88",
+    "developer-tools/test087/controlled_trace_report.py": "e330fbcb92788f928a0895bd34cf471552fa9151f31910eff751a85c8f58cd14",
+    "developer-tools/test087/finalize_test087_runtime_binding.py": "be57a550aba41c58faef53eb7b41987183c6f5de4dcd3889026144042963c206",
+    "developer-tools/test087/host_clock_domain.py": "8abb0390d135c36eba87e95ea0cfdd6850f48258c7c6fbb5ab2fe98984fc7a1c",
+    "developer-tools/test087/native_controlled_capture.py": "db4fb18bb5d1a70cb054f81abd223f1483476e0b19719e4f1fc5ed12efb69266",
+    "developer-tools/test087/preowner_decode.py": "7e89f9683add17a0127da75d3e0c8ded2392b5d1ca01b257d8f44ca69620b8e3",
+    "developer-tools/test087/run_controlled_probe_once.py": "3dac10d838093c8a7e83270dada59f9bd6c238fa4d070190a78a68c2a218b831",
+    "developer-tools/test087/test087_controlled.py": "44f15b4e1e7b4d9b1d4d20d8aebfdbffbda1b5acaa06ad29afe1077f585df16a",
+    "developer-tools/test087/tests/test_preowner_wire.py": "3e6bedb9f91c043b63a157d20a4dfa6f9d3ca8324816b2aeac7bba1e8cdb44bc",
+    "developer-tools/test087/tests/test_test087_runtime.py": "0dd403c277abf6dc7da89ba2833cf97a0143b522707d213d396068949dc48cba"
+  },
+  "schema": 1,
+  "scope": "Public Test087 runtime tooling, offline fixtures, and hash-pinned frozen Test086 source dependencies.",
+  "validation_scope": {
+    "finalizer": "read-only --plan validated the final build receipt and source map; no runtime binding was written",
+    "hardware_rf_or_efi_operation": false,
+    "offline_runtime_and_wire_tests": "13 tests passed",
+    "swift_helper_typecheck": "passed"
+  }
+}

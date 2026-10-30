@@ -95,6 +95,7 @@ def make_harness() -> str:
 #include "native/rx_preowner_observation.hpp"
 
 using namespace NativeRxPreOwner;
+static constexpr uint32_t IWX_FLAG_SHUTDOWN = 0x20u;
 static int gBooleanToken;
 static void *const kOSBooleanTrue = &gBooleanToken;
 static uint64_t gClockAbsoluteNs = 1000000ULL;
@@ -189,8 +190,12 @@ public:
     ObserverProxy nativeRxPreOwner_;
     volatile uint32_t nativeRxPreOwnerArmed_ = 0;
     volatile uint64_t nativeRxPreOwnerStopSerial_ = 0;
+    uint32_t nativeRxPreOwnerStopDepth_ = 0;
     volatile uint32_t nativeLifecycleTearingDown_ = 0;
-    struct { volatile uint32_t sc_generation = 7; } com;
+    struct {
+        volatile uint32_t sc_generation = 7;
+        volatile uint32_t sc_flags = 0;
+    } com;
 
     void runArm(FakeController *controller) {
         @@STOP_SERIAL_SAMPLE@@
@@ -305,8 +310,15 @@ static void testTeardownBeforeAndAfterArmed() {
         owner.nativeLifecycleTearingDown_ = 1;
         gArmedAddress = &owner.nativeRxPreOwnerArmed_;
         owner.runArm(&controller);
-        checkStopped(owner, controller, 1,
-                     "teardown before arm is detected after begin");
+        check(owner.nativeRxPreOwnerArmed_ == 0,
+              "teardown before ARM entry blocks observer begin");
+        check(controller.armAccepted == 0,
+              "teardown before ARM entry is not acknowledged");
+        Snapshot snapshot{};
+        check(!owner.nativeRxPreOwner_.snapshot(1100, &snapshot),
+              "teardown before ARM entry creates no capture");
+        check(owner.nativeRxPreOwner_.closeCalls == 0,
+              "teardown before ARM entry needs no close call");
         gArmedAddress = nullptr;
     }
     {
@@ -342,6 +354,62 @@ static void testFailedBeginDoesNotClearExistingArmed() {
     gArmedAddress = nullptr;
 }
 
+static void testStopBeforeEntryWithShutdownSet() {
+    ItlIwx owner;
+    FakeController controller;
+    owner.tahoeRxPreOwnerStop();
+    owner.com.sc_flags = IWX_FLAG_SHUTDOWN;
+    check(owner.nativeRxPreOwnerStopSerial_ == 1,
+          "stop before arm advances serial");
+    owner.runArm(&controller);
+    check(owner.nativeRxPreOwnerStopSerial_ == 1,
+          "ARM samples the already-advanced stop serial");
+    check(owner.nativeRxPreOwnerStopDepth_ == 0,
+          "stop operation has already returned");
+    check(owner.nativeRxPreOwnerArmed_ == 0,
+          "shutdown at ARM entry blocks observer begin");
+    check(controller.armAccepted == 0,
+          "shutdown at ARM entry is not acknowledged");
+    Snapshot snapshot{};
+    check(!owner.nativeRxPreOwner_.snapshot(1100, &snapshot),
+          "shutdown at ARM entry creates no observer capture");
+}
+
+static void testNestedStopActivityBlocksArmAndReturnsDepthToZero() {
+    ItlIwx owner;
+    FakeController controller;
+    {
+        NativeRxPreOwner::StopActivity outer(&owner.nativeRxPreOwnerStopDepth_);
+        check(__atomic_load_n(&owner.nativeRxPreOwnerStopDepth_, __ATOMIC_ACQUIRE) == 1,
+              "outer StopActivity increments depth");
+        {
+            NativeRxPreOwner::StopActivity inner(&owner.nativeRxPreOwnerStopDepth_);
+            check(__atomic_load_n(&owner.nativeRxPreOwnerStopDepth_, __ATOMIC_ACQUIRE) == 2,
+                  "nested StopActivity increments depth");
+            owner.runArm(&controller);
+            check(owner.nativeRxPreOwnerArmed_ == 0,
+                  "nonzero stop depth blocks observer begin");
+            check(controller.armAccepted == 0,
+                  "nonzero stop depth is not acknowledged");
+            Snapshot snapshot{};
+            check(!owner.nativeRxPreOwner_.snapshot(1100, &snapshot),
+                  "nonzero stop depth creates no observer capture");
+        }
+        check(__atomic_load_n(&owner.nativeRxPreOwnerStopDepth_, __ATOMIC_ACQUIRE) == 1,
+              "inner StopActivity decrements depth once");
+    }
+    check(__atomic_load_n(&owner.nativeRxPreOwnerStopDepth_, __ATOMIC_ACQUIRE) == 0,
+          "nested StopActivity leaves depth at zero");
+    owner.runArm(&controller);
+    check(owner.nativeRxPreOwnerArmed_ == 1,
+          "ARM is allowed after every StopActivity scope exits");
+    check(controller.armAccepted == 1,
+          "observer reports ready after stop depth returns to zero");
+    const Snapshot snapshot = snapshotAt(owner, 1100);
+    check(snapshot.active == 1 && snapshot.closed == 0,
+          "post-stop-depth ARM starts a fresh capture");
+}
+
 int main() {
     std::fprintf(stderr, "normal\n");
     testNormalArm();
@@ -355,6 +423,8 @@ int main() {
     testTeardownBeforeAndAfterArmed();
     std::fprintf(stderr, "failed-begin\n");
     testFailedBeginDoesNotClearExistingArmed();
+    testStopBeforeEntryWithShutdownSet();
+    testNestedStopActivityBlocksArmAndReturnsDepthToZero();
     std::puts("PASS Test087 arm-stop interleavings");
     return 0;
 }
@@ -405,6 +475,8 @@ class ArmStopInterleavings(unittest.TestCase):
                 if isinstance(output, bytes):
                     output = output.decode("utf-8", "replace")
                 self.fail("interleaving fixture hung after: " + str(output))
+            except subprocess.CalledProcessError as error:
+                self.fail("interleaving fixture failed: " + str(error.stdout))
             self.assertIn("PASS Test087 arm-stop interleavings", completed.stdout)
 
 
