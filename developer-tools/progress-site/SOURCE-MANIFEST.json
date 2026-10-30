@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "b168b5a771432827b5d584303a9cfa05ebd8e6b0ffc673899a7d6b5561a4231a"
+      "sha256": "a8c30ed5b5a480ca7c60dceea3b89bbb62b4bf1c4478ccfbfce97248b02e814b"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "ef1193d407ccc556cdbe1efaacca7441cd27511d55651f07072b814224cb2353"
+      "sha256": "5348aac3db08df1fe3df9009674ded8dcf5cb6fe9b4b5ee7e3697c4bfc691663"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -30,7 +30,7 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "88a221f691aa1022d20f3f72638acf03d9de234e1792e7d47baf65f947980354"
+      "sha256": "980393e8547624472e15d7d208ed90255f517335dec77c21124c86ae29258db9"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-31T05:20:25.322901+08:00",
-  "runtime_scope": "Test091 was built, reviewed and deployed with a verified full EFI backup; only AirportItlwm.kext changed. The currently running Test090 has one recorded spontaneous link loss and later recovery. Two separate 15-minute passive windows subsequently passed (163 samples each); they do not erase that failure or establish a periodic cause. Test091 adds bounded key/update/disconnect records and RX rejection counters, with original authentication and receive conditions retained. 19 host checks, 35 compile-profile checks and independent source/RX reviews passed. New runtime and AirDrop acceptance remain unverified; current Test090 matrix stays 4 passed, 0 partial, 35 uncovered, 1 failed. No RF diagnostic was triggered in this preparation turn."
+  "updated_at": "2026-10-31T05:51:56.055799+08:00",
+  "runtime_scope": "Test091 loaded successfully. A 300.002-second/54-sample Wi-Fi baseline and a later 120.004-second/23-sample observation passed, along with interface-bound HTTP/HTTPS requests. Early boot still recorded two RUN-to-INIT retirements and a firmware software error; long-term stability and DNS resolution were not established. RX149 preflight stopped before helper, claim, ARM or sender because data-input readiness remained disabled. Source and independent review support a sticky input fence after an earlier error; safe versioned recovery remains to be implemented. No RF receipt, native inbound data or AirDrop acceptance is claimed. Current matrix: 4 passed, 1 partial, 35 uncovered, 0 failed; historical 24/40 retained, net new 0. No EFI or router configuration changes this turn."
 }
