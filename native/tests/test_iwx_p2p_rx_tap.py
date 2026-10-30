@@ -22,7 +22,7 @@ while depth:
     end += 1
 method = text[start:end]
 assert ('device_timestamp, true, rxMacPhyIndex,\n'
-        '                      rxMacPhyIndexPresent);' in method)
+        '                      rxMacPhyIndexPresent, originalData);' in method)
 assert 'tahoe_awdl_rx_stage_counters_.record(' in method
 assert 'tahoe_awdl_rx_stage_counters_.recordData(' in method
 assert 'NativeAwdlData::isAwdlDataCandidate(' in method
@@ -35,6 +35,7 @@ fixture = r'''
 #include <cstddef>
 #include <cstdlib>
 #include "native/awdl_data_frame.hpp"
+#include "native/p2p_rx149_data_input.hpp"
 #define AIRPORT_TAHOE 1
 #define NBPFILTER 0
 #define IEEE80211_FC1_PROTECTED 0x40
@@ -76,6 +77,7 @@ struct ItlIwx {
     uint16_t sawChannel=0;
     uint32_t sawGp2=0; bool sawGp2Present=false;
     uint32_t sawRxMacPhyIndex=0; bool sawRxMacPhyIndexPresent=false;
+    const NativeP2PRx149DataInput::OriginalDescriptor *sawOriginalData=nullptr;
     int iwx_ccmp_decap(iwx_softc*,mbuf_t m,ieee80211_node*,ieee80211_rxinfo*) {
         if(decapFails)return 1;
         m->bytes[1]&=~IEEE80211_FC1_PROTECTED;
@@ -84,22 +86,28 @@ struct ItlIwx {
     void tahoeP2pTapAction(iwx_softc*,const uint8_t*,size_t length,
                            bool protectedFrame,uint16_t channel,uint32_t gp2,
                            bool gp2Present,uint32_t rxMacPhyIndex,
-                           bool rxMacPhyIndexPresent) {
+                           bool rxMacPhyIndexPresent,
+                           const NativeP2PRx149DataInput::OriginalDescriptor *originalData) {
         assert(inputs==0&&length==64); ++taps; sawProtected=protectedFrame;sawChannel=channel;
         sawGp2=gp2;sawGp2Present=gp2Present;
         sawRxMacPhyIndex=rxMacPhyIndex;
         sawRxMacPhyIndexPresent=rxMacPhyIndexPresent;
+        sawOriginalData=originalData;
         if(tapDrops)return; // A rejected/full side queue never owns the packet.
     }
     void iwx_rx_frame(iwx_softc*,mbuf_t,int,uint32_t,int,int,uint32_t,
                       ieee80211_rxinfo*,mbuf_list*,uint32_t=0,uint8_t=0,
-                      uint32_t=0,bool=false);
+                      uint32_t=0,bool=false,
+                      const NativeP2PRx149DataInput::OriginalDescriptor * = nullptr);
 };
 '''
 tests = r'''
 int main() {
-    for(unsigned test=0;test<5;++test) {
+    for(unsigned test=0;test<6;++test) {
         ItlIwx driver; iwx_softc sc; Packet packet; ieee80211_rxinfo info; mbuf_list list;
+        NativeP2PRx149DataInput::OriginalDescriptor originalData{
+            true, test==5, false, 0x12345678u};
+        const auto *originalDataArgument=test==5?&originalData:nullptr;
         inputs=releases=0;observedInput=nullptr;
         if(test==1||test==2) { packet.bytes[1]=IEEE80211_FC1_PROTECTED;info.rxi_flags=IEEE80211_RXI_HWDEC; }
         driver.decapFails=test==2;driver.tapDrops=test==4;
@@ -112,7 +120,7 @@ int main() {
             driver.tahoe_awdl_rx_stage_counters_.beginOwner(ownerGeneration);
         driver.iwx_rx_frame(&sc,&packet,test==3?-1:36,0,0,0,0x78563412,
             &info,&list,ownerGeneration,frameKind,macPhyIndex,
-            macPhyIndexPresent);
+            macPhyIndexPresent,originalDataArgument);
         if(test==2) {
             assert(driver.taps==0&&inputs==0&&packet.freed);
             assert(sc.sc_ic.stats.inputErrors==1);
@@ -123,6 +131,13 @@ int main() {
             assert(driver.sawGp2==0x78563412&&driver.sawGp2Present);
             assert(driver.sawRxMacPhyIndex==macPhyIndex);
             assert(driver.sawRxMacPhyIndexPresent==macPhyIndexPresent);
+            assert(driver.sawOriginalData==originalDataArgument);
+            if(test==5) {
+                assert(driver.sawOriginalData->present);
+                assert(driver.sawOriginalData->protectedFrame);
+                assert(!driver.sawOriginalData->hardwareDeaggregated);
+                assert(driver.sawOriginalData->rawStatus==0x12345678u);
+            }
         }
         const auto rxStages=driver.tahoe_awdl_rx_stage_counters_.snapshot();
         const uint32_t expectedTapCount=ownerGeneration&&test!=2?1:0;

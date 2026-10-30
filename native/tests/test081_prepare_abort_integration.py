@@ -233,6 +233,7 @@ def main() -> None:
     production_markers = low_level_markers + [
         ("itlwm/hal_iwx/ItlIwxP2PProbe.cpp", "static bool readPrepareTraceSnapshot("),
         ("itlwm/hal_iwx/ItlIwxP2PProbe.cpp", "static void publishPrepareTraceSnapshot("),
+        ("itlwm/hal_iwx/ItlIwxP2PProbe.cpp", "static void drainRx149NativeDataOutsideMainGate("),
         ("itlwm/hal_iwx/ItlIwxP2PProbe.cpp", "static int exerciseRx149Observation("),
         ("itlwm/hal_iwx/ItlIwxP2PProbe.cpp", "int ItlIwx::tahoeP2pExerciseRoc("),
         ("itlwm/hal_iwx/ItlIwxP2PProbe.cpp", "bool ItlIwx::tahoeP2pExerciseRecovery("),

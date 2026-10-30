@@ -49,6 +49,7 @@ def compile_binary(temp: Path, source: Path, suffix: str,
         f"-fsanitize={sanitizer}", "-fno-omit-frame-pointer",
         "-DITL_NATIVE_AWDL_RESIDENT_25G332=1",
         "-DITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332=1",
+        "-DITL_NATIVE_AWDL_RX149_TEST_HOOKS=1",
         f"-I{temp}", "-Inative/tests", "-Inative",
         "native/awdl_native_bsd_data_25G332.cpp",
         "native/awdl_data_frame.cpp", str(source), "-o", str(output),
@@ -64,7 +65,7 @@ def main() -> None:
         functional = compile_binary(temp, FUNCTIONAL, "asan-ubsan",
                                     "address,undefined")
         cases = 0
-        for case in range(1, 9):
+        for case in range(1, 18):
             run([str(functional), str(case)])
             cases += 1
 

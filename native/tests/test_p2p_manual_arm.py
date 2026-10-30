@@ -18,6 +18,7 @@ methods=[function('AirportItlwm/AirportItlwmV2.cpp','IOReturn AirportItlwm::setP
  function('itlwm/hal_iwx/ItlIwxP2PProbe.cpp','static bool rx149ObservationOnlyRequested('),
  function('itlwm/hal_iwx/ItlIwxP2PProbe.cpp','static NativeP2PRx149Observation::ProfileInput rx149ProfileInput('),
  function('itlwm/hal_iwx/ItlIwxP2PProbe.cpp','static NativeP2PRx149Observation::ProfileStatus rx149ProfileStatus('),
+ function('itlwm/hal_iwx/ItlIwxP2PProbe.cpp','static void publishRx149DataInputAvailability('),
  function('itlwm/hal_iwx/ItlIwxP2PProbe.cpp','static void publishRx149ProfileState('),
  function('itlwm/hal_iwx/ItlIwxP2PProbe.cpp','static bool manualProbeGateOpen('),
  function('itlwm/hal_iwx/ItlIwxP2PProbe.cpp','static bool psfObservationProfileEnabled('),
@@ -27,7 +28,9 @@ methods=[function('AirportItlwm/AirportItlwmV2.cpp','IOReturn AirportItlwm::setP
  function('itlwm/hal_iwx/ItlIwxP2PProbe.cpp','IOReturn ItlIwx::nativeP2pArmProbe(')]
 shim=r"""
 #define ITL_NATIVE_AWDL_RX149_OBSERVATION_25G332 1
+#define ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332 1
 #include "p2p_rx149_observation.hpp"
+#include "p2p_rx149_data_input.hpp"
 #include <cassert>
 #include <cstdint>
 #include <map>
@@ -47,7 +50,9 @@ static int privilegeResult=0;static int privilegeChecks=0;
 static void*current_task(){return reinterpret_cast<void*>(7);}
 constexpr const char*kIOClientPrivilegeAdministrator="root";
 struct IOUserClient {static int clientHasPrivilege(void*p,const char*k){assert(p==current_task());assert(std::string(k)=="root");++privilegeChecks;return privilegeResult;}};
-struct IOEthernetController {OSDictionary props; OSObject*getProperty(const char*k){return props.getObject(k);} bool setProperty(const char*,uint32_t,unsigned){return true;}};
+static bool gRx149DataInputBlocked=false;
+namespace NativeAwdlBSD { static bool rx149DataInputBlocked(){return gRx149DataInputBlocked;} }
+struct IOEthernetController {OSDictionary props; std::map<std::string,uint32_t> numbers; OSObject*getProperty(const char*k){return props.getObject(k);} bool setProperty(const char*k,uint32_t value,unsigned){numbers[k]=value;return true;} uint32_t number(const char*k){auto i=numbers.find(k);return i==numbers.end()?0:i->second;}};
 struct ItlIwx {uint32_t nativeP2pManualArmRequested_=0;uint32_t nativeP2pProbeRunAllocationFailed_=0;IOEthernetController controller;IOEthernetController*getController(){return &controller;} IOEthernetController*tahoeP2pController(){return &controller;} IOReturn nativeP2pArmProbe();};
 struct Parent {static int calls;IOReturn setProperties(OSObject*){++calls;return 55;}};int Parent::calls=0;
 #define super Parent
@@ -59,6 +64,21 @@ static void receive149Profile(ItlIwx&h){h.controller.props.data["NativeP2PManual
 """
 tests=r"""
 int main(){
+ IOEthernetController availability;
+ publishRx149DataInputAvailability(&availability,true);
+ assert(availability.number("NativeP2PRx149DataInputProfileEnabled")==0);
+ availability.props.data["NativeP2PRx149DataInputExperiment"]=kOSBooleanTrue;
+ publishRx149DataInputAvailability(&availability,true);
+ assert(availability.number("NativeP2PRx149DataInputProfileEnabled")==1);
+ gRx149DataInputBlocked=true;
+ publishRx149DataInputAvailability(&availability,true);
+ assert(availability.number("NativeP2PRx149DataInputProfileEnabled")==0);
+ availability.props.data["NativeP2PRx149DataInputExperiment"]=kOSBooleanFalse;
+ publishRx149DataInputAvailability(&availability,true);
+ assert(availability.number("NativeP2PRx149DataInputProfileEnabled")==0);
+ gRx149DataInputBlocked=false;
+ publishRx149DataInputAvailability(&availability,false);
+ assert(availability.number("NativeP2PRx149DataInputProfileEnabled")==0);
  AirportItlwm a;ItlIwx h;a.fHalService=&h;profile(h);
  assert(!probeEnabled(&h,&h.controller)&&!txProbeEnabled(&h,&h.controller));
  OSDictionary request;request.data["NativeP2PArmOnce"]=kOSBooleanTrue;
@@ -128,6 +148,8 @@ int main(){
  // The RX149 alias selects immutable arm mode 2 only after a valid profile
  // and the RX prearm callback accepts its real TX-quiescence preflight.
  ItlIwx rx149;receive149Profile(rx149);
+ rx149.controller.props.data["NativeP2PRx149DataInputExperiment"]=
+     kOSBooleanTrue;
  AirportItlwm rx149Client;rx149Client.fHalService=&rx149;
  OSDictionary rxArm;rxArm.data["NativeP2PRx149ArmOnce"]=kOSBooleanTrue;
  privilegeResult=99;
@@ -138,6 +160,12 @@ int main(){
  assert(rx149Client.setProperties(&rxArm)==kIOReturnBadArgument);
  assert(rx149.nativeP2pManualArmRequested_==0);
  rxArm.data.erase("extra");
+ gRx149DataInputBlocked=true;
+ const unsigned prearmCountBeforeBlockedArm=prearmChecks;
+ assert(rx149Client.setProperties(&rxArm)==kIOReturnNotReady);
+ assert(rx149.nativeP2pManualArmRequested_==0);
+ assert(prearmChecks==prearmCountBeforeBlockedArm);
+ gRx149DataInputBlocked=false;
  prearmReady=false;
  assert(rx149Client.setProperties(&rxArm)==kIOReturnUnsupported);
  assert(rx149.nativeP2pManualArmRequested_==0);
@@ -165,6 +193,36 @@ int main(){
  assert(rxMixed.nativeP2pManualArmRequested_==0);
  assert(!probeEnabled(&rxMixed,&rxMixed.controller));
  assert(!txProbeEnabled(&rxMixed,&rxMixed.controller));
+
+ // The production RX149 permit gate must reject an MPDU marked protected,
+ // even when every lease, channel, MAC-index, and original-descriptor check
+ // passes. This protects the normal encrypted input path from observation.
+ using namespace NativeP2PRx149DataInput;
+ Lease inputLease{};
+ inputLease.compiled=true;inputLease.runtimeEnabled=true;
+ inputLease.profileEnabled=true;inputLease.profileSelected=true;
+ inputLease.receiveObservationOnly=true;inputLease.leaseActive=true;
+ inputLease.ownerCurrent=true;inputLease.epochsMatch=true;
+ inputLease.tokenMatches=true;inputLease.commandReturned=true;
+ inputLease.commandSucceeded=true;
+ inputLease.deviceDiscoveryConfiguration=true;
+ inputLease.startSeen=true;inputLease.startSucceeded=true;
+ inputLease.epochs={7,8,9,7};inputLease.ownerSerial=41;
+ inputLease.startUs=1000000;inputLease.nowUs=1000100;
+ Descriptor inputDescriptor{};
+ inputDescriptor.channelPresent=true;inputDescriptor.ieeeChannel=149;
+ inputDescriptor.macPhyIndexPresent=true;inputDescriptor.macPhyIndex=0x21;
+ inputDescriptor.decodeModePresent=true;
+ inputDescriptor.decodeMode=kMacPhyDecodeBandInRx;
+ inputDescriptor.awdlDataCandidate=true;
+ inputDescriptor.originalDescriptorPresent=true;
+ inputDescriptor.originalRawStatus=0x12345678u;
+ Permit inputPermit{};
+ assert(makePermit(inputLease,inputDescriptor,&inputPermit));
+ assert(inputPermit.valid);
+ inputDescriptor.protectedFrame=true;
+ assert(!makePermit(inputLease,inputDescriptor,&inputPermit));
+ assert(!inputPermit.valid);
  puts("PASS: production manual-arm privilege, profile, no-bypass, and one-shot concurrency boundaries");
 }
 """

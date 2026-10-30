@@ -4477,6 +4477,9 @@ iwx_check_rfkill(struct iwx_softc *sc)
     v = IWX_READ(sc, IWX_CSR_GP_CNTRL);
     rv = (v & IWX_CSR_GP_CNTRL_REG_FLAG_HW_RF_KILL_SW) == 0;
     if (rv) {
+#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+        NativeAwdlBSD::invalidateRx149DataInputFast();
+#endif
         sc->sc_flags |= IWX_FLAG_RFKILL;
     } else {
         sc->sc_flags &= ~IWX_FLAG_RFKILL;
@@ -12538,7 +12541,19 @@ iwx_mcc_update(struct iwx_softc *sc, struct iwx_mcc_chub_notif *notif)
     if (!sc || !notif)
         return;
 #if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
-    NativeAwdlBSD::revokeRx149DataInput();
+    // Revoke this ROC even if no data packet has activated its BSD lease yet.
+    const auto traceOwner = nativeAwdlRxEventTimeline_.snapshot();
+    if (traceOwner.ownerPresent && traceOwner.ownerSerial) {
+        const NativeP2PRx149DataInput::Epochs epochs {
+            traceOwner.epochs.contextGeneration,
+            traceOwner.epochs.powerGeneration,
+            traceOwner.epochs.stationGeneration,
+            traceOwner.epochs.rocGeneration
+        };
+        NativeAwdlBSD::revokeRx149DataInput(traceOwner.ownerSerial, epochs);
+    } else {
+        NativeAwdlBSD::revokeRx149DataInput();
+    }
 #endif
 #ifdef AIRPORT_TAHOE
     const uint32_t noticeMcc = le16toh(notif->mcc);
@@ -17571,6 +17586,9 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
                 XYLog("%s: device at critical temperature (%u degC), "
                        "stopping device\n",
                        DEVNAME(sc), le16toh(notif->temperature));
+#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+                NativeAwdlBSD::invalidateRx149DataInputFast();
+#endif
                 sc->sc_flags |= IWX_FLAG_HW_ERR;
 #ifdef AIRPORT_TAHOE
                 ItlIwx *that = container_of(sc, ItlIwx, com);
@@ -18040,6 +18058,9 @@ iwx_intr(OSObject *object, IOInterruptEventSource* sender, int count)
     }
     
     if (r1 & IWX_CSR_INT_BIT_SW_ERR) {
+#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+        NativeAwdlBSD::invalidateRx149DataInputFast();
+#endif
 #ifdef AIRPORT_TAHOE
         // An interrupt must never poll the NIC or walk the firmware error
         // table. The bounded pre-reset reader runs later in recovery.
@@ -18081,6 +18102,9 @@ iwx_intr(OSObject *object, IOInterruptEventSource* sender, int count)
         handled |= IWX_CSR_INT_BIT_HW_ERR;
         XYLog("%s: hardware error, stopping device \n", DEVNAME(sc));
         if ((sc->sc_flags & IWX_FLAG_SHUTDOWN) == 0) {
+#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+            NativeAwdlBSD::invalidateRx149DataInputFast();
+#endif
             sc->sc_flags |= IWX_FLAG_HW_ERR;
 #ifdef AIRPORT_TAHOE
             that->tahoeRecordInitTaskTrigger(
@@ -18167,6 +18191,9 @@ iwx_intr_msix(OSObject *object, IOInterruptEventSource* sender, int count)
     if ((inta_fh & IWX_MSIX_FH_INT_CAUSES_FH_ERR) ||
         (inta_hw & IWX_MSIX_HW_INT_CAUSES_REG_SW_ERR) ||
         (inta_hw & IWX_MSIX_HW_INT_CAUSES_REG_SW_ERR_V2)) {
+#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+        NativeAwdlBSD::invalidateRx149DataInputFast();
+#endif
 #ifdef AIRPORT_TAHOE
         // Preserve interrupt cause scalars; do table reads only from the
         // pre-reset, bounded recovery action.
@@ -18214,6 +18241,9 @@ iwx_intr_msix(OSObject *object, IOInterruptEventSource* sender, int count)
     if (inta_hw & IWX_MSIX_HW_INT_CAUSES_REG_HW_ERR) {
         XYLog("%s: hardware error, stopping device \n", DEVNAME(sc));
         if ((sc->sc_flags & IWX_FLAG_SHUTDOWN) == 0) {
+#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+            NativeAwdlBSD::invalidateRx149DataInputFast();
+#endif
             sc->sc_flags |= IWX_FLAG_HW_ERR;
 #ifdef AIRPORT_TAHOE
             that->tahoeRecordInitTaskTrigger(

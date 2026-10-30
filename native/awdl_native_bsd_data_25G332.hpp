@@ -50,9 +50,10 @@ enum Rx149InputDisposition : uint32_t {
 // One bounded, payload-free receipt for the latest Test086 MPDU. This proves
 // local queue/decode/DLIL attempts only; it is not proof of RF peer receipt.
 struct Rx149InputReceipt {
-    uint32_t schemaVersion=1;
+    uint32_t schemaVersion=2;
     uint32_t disposition=Rx149ReceiptNone;
     uint64_t sequence=0;
+    uint64_t contentRevision=0;
     uint64_t ownerSerial=0;
     uint64_t interfaceIncarnation=0;
     uint32_t contextGeneration=0;
@@ -120,6 +121,21 @@ void publishRx149DataInputLease(
 void revokeRx149DataInput();
 void revokeRx149DataInput(uint64_t ownerSerial,
           const NativeP2PRx149DataInput::Epochs &epochs);
+// Latched, lock-free RX149 fail-closed fence for HW_ERR/RFKILL interrupt
+// paths. It performs no clock read, queue walk, KPI, wait, or allocation.
+void invalidateRx149DataInputFast();
+bool rx149DataInputBlocked();
+#if defined(ITL_NATIVE_AWDL_RX149_TEST_HOOKS)
+enum class Rx149TestHookPoint : uint8_t {
+    LeaseAuthorization,
+    CaptureAuthorization,
+    InputTicketAuthorization,
+    BeforeInputTicketReservation,
+    AfterInputTicket
+};
+using Rx149TestHook = void (*)(Rx149TestHookPoint);
+void setRx149TestHookForTests(Rx149TestHook hook);
+#endif
 mbuf_t nextTx(uint16_t wifiSequence,uint64_t *token);
 // Reads bounded immutable queue metadata and returns the earliest current
 // strict-QM item, which may be behind unrelated FIFO entries. A successful

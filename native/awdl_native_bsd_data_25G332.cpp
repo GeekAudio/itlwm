@@ -18,6 +18,13 @@
 
 namespace NativeAwdlBSD {
 namespace {
+#if defined(ITL_NATIVE_AWDL_RX149_TEST_HOOKS)
+Rx149TestHook rx149TestHookForTests=nullptr;
+void runRx149TestHook(Rx149TestHookPoint point) {
+    const auto hook=rx149TestHookForTests;
+    if(hook)hook(point);
+}
+#endif
 struct Tx {
     mbuf_t packet=nullptr;
     uint64_t token=0,born=0;
@@ -56,7 +63,29 @@ bool activeRx149LeaseValid=false;
 uint64_t activeRx149Version=0;
 uint64_t rx149OwnerSerialHighWater=0;
 uint64_t rx149ReceiptSequence=0;
+uint64_t rx149ReceiptContentRevision=0;
 Rx149InputReceipt rx149Receipt{};
+constexpr uint32_t kRx149InputBlockedBit=0x80000000u;
+constexpr uint32_t kRx149InputTicketCountMask=~kRx149InputBlockedBit;
+uint32_t rx149InputGateState=0;
+bool reserveRx149InputTicketFast() {
+    uint32_t observed=__atomic_load_n(&rx149InputGateState,__ATOMIC_ACQUIRE);
+    for(;;) {
+        if((observed&kRx149InputBlockedBit)!=0||
+           (observed&kRx149InputTicketCountMask)==
+               kRx149InputTicketCountMask)
+            return false;
+        const uint32_t desired=observed+1;
+        if(__atomic_compare_exchange_n(&rx149InputGateState,&observed,desired,
+                false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))
+            return true;
+        // Only the lock-free invalidator can race this lock-protected grant;
+        // a failed compare therefore observes the blocked bit and stops.
+    }
+}
+void releaseRx149InputTicketFast() {
+    __atomic_fetch_sub(&rx149InputGateState,1u,__ATOMIC_ACQ_REL);
+}
 IOSimpleLock *bridgeLock() {
     return __atomic_load_n(&lock,__ATOMIC_ACQUIRE);
 }
@@ -93,6 +122,45 @@ Counter mdnsSucceededCounter(NativeAwdlData::MdnsQueryClass value) {
 uint64_t nowUs(){uint64_t t=0,n=0;clock_get_uptime(&t);absolutetime_to_nanoseconds(t,&n);return n/1000;}
 bool discoveryAgeCurrent(uint64_t born,uint64_t now) {
     return now>=born&&now-born<=2000000;
+}
+bool ipv6LinkLocal(const uint8_t *address) {
+    return address&&address[0]==0xfe&&(address[1]&0xc0u)==0x80u;
+}
+bool nativeLinkLocalTarget(const uint8_t *address,const uint8_t own[6]) {
+    if(!address||!own||!ipv6LinkLocal(address)||address[1]!=0x80)
+        return false;
+    for(unsigned index=2;index<8;++index)
+        if(address[index]!=0)return false;
+    const uint8_t expectedIid[8]={
+        static_cast<uint8_t>(own[0]^2u),own[1],own[2],0xff,0xfe,
+        own[3],own[4],own[5]};
+    return memcmp(address+8,expectedIid,sizeof(expectedIid))==0;
+}
+bool linkLocalMulticastMapping(const uint8_t *address,
+                               const uint8_t ethernetDestination[6]) {
+    return address&&ethernetDestination&&address[0]==0xff&&
+        address[1]==0x02&&ethernetDestination[0]==0x33&&
+        ethernetDestination[1]==0x33&&
+        memcmp(ethernetDestination+2,address+12,4)==0;
+}
+bool validUnicastAddress(const uint8_t address[6]) {
+    if(!address||(address[0]&1u))return false;
+    uint8_t any=0;
+    for(unsigned index=0;index<6;++index)any|=address[index];
+    return any!=0;
+}
+bool acceptsRx149(const NativeAwdlData::PacketView &packet,
+                  const uint8_t own[6]) {
+    if(!acceptsRx(packet,own)||!validUnicastAddress(packet.sourceAddress)||
+       packet.ipv6Length<40||(packet.ipv6Packet[0]>>4)!=6||
+       !ipv6LinkLocal(packet.ipv6Packet+8))
+        return false;
+    const uint8_t *destination=packet.ipv6Packet+24;
+    if(destination[0]==0xff)
+        return linkLocalMulticastMapping(
+            destination,packet.destinationAddress);
+    return !memcmp(packet.destinationAddress,own,6)&&
+        nativeLinkLocalTarget(destination,own);
 }
 bool isStrictContinuityQm(const NativeAwdlData::TxObservation &observation) {
     const auto &mdns=observation.mdnsQuery;
@@ -209,7 +277,9 @@ bool activateRx149LeaseLocked(
     const NativeP2PRx149DataInput::Lease &lease,
     size_t *discardedCount,uint64_t nowUsValue) {
     if(discardedCount)*discardedCount=0;
-    if(!NativeP2PRx149DataInput::leaseCurrent(lease,lease.nowUs))
+    if((__atomic_load_n(&rx149InputGateState,__ATOMIC_ACQUIRE)&
+        kRx149InputBlockedBit)!=0||
+       !NativeP2PRx149DataInput::leaseCurrent(lease,nowUsValue))
         return false;
     if(!activeRx149LeaseValid||
        !sameRx149LeaseIdentity(activeRx149Lease,lease)) {
@@ -242,21 +312,47 @@ bool activateRx149LeaseLocked(
 size_t revokeRx149LeaseLocked(
     uint64_t ownerSerial,const NativeP2PRx149DataInput::Epochs *epochs,
     uint64_t nowUsValue) {
-    if(!activeRx149LeaseValid||!ownerSerial||!epochs||
-       activeRx149Lease.ownerSerial!=ownerSerial||
-       !NativeP2PRx149DataInput::sameEpochs(activeRx149Lease.epochs,*epochs))
+    if(!ownerSerial||!epochs||
+       !NativeP2PRx149DataInput::validEpochs(*epochs))
         return 0;
-    activeRx149LeaseValid=false;
-    activeRx149Lease=NativeP2PRx149DataInput::Lease{};
-    if(ownerSerial>rx149OwnerSerialHighWater)
-        rx149OwnerSerialHighWater=ownerSerial;
-    if(activeRx149Version==UINT64_MAX) {
-        // Exhaustion is terminal for this owner; never alias a prior version.
-        return removeRx149ItemsLocked(true,0,0,nullptr,nowUsValue);
+
+    size_t discarded=0;
+    if(activeRx149LeaseValid) {
+        if(activeRx149Lease.ownerSerial>ownerSerial)
+            return 0; // a stale targeted close cannot revoke a newer owner
+        if(activeRx149Lease.ownerSerial==ownerSerial&&
+           !NativeP2PRx149DataInput::sameEpochs(
+               activeRx149Lease.epochs,*epochs))
+            return 0; // serial matches but the epoch tuple does not
+
+        if(activeRx149Lease.ownerSerial==ownerSerial) {
+            activeRx149LeaseValid=false;
+            activeRx149Lease=NativeP2PRx149DataInput::Lease{};
+            if(ownerSerial>rx149OwnerSerialHighWater)
+                rx149OwnerSerialHighWater=ownerSerial;
+            if(activeRx149Version==UINT64_MAX)
+                return removeRx149ItemsLocked(true,0,0,nullptr,nowUsValue);
+            ++activeRx149Version;
+            return removeRx149ItemsLocked(false,activeRx149Version-1,
+                                          ownerSerial,epochs,nowUsValue);
+        }
+
+        // A newer terminal owner supersedes the older active receive lease.
+        discarded=removeRx149ItemsLocked(true,0,0,nullptr,nowUsValue);
+        activeRx149LeaseValid=false;
+        activeRx149Lease=NativeP2PRx149DataInput::Lease{};
     }
-    ++activeRx149Version;
-    return removeRx149ItemsLocked(false,activeRx149Version-1,
-                                  ownerSerial,epochs,nowUsValue);
+
+    // Tombstone a terminal current owner even if its first authoritative
+    // lease was never published (for example, MCC revokes before any frame).
+    if(ownerSerial<=rx149OwnerSerialHighWater)
+        return discarded;
+    rx149OwnerSerialHighWater=ownerSerial;
+    if(activeRx149Version!=UINT64_MAX)
+        ++activeRx149Version;
+    const size_t targeted=removeRx149ItemsLocked(
+        true,0,0,nullptr,nowUsValue);
+    return discarded+targeted;
 }
 void recordRx149ReceiptLocked(const Rx &item,uint32_t disposition,
                              uint64_t inputUs,uint32_t decodedCount,
@@ -264,16 +360,30 @@ void recordRx149ReceiptLocked(const Rx &item,uint32_t disposition,
     if(!item.rx149ReceiptSequence||
        rx149Receipt.sequence!=item.rx149ReceiptSequence)
         return; // a newer captured MPDU owns the single latest receipt
+    const int32_t result=static_cast<int32_t>(inputResult);
+    if(rx149Receipt.disposition==disposition&&
+       rx149Receipt.inputUs==inputUs&&
+       rx149Receipt.decodedIpv6Count==decodedCount&&
+       rx149Receipt.ifnetInputResultPresent==(inputResultPresent?1u:0u)&&
+       rx149Receipt.ifnetInputResult==result)
+        return;
+    if(rx149ReceiptContentRevision==UINT64_MAX) {
+        // Revision wrap would alias a previously published snapshot. Preserve
+        // the last state and fail closed instead of silently reusing a key.
+        rx149Receipt.schemaVersion=0;
+        return;
+    }
     rx149Receipt.disposition=disposition;
     rx149Receipt.inputUs=inputUs;
     rx149Receipt.decodedIpv6Count=decodedCount;
     rx149Receipt.ifnetInputResultPresent=inputResultPresent?1u:0u;
-    rx149Receipt.ifnetInputResult=inputResult;
+    rx149Receipt.ifnetInputResult=result;
+    rx149Receipt.contentRevision=++rx149ReceiptContentRevision;
 }
 Rx149InputReceipt makeRx149Receipt(const Rx &item,uint64_t sequence,
                                     uint32_t disposition) {
     Rx149InputReceipt receipt{};
-    receipt.schemaVersion=1;
+    receipt.schemaVersion=2;
     receipt.disposition=disposition;
     receipt.sequence=sequence;
     receipt.ownerSerial=item.rx149Permit.ownerSerial;
@@ -537,13 +647,19 @@ void publishRx149DataInputLease(
     const NativeP2PRx149DataInput::Lease &lease) {
     if(!bridgeLock())return;
     size_t discarded=0;
-    const uint64_t now=nowUs();
     auto irq=IOSimpleLockLockDisableInterrupt(lock);
-    if(NativeP2PRx149DataInput::leaseCurrent(lease,now))
-        (void)activateRx149LeaseLocked(lease,&discarded,now);
+    // Authorization time is sampled only after acquiring the same lock that
+    // publishes the lease, so lock contention cannot revive an expired ROC.
+#if defined(ITL_NATIVE_AWDL_RX149_TEST_HOOKS)
+    runRx149TestHook(Rx149TestHookPoint::LeaseAuthorization);
+#endif
+    const uint64_t lockedNow=nowUs();
+    if(NativeP2PRx149DataInput::leaseCurrent(lease,lockedNow))
+        (void)activateRx149LeaseLocked(lease,&discarded,lockedNow);
     else if(lease.ownerSerial&&
             NativeP2PRx149DataInput::validEpochs(lease.epochs))
-        discarded=revokeRx149LeaseLocked(lease.ownerSerial,&lease.epochs,now);
+        discarded=revokeRx149LeaseLocked(lease.ownerSerial,&lease.epochs,
+                                         lockedNow);
     IOSimpleLockUnlockEnableInterrupt(lock,irq);
     for(size_t i=0;i<discarded;++i)add(RxRejected);
 }
@@ -572,6 +688,22 @@ void revokeRx149DataInput() {
     IOSimpleLockUnlockEnableInterrupt(lock,irq);
     for(size_t i=0;i<discarded;++i)add(RxRejected);
 }
+void invalidateRx149DataInputFast() {
+    // This latch is intentionally independent of bridge initialization and
+    // IOSimpleLock availability. HW_ERR/RFKILL callers can fence a final
+    // ticket without waiting for the queue lock or doing cleanup in context.
+    __atomic_fetch_or(&rx149InputGateState,kRx149InputBlockedBit,
+                      __ATOMIC_ACQ_REL);
+}
+bool rx149DataInputBlocked() {
+    return (__atomic_load_n(&rx149InputGateState,__ATOMIC_ACQUIRE)&
+            kRx149InputBlockedBit)!=0;
+}
+#if defined(ITL_NATIVE_AWDL_RX149_TEST_HOOKS)
+void setRx149TestHookForTests(Rx149TestHook hook) {
+    rx149TestHookForTests=hook;
+}
+#endif
 void cancelQueued() {
     if(!bridgeLock())return;
     Tx item{};
@@ -685,7 +817,10 @@ void poll(bool ready,uint32_t generation,
             }
         }
         const bool have=selected<rx.count&&removeRxAt(selected,&item);
-        if(have&&rx149Lease&&activeRx149LeaseValid&&
+        if(have&&rx149Lease&&
+           (__atomic_load_n(&rx149InputGateState,__ATOMIC_ACQUIRE)&
+            kRx149InputBlockedBit)==0&&
+           activeRx149LeaseValid&&
            item.rx149GuardVersion==activeRx149Version&&
            item.interfaceIncarnation==interfaceIncarnation&&
            sameRx149LeaseIdentity(activeRx149Lease,*rx149Lease)&&
@@ -723,7 +858,7 @@ void poll(bool ready,uint32_t generation,
         add(RxDecoded);
         for(size_t n=0;n<parsed.packetCount;++n) {
             const auto &packet=parsed.packets[n];
-            if(!acceptsRx(packet,expectedAddress)) {
+            if(!acceptsRx149(packet,expectedAddress)) {
                 recordRx149Receipt(item,Rx149ReceiptAddressRejected,
                                    firstNow,uint32_t(parsed.packetCount));
                 add(RxRejected);
@@ -751,12 +886,19 @@ void poll(bool ready,uint32_t generation,
             // Packet allocation/decoding happen outside the lock. Recheck the
             // permit immediately before DLIL input so END, owner replacement,
             // radio invalidation, or deadline expiry drops the unconsumed mbuf.
-            const uint64_t finalNow=nowUs();
             irq=IOSimpleLockLockDisableInterrupt(lock);
+            // This is the linearization point for an input ticket. A packet
+            // delayed on the lock past its permit deadline is denied here.
+#if defined(ITL_NATIVE_AWDL_RX149_TEST_HOOKS)
+            runRx149TestHook(Rx149TestHookPoint::InputTicketAuthorization);
+#endif
+            const uint64_t ticketNow=nowUs();
             const bool stillAttached=interface==dev&&!closing&&!detached&&
                 radio&&__atomic_load_n(&closingRequested,__ATOMIC_ACQUIRE)==0&&
                 __atomic_load_n(&counters[Attached],__ATOMIC_ACQUIRE)!=0&&
                 radioGeneration==generation&&
+                (__atomic_load_n(&rx149InputGateState,__ATOMIC_ACQUIRE)&
+                 kRx149InputBlockedBit)==0&&
                 interfaceIncarnation==item.interfaceIncarnation;
             const bool permitStillCurrent=stillAttached&&rx149Lease&&
                 activeRx149LeaseValid&&
@@ -764,30 +906,45 @@ void poll(bool ready,uint32_t generation,
                 sameRx149LeaseIdentity(activeRx149Lease,*rx149Lease)&&
                 sameRx149LeaseIdentity(activeRx149Lease,authoritativeLease)&&
                 NativeP2PRx149DataInput::leaseCurrent(
-                    activeRx149Lease,finalNow)&&
+                    activeRx149Lease,ticketNow)&&
                 NativeP2PRx149DataInput::stillCurrent(
-                    item.rx149Permit,activeRx149Lease,finalNow);
+                    item.rx149Permit,activeRx149Lease,ticketNow);
+            bool ticketReserved=false;
+            if(permitStillCurrent) {
+#if defined(ITL_NATIVE_AWDL_RX149_TEST_HOOKS)
+                runRx149TestHook(
+                    Rx149TestHookPoint::BeforeInputTicketReservation);
+#endif
+                // The CAS shares one atomic word with fast invalidation. A
+                // fault either wins first and blocks this ticket, or this CAS
+                // wins first and the already issued ticket may finish.
+                ticketReserved=reserveRx149InputTicketFast();
+            }
             // Count a per-MPDU input ticket while holding the same lock that
             // validates the owner/epochs/incarnation. close() waits for both
             // the worker pin and each in-flight DLIL call to retire.
-            if(permitStillCurrent)++inputCalls;
+            if(ticketReserved)++inputCalls;
             IOSimpleLockUnlockEnableInterrupt(lock,irq);
-            if(!permitStillCurrent) {
+            if(!ticketReserved) {
                 mbuf_freem(m);
                 recordRx149Receipt(item,Rx149ReceiptStaleOrInvalid,
-                                   finalNow,uint32_t(parsed.packetCount));
+                                   ticketNow,uint32_t(parsed.packetCount));
                 add(RxRejected);
                 continue;
             }
             // The lock-linearized permit ticket above is the boundary: an
             // already acquired ticket may finish if END arrives immediately
             // afterward. DLIL itself always runs outside the bridge lock.
+#if defined(ITL_NATIVE_AWDL_RX149_TEST_HOOKS)
+            runRx149TestHook(Rx149TestHookPoint::AfterInputTicket);
+#endif
             const int inputResult=ifnet_input(dev,m,nullptr);
             recordRx149Receipt(item,
                 inputResult==0?Rx149ReceiptIfnetInputSucceeded:
                               Rx149ReceiptIfnetInputFailed,
-                finalNow,uint32_t(parsed.packetCount),true,inputResult);
+                ticketNow,uint32_t(parsed.packetCount),true,inputResult);
             irq=IOSimpleLockLockDisableInterrupt(lock);
+            releaseRx149InputTicketFast();
             if(inputCalls)--inputCalls;
             IOSimpleLockUnlockEnableInterrupt(lock,irq);
             if(inputResult==0)add(RxDelivered);
@@ -827,9 +984,7 @@ CaptureResult captureRx149Data(
         add(RxRejected);
         return CaptureResult::Rejected;
     }
-    const uint64_t captureNow=nowUs();
     if(protectedFrame||length>2048||!permit.valid||
-       !NativeP2PRx149DataInput::stillCurrent(permit,lease,captureNow)||
        generation!=permit.epochs.power) {
         add(RxRejected);
         return CaptureResult::Rejected;
@@ -844,6 +999,20 @@ CaptureResult captureRx149Data(
 
     size_t expired=0;
     auto irq=IOSimpleLockLockDisableInterrupt(lock);
+    // Capture time is an immutable frame fact carried by the permit. Current
+    // authorization time is sampled after acquiring the queue lock so lock
+    // contention cannot admit an expired frame.
+#if defined(ITL_NATIVE_AWDL_RX149_TEST_HOOKS)
+    runRx149TestHook(Rx149TestHookPoint::CaptureAuthorization);
+#endif
+    const uint64_t captureNow=nowUs();
+    if((__atomic_load_n(&rx149InputGateState,__ATOMIC_ACQUIRE)&
+        kRx149InputBlockedBit)!=0||
+       !NativeP2PRx149DataInput::stillCurrent(permit,lease,captureNow)) {
+        IOSimpleLockUnlockEnableInterrupt(lock,irq);
+        add(RxRejected);
+        return CaptureResult::Rejected;
+    }
     // Expired scoped entries never block a fresh packet behind them. This is
     // a bounded fixed-ring compaction and performs no packet/KPI operation.
     for(size_t offset=0;offset<rx.count;) {
@@ -859,7 +1028,10 @@ CaptureResult captureRx149Data(
             ++offset;
         }
     }
-    const bool authorityCurrent=activeRx149LeaseValid&&
+    const bool authorityCurrent=
+        (__atomic_load_n(&rx149InputGateState,__ATOMIC_ACQUIRE)&
+         kRx149InputBlockedBit)==0&&
+        activeRx149LeaseValid&&
         activeRx149Version!=0&&sameRx149LeaseIdentity(activeRx149Lease,lease)&&
         sameRx149PermitIdentity(activeRx149Lease,permit)&&
         NativeP2PRx149DataInput::leaseCurrent(activeRx149Lease,captureNow)&&
@@ -873,17 +1045,25 @@ CaptureResult captureRx149Data(
     item.interfaceIncarnation=interfaceIncarnation;
     item.rx149GuardVersion=activeRx149Version;
     const bool sequenceAvailable=rx149ReceiptSequence!=UINT64_MAX;
+    const bool revisionAvailable=rx149ReceiptContentRevision!=UINT64_MAX;
     const bool spaceAvailable=rx.count<QueueDepth;
-    const bool accepted=current&&sequenceAvailable&&spaceAvailable;
+    const bool accepted=current&&sequenceAvailable&&revisionAvailable&&
+        spaceAvailable;
     if(accepted) {
         item.rx149ReceiptSequence=++rx149ReceiptSequence;
         rx149Receipt=makeRx149Receipt(
             item,item.rx149ReceiptSequence,Rx149ReceiptCaptured);
+        rx149Receipt.contentRevision=++rx149ReceiptContentRevision;
         (void)rx.push(item); // spaceAvailable was checked under this same lock
-    } else if(current&&sequenceAvailable) {
+    } else if(current&&sequenceAvailable&&revisionAvailable) {
         item.rx149ReceiptSequence=++rx149ReceiptSequence;
         rx149Receipt=makeRx149Receipt(
             item,item.rx149ReceiptSequence,Rx149ReceiptQueueFull);
+        rx149Receipt.contentRevision=++rx149ReceiptContentRevision;
+    } else if(current) {
+        // Sequence/revision exhaustion is terminal for this receipt stream.
+        // Do not queue another data frame that could overwrite old evidence.
+        rx149Receipt.schemaVersion=0;
     }
     set(RxPending,rx.count);
     IOSimpleLockUnlockEnableInterrupt(lock,irq);
@@ -896,7 +1076,7 @@ CaptureResult captureRx149Data(
         add(RxRejected);
         return CaptureResult::Rejected;
     }
-    if(!sequenceAvailable) {
+    if(!sequenceAvailable||!revisionAvailable) {
         add(RxRejected);
         return CaptureResult::Rejected;
     }

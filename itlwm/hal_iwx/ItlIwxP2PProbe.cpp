@@ -745,8 +745,8 @@ static void publishRx149DataInputAvailability(
     if (!controller)
         return;
 #if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
-    const bool available = profileEnabled && controller->getProperty(
-        "NativeP2PRx149DataInputExperiment") == kOSBooleanTrue;
+    const bool available = profileEnabled && !NativeAwdlBSD::rx149DataInputBlocked() &&
+        controller->getProperty("NativeP2PRx149DataInputExperiment") == kOSBooleanTrue;
 #else
     const bool available = false;
     (void)profileEnabled;
@@ -7897,6 +7897,10 @@ IOReturn ItlIwx::nativeP2pArmProbe()
         return kIOReturnNoMemory;
     IOEthernetController *controller = getController();
     if (rx149ObservationOnlyRequested(controller)) {
+#if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+        if (NativeAwdlBSD::rx149DataInputBlocked())
+            return kIOReturnNotReady;
+#endif
         if (rx149ProfileStatus(this, controller) !=
             NativeP2PRx149Observation::ProfileStatus::kReadyToArm ||
             !initializeRx149PrearmCounters(this))

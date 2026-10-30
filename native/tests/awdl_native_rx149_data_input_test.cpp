@@ -4,6 +4,11 @@
 #include "../awdl_native_bsd_data_25G332.hpp"
 #include "../awdl_data_frame.hpp"
 #include "../p2p_rx149_data_input.hpp"
+#include "../p2p_rx149_input_receipt_publisher.hpp"
+
+#include <map>
+#include <string>
+#include <vector>
 
 std::atomic<unsigned> allocated{0},freed{0},delivered{0},finalized{0},
     socketsOpen{0},socketsClosed{0};
@@ -13,6 +18,29 @@ bool ipv6Fail=false,socketFail=false,packetHeaderMissing=false;
 bool lladdrFail=false;
 iff_filter installed;
 ifnet_t filterIf=nullptr;
+namespace {
+NativeAwdlBSD::Rx149TestHookPoint hookPoint=
+    NativeAwdlBSD::Rx149TestHookPoint::LeaseAuthorization;
+uint64_t hookTime=0;
+void setTimeAtHook(NativeAwdlBSD::Rx149TestHookPoint point) {
+    if(point==hookPoint) {
+        fakeTime=hookTime;
+        NativeAwdlBSD::setRx149TestHookForTests(nullptr);
+    }
+}
+void invalidateAtTicket(NativeAwdlBSD::Rx149TestHookPoint point) {
+    if(point==NativeAwdlBSD::Rx149TestHookPoint::AfterInputTicket) {
+        NativeAwdlBSD::invalidateRx149DataInputFast();
+        NativeAwdlBSD::setRx149TestHookForTests(nullptr);
+    }
+}
+void invalidateBeforeReservation(NativeAwdlBSD::Rx149TestHookPoint point) {
+    if(point==NativeAwdlBSD::Rx149TestHookPoint::BeforeInputTicketReservation) {
+        NativeAwdlBSD::invalidateRx149DataInputFast();
+        NativeAwdlBSD::setRx149TestHookForTests(nullptr);
+    }
+}
+}
 
 namespace {
 using namespace NativeAwdlBSD;
@@ -131,10 +159,33 @@ void gateMatrix() {
     assert(!stillCurrent(permit,stale,1002));
 }
 
+void makeLinkLocal(uint8_t *address,const uint8_t *mac) {
+    memset(address,0,16);
+    address[0]=0xfe;
+    address[1]=0x80;
+    address[8]=mac[0]^2u;
+    address[9]=mac[1];
+    address[10]=mac[2];
+    address[11]=0xff;
+    address[12]=0xfe;
+    address[13]=mac[3];
+    address[14]=mac[4];
+    address[15]=mac[5];
+}
+
 void makeFrame(uint8_t *out,size_t capacity,size_t *written,
-               const uint8_t *destination=own) {
+               const uint8_t *destination=own,bool wrongMapping=false) {
     uint8_t ipv6[40]{};
     ipv6[0]=0x60;
+    makeLinkLocal(ipv6+8,peer);
+    if(destination[0]&1u) {
+        ipv6[24]=0xff;
+        ipv6[25]=0x02;
+        memcpy(ipv6+36,destination+2,4);
+        if(wrongMapping)ipv6[39]^=1u;
+    } else {
+        makeLinkLocal(ipv6+24,own);
+    }
     NativeAwdlData::EncodeInput input{};
     memcpy(input.destinationAddress,destination,6);
     memcpy(input.sourceAddress,peer,6);
@@ -152,14 +203,52 @@ void prepare(FakeIf &dev) {
     poll(true,72);
 }
 
-Permit captureFrame(const Lease &lease,const uint8_t *destination=own) {
+struct ReceiptProperties {
+    std::map<std::string,uint64_t> values;
+    std::vector<bool> completeAfterWrite;
+    int failAtWrite=-1;
+    int writes=0;
+
+    bool readNumber(const char *name,uint64_t *value) const {
+        const auto found=values.find(name);
+        if(found==values.end()||!value)return false;
+        *value=found->second;
+        return true;
+    }
+
+    bool complete() const {
+        uint64_t schema=0,begin=0,end=0;
+        return readNumber("NativeAwdlDataRx149ReceiptSchemaVersion",&schema)&&
+            readNumber("NativeAwdlDataRx149ReceiptSnapshotBegin",&begin)&&
+            readNumber("NativeAwdlDataRx149ReceiptSnapshotEnd",&end)&&
+            schema==2&&begin!=0&&begin==end&&(begin&1u)==0;
+    }
+
+    bool writeNumber(const char *name,uint64_t value,unsigned) {
+        if(writes++==failAtWrite)return false;
+        values[name]=value;
+        completeAfterWrite.push_back(complete());
+        return true;
+    }
+};
+
+CaptureResult captureFrameResult(const Lease &lease,Permit *captured,
+                    const uint8_t *destination=own,bool wrongMapping=false) {
     uint8_t bytes[256]{};
     size_t length=0;
-    makeFrame(bytes,sizeof(bytes),&length,destination);
+    makeFrame(bytes,sizeof(bytes),&length,destination,wrongMapping);
     auto descriptor=validDescriptor();
     Permit permit{};
-    assert(makePermit(lease,descriptor,&permit));
-    assert(captureRx149Data(bytes,length,false,lease,permit,72)==
+    if(!makePermit(lease,descriptor,&permit))
+        return CaptureResult::Rejected;
+    if(captured)*captured=permit;
+    return captureRx149Data(bytes,length,false,lease,permit,72);
+}
+
+Permit captureFrame(const Lease &lease,const uint8_t *destination=own,
+                    bool wrongMapping=false) {
+    Permit permit{};
+    assert(captureFrameResult(lease,&permit,destination,wrongMapping)==
            CaptureResult::Captured);
     return permit;
 }
@@ -179,7 +268,8 @@ int delivery() {
     assert(state.value[RxCaptured]==1&&state.value[RxDecoded]==1);
     assert(state.value[RxDelivered]==1&&state.value[RxPending]==0);
     const auto &receipt=state.rx149Input;
-    assert(receipt.schemaVersion==1&&receipt.sequence==1);
+    assert(receipt.schemaVersion==2&&receipt.sequence==1);
+    assert(receipt.contentRevision==2); // captured then delivered
     assert(receipt.disposition==Rx149ReceiptIfnetInputSucceeded);
     assert(receipt.ownerSerial==lease.ownerSerial);
     assert(receipt.interfaceIncarnation==1);
@@ -288,6 +378,146 @@ int l2Validation() {
     return 0;
 }
 
+int multicastMappingValidation() {
+    FakeIf dev;
+    prepare(dev);
+    auto lease=validLease();
+    publishRx149DataInputLease(lease);
+    const uint8_t wrongGroup[6]={0x33,0x33,0,0,0,2};
+    (void)captureFrame(lease,wrongGroup,true); // IPv6 ff02::1 maps to ...:01
+    poll(true,72,&lease);
+    assert(delivered==0);
+    const auto receipt=snapshot().rx149Input;
+    assert(receipt.disposition==Rx149ReceiptAddressRejected);
+    assert(receipt.decodedIpv6Count==1);
+    assert(close()&&allocated==freed);
+    return 0;
+}
+
+int targetedRevokeBeforeLeasePublication() {
+    FakeIf dev;
+    prepare(dev);
+    auto old=validLease();
+    revokeRx149DataInput(old.ownerSerial,old.epochs);
+    publishRx149DataInputLease(old); // stale same-owner START/ACK snapshot
+    Permit oldPermit{};
+    assert(captureFrameResult(old,&oldPermit)==CaptureResult::Rejected);
+    assert(snapshot().value[RxPending]==0);
+
+    auto current=validLease();
+    ++current.ownerSerial;
+    current.epochs={72,72,74,72};
+    current.startUs=2000;
+    current.nowUs=2001;
+    fakeTime=2001;
+    publishRx149DataInputLease(current);
+    (void)captureFrame(current);
+    poll(true,72,&current);
+    assert(delivered==1);
+    assert(close()&&allocated==freed);
+    return 0;
+}
+
+int leaseAuthorizationAfterLockWait() {
+    FakeIf dev;
+    prepare(dev);
+    const auto lease=validLease();
+    hookPoint=NativeAwdlBSD::Rx149TestHookPoint::LeaseAuthorization;
+    hookTime=lease.startUs+NativeP2PRx149DataInput::kSessionWindowUs;
+    NativeAwdlBSD::setRx149TestHookForTests(setTimeAtHook);
+    publishRx149DataInputLease(lease);
+    NativeAwdlBSD::setRx149TestHookForTests(nullptr);
+
+    // Roll the deterministic clock back only to distinguish the tombstone
+    // from a fresh deadline check; a stale lease still cannot activate.
+    fakeTime=lease.nowUs;
+    Permit permit{};
+    assert(captureFrameResult(lease,&permit)==CaptureResult::Rejected);
+    assert(snapshot().value[RxPending]==0);
+    assert(close()&&allocated==freed);
+    return 0;
+}
+
+int captureAuthorizationAfterLockWait() {
+    FakeIf dev;
+    prepare(dev);
+    const auto lease=validLease();
+    publishRx149DataInputLease(lease);
+    hookPoint=NativeAwdlBSD::Rx149TestHookPoint::CaptureAuthorization;
+    hookTime=lease.startUs+NativeP2PRx149DataInput::kSessionWindowUs;
+    NativeAwdlBSD::setRx149TestHookForTests(setTimeAtHook);
+    Permit permit{};
+    assert(captureFrameResult(lease,&permit)==CaptureResult::Rejected);
+    NativeAwdlBSD::setRx149TestHookForTests(nullptr);
+    assert(snapshot().value[RxPending]==0);
+    assert(close()&&allocated==freed);
+    return 0;
+}
+
+int ticketAuthorizationAfterLockWait() {
+    FakeIf dev;
+    prepare(dev);
+    const auto lease=validLease();
+    publishRx149DataInputLease(lease);
+    const auto permit=captureFrame(lease);
+    hookPoint=NativeAwdlBSD::Rx149TestHookPoint::InputTicketAuthorization;
+    hookTime=permit.deadlineUs;
+    NativeAwdlBSD::setRx149TestHookForTests(setTimeAtHook);
+    poll(true,72,&lease);
+    NativeAwdlBSD::setRx149TestHookForTests(nullptr);
+    assert(delivered==0&&snapshot().value[RxPending]==0);
+    assert(snapshot().rx149Input.disposition==Rx149ReceiptStaleOrInvalid);
+    assert(close()&&allocated==freed);
+    return 0;
+}
+
+int fastInvalidationFencesTicket() {
+    FakeIf dev;
+    prepare(dev);
+    const auto lease=validLease();
+    publishRx149DataInputLease(lease);
+    (void)captureFrame(lease);
+    NativeAwdlBSD::invalidateRx149DataInputFast();
+    assert(NativeAwdlBSD::rx149DataInputBlocked());
+    poll(true,72,&lease);
+    assert(delivered==0&&snapshot().value[RxPending]==0);
+    assert(snapshot().rx149Input.disposition==Rx149ReceiptStaleOrInvalid);
+    assert(close()&&allocated==freed);
+    return 0;
+}
+
+int fastInvalidationWinsBeforeTicketCas() {
+    FakeIf dev;
+    prepare(dev);
+    const auto lease=validLease();
+    publishRx149DataInputLease(lease);
+    (void)captureFrame(lease);
+    NativeAwdlBSD::setRx149TestHookForTests(invalidateBeforeReservation);
+    poll(true,72,&lease);
+    NativeAwdlBSD::setRx149TestHookForTests(nullptr);
+    assert(NativeAwdlBSD::rx149DataInputBlocked());
+    assert(delivered==0&&snapshot().value[RxPending]==0);
+    assert(snapshot().rx149Input.disposition==Rx149ReceiptStaleOrInvalid);
+    assert(close()&&allocated==freed);
+    return 0;
+}
+
+int admittedTicketMayFinishAfterFastInvalidation() {
+    FakeIf dev;
+    prepare(dev);
+    const auto lease=validLease();
+    publishRx149DataInputLease(lease);
+    (void)captureFrame(lease);
+    NativeAwdlBSD::setRx149TestHookForTests(invalidateAtTicket);
+    poll(true,72,&lease);
+    NativeAwdlBSD::setRx149TestHookForTests(nullptr);
+    assert(NativeAwdlBSD::rx149DataInputBlocked());
+    assert(delivered==1&&snapshot().value[RxDelivered]==1);
+    assert(snapshot().rx149Input.disposition==Rx149ReceiptIfnetInputSucceeded);
+    assert(close()&&allocated==freed);
+    return 0;
+}
+
 int inputFailure() {
     FakeIf dev;
     prepare(dev);
@@ -299,6 +529,7 @@ int inputFailure() {
     inputFail=false;
     const auto receipt=snapshot().rx149Input;
     assert(receipt.disposition==Rx149ReceiptIfnetInputFailed);
+    assert(receipt.contentRevision==2);
     assert(receipt.ifnetInputResultPresent==1&&
            receipt.ifnetInputResult==EIO);
     assert(snapshot().value[RxInputFailed]==1&&delivered==0);
@@ -331,6 +562,87 @@ int receiveOnly() {
     assert(close()&&allocated==freed);
     return 0;
 }
+
+int receiptPublication() {
+    using namespace NativeAwdlBSD;
+    ReceiptProperties properties;
+    Rx149InputReceiptPublisher publisher;
+    auto read=[&](const char *name,uint64_t *value) {
+        return properties.readNumber(name,value);
+    };
+    auto write=[&](const char *name,uint64_t value,unsigned bits) {
+        return properties.writeNumber(name,value,bits);
+    };
+
+    Rx149InputReceipt receipt{};
+    receipt.schemaVersion=2;
+    receipt.disposition=Rx149ReceiptCaptured;
+    receipt.sequence=77;
+    receipt.contentRevision=1;
+    receipt.ownerSerial=901;
+    receipt.inputUs=1001;
+    assert(publisher.publish(receipt,read,write));
+    assert(properties.complete());
+    unsigned completeWrites=0;
+    for(bool complete:properties.completeAfterWrite)
+        if(complete)++completeWrites;
+    assert(completeWrites==1&&properties.completeAfterWrite.back());
+
+    // The same MPDU sequence can advance from captured to DLIL result. The
+    // content revision, not the immutable MPDU sequence, drives publication.
+    receipt.disposition=Rx149ReceiptIfnetInputSucceeded;
+    receipt.contentRevision=2;
+    receipt.inputUs=1042;
+    receipt.ifnetInputResultPresent=1;
+    receipt.ifnetInputResult=0;
+    assert(publisher.publish(receipt,read,write));
+    uint64_t value=0;
+    assert(properties.readNumber(
+        "NativeAwdlDataRx149ReceiptSequence",&value)&&value==77);
+    assert(properties.readNumber(
+        "NativeAwdlDataRx149ReceiptContentRevision",&value)&&value==2);
+    assert(properties.readNumber(
+        "NativeAwdlDataRx149ReceiptDisposition",&value)&&
+        value==Rx149ReceiptIfnetInputSucceeded);
+    assert(properties.readNumber(
+        "NativeAwdlDataRx149ReceiptInputMonotonicUs",&value)&&value==1042);
+    const int writesAfterRevision=properties.writes;
+    assert(publisher.publish(receipt,read,write));
+    assert(properties.writes==writesAfterRevision); // stable snapshot dedupe
+
+    // A failed payload write leaves Begin odd, so the identical revision is
+    // retried rather than hidden by the prior MPDU sequence or a false cache.
+    receipt.disposition=Rx149ReceiptIfnetInputFailed;
+    receipt.contentRevision=3;
+    receipt.inputUs=1050;
+    receipt.ifnetInputResultPresent=1;
+    receipt.ifnetInputResult=EIO;
+    properties.failAtWrite=properties.writes+3;
+    assert(!publisher.publish(receipt,read,write));
+    assert(!properties.complete());
+    properties.failAtWrite=-1;
+    const size_t oldObservations=properties.completeAfterWrite.size();
+    assert(publisher.publish(receipt,read,write));
+    assert(properties.complete());
+    assert(properties.completeAfterWrite.size()>oldObservations);
+    assert(properties.completeAfterWrite.back());
+    assert(properties.readNumber(
+        "NativeAwdlDataRx149ReceiptContentRevision",&value)&&value==3);
+    assert(properties.readNumber(
+        "NativeAwdlDataRx149ReceiptIfnetInputResult",&value)&&
+        value==uint32_t(EIO));
+
+    // A failed final completion marker also leaves the publication fenced.
+    receipt.disposition=Rx149ReceiptStaleOrInvalid;
+    receipt.contentRevision=4;
+    properties.failAtWrite=properties.writes+23; // final matching Begin
+    assert(!publisher.publish(receipt,read,write));
+    assert(!properties.complete());
+    properties.failAtWrite=-1;
+    assert(publisher.publish(receipt,read,write));
+    assert(properties.complete());
+    return 0;
+}
 }
 
 int main(int argc,char **argv) {
@@ -346,6 +658,15 @@ int main(int argc,char **argv) {
         case 6:return l2Validation();
         case 7:return inputFailure();
         case 8:return receiveOnly();
+        case 9:return receiptPublication();
+        case 10:return multicastMappingValidation();
+        case 11:return targetedRevokeBeforeLeasePublication();
+        case 12:return leaseAuthorizationAfterLockWait();
+        case 13:return captureAuthorizationAfterLockWait();
+        case 14:return ticketAuthorizationAfterLockWait();
+        case 15:return fastInvalidationFencesTicket();
+        case 16:return admittedTicketMayFinishAfterFastInvalidation();
+        case 17:return fastInvalidationWinsBeforeTicketCas();
         default:return 2;
     }
 }

@@ -10,6 +10,9 @@
 #if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
 #include "../../native/awdl_native_bsd_data_25G332.hpp"
 #endif
+#if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+#include "../../native/p2p_rx149_input_receipt_publisher.hpp"
+#endif
 #if defined(ITL_NATIVE_AWDL_LIFECYCLE_25G332)
 #include "../../native/awdl_native_lifecycle_25G332.hpp"
 #endif
@@ -228,56 +231,25 @@ void publishRx149InputReceipt(
 {
     if (!controller)
         return;
-    static const char *kSchema =
-        "NativeAwdlDataRx149ReceiptSchemaVersion";
-    static const char *kSequence = "NativeAwdlDataRx149ReceiptSequence";
-    auto prior = OSDynamicCast(OSNumber, controller->getProperty(kSequence));
-    const bool changed = !prior ||
-        prior->unsigned64BitValue() != receipt.sequence;
-    if (!changed && receipt.sequence != 0)
-        return;
-    controller->setProperty(kSchema, receipt.schemaVersion, 32);
-    controller->setProperty("NativeAwdlDataRx149ReceiptDisposition",
-                            receipt.disposition, 32);
-    controller->setProperty("NativeAwdlDataRx149ReceiptOwnerSerial",
-                            receipt.ownerSerial, 64);
-    controller->setProperty("NativeAwdlDataRx149ReceiptInterfaceIncarnation",
-                            receipt.interfaceIncarnation, 64);
-    controller->setProperty("NativeAwdlDataRx149ReceiptContextGeneration",
-                            receipt.contextGeneration, 32);
-    controller->setProperty("NativeAwdlDataRx149ReceiptPowerGeneration",
-                            receipt.powerGeneration, 32);
-    controller->setProperty("NativeAwdlDataRx149ReceiptStationGeneration",
-                            receipt.stationGeneration, 32);
-    controller->setProperty("NativeAwdlDataRx149ReceiptRocGeneration",
-                            receipt.rocGeneration, 32);
-    controller->setProperty("NativeAwdlDataRx149ReceiptCaptureMonotonicUs",
-                            receipt.captureUs, 64);
-    controller->setProperty("NativeAwdlDataRx149ReceiptInputMonotonicUs",
-                            receipt.inputUs, 64);
-    controller->setProperty("NativeAwdlDataRx149ReceiptDeadlineMonotonicUs",
-                            receipt.deadlineUs, 64);
-    controller->setProperty("NativeAwdlDataRx149ReceiptIeeeChannel",
-                            receipt.ieeeChannel, 32);
-    controller->setProperty("NativeAwdlDataRx149ReceiptMacIndexPresent",
-                            receipt.macIndexPresent, 32);
-    controller->setProperty("NativeAwdlDataRx149ReceiptMacIndex",
-                            receipt.macIndex, 32);
-    controller->setProperty("NativeAwdlDataRx149ReceiptMacPhyDecodeMode",
-                            receipt.macPhyDecodeMode, 32);
-    controller->setProperty("NativeAwdlDataRx149ReceiptOriginalRxStatus",
-                            receipt.originalRxStatus, 32);
-    controller->setProperty("NativeAwdlDataRx149ReceiptMpduLength",
-                            receipt.mpduLength, 32);
-    controller->setProperty("NativeAwdlDataRx149ReceiptDecodedIpv6Count",
-                            receipt.decodedIpv6Count, 32);
-    controller->setProperty("NativeAwdlDataRx149ReceiptIfnetInputResultPresent",
-                            receipt.ifnetInputResultPresent, 32);
-    controller->setProperty("NativeAwdlDataRx149ReceiptIfnetInputResult",
-                            static_cast<uint32_t>(receipt.ifnetInputResult), 32);
-    // Publish sequence last. Readers can sample it before/after the numeric
-    // fields to reject a torn update without copying packet payload.
-    controller->setProperty(kSequence, receipt.sequence, 64);
+    // This telemetry publisher is called from the main workloop gate. The
+    // helper publishes a fenced snapshot and retries any incomplete write on
+    // the next periodic pass, even when MPDU sequence is unchanged.
+    static NativeAwdlBSD::Rx149InputReceiptPublisher publisher;
+    auto readNumber = [controller](const char *name, uint64_t *value) {
+        if (!controller || !name || !value)
+            return false;
+        OSNumber *number = OSDynamicCast(OSNumber,
+                                         controller->getProperty(name));
+        if (!number)
+            return false;
+        *value = number->unsigned64BitValue();
+        return true;
+    };
+    auto writeNumber = [controller](const char *name, uint64_t value,
+                                    unsigned int bits) {
+        return controller && controller->setProperty(name, value, bits);
+    };
+    (void)publisher.publish(receipt, readNumber, writeNumber);
 }
 #endif
 
@@ -1055,6 +1027,7 @@ bool ItlIwx::tahoeP2pRx149DataLease(
     out->leaseActive = evidence.leaseActive;
     out->ownerCurrent = evidence.ownerCurrent &&
         __atomic_load_n(&nativeP2pCancelRequested_, __ATOMIC_ACQUIRE) == 0 &&
+        !NativeAwdlBSD::rx149DataInputBlocked() &&
         (sc->sc_flags & (IWX_FLAG_HW_ERR | IWX_FLAG_SHUTDOWN |
                          IWX_FLAG_RFKILL)) == 0;
     out->epochsMatch = evidence.epochsMatch;
