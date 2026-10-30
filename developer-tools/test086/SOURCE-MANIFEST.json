@@ -102,6 +102,24 @@
       "source_sha256": "c8bd6069a3f4091459ba8b3c4071cefbf9caac22bbff65f6ccd0d24944f26593",
       "snapshot_sha256": "7e36e8f30ffc31bc320207b748f8d5cdb9b0c47b7262c07c7e18027b6a5aa1b5",
       "sanitization": "Removed the private metadata-generator import and metadata-only receipt assertions; retained all RX-entry runtime assertions."
+    },
+    {
+      "role": "offline_review_tool",
+      "source_relative_path": "IntelWirelessNative/tools/review_test086_saved_window.py",
+      "snapshot_path": "tools/review_test086_saved_window.py",
+      "size_bytes": 15780,
+      "source_sha256": "2db4662dbb4d6583fbe2cf3edf7c716399371ba0042a3883522891d7fee7c609",
+      "snapshot_sha256": "2db4662dbb4d6583fbe2cf3edf7c716399371ba0042a3883522891d7fee7c609",
+      "sanitization": null
+    },
+    {
+      "role": "test",
+      "source_relative_path": "IntelWirelessNative/tools/test_review_test086_saved_window.py",
+      "snapshot_path": "tools/test_review_test086_saved_window.py",
+      "size_bytes": 7645,
+      "source_sha256": "95932d5cdd480a3db065b2c72a545e1224ceec4b3058351b2669d005dba25bc9",
+      "snapshot_sha256": "95932d5cdd480a3db065b2c72a545e1224ceec4b3058351b2669d005dba25bc9",
+      "sanitization": null
     }
   ],
   "excluded": [
@@ -138,5 +156,17 @@
       }
     ],
     "scope": "Public-copy offline mocks only; no RF actions."
+  },
+  "follow_up_validation": {
+    "command": "python3 -m unittest discover -s tools -p test_review_test086_saved_window.py",
+    "tests_run": 5,
+    "tests_failed": 0,
+    "passed": true,
+    "scope": "Saved-report parser regression mocks only; no private runtime fixture, RF, IORegistry, EFI, or AirDrop action.",
+    "coverage": [
+      "stable signed-I32 encodings of explicitly whitelisted U32 fields normalize and pass the existing production trace guard",
+      "missing receipt and zero numeric data-RX counters do not promote overall data acceptance",
+      "out-of-range negative values, U64 properties, mixed raw encodings, and mixed snapshot versions remain rejected"
+    ]
   }
 }
