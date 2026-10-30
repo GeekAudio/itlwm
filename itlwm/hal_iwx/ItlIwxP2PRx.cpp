@@ -1084,6 +1084,42 @@ void ItlIwx::tahoeP2pTapAction(struct iwx_softc *sc, const uint8_t *frame,
     }
 }
 
+// Confine descriptor-owner telemetry to the accepted P2P observation session.
+// This is a diagnostic gate, not a management-action or data-path permission.
+static bool withinRx149DiagnosticWindow(uint64_t nowUs, uint64_t startUs)
+{
+    const uint64_t windowUs =
+        uint64_t(NativeP2PRx149Observation::kSessionDurationMs) * 1000ULL;
+    return startUs != 0 && nowUs >= startUs && nowUs - startUs < windowUs;
+}
+
+static bool rxDiagnosticSessionWindowQualified(
+    const IntelROCEvent::SessionSnapshot &session, uint64_t nowUs,
+    const NativeP2PRx149Observation::RocEvidence *rx149Owner)
+{
+#if !defined(ITL_NATIVE_AWDL_RX149_OBSERVATION_25G332)
+    (void)rx149Owner;
+#endif
+    if (!session.startSeen || session.startStatus != 1 ||
+        session.endSeen || session.outcomeUnknown)
+        return false;
+
+    if (session.configuration ==
+        IWX_SESSION_PROTECT_CONF_P2P_GO_NEGOTIATION)
+        return NativeAwdlRxEntry::withinDiagnosticWindow(
+            nowUs, session.startObservedMonotonicUs);
+
+#if defined(ITL_NATIVE_AWDL_RX149_OBSERVATION_25G332)
+    if (session.configuration ==
+            IWX_SESSION_PROTECT_CONF_P2P_DEVICE_DISCOV &&
+        rx149Owner &&
+        NativeP2PRx149Observation::validStartedOwner(*rx149Owner))
+        return withinRx149DiagnosticWindow(
+            nowUs, session.startObservedMonotonicUs);
+#endif
+    return false;
+}
+
 bool ItlIwx::tahoeP2pCurrentRxDiagnosticEpochs(
     struct iwx_softc *sc, NativeAwdlRxEntry::Epochs *epochs)
 {
@@ -1112,14 +1148,25 @@ bool ItlIwx::tahoeP2pCurrentRxDiagnosticEpochs(
         return false;
     const auto session = nativeP2pRocEvents_.snapshot();
     const uint64_t nowUs = tahoeP2pRxMonotonicUs();
+    NativeP2PRx149Observation::RocEvidence rx149OwnerEvidence{};
+    const NativeP2PRx149Observation::RocEvidence *rx149Owner = nullptr;
+#if defined(ITL_NATIVE_AWDL_RX149_OBSERVATION_25G332)
+    if (session.configuration ==
+        IWX_SESSION_PROTECT_CONF_P2P_DEVICE_DISCOV) {
+        const auto traceOwner = nativeAwdlRxEventTimeline_.snapshot();
+        // The out-of-range index intentionally supplies no descriptor-channel
+        // evidence. This only opens numeric RX-entry telemetry for a current
+        // 149 observation owner; packet channel and Action gates remain intact.
+        rx149OwnerEvidence = currentRx149ActionEvidence(
+            this, sc, lease, static_cast<uint16_t>(0xffffu), session,
+            traceOwner);
+        rx149Owner = &rx149OwnerEvidence;
+    }
+#endif
     if (session.generation != lease.contextGeneration ||
         session.generation != currentRoc || !session.commandReturned ||
         session.commandResult != 0 ||
-        session.configuration != IWX_SESSION_PROTECT_CONF_P2P_GO_NEGOTIATION ||
-        !session.startSeen || session.startStatus != 1 ||
-        session.endSeen || session.outcomeUnknown ||
-        !NativeAwdlRxEntry::withinDiagnosticWindow(
-            nowUs, session.startObservedMonotonicUs) ||
+        !rxDiagnosticSessionWindowQualified(session, nowUs, rx149Owner) ||
         sc->sc_p2p_roc.token != session.generation ||
         sc->sc_p2p_roc.phase != IWX_P2P_ROC_SESSION_ACKED)
         return false;
