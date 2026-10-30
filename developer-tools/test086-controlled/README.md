@@ -11,6 +11,13 @@ zero-send result plus verified monitor/AP/temp-file cleanup. This mode does
 not read or change Test086 metadata, inspect the kext, consume the shared boot
 claim, start the listener, arm the native probe, or send a frame.
 
+The test OpenWrt router's 2024 `mt76-connac` module panicked on a NULL pointer.
+These host-side budget and receipt fixes do not repair that router driver;
+pause RF runs on the affected module until it is fixed and verified.
+This public source snapshot is updated independently; the frozen private IWN
+preparation copy is not automatically synchronized. Compare its manifest and
+hashes before a later manual sync.
+
 `controlled_run_coordinator.py` is the separate, explicit full-run entry point.
 It starts the native worker, waits for its identity/host-TX/claim preflight,
 then requires both router sender and `awdl0` listener readiness before one

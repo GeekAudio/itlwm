@@ -7,6 +7,7 @@ import json
 import dataclasses
 import selectors
 from pathlib import Path
+import re
 import socket
 import subprocess
 import sys
@@ -93,6 +94,25 @@ def metadata_fixture():
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_sender_ready_and_go_time_budgets_match_frozen_sender(self):
+        sender_source = (ROOT / "afpacket-sender/awdl_probe_sender.c").read_text()
+        go_match = re.search(r"#define GO_TIMEOUT_MS (\d+)", sender_source)
+        tx_match = re.search(r"#define TX_BUDGET_NS UINT64_C\((\d+)\)",
+                             sender_source)
+        self.assertIsNotNone(go_match)
+        self.assertIsNotNone(tx_match)
+        self.assertEqual(runner.READINESS_TIMEOUT_SECONDS, 24.0)
+        self.assertEqual(runner.SENDER_GO_TIMEOUT_SECONDS * 1000,
+                         int(go_match.group(1)))
+        self.assertEqual(runner.SENDER_TX_BUDGET_SECONDS * 1_000_000_000,
+                         int(tx_match.group(1)))
+        self.assertEqual(runner.SENDER_POST_READY_TIMEOUT_SECONDS,
+                         runner.SENDER_GO_TIMEOUT_SECONDS +
+                         runner.SENDER_TX_BUDGET_SECONDS +
+                         runner.SENDER_RESULT_CLEANUP_GRACE_SECONDS)
+        self.assertGreater(runner.SENDER_POST_READY_TIMEOUT_SECONDS,
+                           runner.SENDER_GO_TIMEOUT_SECONDS)
+
     def test_sender_ready_exact_contract(self):
         ready = protocol.parse_sender_ready(
             "READY frames=16 interval_ms=50 mpdu_bytes=96 radiotap_bytes=10 "
@@ -314,6 +334,25 @@ class ProtocolTests(unittest.TestCase):
             self.assertEqual(first, 'NATIVE_ARMED {"claim_consumed":true}')
             self.assertEqual(second, 'NATIVE_RESULT {"report_saved":true}')
             self.assertEqual(process.wait(timeout=1), 0)
+        finally:
+            selector.close()
+            process.stdout.close()
+
+    def test_pipe_records_survive_child_exit_before_first_read(self):
+        process = subprocess.Popen(
+            [sys.executable, "-c", "print('SENDER_RESULT terminal')"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
+        selector = selectors.DefaultSelector()
+        selector.register(process.stdout, selectors.EVENT_READ)
+        state = {"buffer": b""}
+        try:
+            self.assertEqual(process.wait(timeout=2), 0)
+            deadline = __import__("time").monotonic() + 2
+            self.assertEqual(
+                runner._read_protocol_line(selector, process, state, deadline),
+                "SENDER_RESULT terminal")
+            self.assertIsNone(
+                runner._read_protocol_line(selector, process, state, deadline))
         finally:
             selector.close()
             process.stdout.close()

@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "8b9c1ab92ee1f3ae03f45a7ecd2e58b0593a597c5f65511d5b1bada227b6e010"
+      "sha256": "fcb059435d8b5caad493ea8db98aed1a3511ef50b04e2408534939afdc09f8d8"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "1bd9f7b0aa5f8553b1f4487a7743669b769a8b74f40b1b936340acd20b4263b9"
+      "sha256": "c7eb99baf2e575bb7be5fc4cf72e2129e84b75b160a00516f11b8bbf7d84cd9c"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-30T16:26:48.126313+08:00",
-  "runtime_scope": "Test086 boot1793346889:7 passed,4 partial,29 uncovered,0 failed; history24/40,net-new0. Approximately five-minute Wi-Fi baseline and separate two-minute post-window passed. Native149 ROC95.2ms completed with one ordinary beacon; no MIF/data. OpenWrt mt76 kernel panic interrupted sender receipts; send count and cleanup unknown. Exact module NULL dereference confirmed offline; probe causality unproven. No EFI write or repeat injection; reboot not requested."
+  "updated_at": "2026-10-30T16:35:05.815082+08:00",
+  "runtime_scope": "Test086 boot1793346889:7 passed,4 partial,29 uncovered,0 failed; history24/40,net-new0. Approximately five-minute Wi-Fi baseline and separate two-minute post-window passed. Native149 ROC95.2ms completed with one ordinary beacon; no MIF/data. OpenWrt mt76 kernel panic interrupted sender receipts; send count and cleanup unknown. Exact module NULL dereference confirmed offline; probe causality unproven. No EFI write or repeat injection; reboot not requested. Host coordinator deadlines and completed-result collection fixed offline:25 targeted tests,24 passed,1 BusyBox environment skip. No additional runtime trial."
 }

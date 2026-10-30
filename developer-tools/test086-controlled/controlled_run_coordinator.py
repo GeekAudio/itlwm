@@ -48,6 +48,7 @@ NATIVE_ARM_TIMEOUT = 5.0
 NATIVE_RESULT_TIMEOUT = 15.0
 LISTENER_READY_TIMEOUT = 5.0
 RUN_TOTAL_TIMEOUT = 50.0
+LISTENER_RESULT_TIMEOUT = 15.5
 
 
 class CoordinatorError(RuntimeError):
@@ -335,8 +336,9 @@ class ManagedPipe:
                     return raw.decode("utf-8", "strict")
                 except UnicodeDecodeError:
                     raise CoordinatorError("CHILD_PROTOCOL_ENCODING_INVALID")
-            if self.process.poll() is not None and not self.state["buffer"]:
-                return None
+            # A child may have exited after writing one or more records that
+            # remain queued in the OS pipe. Read until EOF so those terminal
+            # records are not dropped just because poll() already has a code.
             events = self.selector.select(min(0.2, deadline - time.monotonic()))
             if not events:
                 continue
@@ -503,6 +505,9 @@ def run_controlled_once(*, host: str, control_path: str, metadata_path: Path,
         "native_arm_result": None,
         "native_result": None,
         "listener_result": None,
+        "listener_result_error": None,
+        "listener_worker_cleanup": None,
+        "native_worker_cleanup": None,
         "local_sender_acceptance_is_rf_proof": False,
         "peer_receipt_proven": False,
         "native_awdl_reply_proven": False,
@@ -667,7 +672,7 @@ def run_controlled_once(*, host: str, control_path: str, metadata_path: Path,
             raise CoordinatorError("NATIVE_FINAL_RESULT_MISSING")
         report["native_result"] = _parse_native_result(native_result_line, run_token)
 
-        listener_result_line = listener.read_line(15.5)
+        listener_result_line = listener.read_line(LISTENER_RESULT_TIMEOUT)
         if listener_result_line is None:
             raise CoordinatorError("AWDL_LISTENER_RESULT_MISSING")
         try:
@@ -737,12 +742,12 @@ def run_controlled_once(*, host: str, control_path: str, metadata_path: Path,
             raise
         raise error from caught
     finally:
-        if listener is not None:
-            listener.terminate()
         if native is not None:
-            if native_arm_control_sent and native.process.poll() is None:
+            if native_arm_control_sent:
                 deadline = time.monotonic() + NATIVE_RESULT_TIMEOUT
-                while time.monotonic() < deadline and report.get("native_result") is None:
+                while (time.monotonic() < deadline and
+                       (report.get("native_arm_result") is None or
+                        report.get("native_result") is None)):
                     try:
                         line = native.read_line(min(3.0, deadline - time.monotonic()))
                     except CoordinatorError:
@@ -766,6 +771,36 @@ def run_controlled_once(*, host: str, control_path: str, metadata_path: Path,
             elif native.process.poll() is None and not native_arm_control_sent:
                 native.terminate()
             native.close()
+        if listener is not None:
+            if report.get("listener_ready") is not None:
+                if report.get("listener_result") is None:
+                    try:
+                        listener_result_line = listener.read_line(
+                            LISTENER_RESULT_TIMEOUT)
+                    except CoordinatorError as listener_error:
+                        report["listener_result_error"] = listener_error.code
+                    else:
+                        if listener_result_line is None:
+                            report["listener_result_error"] = (
+                                "AWDL_LISTENER_RESULT_MISSING")
+                        else:
+                            try:
+                                report["listener_result"] = protocol.parse_listener_result(
+                                    listener_result_line, run_token=run_token)
+                            except protocol.ControlledProbeError as listener_error:
+                                report["listener_result_error"] = listener_error.code
+                try:
+                    listener.process.wait(timeout=1.0)
+                except subprocess.TimeoutExpired:
+                    report["listener_worker_cleanup"] = (
+                        "terminated_after_result_deadline")
+                    listener.terminate(timeout=1.0)
+                else:
+                    report["listener_worker_cleanup"] = (
+                        "exited_after_result_window")
+                    listener.close()
+            else:
+                listener.terminate()
         if sender is not None and not sender.closed:
             router._terminate_process(sender.process)
 

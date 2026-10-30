@@ -207,6 +207,13 @@ class FakePipe:
             elif self.scenario == "native_hang":
                 self.lines.extend([native_armed_line(token),
                                    native_arm_result_line(token)])
+            elif self.scenario == "sender_error_native_exited":
+                self.lines.extend([native_armed_line(token),
+                                   native_arm_result_line(token),
+                                   native_result_line(token)])
+                # Model a worker that wrote both terminal records and exited
+                # before the sender path raised its transport error.
+                self.process.returncode = 0
             else:
                 native_status = {
                     "terminal_unknown": "session_terminal_unknown_no_retry",
@@ -224,6 +231,7 @@ class FakePipe:
             }, separators=(",", ":")))
 
     def terminate(self, timeout=1.0):
+        self.event_trace.append(self.role + ":TERMINATE")
         self.process.returncode = -15
         self.closed = True
 
@@ -282,6 +290,11 @@ class FakeRouterSession:
         return self._finish("ABORT")
 
     def go_once(self):
+        if self.scenario == "sender_error_native_exited":
+            self.control_consumed = True
+            self.closed = True
+            self.event_trace.append("router:GO_ERROR")
+            raise protocol.ControlledProbeError("REMOTE_PROTOCOL_TIMEOUT")
         return self._finish("GO")
 
 
@@ -292,6 +305,7 @@ class ControlledCoordinatorIntegrationTests(unittest.TestCase):
 
     def run_fake(self, scenario):
         FakePipe.scenario = scenario
+        FakeRouterSession.scenario = scenario
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             sender_binary = root / "sender.bin"
@@ -358,6 +372,7 @@ class ControlledCoordinatorIntegrationTests(unittest.TestCase):
         self.assertEqual(events, [
             "native:NATIVE_READY", "router:MONITOR_READY", "router:SENDER_READY",
             "router:ABORT", "native:ABORT", "native:NATIVE_ABORTED",
+            "listener:TERMINATE",
         ])
         self.assertIsNone(error.partial_report["native_armed_ack"])
         self.assertFalse(error.partial_report["boot_claim_consumed"])
@@ -370,12 +385,15 @@ class ControlledCoordinatorIntegrationTests(unittest.TestCase):
         self.assertEqual(events, [
             "native:NATIVE_READY", "router:MONITOR_READY", "router:SENDER_READY",
             "listener:LISTENER_READY", "native:ARM", "router:ABORT",
+            "listener:LISTENER_RESULT",
         ])
         self.assertIsNone(error.partial_report["boot_claim_consumed"])
         self.assertEqual(error.partial_report["claim_outcome"],
                          "unknown_after_arm_request_no_retry")
         self.assertFalse(error.partial_report["retry_allowed"])
         self.assertEqual(error.partial_report["sender_result"]["sent"], 0)
+        self.assertEqual(error.partial_report["listener_result"]["status"],
+                         "timeout_or_unmatched")
         self.assertEqual(error.partial_report["status"],
                          "NATIVE_ARM_ACK_MISSING_after_arm_request_no_retry")
 
@@ -391,8 +409,37 @@ class ControlledCoordinatorIntegrationTests(unittest.TestCase):
         self.assertEqual(events, [
             "native:NATIVE_READY", "router:MONITOR_READY", "router:SENDER_READY",
             "listener:LISTENER_READY", "native:ARM", "native:NATIVE_ARMED",
-            "router:GO", "native:NATIVE_ARM_RESULT",
+            "router:GO", "native:NATIVE_ARM_RESULT", "native:TERMINATE",
+            "listener:LISTENER_RESULT",
         ])
+
+    def test_sender_error_drains_exited_native_receipts_and_listener_result(self):
+        report, error, events = self.run_fake("sender_error_native_exited")
+        self.assertIsNone(report)
+        self.assertIsNotNone(error)
+        partial = error.partial_report
+        self.assertEqual(partial["boot_claim_consumed"], True)
+        self.assertIsNotNone(partial["native_arm_result"])
+        self.assertIsNotNone(partial["native_result"])
+        self.assertEqual(partial["listener_result"]["status"],
+                         "timeout_or_unmatched")
+        self.assertEqual(partial["listener_worker_cleanup"],
+                         "exited_after_result_window")
+        self.assertLess(events.index("native:NATIVE_RESULT"),
+                        events.index("listener:LISTENER_RESULT"))
+        self.assertNotIn("listener:TERMINATE", events)
+
+    def test_managed_pipe_drains_records_after_child_exit(self):
+        pipe = coordinator.ManagedPipe([
+            sys.executable, "-c", "print('first'); print('second')"])
+        try:
+            pipe.process.wait(timeout=5.0)
+            self.assertIsNotNone(pipe.process.poll())
+            self.assertEqual(pipe.read_line(1.0), "first")
+            self.assertEqual(pipe.read_line(1.0), "second")
+            self.assertIsNone(pipe.read_line(1.0))
+        finally:
+            pipe.close()
 
     def test_native_report_write_failure_keeps_streamed_and_listener_results(self):
         report, error, events = self.run_fake("report_write_fail")

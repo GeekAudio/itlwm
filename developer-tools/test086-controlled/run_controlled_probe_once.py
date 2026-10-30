@@ -30,7 +30,16 @@ import test086_controlled as protocol
 ROOT = Path(__file__).resolve().parents[2]
 MAX_REMOTE_SCRIPT_BYTES = 3 * 1024 * 1024
 MAX_LINE_BYTES = 16384
-TOTAL_TIMEOUT_SECONDS = 24.0
+# Separate startup/readiness from the sender's own post-READY GO gate. The C
+# sender starts its 30 s gate just before printing READY. After that gate, allow
+# its existing 2 s TX budget plus a small bounded result/remote-cleanup grace.
+READINESS_TIMEOUT_SECONDS = 24.0
+SENDER_GO_TIMEOUT_SECONDS = 30.0
+SENDER_TX_BUDGET_SECONDS = 2.0
+SENDER_RESULT_CLEANUP_GRACE_SECONDS = 3.0
+SENDER_POST_READY_TIMEOUT_SECONDS = (
+    SENDER_GO_TIMEOUT_SECONDS + SENDER_TX_BUDGET_SECONDS +
+    SENDER_RESULT_CLEANUP_GRACE_SECONDS)
 HOST_RE = re.compile(r"^[A-Za-z0-9_.@:-]{1,255}$")
 
 
@@ -122,8 +131,9 @@ def _read_protocol_line(selector: selectors.BaseSelector, process: subprocess.Po
                 return raw.decode("utf-8", errors="strict")
             except UnicodeDecodeError:
                 raise protocol.ControlledProbeError("REMOTE_PROTOCOL_ENCODING_INVALID")
-        if process.poll() is not None and not state["buffer"]:
-            return None
+        # The SSH process may exit after writing protocol lines that remain
+        # queued in its stdout pipe. Drain the descriptor through EOF instead
+        # of treating poll() as proof that no terminal record is pending.
         events = selector.select(min(0.25, max(0.0, deadline - time.monotonic())))
         if not events:
             continue
@@ -178,24 +188,27 @@ class RouterSenderSession:
             stderr=subprocess.DEVNULL, start_new_session=True, bufsize=0)
         selector = selectors.DefaultSelector()
         selector.register(process.stdout, selectors.EVENT_READ)
-        deadline = time.monotonic() + TOTAL_TIMEOUT_SECONDS
+        readiness_deadline = time.monotonic() + READINESS_TIMEOUT_SECONDS
         state: Dict[str, Any] = {"buffer": b""}
         try:
             assert process.stdin is not None
             process.stdin.write(remote_script_bytes(script))
             process.stdin.flush()
-            monitor_line = _read_protocol_line(selector, process, state, deadline)
+            monitor_line = _read_protocol_line(
+                selector, process, state, readiness_deadline)
             if monitor_line is None:
                 raise protocol.ControlledProbeError("ROUTER_READINESS_SETUP_FAILED")
             if monitor_line.startswith("REMOTE_ERROR "):
                 match = re.fullmatch(r"REMOTE_ERROR code=([a-z0-9_]+)", monitor_line)
                 remote_error = match.group(1) if match else "unknown"
-                cleanup_line = _read_protocol_line(selector, process, state, deadline)
+                cleanup_line = _read_protocol_line(
+                    selector, process, state, readiness_deadline)
                 cleanup = None
                 if cleanup_line and cleanup_line.startswith("CLEANUP "):
                     cleanup = protocol.parse_cleanup(cleanup_line, run_token=token)
                 try:
-                    exit_code = process.wait(timeout=max(0.0, deadline - time.monotonic()))
+                    exit_code = process.wait(timeout=max(
+                        0.0, readiness_deadline - time.monotonic()))
                 except subprocess.TimeoutExpired:
                     exit_code = None
                 evidence = {"remote_error_code": remote_error,
@@ -203,18 +216,21 @@ class RouterSenderSession:
                 raise protocol.ControlledProbeError(
                     "ROUTER_READINESS_SETUP_FAILED", evidence=evidence)
             monitor_ready = protocol.parse_monitor_ready(monitor_line)
-            ready_line = _read_protocol_line(selector, process, state, deadline)
+            ready_line = _read_protocol_line(
+                selector, process, state, readiness_deadline)
             if ready_line is None:
                 raise protocol.ControlledProbeError("SENDER_READY_MISSING")
             if ready_line.startswith("REMOTE_ERROR "):
                 match = re.fullmatch(r"REMOTE_ERROR code=([a-z0-9_]+)", ready_line)
                 remote_error = match.group(1) if match else "unknown"
-                cleanup_line = _read_protocol_line(selector, process, state, deadline)
+                cleanup_line = _read_protocol_line(
+                    selector, process, state, readiness_deadline)
                 cleanup = None
                 if cleanup_line and cleanup_line.startswith("CLEANUP "):
                     cleanup = protocol.parse_cleanup(cleanup_line, run_token=token)
                 try:
-                    exit_code = process.wait(timeout=max(0.0, deadline - time.monotonic()))
+                    exit_code = process.wait(timeout=max(
+                        0.0, readiness_deadline - time.monotonic()))
                 except subprocess.TimeoutExpired:
                     exit_code = None
                 raise protocol.ControlledProbeError(
@@ -223,7 +239,11 @@ class RouterSenderSession:
                               "remote_error_code": remote_error,
                               "cleanup": cleanup, "ssh_exit_code": exit_code})
             ready = protocol.parse_sender_ready(ready_line)
-            session = cls(process, selector, state, deadline, token, actual_sha)
+            # The 24 s readiness budget ends at sender READY. Give the sender
+            # its declared 30 s GO gate, then its unchanged 2 s TX budget and
+            # a bounded 3 s for result/monitor cleanup to reach this process.
+            sender_deadline = time.monotonic() + SENDER_POST_READY_TIMEOUT_SECONDS
+            session = cls(process, selector, state, sender_deadline, token, actual_sha)
             session.protocol_evidence["monitor_ready"] = monitor_ready
             session.protocol_evidence["sender_ready"] = ready
             return session, monitor_ready, ready
