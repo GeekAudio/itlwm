@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "248ea70f34a35e7bb36ccd9c43e34482d2847db87f7bbf85e145ed69ba30fce6"
+      "sha256": "4daf406ce17a2c38164a7be908540869c45f18683ca466cfa27161c1d33ab1ae"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "f780405fab7c8a4825db777c1a6842b0c0d52f05c5406b64316b509979a654dc"
+      "sha256": "ca55a637f4c448b97527cf86f4da9bd97d5ef8c0e3a40e260e1f94a80aff4e7f"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -30,7 +30,7 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "4a090f3f52e5145e8827ba97ece76f71ee94ba37fe2dae3e578dc746a641fe22"
+      "sha256": "16c11f4bf6b32389ec93a7fdea52b464919e9c432aaa346ed1d91b394cacbcb9"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-30T14:41:16.932153+08:00",
-  "runtime_scope": "Current Test086 boot1793340271:9 passed/6 partial/25 uncovered/0 failed, historical24/40, net-new0. Separate300.003s/56-sample and120.004s/23-sample Wi-Fi windows plus en1 HTTP/HTTPS passed. One100ms149 ROC completed; one MIF uniquely matched to router PCAP. Data/QoS candidates and native capture/decode/delivered all0, receipt unpublished. Derived strict U32 review repaired management-trace false negative; 5 new plus55 prior host cases passed. Phone logs and separate router-only browse windows retained; no native rearm, no EFI write or driver change. Controlled96B probe is preparation only; no input/AirDrop proof."
+  "updated_at": "2026-10-30T15:34:58.992234+08:00",
+  "runtime_scope": "Test086 current runtime unchanged:9 passed,6 partial,25 uncovered,0 failed; historical24/40, net-new0. Controlled96B tooling prepared for a new boot with the existing C28 driver. Real OpenWrt READY-to-ABORT verified0 sends and cleanup; real awdl0 UDP listener READY without stimulus. Offline Python38 passed/1 local ash skip and sender host9 passed. No additional native arm, probe transmission, EFI write, data-input or AirDrop proof."
 }
