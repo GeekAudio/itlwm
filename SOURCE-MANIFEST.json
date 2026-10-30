@@ -432,13 +432,13 @@
     "developer-tools/continuity/tests/test_observe_continuity_window.py": "fc41200a8c4221de7396c4a8e93dc128dbe5d4872cefcb3154343d25d14c790f",
     "developer-tools/continuity/tools/observe_continuity_window.py": "24aaa6dc89c8ecff0f009850cf36d74b20fb6be483db46853040cb74d12d4007",
     "developer-tools/progress-site/README.md": "bc45538986622364e2891a85a6e93e297967229d5305032cd91e187287ad04b2",
-    "developer-tools/progress-site/SOURCE-MANIFEST.json": "391ad9afc87c9812f49c3b6c5b1761f894ddfc920bc6ca8161cdfcd0cfa2912b",
+    "developer-tools/progress-site/SOURCE-MANIFEST.json": "8a5a2bcf8b38f7d3c0c7264bbe884d1040cb6ebb1a4eb96501b4693b78c6b647",
     "developer-tools/progress-site/dist/assets/site.css": "4348ea93c013b95d6d00aa729ddb230a630830b4220c9e6bfa1db19c59de6a99",
     "developer-tools/progress-site/dist/assets/site.js": "db2af24f6b933e1eabc9f4ec0eebd90920ea21249ae164012f2b477759bb5a90",
-    "developer-tools/progress-site/dist/assets/test-records.js": "385c803d764ee3bb0a9fe55f00d11989fd4f7b8af795c661b4c54a8cd2618687",
-    "developer-tools/progress-site/dist/data.js": "6b7abe499bfe1423f906c0b9acce985804b99314039dbd7eb9e9a921713a7ee0",
+    "developer-tools/progress-site/dist/assets/test-records.js": "c55b8a2e625884ef7ae364b364e47769168a861fafcd4709218918ebc4c8984a",
+    "developer-tools/progress-site/dist/data.js": "6e2b260d0a4bf8673d9d0508fcbea10e0f1e63ec0a12e6a0010df14c70010953",
     "developer-tools/progress-site/dist/index.html": "38276cf10b5e8539721e2bc321d5f6093fd7e30997791cb5a2d0f71ec966057f",
-    "developer-tools/progress-site/dist/milestones.html": "345c904a3c2c314f53586e4e06a91371e55d714971b0784ec2de1344045ecb71",
+    "developer-tools/progress-site/dist/milestones.html": "178dbc1cb418e00637d1ff7c59f3125eb118acd5824e168002452508ca7b0b67",
     "developer-tools/progress-site/tools/publish_github_pages.py": "7c05efb77487e503bacbb8056906822ea04569085bddc968699dd2bd7b3c6359",
     "developer-tools/progress-site/tools/refresh_data.py": "b00856ca206585daba1883e08fb6ecc4738dada058635c559dd6b62ac9f9feef",
     "developer-tools/rx-stimulus/README.md": "b889968fe61dd6967053e6582bd3a701dd507de4a1ec9d4ec1f80618a040e8ce",
@@ -1175,9 +1175,14 @@
   },
   "deployment_validation": {
     "candidate": "25G332-Test083",
-    "state": "waiting_for_native_administrator_authorization",
-    "installed": false,
-    "reboot_ready": false,
-    "automatic_reboot": false
+    "state": "deployed_waiting_reboot_disarmed",
+    "installed": true,
+    "reboot_ready": true,
+    "diagnostics_armed": false,
+    "full_efi_backup_verified": true,
+    "only_airportitlwm_replaced": true,
+    "other_efi_files_unchanged": true,
+    "automatic_reboot": false,
+    "runtime_verified": false
   }
 }
