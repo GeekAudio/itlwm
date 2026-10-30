@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "eca8157ad32188109b973d24c63c1a427e2b3d744053b4d75d5229711a4d7e0e"
+      "sha256": "b168b5a771432827b5d584303a9cfa05ebd8e6b0ffc673899a7d6b5561a4231a"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "3d7484d9c0abe12b428f97730d6c3e8eae5dd42e447c0a56f0637571f3606e2c"
+      "sha256": "ef1193d407ccc556cdbe1efaacca7441cd27511d55651f07072b814224cb2353"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -30,7 +30,7 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "8e21b4b70385e40baa5eb4e887cd8ceaf7d0ea23900a9b4181955ba2bcd3c7de"
+      "sha256": "88a221f691aa1022d20f3f72638acf03d9de234e1792e7d47baf65f947980354"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-31T04:15:37.277321+08:00",
-  "runtime_scope": "Test090 boot identity matched. Passive Wi-Fi baseline failed at 371.446 seconds / 68 samples with link and IPv4 loss while IFF_UP remained set; reset=5, stop=2, watchdog=0 unchanged across saved failure/recovery stages. User reports no manual action. Reassociation and en1-bound gateway HTTP plus two HTTPS requests passed afterward. Initial trigger remains unknown; near-hourly recurrence is only a clue. No Intel ARM/ROC, router sender, EFI write or WAN/LAN change in this turn. Current acceptance: 4 passed, 0 partial, 35 uncovered, 1 failed; previous passes not inherited. Native AWDL data return and AirDrop remain unproven."
+  "updated_at": "2026-10-31T05:20:25.322901+08:00",
+  "runtime_scope": "Test091 was built, reviewed and deployed with a verified full EFI backup; only AirportItlwm.kext changed. The currently running Test090 has one recorded spontaneous link loss and later recovery. Two separate 15-minute passive windows subsequently passed (163 samples each); they do not erase that failure or establish a periodic cause. Test091 adds bounded key/update/disconnect records and RX rejection counters, with original authentication and receive conditions retained. 19 host checks, 35 compile-profile checks and independent source/RX reviews passed. New runtime and AirDrop acceptance remain unverified; current Test090 matrix stays 4 passed, 0 partial, 35 uncovered, 1 failed. No RF diagnostic was triggered in this preparation turn."
 }
