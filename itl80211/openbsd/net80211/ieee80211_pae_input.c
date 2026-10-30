@@ -910,6 +910,7 @@ ieee80211_recv_rsn_group_msg1(struct ieee80211com *ic,
     const u_int8_t *gtk, *igtk;
     u_int16_t info, kid, reason = 0;
     int keylen;
+    int group2Result;
 #ifdef AIRPORT_TAHOE
     uint32_t traceAttempt = iwx_sta_auth_trace_begin_attempt(
         &ic->ic_tahoe_auth_trace, ieee80211_tahoe_trace_time_us(),
@@ -1183,7 +1184,7 @@ ieee80211_recv_rsn_group_msg1(struct ieee80211com *ic,
               ether_sprintf(ni->ni_macaddr));
     
     /* send message 2 to authenticator */
-    int group2Result = ieee80211_send_group_msg2(ic, ni, NULL);
+    group2Result = ieee80211_send_group_msg2(ic, ni, NULL);
 #ifdef AIRPORT_TAHOE
     ieee80211_tahoe_trace_group(ic, traceAttempt,
         IWX_STA_TRACE_GROUP2_RESULT, IWX_STA_STAGE_GROUP2_OUTPUT,

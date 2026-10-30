@@ -90,6 +90,9 @@ def decode(raw: bytes) -> dict:
         'Receive-handler entry is not sender authenticity or PMF validation.',
         'Only matching explicit attempt identifiers support attempt attribution.',
         'Lost records or a lost first trigger leave missing causes unknown.',
+        'Captured means a bounded record copy, not complete causal history; ordering is append order.',
+        'Receive-handler association identity is sampled at append, not at handler entry.',
+        'Local deauth coverage here is Group1 and driver cleanup, not every system disconnect source.',
     ]
     return result
 

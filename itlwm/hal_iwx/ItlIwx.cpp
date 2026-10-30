@@ -192,15 +192,16 @@ static uint64_t tahoeMonotonicNs()
 }
 
 #ifdef AIRPORT_TAHOE
-static int tahoeRecordStaAuth(struct iwx_softc *sc, uint16_t kind,
-    uint16_t stage, uint16_t source, int32_t result, uint32_t detail,
+static int tahoeRecordStaAuthAtGeneration(struct iwx_softc *sc,
+    uint32_t driverGeneration, uint16_t kind, uint16_t stage,
+    uint16_t source, int32_t result, uint32_t detail,
     uint32_t attemptId = 0, uint32_t flags = 0, bool freeze = false)
 {
     if (sc == nullptr)
         return 0;
     IwxStaAuthTraceInput input{};
     input.monotonic_us = tahoeMonotonicNs() / 1000ULL;
-    input.driver_generation = static_cast<uint32_t>(sc->sc_generation);
+    input.driver_generation = driverGeneration;
     input.attempt_id = attemptId;
     input.kind = kind;
     input.stage = stage;
@@ -210,6 +211,70 @@ static int tahoeRecordStaAuth(struct iwx_softc *sc, uint16_t kind,
     input.flags = flags;
     input.freeze_first_failure = freeze ? 1 : 0;
     return iwx_sta_auth_trace_record(&sc->sc_ic.ic_tahoe_auth_trace, &input);
+}
+
+static int tahoeRecordStaAuth(struct iwx_softc *sc, uint16_t kind,
+    uint16_t stage, uint16_t source, int32_t result, uint32_t detail,
+    uint32_t attemptId = 0, uint32_t flags = 0, bool freeze = false)
+{
+    return tahoeRecordStaAuthAtGeneration(sc,
+        sc != nullptr ? static_cast<uint32_t>(sc->sc_generation) : 0U,
+        kind, stage, source, result, detail, attemptId, flags, freeze);
+}
+
+/* Close one already-published RUN association without using the current
+ * driver generation implicitly. Stop advances sc_generation before it can
+ * retire net80211 to INIT, so callers pass the generation captured from the
+ * RUN association. A missing association remains unknown and is not invented.
+ */
+static bool tahoeEndStaRunAssociationIfCurrent(struct IwxStaAuthTrace *trace,
+    uint32_t expectedAssociationId)
+{
+    if (trace == nullptr || expectedAssociationId == 0)
+        return false;
+    if (!iwx_sta_auth_trace_try_lock(trace)) {
+        uint32_t expected = expectedAssociationId;
+        (void)__atomic_compare_exchange_n(&trace->association_id, &expected,
+            0U, false, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+        __atomic_add_fetch(&trace->dropped_count, 1u, __ATOMIC_RELAXED);
+        return false;
+    }
+
+    if (__atomic_load_n(&trace->association_id, __ATOMIC_RELAXED) !=
+        expectedAssociationId) {
+        iwx_sta_auth_trace_unlock(trace);
+        return false;
+    }
+    __atomic_add_fetch(&trace->revision, 1u, __ATOMIC_RELEASE);
+    __atomic_store_n(&trace->association_id, 0u, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&trace->revision, 1u, __ATOMIC_RELEASE);
+    iwx_sta_auth_trace_unlock(trace);
+    return true;
+}
+
+static bool tahoeRetireStaRunAssociation(struct iwx_softc *sc,
+    uint32_t driverGeneration, uint32_t oldState, uint32_t newState,
+    int32_t result)
+{
+    if (sc == nullptr || oldState != IEEE80211_S_RUN ||
+        newState == IEEE80211_S_RUN)
+        return false;
+
+    struct IwxStaAuthTrace *trace = &sc->sc_ic.ic_tahoe_auth_trace;
+    const uint32_t associationId = __atomic_load_n(&trace->association_id,
+                                                    __ATOMIC_ACQUIRE);
+    if (associationId == 0)
+        return false;
+
+    (void)tahoeRecordStaAuthAtGeneration(sc, driverGeneration,
+        IWX_STA_TRACE_ASSOC_LOSS, IWX_STA_STAGE_STATE_COMPLETED,
+        IWX_STA_SOURCE_UNKNOWN, result,
+        (oldState << 16) | (newState & 0xffffU), 0, 0, true);
+
+    /* End only the association observed above, even if another RUN starts
+     * before this close reaches the trace writer. */
+    (void)tahoeEndStaRunAssociationIfCurrent(trace, associationId);
+    return true;
 }
 #endif
 
@@ -13363,6 +13428,8 @@ iwx_scan(struct iwx_softc *sc)
     int err;
 #ifdef AIRPORT_TAHOE
     const int generation = sc->sc_generation;
+    const uint32_t stateBeforeScan = static_cast<uint32_t>(ic->ic_state);
+    bool scanRetiredRunLink = false;
     if (sc->sc_flags & IWX_FLAG_SHUTDOWN)
         return ENXIO;
     const uint32_t phase = tahoeScanState(ic);
@@ -13416,10 +13483,21 @@ iwx_scan(struct iwx_softc *sc)
     if ((sc->sc_flags & IWX_FLAG_BGSCAN) == 0) {
         ieee80211_set_link_state(ic, LINK_STATE_DOWN);
         ieee80211_node_cleanup(ic, ic->ic_bss);
+#ifdef AIRPORT_TAHOE
+        scanRetiredRunLink = true;
+#endif
     }
     ic->ic_state = IEEE80211_S_SCAN;
     wakeupOn(&ic->ic_state); /* wake iwx_init() */
 #ifdef AIRPORT_TAHOE
+    /* iwx_newstate_task's SCAN success path returns before its common out:
+     * block. Record the actual foreground RUN retirement here, after link
+     * teardown and the SCAN state update, before scan-start can fail. */
+    if (scanRetiredRunLink && stateBeforeScan == IEEE80211_S_RUN &&
+        ic->ic_state == IEEE80211_S_SCAN && generation == sc->sc_generation)
+        (void)tahoeRetireStaRunAssociation(sc,
+            static_cast<uint32_t>(generation), stateBeforeScan,
+            static_cast<uint32_t>(ic->ic_state), 0);
     err = tahoeCommitScanStart(sc, serial);
     if (err)
         IOLog("AirportItlwm[Tahoe] scan commit failed generation=%d state=%d flags=0x%x phase=%u error=%d\n",
@@ -16097,6 +16175,8 @@ iwx_stop(struct _ifnet *ifp, IwxResetTrace::ResetReason reason)
     
 #ifdef AIRPORT_TAHOE
     const uint32_t linkResetOldState = static_cast<uint32_t>(ic->ic_state);
+    const uint32_t linkResetOldGeneration =
+        static_cast<uint32_t>(sc->sc_generation);
 #if defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
     NativeRxPreOwner::StopActivity observerStopActivity(&nativeRxPreOwnerStopDepth_);
     tahoeRxPreOwnerStop();
@@ -16180,8 +16260,23 @@ iwx_stop(struct _ifnet *ifp, IwxResetTrace::ResetReason reason)
     sc->ba_tx.start_tidmask = 0;
     sc->ba_tx.stop_tidmask = 0;
     
+#ifdef AIRPORT_TAHOE
+    const int stopStateError = sc->sc_newstate(ic, IEEE80211_S_INIT, -1);
+#else
     sc->sc_newstate(ic, IEEE80211_S_INIT, -1);
+#endif
     sc->ns_nstate = IEEE80211_S_INIT;
+#ifdef AIRPORT_TAHOE
+    /* stop() advances sc_generation before calling sc_newstate(INIT), and it
+     * bypasses iwx_newstate_task's RUN->nonRUN completion hook. Attribute the
+     * retirement to the generation captured with the old RUN state, never to
+     * the already-advanced generation. */
+    if (linkResetOldState == IEEE80211_S_RUN &&
+        ic->ic_state == IEEE80211_S_INIT)
+        (void)tahoeRetireStaRunAssociation(sc, linkResetOldGeneration,
+            linkResetOldState, static_cast<uint32_t>(ic->ic_state),
+            stopStateError);
+#endif
     
     for (i = 0; i < nitems(sc->sc_rxba_data); i++) {
         struct iwx_rxba_data *rxba = &sc->sc_rxba_data[i];

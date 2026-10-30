@@ -617,14 +617,22 @@ def main() -> None:
 
     with tempfile.TemporaryDirectory(prefix="iwx-group1-host-") as temp:
         temp_path = Path(temp)
-        harness_path = temp_path / "group1_host.c"
-        harness_path.write_text(generated, encoding="utf-8")
-        outputs = []
-        for name, tahoe in (("legacy", False), ("tahoe", True)):
+        outputs = {}
+        profiles = (
+            ("c-legacy", "clang", "-std=c11", False),
+            ("c-tahoe", "clang", "-std=c11", True),
+            ("cxx-legacy", "clang++", "-std=c++17", False),
+            ("cxx-tahoe", "clang++", "-std=c++17", True),
+        )
+        for name, compiler, standard, tahoe in profiles:
+            harness_path = temp_path / (
+                "group1_host.cpp" if compiler == "clang++" else "group1_host.c"
+            )
+            harness_path.write_text(generated, encoding="utf-8")
             binary = temp_path / name
             command = [
-                "clang",
-                "-std=c11",
+                compiler,
+                standard,
                 "-Wall",
                 "-Wextra",
                 "-Wno-sign-compare",
@@ -644,15 +652,25 @@ def main() -> None:
             result = subprocess.run(
                 [str(binary)], check=True, capture_output=True, text=True
             )
-            outputs.append(result.stdout)
+            outputs[name] = result.stdout
 
-        if outputs[0] != outputs[1]:
+        if outputs["c-legacy"] != outputs["c-tahoe"]:
             raise AssertionError(
-                "instrumented Group1 behavior differs from the legacy path:\n"
-                f"legacy:\n{outputs[0]}\nTahoe:\n{outputs[1]}"
+                "C11 instrumented Group1 behavior differs from the legacy path:\n"
+                f"legacy:\n{outputs['c-legacy']}\nTahoe:\n{outputs['c-tahoe']}"
             )
-        print("PASS: RSN/WPA Group1 legacy behavior matches Tahoe trace build")
-        print(outputs[1], end="")
+        if outputs["cxx-legacy"] != outputs["cxx-tahoe"]:
+            raise AssertionError(
+                "C++ instrumented Group1 behavior differs from the legacy path:\n"
+                f"legacy:\n{outputs['cxx-legacy']}\nTahoe:\n{outputs['cxx-tahoe']}"
+            )
+        if outputs["c-legacy"] != outputs["cxx-legacy"]:
+            raise AssertionError(
+                "C11 and C++ Group1 production modes differ:\n"
+                f"C11:\n{outputs['c-legacy']}\nC++:\n{outputs['cxx-legacy']}"
+            )
+        print("PASS: RSN/WPA Group1 legacy/Tahoe behavior matches in C11 and C++17")
+        print(outputs["cxx-tahoe"], end="")
 
 
 if __name__ == "__main__":
