@@ -31,10 +31,16 @@ static Layout v1Layout(bool rpa=true)
     layout.macPhyIndexOffset = 7;
     layout.filterMatchOffset = 24;
     layout.channelOffset = 34;
+    layout.macContextOffset = 35;
+    layout.gp2OnAirRiseOffset = 36;
+    layout.tsfOnAirRiseOffset = 40;
+    layout.phyInfoOffset = 5;
     layout.descriptorVersion = 1;
     layout.minimumMpduLength = 24;
     layout.crcOkMask = kCrcOkMask;
     layout.overrunOkMask = kOverrunOkMask;
+    layout.tsfOverloadMask = 1u << 8;
+    layout.macPhyIndexDecodeMode = MacPhyDecodeLegacy;
     layout.rpaEnabled = rpa;
     return layout;
 }
@@ -42,16 +48,22 @@ static Layout v1Layout(bool rpa=true)
 static Layout v3Layout(bool rpa=true)
 {
     Layout layout{};
-    layout.descriptorSize = 76;
+    layout.descriptorSize = 64;
     layout.mpduLengthOffset = 0;
     layout.statusOffset = 12;
     layout.macPhyIndexOffset = 7;
     layout.filterMatchOffset = 20;
     layout.channelOffset = 42;
+    layout.macContextOffset = 43;
+    layout.gp2OnAirRiseOffset = 44;
+    layout.tsfOnAirRiseOffset = 48;
+    layout.phyInfoOffset = 5;
     layout.descriptorVersion = 3;
     layout.minimumMpduLength = 24;
     layout.crcOkMask = kCrcOkMask;
     layout.overrunOkMask = kOverrunOkMask;
+    layout.tsfOverloadMask = 1u << 8;
+    layout.macPhyIndexDecodeMode = MacPhyDecodeLegacy;
     layout.rpaEnabled = rpa;
     return layout;
 }
@@ -74,6 +86,28 @@ static void makeDataFrame(uint8_t *descriptor, const Layout &layout,
         memcpy(frame + 16, NativeAwdlData::kAwdlBssid, 6);
     else
         memset(frame + 16, 0xa5, 6);
+}
+
+static void setRxIdentity(uint8_t *descriptor, const Layout &layout,
+                          uint8_t macPhyIndex, uint8_t macContext,
+                          uint32_t gp2, uint64_t tsf, uint16_t phyInfo=0)
+{
+    descriptor[layout.macPhyIndexOffset] = macPhyIndex;
+    if (layout.macContextOffset)
+        descriptor[layout.macContextOffset] = macContext;
+    if (layout.gp2OnAirRiseOffset)
+        putLe32(descriptor + layout.gp2OnAirRiseOffset, gp2);
+    if (layout.tsfOnAirRiseOffset) {
+        putLe32(descriptor + layout.tsfOnAirRiseOffset,
+                static_cast<uint32_t>(tsf));
+        putLe32(descriptor + layout.tsfOnAirRiseOffset + 4,
+                static_cast<uint32_t>(tsf >> 32));
+    }
+    if (layout.phyInfoOffset) {
+        descriptor[layout.phyInfoOffset] = static_cast<uint8_t>(phyInfo);
+        descriptor[layout.phyInfoOffset + 1] =
+            static_cast<uint8_t>(phyInfo >> 8);
+    }
 }
 
 static bool candidate(const uint8_t *descriptor, const Layout &layout,
@@ -100,6 +134,9 @@ static void test_valid_v1_witness_and_epoch_scope()
     assert(observed.statusPresent && observed.status == 0x5a000003u);
     assert(observed.descriptorPresent && observed.macPhyIndexPresent);
     assert(observed.macPhyIndex == 7 && observed.filterMatchPresent);
+    assert(observed.macContextPresent && observed.macContext == 0);
+    assert(observed.macIndexPresent && observed.macIndex == 7);
+    assert(observed.phyIndexPresent && observed.phyIndex == 0);
     assert(observed.filterMatch == 0x12345678u);
     assert(observed.channelPresent && observed.channel == 11);
     assert(observed.frameControlPresent && observed.frameType == 2);
@@ -112,7 +149,7 @@ static void test_valid_v1_witness_and_epoch_scope()
     assert(telemetry.beginOwner(owner));
     assert(telemetry.record(owner, observed, true));
     auto snapshot = telemetry.snapshot();
-    assert(snapshot.schema == kSchema && snapshot.active == 1);
+    assert(snapshot.schema == 2 && snapshot.active == 1);
     assert(snapshot.epochs.contextGeneration == owner.contextGeneration);
     assert(snapshot.epochs.rocGeneration == owner.rocGeneration);
     assert(snapshot.counts[OwnerGateEntries] == 1);
@@ -169,6 +206,10 @@ static void test_v3_offsets_and_rpa_presence()
     assert(observed.filterMatchPresent &&
            observed.filterMatch == 0x0badcafeu);
     assert(observed.channelPresent && observed.channel == 149);
+    assert(observed.macContextPresent && observed.macContext == 0);
+    assert(observed.gp2OnAirRisePresent && observed.gp2OnAirRiseRaw == 0);
+    assert(observed.tsfOnAirRisePresent && observed.tsfOnAirRiseRaw == 0);
+    assert(observed.tsfValidPresent && observed.tsfValid);
     assert(observed.frameControlPresent);
 
     const Layout noRpa = v3Layout(false);
@@ -336,6 +377,249 @@ static void test_diagnostic_window_is_half_open()
     assert(!withinDiagnosticWindow(start, 0));
 }
 
+static void test_rx_identity_timing_and_dispatch_witnesses()
+{
+    uint8_t descriptor[160]{};
+    const Layout layout = v1Layout(false);
+    makeDataFrame(descriptor, layout, 3, 24, 0, 0, 149);
+    setRxIdentity(descriptor, layout, 0, 0x80u, 0xfffffff0u,
+                  0x12345678abcdef01ULL, 0);
+    auto observed = inspect(descriptor, 72, sizeof(descriptor), layout);
+    assert(observed.descriptorPresent && observed.macPhyIndexPresent);
+    assert(observed.macContextPresent && observed.macContext == 0x80u);
+    assert(observed.macPhyIndexDecodeModePresent);
+    assert(observed.macPhyIndexDecodeMode == MacPhyDecodeLegacy);
+    assert(observed.macIndexPresent && observed.macIndex == 0);
+    assert(observed.phyIndexPresent && observed.phyIndex == 0);
+    assert(observed.gp2OnAirRisePresent &&
+           observed.gp2OnAirRiseRaw == 0xfffffff0u);
+    assert(observed.tsfOnAirRisePresent &&
+           observed.tsfOnAirRiseRaw == 0x12345678abcdef01ULL);
+    assert(observed.tsfValidPresent && observed.tsfValid);
+
+    Dispatch dispatch{};
+    dispatch.hostRxMonotonicUsPresent = 1;
+    dispatch.hostRxMonotonicUs = 0x100000123ULL;
+    dispatch.rxRingPresent = 1;
+    dispatch.rxRing = 0;
+    dispatch.rxRingSlotPresent = 1;
+    dispatch.rxRingSlot = 511;
+    dispatch.transportNotificationQidPresent = 1;
+    dispatch.transportNotificationQid = 0x80;
+    dispatch.transportNotificationIndexPresent = 1;
+    dispatch.transportNotificationIndex = 7;
+    Telemetry telemetry;
+    const auto owner = epoch();
+    assert(telemetry.beginOwner(owner));
+    assert(telemetry.record(owner, observed, false, dispatch));
+    auto snapshot = telemetry.snapshot();
+    const auto &witness = snapshot.lastDescriptor;
+    assert(witness.hostRxMonotonicUsPresent &&
+           witness.hostRxMonotonicUs == 0x100000123ULL);
+    assert(witness.gp2OnAirRisePresent &&
+           witness.gp2OnAirRiseRaw == 0xfffffff0u);
+    assert(witness.tsfOnAirRisePresent &&
+           witness.tsfOnAirRiseRaw == 0x12345678abcdef01ULL);
+    assert(witness.rxRingPresent && witness.rxRing == 0);
+    assert(witness.rxRingSlotPresent && witness.rxRingSlot == 511);
+    assert(witness.transportNotificationQidPresent &&
+           witness.transportNotificationQid == 0x80);
+    assert(witness.transportNotificationIndexPresent &&
+           witness.transportNotificationIndex == 7);
+
+    // GP2 wrap is preserved as two raw device values with no host projection.
+    makeDataFrame(descriptor, layout, 3, 24, 0, 0, 36);
+    setRxIdentity(descriptor, layout, 0, 0, 0x20u, 0x20u, 0);
+    observed = inspect(descriptor, 72, sizeof(descriptor), layout);
+    assert(telemetry.record(owner, observed, false, dispatch));
+    snapshot = telemetry.snapshot();
+    assert(snapshot.counts[Channel149] == 1);
+    assert(snapshot.counts[Channel36] == 1);
+    assert(snapshot.lastDescriptor.channel == 36);
+    assert(snapshot.lastDescriptor.gp2OnAirRiseRaw == 0x20u);
+}
+
+static void test_index_decode_mode_guard_and_tsf_overload()
+{
+    uint8_t descriptor[160]{};
+    Layout unknown = v1Layout(false);
+    unknown.macPhyIndexDecodeMode = MacPhyDecodeUnknown;
+    makeDataFrame(descriptor, unknown, 3, 24, 0, 0, 149);
+    setRxIdentity(descriptor, unknown, 0, 0x03, 17, 19,
+                  static_cast<uint16_t>(1u << 8));
+    auto observed = inspect(descriptor, 72, sizeof(descriptor), unknown);
+    assert(observed.macPhyIndexPresent && observed.macPhyIndex == 0);
+    assert(!observed.macPhyIndexDecodeModePresent);
+    assert(!observed.macIndexPresent && !observed.phyIndexPresent);
+    assert(observed.tsfOnAirRisePresent &&
+           observed.tsfOnAirRiseRaw == 19);
+    assert(observed.tsfValidPresent && !observed.tsfValid);
+
+    Layout bandInRx = v1Layout(false);
+    bandInRx.macPhyIndexDecodeMode = MacPhyDecodeBandInRx;
+    makeDataFrame(descriptor, bandInRx, 3, 24, 0, 0, 149);
+    setRxIdentity(descriptor, bandInRx, 0x91u, 0x01, 23, 29, 0);
+    observed = inspect(descriptor, 72, sizeof(descriptor), bandInRx);
+    assert(observed.macPhyIndexDecodeModePresent);
+    assert(observed.macPhyIndexDecodeMode == MacPhyDecodeBandInRx);
+    assert(observed.macIndexPresent && observed.macIndex == 1);
+    // The primary API enum does not verify a PHY mask that excludes band bits.
+    assert(!observed.phyIndexPresent);
+    Telemetry telemetry;
+    const auto owner = epoch();
+    assert(telemetry.beginOwner(owner));
+    assert(telemetry.record(owner, observed, false));
+    const auto snapshot = telemetry.snapshot();
+    assert(snapshot.counts[MacIndex1Channel149] == 1);
+    assert(snapshot.counts[ExpectedMacPhy149] == 0);
+    assert(snapshot.lastMacIndexTarget.present);
+    assert(snapshot.lastMacIndexTarget.macIndex == 1);
+    assert(!snapshot.lastMacIndexTarget.phyIndexPresent);
+    assert(!snapshot.lastTarget.present);
+}
+
+static void test_strict_target_counter_and_last_target_is_channel_scoped()
+{
+    uint8_t descriptor[160]{};
+    const Layout layout = v1Layout(false);
+    const auto owner = epoch();
+    Telemetry telemetry;
+    assert(telemetry.beginOwner(owner));
+    Dispatch dispatch{};
+    dispatch.hostRxMonotonicUsPresent = 1;
+    dispatch.hostRxMonotonicUs = 0x100000222ULL;
+    dispatch.rxRingPresent = 1;
+    dispatch.rxRing = 0;
+    dispatch.rxRingSlotPresent = 1;
+    dispatch.rxRingSlot = 3;
+    dispatch.transportNotificationQidPresent = 1;
+    dispatch.transportNotificationQid = 0x80;
+    dispatch.transportNotificationIndexPresent = 1;
+    dispatch.transportNotificationIndex = 15;
+
+    makeDataFrame(descriptor, layout, 3, 24, 0x11, 0, 149);
+    setRxIdentity(descriptor, layout, 0x11, 0xf0, 41, 43, 0);
+    auto observed = inspect(descriptor, 72, sizeof(descriptor), layout);
+    assert(observed.frameControlPresent && observed.frameRangeValid);
+    assert(observed.macIndexPresent && observed.macIndex == 1);
+    assert(observed.phyIndexPresent && observed.phyIndex == 1);
+    assert(telemetry.record(owner, observed, false, dispatch));
+    auto snapshot = telemetry.snapshot();
+    assert(snapshot.counts[Channel149] == 1);
+    assert(snapshot.counts[ExpectedMacPhy149] == 1);
+    assert(snapshot.lastTarget.present);
+    assert(snapshot.lastTarget.channel == 149);
+    assert(snapshot.lastTarget.macContextPresent &&
+           snapshot.lastTarget.macContext == 0xf0);
+    assert(snapshot.counts[MacIndex1Channel149] == 1);
+    assert(snapshot.lastMacIndexTarget.present);
+
+    // A complete channel-36 descriptor changes the global lastDescriptor but
+    // leaves the channel-149 target witness intact.
+    makeDataFrame(descriptor, layout, 3, 24, 0, 0, 36);
+    setRxIdentity(descriptor, layout, 0, 0x55, 47, 53, 0);
+    observed = inspect(descriptor, 72, sizeof(descriptor), layout);
+    assert(telemetry.record(owner, observed, false, dispatch));
+    snapshot = telemetry.snapshot();
+    assert(snapshot.counts[Channel36] == 1);
+    assert(snapshot.lastDescriptor.channel == 36);
+    assert(snapshot.lastTarget.present && snapshot.lastTarget.channel == 149);
+    assert(snapshot.lastTarget.hostRxMonotonicUs == 0x100000222ULL);
+
+    // Failed status and invalid bounds count as channel observations, but
+    // cannot increment or replace the strict expected MAC/PHY target.
+    makeDataFrame(descriptor, layout, 2, 24, 0x11, 0, 149);
+    setRxIdentity(descriptor, layout, 0x11, 0x01, 59, 61, 0);
+    observed = inspect(descriptor, 72, sizeof(descriptor), layout);
+    assert(!observed.frameControlPresent && !observed.crcOk);
+    assert(telemetry.record(owner, observed, false, dispatch));
+    makeDataFrame(descriptor, layout, 3, 200, 0x11, 0, 149);
+    setRxIdentity(descriptor, layout, 0x11, 0x01, 67, 71, 0);
+    observed = inspect(descriptor, 72, sizeof(descriptor), layout);
+    assert(!observed.frameRangeValid && !observed.frameControlPresent);
+    assert(telemetry.record(owner, observed, false, dispatch));
+    Layout noContext = layout;
+    noContext.macContextOffset = 0;
+    makeDataFrame(descriptor, noContext, 3, 24, 0x11, 0, 149);
+    setRxIdentity(descriptor, noContext, 0x11, 0, 73, 79, 0);
+    observed = inspect(descriptor, 72, sizeof(descriptor), noContext);
+    assert(!observed.macContextPresent);
+    assert(telemetry.record(owner, observed, false, dispatch));
+
+    snapshot = telemetry.snapshot();
+    assert(snapshot.counts[Channel149] == 4);
+    assert(snapshot.counts[ExpectedMacPhy149] == 2);
+    assert(snapshot.counts[MacIndex1Channel149] == 2);
+    assert(snapshot.lastTarget.present && snapshot.lastTarget.channel == 149);
+    assert(!snapshot.lastTarget.macContextPresent);
+}
+
+static void test_rx_layout_bounds_and_lifecycle_sync()
+{
+    uint8_t descriptor[160]{};
+    const Layout valid = v1Layout(false);
+    makeDataFrame(descriptor, valid, 3, 24, 0, 0, 149);
+    setRxIdentity(descriptor, valid, 0, 0, 0xfffffffeu,
+                  0xffffffffffffffffULL, 0);
+
+    Layout noContext = valid;
+    noContext.macContextOffset = 0;
+    Layout noGp2 = valid;
+    noGp2.gp2OnAirRiseOffset = 0;
+    Layout noTsf = valid;
+    noTsf.tsfOnAirRiseOffset = 0;
+    const auto missingContext = inspect(descriptor, 72, sizeof(descriptor),
+                                        noContext);
+    assert(missingContext.descriptorPresent && !missingContext.macContextPresent);
+    const auto missingGp2 = inspect(descriptor, 72, sizeof(descriptor), noGp2);
+    assert(!missingGp2.gp2OnAirRisePresent);
+    const auto missingTsf = inspect(descriptor, 72, sizeof(descriptor), noTsf);
+    assert(!missingTsf.tsfOnAirRisePresent);
+
+    Layout outOfBounds = valid;
+    outOfBounds.gp2OnAirRiseOffset = valid.descriptorSize - 2;
+    outOfBounds.tsfOnAirRiseOffset = valid.descriptorSize - 4;
+    outOfBounds.phyInfoOffset = valid.descriptorSize - 1;
+    const auto truncated = inspect(descriptor, valid.descriptorSize,
+                                   sizeof(descriptor), outOfBounds);
+    assert(!truncated.gp2OnAirRisePresent);
+    assert(!truncated.tsfOnAirRisePresent);
+    assert(!truncated.tsfValidPresent);
+    const auto payloadTruncated = inspect(descriptor, 47, 47, valid);
+    assert(!payloadTruncated.descriptorPresent);
+    assert(!payloadTruncated.macContextPresent);
+    assert(!payloadTruncated.gp2OnAirRisePresent);
+    assert(!payloadTruncated.tsfOnAirRisePresent);
+
+    Telemetry telemetry;
+    const auto owner = epoch();
+    assert(!telemetry.syncOwner(true, owner, true)); // END cannot create owner.
+    assert(!telemetry.active());
+    assert(!telemetry.syncOwner(false, owner, false)); // Early START pre-ACK.
+    assert(!telemetry.active());
+    assert(telemetry.syncOwner(false, owner, true)); // ACK makes START eligible.
+    auto observed = inspect(descriptor, 72, sizeof(descriptor), valid);
+    assert(telemetry.record(owner, observed, false));
+    const auto beforeDuplicate = telemetry.snapshot();
+    assert(!telemetry.syncOwner(false, owner, false));
+    assert(telemetry.active()); // An ineligible poll cannot end the owner.
+    assert(telemetry.snapshot().counts[OwnerGateEntries] ==
+           beforeDuplicate.counts[OwnerGateEntries]);
+    assert(telemetry.syncOwner(false, owner, true)); // Duplicate begin keeps counts.
+    assert(telemetry.snapshot().counts[OwnerGateEntries] ==
+           beforeDuplicate.counts[OwnerGateEntries]);
+    auto stale = owner;
+    ++stale.stationGeneration;
+    assert(!telemetry.syncOwner(true, stale, true));
+    assert(telemetry.active()); // A stale END cannot close a current owner.
+    assert(!telemetry.syncOwner(true, owner, false));
+    assert(telemetry.active()); // Missing current tuple cannot close it.
+    assert(telemetry.syncOwner(true, owner, true));
+    assert(!telemetry.active());
+    assert(!telemetry.syncOwner(false, owner, true));
+    assert(!telemetry.active()); // Same terminal epoch cannot reopen.
+}
+
 int main()
 {
     assert(!Telemetry().beginOwner(epoch(0, 22, 33, 11)));
@@ -348,4 +632,8 @@ int main()
     test_field_offsets_and_counter_saturation();
     test_prepadding_action_header_has_no_psf_mif_classification();
     test_diagnostic_window_is_half_open();
+    test_rx_identity_timing_and_dispatch_witnesses();
+    test_index_decode_mode_guard_and_tsf_overload();
+    test_strict_target_counter_and_last_target_is_channel_scoped();
+    test_rx_layout_bounds_and_lifecycle_sync();
 }

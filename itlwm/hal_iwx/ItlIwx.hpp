@@ -492,6 +492,7 @@ public:
     static IOReturn tahoeP2pRxDrainAction(OSObject *, void *, void *, void *, void *);
     bool tahoeP2pCurrentRxDiagnosticEpochs(
         struct iwx_softc *, NativeAwdlRxEntry::Epochs *);
+    void tahoeP2pSyncRxDiagnosticOwner(bool closeOnly);
     void tahoeP2pPublishRxStageCounters(IOEthernetController *);
     void tahoeP2pPublishRxEntryTelemetry(IOEthernetController *);
     void tahoeP2pPublishRxEventTimeline(IOEthernetController *);
@@ -769,7 +770,11 @@ public:
     void iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
                         size_t actualPayloadLength, bool rpaEnabled,
                         size_t maxlen,
-                        struct mbuf_list *ml);
+                        struct mbuf_list *ml, uint32_t rxRingSlot,
+                        uint32_t transportNotificationQid,
+                        uint32_t transportNotificationIndex,
+                        uint64_t hostRxMonotonicUs,
+                        bool hostRxMonotonicUsPresent);
     void    iwx_rx_tx_cmd_single(struct iwx_softc *, struct iwx_rx_packet *,
             struct iwx_tx_data *);
     void iwx_txd_done(struct iwx_softc *sc, struct iwx_tx_data *txd);
@@ -932,7 +937,7 @@ public:
             struct ieee80211_rxinfo *, struct mbuf_list *);
     int    iwx_rx_pkt_valid(struct iwx_rx_packet *);
     void    iwx_rx_pkt(struct iwx_softc *, struct iwx_rx_data *,
-            struct mbuf_list *);
+            struct mbuf_list *, uint32_t rxRingSlot);
     void    iwx_notif_intr(struct iwx_softc *);
     static int    iwx_intr(OSObject *object, IOInterruptEventSource* sender, int count);
     static int    iwx_intr_msix(OSObject *object, IOInterruptEventSource* sender, int count);

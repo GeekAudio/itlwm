@@ -187,6 +187,36 @@ static uint64_t tahoeMonotonicNs()
     return nanoseconds;
 }
 
+static_assert(IWX_RX_DESC_SIZE_V1 == 48,
+              "RX MPDU descriptor v1 size must match firmware ABI");
+static_assert(sizeof(struct iwx_rx_mpdu_desc) == 64,
+              "RX MPDU descriptor v3 size must match firmware ABI");
+static_assert(offsetof(struct iwx_rx_mpdu_desc, phy_info) == 5,
+              "RX common phy_info offset must match firmware ABI");
+static_assert(offsetof(struct iwx_rx_mpdu_desc, mac_phy_idx) == 7,
+              "RX common mac_phy_idx offset must match firmware ABI");
+static_assert(offsetof(struct iwx_rx_mpdu_desc, status) == 12,
+              "RX common status offset must match firmware ABI");
+static_assert(offsetof(struct iwx_rx_mpdu_desc, v1) +
+                  offsetof(struct iwx_rx_mpdu_desc_v1, filter_match) == 24 &&
+              offsetof(struct iwx_rx_mpdu_desc, v3) +
+                  offsetof(struct iwx_rx_mpdu_desc_v3, filter_match) == 20,
+              "RX descriptor filter offsets must match firmware ABI");
+static_assert(offsetof(struct iwx_rx_mpdu_desc, v1) +
+                  offsetof(struct iwx_rx_mpdu_desc_v1, mac_context) == 35 &&
+              offsetof(struct iwx_rx_mpdu_desc, v1) +
+                  offsetof(struct iwx_rx_mpdu_desc_v1, gp2_on_air_rise) == 36 &&
+              offsetof(struct iwx_rx_mpdu_desc, v1) +
+                  offsetof(struct iwx_rx_mpdu_desc_v1, tsf_on_air_rise) == 40,
+              "RX descriptor v1 timing/context offsets must match firmware ABI");
+static_assert(offsetof(struct iwx_rx_mpdu_desc, v3) +
+                  offsetof(struct iwx_rx_mpdu_desc_v3, mac_context) == 43 &&
+              offsetof(struct iwx_rx_mpdu_desc, v3) +
+                  offsetof(struct iwx_rx_mpdu_desc_v3, gp2_on_air_rise) == 44 &&
+              offsetof(struct iwx_rx_mpdu_desc, v3) +
+                  offsetof(struct iwx_rx_mpdu_desc_v3, tsf_on_air_rise) == 48,
+              "RX descriptor v3 timing/context offsets must match firmware ABI");
+
 static bool txTimerTraceTryLock(struct iwx_softc *sc)
 {
     uint32_t expected = 0;
@@ -7597,7 +7627,11 @@ drop:
 void ItlIwx::
 iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
                size_t actualPayloadLength, bool rpaEnabled,
-               size_t maxlen, struct mbuf_list *ml)
+               size_t maxlen, struct mbuf_list *ml, uint32_t rxRingSlot,
+               uint32_t transportNotificationQid,
+               uint32_t transportNotificationIndex,
+               uint64_t hostRxMonotonicUs,
+               bool hostRxMonotonicUsPresent)
 {
     struct ieee80211com *ic = &sc->sc_ic;
     struct ieee80211_rxinfo rxi;
@@ -7612,6 +7646,7 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
     uint8_t rxStageKind = TahoeAwdlRxStageCounters::kNotAwdl;
     bool rxStageAwdlDataCandidate = false;
     NativeAwdlRxEntry::Epochs rxEntryEpochs{};
+    NativeAwdlRxEntry::Dispatch rxEntryDispatch{};
 #endif
     
     desc = (struct iwx_rx_mpdu_desc *)pktdata;
@@ -7621,6 +7656,20 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
         desc_size = IWX_RX_DESC_SIZE_V1;
 
 #ifdef AIRPORT_TAHOE
+    rxEntryDispatch.hostRxMonotonicUsPresent =
+        hostRxMonotonicUsPresent ? 1u : 0u;
+    rxEntryDispatch.hostRxMonotonicUs = hostRxMonotonicUs;
+    rxEntryDispatch.rxRingPresent = 1;
+    rxEntryDispatch.rxRing = 0; // iwx_rx_pkt is reached from RFH Q0.
+    if (rxRingSlot < IWX_RX_MQ_RING_COUNT) {
+        rxEntryDispatch.rxRingSlotPresent = 1;
+        rxEntryDispatch.rxRingSlot = rxRingSlot;
+    }
+    rxEntryDispatch.transportNotificationQidPresent = 1;
+    rxEntryDispatch.transportNotificationQid = transportNotificationQid;
+    rxEntryDispatch.transportNotificationIndexPresent = 1;
+    rxEntryDispatch.transportNotificationIndex = transportNotificationIndex;
+
     // RX entry observation and the older stage counters are scoped to the
     // current manual P2P owner. Lease reads are forbidden outside the gate.
     if (tahoeP2pOnMainGate()) {
@@ -7636,7 +7685,8 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
     }
 
     if (tahoeP2pCurrentRxDiagnosticEpochs(sc, &rxEntryEpochs)) {
-        nativeAwdlRxEntryTelemetry_.beginOwner(rxEntryEpochs);
+        (void)nativeAwdlRxEntryTelemetry_.syncOwner(
+            false, rxEntryEpochs, true);
         NativeAwdlRxEntry::Layout layout{};
         const bool isAx210OrNewer =
             sc->sc_device_family >= IWX_DEVICE_FAMILY_AX210;
@@ -7654,12 +7704,33 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
                 offsetof(struct iwx_rx_mpdu_desc_v3, channel) :
             offsetof(struct iwx_rx_mpdu_desc, v1) +
                 offsetof(struct iwx_rx_mpdu_desc_v1, channel);
+        layout.macContextOffset = isAx210OrNewer ?
+            offsetof(struct iwx_rx_mpdu_desc, v3) +
+                offsetof(struct iwx_rx_mpdu_desc_v3, mac_context) :
+            offsetof(struct iwx_rx_mpdu_desc, v1) +
+                offsetof(struct iwx_rx_mpdu_desc_v1, mac_context);
+        layout.gp2OnAirRiseOffset = isAx210OrNewer ?
+            offsetof(struct iwx_rx_mpdu_desc, v3) +
+                offsetof(struct iwx_rx_mpdu_desc_v3, gp2_on_air_rise) :
+            offsetof(struct iwx_rx_mpdu_desc, v1) +
+                offsetof(struct iwx_rx_mpdu_desc_v1, gp2_on_air_rise);
+        layout.tsfOnAirRiseOffset = isAx210OrNewer ?
+            offsetof(struct iwx_rx_mpdu_desc, v3) +
+                offsetof(struct iwx_rx_mpdu_desc_v3, tsf_on_air_rise) :
+            offsetof(struct iwx_rx_mpdu_desc, v1) +
+                offsetof(struct iwx_rx_mpdu_desc_v1, tsf_on_air_rise);
+        layout.phyInfoOffset = offsetof(struct iwx_rx_mpdu_desc, phy_info);
         layout.descriptorVersion = isAx210OrNewer ? 3u : 1u;
         layout.minimumMpduLength = ic->ic_opmode == IEEE80211_M_MONITOR ?
             sizeof(struct ieee80211_frame_cts) :
             sizeof(struct ieee80211_frame);
         layout.crcOkMask = IWX_RX_MPDU_RES_STATUS_CRC_OK;
         layout.overrunOkMask = IWX_RX_MPDU_RES_STATUS_OVERRUN_OK;
+        layout.tsfOverloadMask = IWX_RX_MPDU_PHY_TSF_OVERLOAD;
+        layout.macPhyIndexDecodeMode = isset(
+            sc->sc_ucode_api, IWX_UCODE_TLV_API_BAND_IN_RX_DATA) ?
+            NativeAwdlRxEntry::MacPhyDecodeBandInRx :
+            NativeAwdlRxEntry::MacPhyDecodeLegacy;
         layout.rpaEnabled = rpaEnabled;
         const auto inspection = NativeAwdlRxEntry::inspect(
             static_cast<const uint8_t *>(pktdata), actualPayloadLength,
@@ -7669,7 +7740,8 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
                 static_cast<const uint8_t *>(pktdata) + desc_size,
                 inspection.mpduLength);
         (void)nativeAwdlRxEntryTelemetry_.record(
-            rxEntryEpochs, inspection, awdlBssidCandidate);
+            rxEntryEpochs, inspection, awdlBssidCandidate,
+            rxEntryDispatch);
     }
 #endif
 
@@ -17142,7 +17214,8 @@ struct iwl_pnvm_init_complete_ntfy {
 } __packed; /* PNVM_INIT_COMPLETE_NTFY_S_VER_1 */
 
 void ItlIwx::
-iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
+iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
+           struct mbuf_list *ml, uint32_t rxRingSlot)
 {
     struct _ifnet *ifp = IC2IFP(&sc->sc_ic);
     struct iwx_rx_packet *pkt, *nextpkt;
@@ -17259,6 +17332,21 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
             iwx_rx_packet_payload_len(pkt));
 #endif
 
+#ifdef AIRPORT_TAHOE
+        uint64_t hostRxMonotonicUs = 0;
+        bool hostRxMonotonicUsPresent = false;
+        if (code == IWX_REPLY_RX_MPDU_CMD && tahoeP2pOnMainGate() &&
+            nativeAwdlRxEntryTelemetry_.active()) {
+            // Capture at first dispatch handling, before RX ring recycling
+            // and before any per-notification mbuf copy.
+            hostRxMonotonicUs = tahoeMonotonicNs() / 1000ULL;
+            hostRxMonotonicUsPresent = true;
+        }
+#else
+        const uint64_t hostRxMonotonicUs = 0;
+        const bool hostRxMonotonicUsPresent = false;
+#endif
+
         if (code == IWX_REPLY_RX_MPDU_CMD && ++nmpdu == 1) {
             /* Take mbuf m0 off the RX ring. */
             if (iwx_rx_addbuf(sc, IWX_RBUF_SIZE, sc->rxq.cur)) {
@@ -17287,7 +17375,10 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
                     iwx_rx_mpdu_mq(sc, m0, pkt->data,
                         iwx_rx_packet_payload_len(pkt),
                         (le32toh(pkt->len_n_flags) & IWX_FH_RSCSR_RPA_EN) != 0,
-                        maxlen, ml);
+                        maxlen, ml, rxRingSlot,
+                        static_cast<uint32_t>(pkt->hdr.qid),
+                        static_cast<uint32_t>(pkt->hdr.idx),
+                        hostRxMonotonicUs, hostRxMonotonicUsPresent);
                     m0 = NULL; /* stack owns m0 now; abort loop */
                 } else {
                     /*
@@ -17306,7 +17397,10 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data, struct mbuf_list *ml)
                     iwx_rx_mpdu_mq(sc, m, pkt->data,
                         iwx_rx_packet_payload_len(pkt),
                         (le32toh(pkt->len_n_flags) & IWX_FH_RSCSR_RPA_EN) != 0,
-                        maxlen, ml);
+                        maxlen, ml, rxRingSlot,
+                        static_cast<uint32_t>(pkt->hdr.qid),
+                        static_cast<uint32_t>(pkt->hdr.idx),
+                        hostRxMonotonicUs, hostRxMonotonicUsPresent);
                 }
                 break;
             }
@@ -17823,9 +17917,10 @@ iwx_notif_intr(struct iwx_softc *sc)
     hw &= (IWX_RX_MQ_RING_COUNT - 1);
     DPRINTFN(3, ("%s hw=%d\n", __FUNCTION__, hw));
     while (sc->rxq.cur != hw) {
-        struct iwx_rx_data *data = &sc->rxq.data[sc->rxq.cur];
-        iwx_rx_pkt(sc, data, &ml);
-        sc->rxq.cur = (sc->rxq.cur + 1) % IWX_RX_MQ_RING_COUNT;
+        const uint32_t ringSlot = static_cast<uint32_t>(sc->rxq.cur);
+        struct iwx_rx_data *data = &sc->rxq.data[ringSlot];
+        iwx_rx_pkt(sc, data, &ml, ringSlot);
+        sc->rxq.cur = (ringSlot + 1) % IWX_RX_MQ_RING_COUNT;
     }
     if_input(&sc->sc_ic.ic_if, &ml);
     

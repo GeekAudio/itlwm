@@ -36,7 +36,19 @@ enum Counter : unsigned {
     AwdlBssidCandidate,
     FilterMatchAvailable,
     FilterMatchUnavailable,
+    Channel149,
+    Channel36,
+    ExpectedMacPhy149,
+    MacIndex1Channel149,
     CounterCount
+};
+
+enum MacPhyIndexDecodeMode : uint32_t {
+    MacPhyDecodeUnknown = 0,
+    // Intel RX API before API59's band-in-RX data capability.
+    MacPhyDecodeLegacy = 1,
+    // API59 band-in-RX capability uses mac_phy_idx bits 6-7 for band.
+    MacPhyDecodeBandInRx = 2
 };
 
 struct Epochs {
@@ -53,10 +65,16 @@ struct Layout {
     size_t macPhyIndexOffset;
     size_t filterMatchOffset;
     size_t channelOffset;
+    size_t macContextOffset;
+    size_t gp2OnAirRiseOffset;
+    size_t tsfOnAirRiseOffset;
+    size_t phyInfoOffset;
     uint32_t descriptorVersion;
     uint32_t minimumMpduLength;
     uint32_t crcOkMask;
     uint32_t overrunOkMask;
+    uint32_t tsfOverloadMask;
+    MacPhyIndexDecodeMode macPhyIndexDecodeMode;
     bool rpaEnabled;
 };
 
@@ -82,6 +100,20 @@ struct Inspection {
     uint32_t rpaEnabled;
     uint32_t channelPresent;
     uint32_t channel;
+    uint32_t macContextPresent;
+    uint32_t macContext;
+    uint32_t macIndexPresent;
+    uint32_t macIndex;
+    uint32_t phyIndexPresent;
+    uint32_t phyIndex;
+    uint32_t macPhyIndexDecodeModePresent;
+    uint32_t macPhyIndexDecodeMode;
+    uint32_t gp2OnAirRisePresent;
+    uint32_t gp2OnAirRiseRaw;
+    uint32_t tsfOnAirRisePresent;
+    uint64_t tsfOnAirRiseRaw;
+    uint32_t tsfValidPresent;
+    uint32_t tsfValid;
     uint32_t capacityFits;
     uint32_t payloadFits;
     uint32_t frameRangeValid;
@@ -91,6 +123,22 @@ struct Inspection {
     uint32_t frameSubtype;
     uint32_t toDs;
     uint32_t fromDs;
+};
+
+// Dispatch fields are copied as numeric metadata only. Ring 0 is the actual
+// RFH notification ring; notification qid/index identify a separate packet
+// header namespace and must not be confused with the ring slot.
+struct Dispatch {
+    uint32_t hostRxMonotonicUsPresent;
+    uint64_t hostRxMonotonicUs;
+    uint32_t rxRingPresent;
+    uint32_t rxRing;
+    uint32_t rxRingSlotPresent;
+    uint32_t rxRingSlot;
+    uint32_t transportNotificationQidPresent;
+    uint32_t transportNotificationQid;
+    uint32_t transportNotificationIndexPresent;
+    uint32_t transportNotificationIndex;
 };
 
 struct Witness {
@@ -107,12 +155,36 @@ struct Witness {
     uint32_t statusPresent;
     uint32_t status; // Raw RX status bits; never interpreted as an address.
     uint32_t macPhyIndexPresent;
-    uint32_t macPhyIndex; // Raw numeric MAC/PHY index; no ID/color mapping.
+    uint32_t macPhyIndex; // Raw byte; decoded indices are separate fields.
     uint32_t filterMatchPresent;
     uint32_t filterMatch; // Raw numeric value; no semantic mapping.
     uint32_t rpaEnabled;
     uint32_t channelPresent;
     uint32_t channel;
+    uint32_t macContextPresent;
+    uint32_t macContext;
+    uint32_t macIndexPresent;
+    uint32_t macIndex;
+    uint32_t phyIndexPresent;
+    uint32_t phyIndex;
+    uint32_t macPhyIndexDecodeModePresent;
+    uint32_t macPhyIndexDecodeMode;
+    uint32_t hostRxMonotonicUsPresent;
+    uint64_t hostRxMonotonicUs;
+    uint32_t gp2OnAirRisePresent;
+    uint32_t gp2OnAirRiseRaw;
+    uint32_t tsfOnAirRisePresent;
+    uint64_t tsfOnAirRiseRaw;
+    uint32_t tsfValidPresent;
+    uint32_t tsfValid;
+    uint32_t rxRingPresent;
+    uint32_t rxRing;
+    uint32_t rxRingSlotPresent;
+    uint32_t rxRingSlot;
+    uint32_t transportNotificationQidPresent;
+    uint32_t transportNotificationQid;
+    uint32_t transportNotificationIndexPresent;
+    uint32_t transportNotificationIndex;
     uint32_t frameControlPresent;
     uint32_t frameControl;
     uint32_t frameType;
@@ -128,10 +200,12 @@ struct Snapshot {
     Epochs epochs;
     uint32_t counts[CounterCount];
     Witness lastDescriptor;
+    Witness lastTarget;
+    Witness lastMacIndexTarget;
     Witness lastAwdlDataCandidate;
 };
 
-static const uint32_t kSchema = 1;
+static const uint32_t kSchema = 2;
 static const uint32_t kCrcOkMask = 1u << 0;
 static const uint32_t kOverrunOkMask = 1u << 1;
 
@@ -162,6 +236,12 @@ static uint32_t readLe32(const uint8_t *bytes)
         (static_cast<uint32_t>(bytes[1]) << 8) |
         (static_cast<uint32_t>(bytes[2]) << 16) |
         (static_cast<uint32_t>(bytes[3]) << 24);
+}
+
+static uint64_t readLe64(const uint8_t *bytes)
+{
+    return static_cast<uint64_t>(readLe32(bytes)) |
+        (static_cast<uint64_t>(readLe32(bytes + 4)) << 32);
 }
 
 static Inspection inspect(const uint8_t *descriptor, size_t actualPayloadLength,
@@ -206,6 +286,58 @@ static Inspection inspect(const uint8_t *descriptor, size_t actualPayloadLength,
             rangeFits(readableLength, layout.channelOffset, 1)) {
             result.channelPresent = 1;
             result.channel = descriptor[layout.channelOffset];
+        }
+        if (layout.macContextOffset != 0 &&
+            rangeFits(layout.descriptorSize, layout.macContextOffset, 1) &&
+            rangeFits(readableLength, layout.macContextOffset, 1)) {
+            result.macContextPresent = 1;
+            result.macContext = descriptor[layout.macContextOffset];
+        }
+        if (result.macPhyIndexPresent) {
+            // Do not decode an unknown mode. In API59 band-in-RX mode the
+            // MAC nibble remains known, while PHY decoding is withheld until
+            // the band/PHY layout is backed by a verified enum.
+            if (layout.macPhyIndexDecodeMode == MacPhyDecodeLegacy) {
+                result.macPhyIndexDecodeModePresent = 1;
+                result.macIndexPresent = 1;
+                result.macIndex = result.macPhyIndex & 0x0fu;
+                result.phyIndexPresent = 1;
+                result.phyIndex = (result.macPhyIndex & 0xf0u) >> 4;
+                result.macPhyIndexDecodeMode = MacPhyDecodeLegacy;
+            } else if (layout.macPhyIndexDecodeMode == MacPhyDecodeBandInRx) {
+                result.macPhyIndexDecodeModePresent = 1;
+                result.macIndexPresent = 1;
+                result.macIndex = result.macPhyIndex & 0x0fu;
+                result.macPhyIndexDecodeMode = MacPhyDecodeBandInRx;
+            }
+        }
+        if (layout.gp2OnAirRiseOffset != 0 &&
+            rangeFits(layout.descriptorSize, layout.gp2OnAirRiseOffset,
+                      sizeof(uint32_t)) &&
+            rangeFits(readableLength, layout.gp2OnAirRiseOffset,
+                      sizeof(uint32_t))) {
+            result.gp2OnAirRisePresent = 1;
+            result.gp2OnAirRiseRaw = readLe32(
+                descriptor + layout.gp2OnAirRiseOffset);
+        }
+        if (layout.tsfOnAirRiseOffset != 0 &&
+            rangeFits(layout.descriptorSize, layout.tsfOnAirRiseOffset,
+                      sizeof(uint64_t)) &&
+            rangeFits(readableLength, layout.tsfOnAirRiseOffset,
+                      sizeof(uint64_t))) {
+            result.tsfOnAirRisePresent = 1;
+            result.tsfOnAirRiseRaw = readLe64(
+                descriptor + layout.tsfOnAirRiseOffset);
+        }
+        if (layout.phyInfoOffset != 0 &&
+            rangeFits(layout.descriptorSize, layout.phyInfoOffset,
+                      sizeof(uint16_t)) &&
+            rangeFits(readableLength, layout.phyInfoOffset,
+                      sizeof(uint16_t))) {
+            result.tsfValidPresent = 1;
+            const uint16_t phyInfo = readLe16(
+                descriptor + layout.phyInfoOffset);
+            result.tsfValid = (phyInfo & layout.tsfOverloadMask) == 0;
         }
         if (layout.rpaEnabled &&
             rangeFits(layout.descriptorSize, layout.filterMatchOffset,
@@ -275,8 +407,33 @@ public:
             snapshot_.active = 0;
     }
 
+    // Shared production lifecycle predicate used by Probe hooks and host
+    // tests. The caller must build `current` only after validating current
+    // lease/ROC/context/power/station identity. A close-only call can never
+    // begin or reopen an owner.
+    bool syncOwner(bool closeOnly, const Epochs &current,
+                   bool currentEpochsPresent)
+    {
+        if (!currentEpochsPresent)
+            return false;
+        if (closeOnly) {
+            if (!snapshot_.active || !sameEpochs(snapshot_.epochs, current))
+                return false;
+            endOwner(current);
+            return true;
+        }
+        return beginOwner(current);
+    }
+
     bool record(const Epochs &epochs, const Inspection &observation,
                 bool awdlBssidCandidate)
+    {
+        const Dispatch dispatch{};
+        return record(epochs, observation, awdlBssidCandidate, dispatch);
+    }
+
+    bool record(const Epochs &epochs, const Inspection &observation,
+                bool awdlBssidCandidate, const Dispatch &dispatch)
     {
         if (!snapshot_.active || !sameEpochs(snapshot_.epochs, epochs))
             return false;
@@ -300,7 +457,34 @@ public:
                 increment(FilterMatchAvailable);
             else
                 increment(FilterMatchUnavailable);
-            updateWitness(snapshot_.lastDescriptor, epochs, observation, false);
+            if (observation.channelPresent && observation.channel == 149)
+                increment(Channel149);
+            else if (observation.channelPresent && observation.channel == 36)
+                increment(Channel36);
+            const bool strictDescriptor = observation.statusPresent &&
+                observation.crcOk && observation.overrunOk &&
+                observation.frameRangeValid &&
+                observation.frameControlPresent;
+            const bool macIndexTarget149 = observation.channelPresent &&
+                observation.channel == 149 && observation.macIndexPresent &&
+                observation.macIndex == 1 &&
+                observation.macPhyIndexDecodeModePresent &&
+                observation.macPhyIndexDecodeMode != MacPhyDecodeUnknown &&
+                strictDescriptor;
+            updateWitness(snapshot_.lastDescriptor, epochs, observation,
+                          false, dispatch);
+            if (macIndexTarget149) {
+                increment(MacIndex1Channel149);
+                updateWitness(snapshot_.lastMacIndexTarget, epochs,
+                              observation, false, dispatch);
+            }
+            const bool expectedMacPhy149 = macIndexTarget149 &&
+                observation.phyIndexPresent && observation.phyIndex == 1;
+            if (expectedMacPhy149) {
+                increment(ExpectedMacPhy149);
+                updateWitness(snapshot_.lastTarget, epochs, observation,
+                              false, dispatch);
+            }
         }
         if (observation.mpduLengthPresent && !observation.capacityFits)
             increment(CapacityOverflow);
@@ -324,14 +508,16 @@ public:
             (observation.frameSubtype == 0 || observation.frameSubtype == 8) &&
             !observation.toDs && !observation.fromDs) {
             increment(AwdlBssidCandidate);
-            updateWitness(snapshot_.lastDescriptor, epochs, observation, true);
+            updateWitness(snapshot_.lastDescriptor, epochs, observation, true,
+                          dispatch);
             updateWitness(snapshot_.lastAwdlDataCandidate, epochs,
-                          observation, true);
+                          observation, true, dispatch);
         }
         return true;
     }
 
     Snapshot snapshot() const { return snapshot_; }
+    bool active() const { return snapshot_.active != 0; }
 
 private:
     void increment(Counter counter)
@@ -341,7 +527,8 @@ private:
 
     static void updateWitness(Witness &witness, const Epochs &epochs,
                               const Inspection &observation,
-                              bool awdlBssidCandidate)
+                              bool awdlBssidCandidate,
+                              const Dispatch &dispatch)
     {
         witness = {};
         witness.present = 1;
@@ -363,6 +550,34 @@ private:
         witness.rpaEnabled = observation.rpaEnabled;
         witness.channelPresent = observation.channelPresent;
         witness.channel = observation.channel;
+        witness.macContextPresent = observation.macContextPresent;
+        witness.macContext = observation.macContext;
+        witness.macIndexPresent = observation.macIndexPresent;
+        witness.macIndex = observation.macIndex;
+        witness.phyIndexPresent = observation.phyIndexPresent;
+        witness.phyIndex = observation.phyIndex;
+        witness.macPhyIndexDecodeModePresent =
+            observation.macPhyIndexDecodeModePresent;
+        witness.macPhyIndexDecodeMode = observation.macPhyIndexDecodeMode;
+        witness.hostRxMonotonicUsPresent = dispatch.hostRxMonotonicUsPresent;
+        witness.hostRxMonotonicUs = dispatch.hostRxMonotonicUs;
+        witness.gp2OnAirRisePresent = observation.gp2OnAirRisePresent;
+        witness.gp2OnAirRiseRaw = observation.gp2OnAirRiseRaw;
+        witness.tsfOnAirRisePresent = observation.tsfOnAirRisePresent;
+        witness.tsfOnAirRiseRaw = observation.tsfOnAirRiseRaw;
+        witness.tsfValidPresent = observation.tsfValidPresent;
+        witness.tsfValid = observation.tsfValid;
+        witness.rxRingPresent = dispatch.rxRingPresent;
+        witness.rxRing = dispatch.rxRing;
+        witness.rxRingSlotPresent = dispatch.rxRingSlotPresent;
+        witness.rxRingSlot = dispatch.rxRingSlot;
+        witness.transportNotificationQidPresent =
+            dispatch.transportNotificationQidPresent;
+        witness.transportNotificationQid = dispatch.transportNotificationQid;
+        witness.transportNotificationIndexPresent =
+            dispatch.transportNotificationIndexPresent;
+        witness.transportNotificationIndex =
+            dispatch.transportNotificationIndex;
         witness.frameControlPresent = observation.frameControlPresent;
         witness.frameControl = observation.frameControl;
         witness.frameType = observation.frameType;

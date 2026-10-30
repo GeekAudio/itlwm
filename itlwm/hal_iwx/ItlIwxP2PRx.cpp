@@ -70,6 +70,28 @@ bool sameRxEntryWitness(const NativeAwdlRxEntry::Witness &a,
         a.filterMatchPresent == b.filterMatchPresent &&
         a.filterMatch == b.filterMatch && a.rpaEnabled == b.rpaEnabled &&
         a.channelPresent == b.channelPresent && a.channel == b.channel &&
+        a.macContextPresent == b.macContextPresent &&
+        a.macContext == b.macContext &&
+        a.macIndexPresent == b.macIndexPresent && a.macIndex == b.macIndex &&
+        a.phyIndexPresent == b.phyIndexPresent && a.phyIndex == b.phyIndex &&
+        a.macPhyIndexDecodeModePresent == b.macPhyIndexDecodeModePresent &&
+        a.macPhyIndexDecodeMode == b.macPhyIndexDecodeMode &&
+        a.hostRxMonotonicUsPresent == b.hostRxMonotonicUsPresent &&
+        a.hostRxMonotonicUs == b.hostRxMonotonicUs &&
+        a.gp2OnAirRisePresent == b.gp2OnAirRisePresent &&
+        a.gp2OnAirRiseRaw == b.gp2OnAirRiseRaw &&
+        a.tsfOnAirRisePresent == b.tsfOnAirRisePresent &&
+        a.tsfOnAirRiseRaw == b.tsfOnAirRiseRaw &&
+        a.tsfValidPresent == b.tsfValidPresent && a.tsfValid == b.tsfValid &&
+        a.rxRingPresent == b.rxRingPresent && a.rxRing == b.rxRing &&
+        a.rxRingSlotPresent == b.rxRingSlotPresent &&
+        a.rxRingSlot == b.rxRingSlot &&
+        a.transportNotificationQidPresent ==
+            b.transportNotificationQidPresent &&
+        a.transportNotificationQid == b.transportNotificationQid &&
+        a.transportNotificationIndexPresent ==
+            b.transportNotificationIndexPresent &&
+        a.transportNotificationIndex == b.transportNotificationIndex &&
         a.frameControlPresent == b.frameControlPresent &&
         a.frameControl == b.frameControl && a.frameType == b.frameType &&
         a.frameSubtype == b.frameSubtype && a.toDs == b.toDs &&
@@ -83,6 +105,8 @@ bool sameRxEntrySnapshot(const NativeAwdlRxEntry::Snapshot &a,
     if (a.schema != b.schema || a.active != b.active ||
         !NativeAwdlRxEntry::sameEpochs(a.epochs, b.epochs) ||
         !sameRxEntryWitness(a.lastDescriptor, b.lastDescriptor) ||
+        !sameRxEntryWitness(a.lastTarget, b.lastTarget) ||
+        !sameRxEntryWitness(a.lastMacIndexTarget, b.lastMacIndexTarget) ||
         !sameRxEntryWitness(a.lastAwdlDataCandidate,
                             b.lastAwdlDataCandidate))
         return false;
@@ -1178,6 +1202,55 @@ bool ItlIwx::tahoeP2pCurrentRxDiagnosticEpochs(
     return true;
 }
 
+void ItlIwx::tahoeP2pSyncRxDiagnosticOwner(bool closeOnly)
+{
+    if (!tahoeP2pOnMainGate())
+        return;
+    if (!closeOnly) {
+        NativeAwdlRxEntry::Epochs current{};
+        const bool eligible =
+            tahoeP2pCurrentRxDiagnosticEpochs(&com, &current);
+        // An ineligible early START or an expired window is not itself a
+        // terminal owner event. Only explicit lifecycle callbacks close it.
+        (void)nativeAwdlRxEntryTelemetry_.syncOwner(
+            false, current, eligible);
+        return;
+    }
+
+    // Closing is deliberately stricter than merely observing END/expiry:
+    // the telemetry owner must still be the current lease/ROC/context/power/
+    // station tuple. This path never calls beginOwner.
+    const auto &lease = tahoe_p2p_rx_lease_;
+    if (!lease.active || lease.contextGeneration == 0 ||
+        lease.powerGeneration == 0 || lease.stationGeneration == 0 ||
+        lease.contextGeneration != lease.currentContextGeneration ||
+        lease.powerGeneration != lease.currentPowerGeneration ||
+        lease.stationGeneration != lease.currentStationGeneration ||
+        lease.contextGeneration != nativeP2pProbeGeneration_)
+        return;
+
+    const uint32_t currentPower = uint32_t(com.sc_generation);
+    const uint32_t currentStation = __atomic_load_n(
+        &com.sc_tx_rate_generation, __ATOMIC_ACQUIRE);
+    const uint32_t currentRoc = __atomic_load_n(
+        &nativeP2pRocGeneration_, __ATOMIC_ACQUIRE);
+    const auto session = nativeP2pRocEvents_.snapshot();
+    if (lease.powerGeneration != currentPower ||
+        lease.powerGeneration != uint32_t(com.sc_p2p.fw_generation) ||
+        lease.stationGeneration != currentStation || currentRoc == 0 ||
+        lease.contextGeneration != currentRoc ||
+        session.generation != currentRoc)
+        return;
+
+    NativeAwdlRxEntry::Epochs current{};
+    current.contextGeneration = uint32_t(lease.contextGeneration);
+    current.powerGeneration = uint32_t(lease.powerGeneration);
+    current.stationGeneration = uint32_t(lease.stationGeneration);
+    current.rocGeneration = currentRoc;
+    (void)nativeAwdlRxEntryTelemetry_.syncOwner(
+        true, current, true);
+}
+
 IOReturn ItlIwx::tahoeP2pRxDrainAction(OSObject *, void *context,
                                       void *, void *, void *)
 {
@@ -1475,13 +1548,7 @@ void ItlIwx::tahoeP2pRxConsume()
         const auto rxStages = tahoe_awdl_rx_stage_counters_.snapshot();
         tahoe_awdl_rx_stage_counters_.endOwner(rxStages.ownerGeneration);
     }
-    NativeAwdlRxEntry::Epochs rxEntryEpochs{};
-    if (tahoeP2pCurrentRxDiagnosticEpochs(&com, &rxEntryEpochs)) {
-        nativeAwdlRxEntryTelemetry_.beginOwner(rxEntryEpochs);
-    } else {
-        const auto rxEntry = nativeAwdlRxEntryTelemetry_.snapshot();
-        nativeAwdlRxEntryTelemetry_.endOwner(rxEntry.epochs);
-    }
+    tahoeP2pSyncRxDiagnosticOwner(false);
     const uint64_t nowUs = tahoeP2pRxMonotonicUs();
     const IntelAwdlPeer::RuntimeEpochs epochs {
         nativeP2pProbeGeneration_, uint64_t(uint32_t(com.sc_generation)),
@@ -1619,6 +1686,96 @@ void ItlIwx::tahoeP2pPublishRxEntryTelemetry(IOEthernetController *controller)
     auto write = [controller](const char *name, uint32_t value) {
         return controller->setProperty(name, value, 32);
     };
+    const auto write64 = [controller](const char *name, uint64_t value) {
+        return controller->setProperty(name, value, 64);
+    };
+    const auto witnessField = [&](const char *prefix, const char *suffix,
+                                  uint64_t value, bool wide) {
+        char name[144] = {};
+        const int length = snprintf(name, sizeof(name), "%s%s", prefix,
+                                    suffix);
+        if (length <= 0 || static_cast<size_t>(length) >= sizeof(name))
+            return false;
+        return wide ? write64(name, value) :
+            write(name, static_cast<uint32_t>(value));
+    };
+    const auto publishWitness = [&](const char *prefix,
+                                    const NativeAwdlRxEntry::Witness &w) {
+#define RX_ENTRY_WITNESS_FIELD(suffix, member) \
+        if (!witnessField(prefix, suffix, w.member, false)) return false
+#define RX_ENTRY_WITNESS_FIELD64(suffix, member) \
+        if (!witnessField(prefix, suffix, w.member, true)) return false
+        RX_ENTRY_WITNESS_FIELD("Present", present);
+        RX_ENTRY_WITNESS_FIELD("ContextGeneration", contextGeneration);
+        RX_ENTRY_WITNESS_FIELD("PowerGeneration", powerGeneration);
+        RX_ENTRY_WITNESS_FIELD("StationGeneration", stationGeneration);
+        RX_ENTRY_WITNESS_FIELD("RocGeneration", rocGeneration);
+        RX_ENTRY_WITNESS_FIELD("PayloadLength", payloadLength);
+        RX_ENTRY_WITNESS_FIELD("DmaCapacity", dmaCapacity);
+        RX_ENTRY_WITNESS_FIELD("DescriptorSize", descriptorSize);
+        RX_ENTRY_WITNESS_FIELD("Version", descriptorVersion);
+        RX_ENTRY_WITNESS_FIELD("MpduLength", mpduLength);
+        RX_ENTRY_WITNESS_FIELD("StatusPresent", statusPresent);
+        RX_ENTRY_WITNESS_FIELD("Status", status);
+        RX_ENTRY_WITNESS_FIELD("MacPhyIndexPresent", macPhyIndexPresent);
+        RX_ENTRY_WITNESS_FIELD("MacPhyIndex", macPhyIndex);
+        RX_ENTRY_WITNESS_FIELD("FilterMatchPresent", filterMatchPresent);
+        RX_ENTRY_WITNESS_FIELD("FilterMatch", filterMatch);
+        RX_ENTRY_WITNESS_FIELD("RpaEnabled", rpaEnabled);
+        RX_ENTRY_WITNESS_FIELD("ChannelPresent", channelPresent);
+        RX_ENTRY_WITNESS_FIELD("Channel", channel);
+        RX_ENTRY_WITNESS_FIELD("MacContextPresent", macContextPresent);
+        RX_ENTRY_WITNESS_FIELD("MacContextRaw", macContext);
+        RX_ENTRY_WITNESS_FIELD("MacIndexPresent", macIndexPresent);
+        RX_ENTRY_WITNESS_FIELD("MacIndex", macIndex);
+        RX_ENTRY_WITNESS_FIELD("PhyIndexPresent", phyIndexPresent);
+        RX_ENTRY_WITNESS_FIELD("PhyIndex", phyIndex);
+        RX_ENTRY_WITNESS_FIELD("MacPhyIndexDecodeModePresent",
+                               macPhyIndexDecodeModePresent);
+        RX_ENTRY_WITNESS_FIELD("MacPhyIndexDecodeMode",
+                               macPhyIndexDecodeMode);
+        RX_ENTRY_WITNESS_FIELD("HostRxMonotonicUsPresent",
+                               hostRxMonotonicUsPresent);
+        RX_ENTRY_WITNESS_FIELD64("HostRxMonotonicUs", hostRxMonotonicUs);
+        RX_ENTRY_WITNESS_FIELD("Gp2OnAirRisePresent", gp2OnAirRisePresent);
+        RX_ENTRY_WITNESS_FIELD("Gp2OnAirRiseRaw", gp2OnAirRiseRaw);
+        RX_ENTRY_WITNESS_FIELD("TsfOnAirRisePresent", tsfOnAirRisePresent);
+        RX_ENTRY_WITNESS_FIELD64("TsfOnAirRiseRaw", tsfOnAirRiseRaw);
+        RX_ENTRY_WITNESS_FIELD("TsfValidPresent", tsfValidPresent);
+        RX_ENTRY_WITNESS_FIELD("TsfValid", tsfValid);
+        RX_ENTRY_WITNESS_FIELD("RxRingPresent", rxRingPresent);
+        RX_ENTRY_WITNESS_FIELD("RxRing", rxRing);
+        RX_ENTRY_WITNESS_FIELD("RxRingSlotPresent", rxRingSlotPresent);
+        RX_ENTRY_WITNESS_FIELD("RxRingSlot", rxRingSlot);
+        RX_ENTRY_WITNESS_FIELD("TransportNotificationQidPresent",
+                               transportNotificationQidPresent);
+        RX_ENTRY_WITNESS_FIELD("TransportNotificationQid",
+                               transportNotificationQid);
+        RX_ENTRY_WITNESS_FIELD("TransportNotificationIndexPresent",
+                               transportNotificationIndexPresent);
+        RX_ENTRY_WITNESS_FIELD("TransportNotificationIndex",
+                               transportNotificationIndex);
+        RX_ENTRY_WITNESS_FIELD("FrameControlPresent", frameControlPresent);
+        RX_ENTRY_WITNESS_FIELD("FrameControl", frameControl);
+        RX_ENTRY_WITNESS_FIELD("FrameType", frameType);
+        RX_ENTRY_WITNESS_FIELD("FrameSubtype", frameSubtype);
+        RX_ENTRY_WITNESS_FIELD("ToDs", toDs);
+        RX_ENTRY_WITNESS_FIELD("FromDs", fromDs);
+        RX_ENTRY_WITNESS_FIELD("AwdlBssidCandidate", awdlBssidCandidate);
+#undef RX_ENTRY_WITNESS_FIELD64
+#undef RX_ENTRY_WITNESS_FIELD
+        return true;
+    };
+    const auto writeWitnesses = [&]() {
+        return publishWitness("NativeP2PRxEntryLastDescriptor",
+                              current.lastDescriptor) &&
+            publishWitness("NativeP2PRxEntryLastTarget",
+                           current.lastTarget) &&
+            publishWitness("NativeP2PRxEntryLastMacIndexTarget",
+                           current.lastMacIndexTarget) &&
+            publishWitness("NativeP2PRxEntryLastAwdlDataCandidate",
+                           current.lastAwdlDataCandidate);
+    };
     NativeAwdlRxEntryPublisher::publish(
         nativeAwdlRxEntryAttemptVersion_, nativeAwdlRxEntryPublishVersion_,
         nativeAwdlRxEntryPublishedOnce_, nativeAwdlRxEntryPublished_, current,
@@ -1634,7 +1791,7 @@ void ItlIwx::tahoeP2pPublishRxEntryTelemetry(IOEthernetController *controller)
             if (!write("NativeP2PRxEntryRocGeneration",
                        current.epochs.rocGeneration)) return false;
 
-            const char *counterNames[NativeAwdlRxEntry::CounterCount] = {
+            const char *counterNames[] = {
                 "NativeP2PRxEntryCountOwnerGateEntries",
                 "NativeP2PRxEntryCountStatusTruncated",
                 "NativeP2PRxEntryCountCrcRejected",
@@ -1652,105 +1809,18 @@ void ItlIwx::tahoeP2pPublishRxEntryTelemetry(IOEthernetController *controller)
                 "NativeP2PRxEntryCountQosDataFrame",
                 "NativeP2PRxEntryCountAwdlBssidCandidate",
                 "NativeP2PRxEntryCountFilterMatchAvailable",
-                "NativeP2PRxEntryCountFilterMatchUnavailable"
+                "NativeP2PRxEntryCountFilterMatchUnavailable",
+                "NativeP2PRxEntryCountChannel149",
+                "NativeP2PRxEntryCountChannel36",
+                "NativeP2PRxEntryCountExpectedMacPhy149",
+                "NativeP2PRxEntryCountMacIndex1Channel149"
             };
+            static_assert(sizeof(counterNames) / sizeof(counterNames[0]) ==
+                              NativeAwdlRxEntry::CounterCount,
+                          "RX entry counter names must match the telemetry schema");
             for (unsigned i = 0; i < NativeAwdlRxEntry::CounterCount; ++i)
                 if (!write(counterNames[i], current.counts[i])) return false;
-
-            const char *lastDescriptorNames[] = {
-                "NativeP2PRxEntryLastDescriptorPresent",
-                "NativeP2PRxEntryLastDescriptorContextGeneration",
-                "NativeP2PRxEntryLastDescriptorPowerGeneration",
-                "NativeP2PRxEntryLastDescriptorStationGeneration",
-                "NativeP2PRxEntryLastDescriptorRocGeneration",
-                "NativeP2PRxEntryLastDescriptorPayloadLength",
-                "NativeP2PRxEntryLastDescriptorDmaCapacity",
-                "NativeP2PRxEntryLastDescriptorDescriptorSize",
-                "NativeP2PRxEntryLastDescriptorVersion",
-                "NativeP2PRxEntryLastDescriptorMpduLength",
-                "NativeP2PRxEntryLastDescriptorStatusPresent",
-                "NativeP2PRxEntryLastDescriptorStatus",
-                "NativeP2PRxEntryLastDescriptorMacPhyIndexPresent",
-                "NativeP2PRxEntryLastDescriptorMacPhyIndex",
-                "NativeP2PRxEntryLastDescriptorFilterMatchPresent",
-                "NativeP2PRxEntryLastDescriptorFilterMatch",
-                "NativeP2PRxEntryLastDescriptorRpaEnabled",
-                "NativeP2PRxEntryLastDescriptorChannelPresent",
-                "NativeP2PRxEntryLastDescriptorChannel",
-                "NativeP2PRxEntryLastDescriptorFrameControlPresent",
-                "NativeP2PRxEntryLastDescriptorFrameControl",
-                "NativeP2PRxEntryLastDescriptorFrameType",
-                "NativeP2PRxEntryLastDescriptorFrameSubtype",
-                "NativeP2PRxEntryLastDescriptorToDs",
-                "NativeP2PRxEntryLastDescriptorFromDs",
-                "NativeP2PRxEntryLastDescriptorAwdlBssidCandidate"
-            };
-            const auto &descriptor = current.lastDescriptor;
-            const uint32_t descriptorValues[] = {
-                descriptor.present, descriptor.contextGeneration,
-                descriptor.powerGeneration, descriptor.stationGeneration,
-                descriptor.rocGeneration, descriptor.payloadLength,
-                descriptor.dmaCapacity, descriptor.descriptorSize,
-                descriptor.descriptorVersion, descriptor.mpduLength,
-                descriptor.statusPresent, descriptor.status,
-                descriptor.macPhyIndexPresent, descriptor.macPhyIndex,
-                descriptor.filterMatchPresent, descriptor.filterMatch,
-                descriptor.rpaEnabled, descriptor.channelPresent, descriptor.channel,
-                descriptor.frameControlPresent, descriptor.frameControl,
-                descriptor.frameType, descriptor.frameSubtype, descriptor.toDs,
-                descriptor.fromDs, descriptor.awdlBssidCandidate
-            };
-            for (unsigned i = 0; i < sizeof(descriptorValues) / sizeof(descriptorValues[0]);
-                 ++i)
-                if (!write(lastDescriptorNames[i], descriptorValues[i])) return false;
-
-            const char *lastCandidateNames[] = {
-                "NativeP2PRxEntryLastAwdlDataCandidatePresent",
-                "NativeP2PRxEntryLastAwdlDataCandidateContextGeneration",
-                "NativeP2PRxEntryLastAwdlDataCandidatePowerGeneration",
-                "NativeP2PRxEntryLastAwdlDataCandidateStationGeneration",
-                "NativeP2PRxEntryLastAwdlDataCandidateRocGeneration",
-                "NativeP2PRxEntryLastAwdlDataCandidatePayloadLength",
-                "NativeP2PRxEntryLastAwdlDataCandidateDmaCapacity",
-                "NativeP2PRxEntryLastAwdlDataCandidateDescriptorSize",
-                "NativeP2PRxEntryLastAwdlDataCandidateVersion",
-                "NativeP2PRxEntryLastAwdlDataCandidateMpduLength",
-                "NativeP2PRxEntryLastAwdlDataCandidateStatusPresent",
-                "NativeP2PRxEntryLastAwdlDataCandidateStatus",
-                "NativeP2PRxEntryLastAwdlDataCandidateMacPhyIndexPresent",
-                "NativeP2PRxEntryLastAwdlDataCandidateMacPhyIndex",
-                "NativeP2PRxEntryLastAwdlDataCandidateFilterMatchPresent",
-                "NativeP2PRxEntryLastAwdlDataCandidateFilterMatch",
-                "NativeP2PRxEntryLastAwdlDataCandidateRpaEnabled",
-                "NativeP2PRxEntryLastAwdlDataCandidateChannelPresent",
-                "NativeP2PRxEntryLastAwdlDataCandidateChannel",
-                "NativeP2PRxEntryLastAwdlDataCandidateFrameControlPresent",
-                "NativeP2PRxEntryLastAwdlDataCandidateFrameControl",
-                "NativeP2PRxEntryLastAwdlDataCandidateFrameType",
-                "NativeP2PRxEntryLastAwdlDataCandidateFrameSubtype",
-                "NativeP2PRxEntryLastAwdlDataCandidateToDs",
-                "NativeP2PRxEntryLastAwdlDataCandidateFromDs",
-                "NativeP2PRxEntryLastAwdlDataCandidateAwdlBssidCandidate"
-            };
-            const auto &candidate = current.lastAwdlDataCandidate;
-            const uint32_t candidateValues[] = {
-                candidate.present, candidate.contextGeneration,
-                candidate.powerGeneration, candidate.stationGeneration,
-                candidate.rocGeneration, candidate.payloadLength,
-                candidate.dmaCapacity, candidate.descriptorSize,
-                candidate.descriptorVersion, candidate.mpduLength,
-                candidate.statusPresent, candidate.status,
-                candidate.macPhyIndexPresent, candidate.macPhyIndex,
-                candidate.filterMatchPresent, candidate.filterMatch,
-                candidate.rpaEnabled, candidate.channelPresent, candidate.channel,
-                candidate.frameControlPresent, candidate.frameControl,
-                candidate.frameType, candidate.frameSubtype, candidate.toDs,
-                candidate.fromDs, candidate.awdlBssidCandidate
-            };
-            for (unsigned i = 0; i < sizeof(candidateValues) / sizeof(candidateValues[0]);
-                 ++i)
-                if (!write(lastCandidateNames[i], candidateValues[i])) return false;
-            return true;
+            return writeWitnesses();
         });
 }
 

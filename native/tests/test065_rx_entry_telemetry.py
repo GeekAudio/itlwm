@@ -57,7 +57,7 @@ def source_contracts():
     assert 'iwx_rx_packet_payload_len(pkt)' in cpp
     assert 'size_t maxlen = IWX_RBUF_SIZE - offset - minsz;' in cpp
     assert cpp.count('iwx_rx_packet_payload_len(pkt),') >= 2
-    assert cpp.count('maxlen, ml);') >= 2
+    assert cpp.count('maxlen, ml, rxRingSlot,') >= 2
     assert 'tahoeP2pCurrentRxDiagnosticEpochs(sc, &rxEntryEpochs)' in rx_entry
     assert 'inspection.frameControlPresent &&' in rx_entry
     assert 'NativeAwdlData::isAwdlDataCandidate(' in rx_entry
@@ -71,17 +71,23 @@ def source_contracts():
     assert 'if (current.active)' in publisher
     assert publisher.index('if (current.active)') < publisher.index('setProperty(')
     assert 'NativeAwdlRxEntryPublisher::publish(' in publisher
-    assert publisher.count('controller->setProperty(') == 1
+    assert publisher.count('controller->setProperty(') == 2
     assert 'nativeAwdlRxEntryAttemptVersion_' in publisher
-    assert 'if (!write(lastDescriptorNames[i], descriptorValues[i])) return false;' in publisher
-    assert 'if (!write(lastCandidateNames[i], candidateValues[i])) return false;' in publisher
+    assert 'publishWitness("NativeP2PRxEntryLastDescriptor"' in publisher
+    assert 'publishWitness("NativeP2PRxEntryLastTarget"' in publisher
+    assert 'publishWitness("NativeP2PRxEntryLastMacIndexTarget"' in publisher
+    assert 'publishWitness("NativeP2PRxEntryLastAwdlDataCandidate"' in publisher
+    assert 'NativeP2PRxEntryCountExpectedMacPhy149' in publisher
+    assert 'NativeP2PRxEntryCountMacIndex1Channel149' in publisher
+    assert 'write64(name, value)' in publisher
+    assert 'setProperty(name, value, 64)' in publisher
     assert 'publishedSnapshot = current;' in publisher_header
     assert 'publishedVersion = version;' in publisher_header
     assert 'publishedOnce = true;' in publisher_header
     assert 'tahoeP2pPublishRxEntryTelemetry(controller);' in rx_cpp
     assert 'if (rxLease.active && rxLease.contextGeneration != 0' in drain
     assert 'tahoe_awdl_rx_stage_counters_.beginOwner(rxLease.contextGeneration);' in drain
-    assert 'nativeAwdlRxEntryTelemetry_.beginOwner(rxEntryEpochs);' in drain
+    assert 'tahoeP2pSyncRxDiagnosticOwner(false);' in drain
     assert 'tahoe_awdl_rx_stage_counters_.beginOwner(rxEntryEpochs' not in drain
     assert 'counters.beginOwner(41);' in STAGE_TEST.read_text()
     assert 'same still-active lease' in STAGE_TEST.read_text()

@@ -7229,8 +7229,12 @@ IOReturn ItlIwx::tahoeP2pRocEventAction(OSObject *, void *opaque,
         }
     } else if (action->operation == kRocCommandReturned) {
         tracker.noteCommandResult(probe->contextGeneration, action->commandResult);
+        // START can arrive before the submitter records the successful ACK.
+        // Re-evaluate the same diagnostic-only owner gate after both exist.
+        owner->tahoeP2pSyncRxDiagnosticOwner(false);
     } else if (action->operation == kRocExpire) {
         tracker.expire(probe->contextGeneration);
+        owner->tahoeP2pSyncRxDiagnosticOwner(true);
     }
     action->snapshot = tracker.snapshot();
     storeRocSnapshot(owner, action->snapshot);
@@ -7439,9 +7443,15 @@ void ItlIwx::tahoeP2pTapSessionEvent(struct iwx_softc *sc,
         }
         (void)nativeAwdlRxEventTimeline_.recordSessionProtection(
             notification, epochs, nativeAwdlRxEventOwnerSerial_);
-        if (canonicalEnd)
+        if (canonicalStart)
+            tahoeP2pSyncRxDiagnosticOwner(false);
+        if (canonicalEnd) {
             (void)nativeAwdlRxEventTimeline_.closeProducer(
                 nativeAwdlRxEventOwnerSerial_, epochs, 1);
+            // Close only an existing matching owner. An END must never create
+            // an empty-window owner or retrospectively claim RX coverage.
+            tahoeP2pSyncRxDiagnosticOwner(true);
+        }
     }
 }
 
