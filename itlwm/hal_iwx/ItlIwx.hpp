@@ -515,6 +515,9 @@ public:
     void tahoeP2pRxConsume();
     void tahoeP2pRxDrain();
     static IOReturn tahoeP2pRxDrainAction(OSObject *, void *, void *, void *, void *);
+    void tahoeRx149RecoverInput();
+    static IOReturn tahoeRx149RecoverInputAction(
+        OSObject *, void *, void *, void *, void *);
     bool tahoeP2pCurrentRxDiagnosticEpochs(
         struct iwx_softc *, NativeAwdlRxEntry::Epochs *, uint32_t * = nullptr);
     void tahoeRxPreOwnerEvent(NativeRxPreOwner::EventKind,
@@ -584,6 +587,10 @@ public:
     uint64_t nativeStateQueueStopRejectFingerprint_ {0};
     bool nativeP2pProbePublishedOnce_ {false};
     NativeP2PProbe::Snapshot nativeP2pProbePublished_{};
+    // A single atomic publication binds a successful hardware initialization
+    // to the fault serial sampled before that initialization, not at recovery.
+    uint64_t nativeRx149InitProof_ {0};
+    uint32_t nativeRx149RecoveryCount_ {0};
 
     IntelP2PRx::Router tahoe_p2p_rx_router_;
     NativeAwdlRxTrace::Timeline nativeAwdlRxEventTimeline_{};

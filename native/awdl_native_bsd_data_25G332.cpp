@@ -5,6 +5,7 @@
 #include "awdl_native_bsd_data_25G332.hpp"
 #include "awdl_bsd_packet_bridge.hpp"
 #include "awdl_data_tx_observation.hpp"
+#include "rx149_input_gate_state.hpp"
 #include <IOKit/IOLib.h>
 #include <IOKit/IOLocks.h>
 #include <kern/clock.h>
@@ -65,26 +66,13 @@ uint64_t rx149OwnerSerialHighWater=0;
 uint64_t rx149ReceiptSequence=0;
 uint64_t rx149ReceiptContentRevision=0;
 Rx149InputReceipt rx149Receipt{};
-constexpr uint32_t kRx149InputBlockedBit=0x80000000u;
-constexpr uint32_t kRx149InputTicketCountMask=~kRx149InputBlockedBit;
-uint32_t rx149InputGateState=0;
+Rx149InputGateState::Word rx149InputGateState=0;
+uint32_t rx149RecoveryPreparedFaultSerial=0;
 bool reserveRx149InputTicketFast() {
-    uint32_t observed=__atomic_load_n(&rx149InputGateState,__ATOMIC_ACQUIRE);
-    for(;;) {
-        if((observed&kRx149InputBlockedBit)!=0||
-           (observed&kRx149InputTicketCountMask)==
-               kRx149InputTicketCountMask)
-            return false;
-        const uint32_t desired=observed+1;
-        if(__atomic_compare_exchange_n(&rx149InputGateState,&observed,desired,
-                false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))
-            return true;
-        // Only the lock-free invalidator can race this lock-protected grant;
-        // a failed compare therefore observes the blocked bit and stops.
-    }
+    return Rx149InputGateState::reserveTicket(&rx149InputGateState);
 }
 void releaseRx149InputTicketFast() {
-    __atomic_fetch_sub(&rx149InputGateState,1u,__ATOMIC_ACQ_REL);
+    (void)Rx149InputGateState::releaseTicket(&rx149InputGateState);
 }
 IOSimpleLock *bridgeLock() {
     return __atomic_load_n(&lock,__ATOMIC_ACQUIRE);
@@ -273,12 +261,24 @@ size_t removeRx149ItemsLocked(bool all,uint64_t version,
     set(RxPending,rx.count);
     return removedCount;
 }
+size_t drainRxQueueForRecoveryLocked(uint64_t nowUsValue) {
+    size_t removedCount=0;
+    Rx removed{};
+    while(rx.pop(&removed)) {
+        if(removed.rx149PermitPresent)
+            recordRx149ReceiptLocked(removed,Rx149ReceiptStaleOrInvalid,
+                                     nowUsValue,0,false,0);
+        ++removedCount;
+    }
+    set(RxPending,0);
+    return removedCount;
+}
 bool activateRx149LeaseLocked(
     const NativeP2PRx149DataInput::Lease &lease,
     size_t *discardedCount,uint64_t nowUsValue) {
     if(discardedCount)*discardedCount=0;
-    if((__atomic_load_n(&rx149InputGateState,__ATOMIC_ACQUIRE)&
-        kRx149InputBlockedBit)!=0||
+    if(Rx149InputGateState::blocked(
+           __atomic_load_n(&rx149InputGateState,__ATOMIC_ACQUIRE))||
        !NativeP2PRx149DataInput::leaseCurrent(lease,nowUsValue))
         return false;
     if(!activeRx149LeaseValid||
@@ -692,12 +692,113 @@ void invalidateRx149DataInputFast() {
     // This latch is intentionally independent of bridge initialization and
     // IOSimpleLock availability. HW_ERR/RFKILL callers can fence a final
     // ticket without waiting for the queue lock or doing cleanup in context.
-    __atomic_fetch_or(&rx149InputGateState,kRx149InputBlockedBit,
-                      __ATOMIC_ACQ_REL);
+    (void)Rx149InputGateState::invalidate(&rx149InputGateState);
 }
 bool rx149DataInputBlocked() {
-    return (__atomic_load_n(&rx149InputGateState,__ATOMIC_ACQUIRE)&
-            kRx149InputBlockedBit)!=0;
+    return Rx149InputGateState::blocked(
+        __atomic_load_n(&rx149InputGateState,__ATOMIC_ACQUIRE));
+}
+uint32_t rx149DataInputFaultSerial() {
+    return Rx149InputGateState::faultSerial(
+        __atomic_load_n(&rx149InputGateState,__ATOMIC_ACQUIRE));
+}
+Rx149RecoveryResult recoverRx149DataInput(
+    const Rx149RecoveryAuthority &authority) {
+    if(!authority.faultSerial||!authority.powerGeneration||
+       !authority.fullInitializationSucceeded||!authority.faultSourceClear)
+        return Rx149RecoveryResult::InvalidAuthority;
+
+    auto gateState=__atomic_load_n(&rx149InputGateState,__ATOMIC_ACQUIRE);
+    if(!Rx149InputGateState::blocked(gateState))
+        return Rx149RecoveryResult::NotBlocked;
+    if(Rx149InputGateState::permanentlyBlocked(gateState))
+        return Rx149RecoveryResult::VersionExhausted;
+    if(Rx149InputGateState::faultSerial(gateState)!=authority.faultSerial)
+        return Rx149RecoveryResult::StaleFaultSerial;
+
+    if(!bridgeLock())return Rx149RecoveryResult::BridgeUnavailable;
+    auto irq=IOSimpleLockLockDisableInterrupt(lock);
+    Rx149RecoveryResult result=Rx149RecoveryResult::Recovered;
+    size_t discarded=0;
+    const uint64_t lockedNow=nowUs();
+
+    gateState=__atomic_load_n(&rx149InputGateState,__ATOMIC_ACQUIRE);
+    if(!Rx149InputGateState::blocked(gateState)) {
+        result=Rx149RecoveryResult::NotBlocked;
+    } else if(Rx149InputGateState::permanentlyBlocked(gateState)) {
+        result=Rx149RecoveryResult::VersionExhausted;
+    } else if(Rx149InputGateState::faultSerial(gateState)!=
+              authority.faultSerial) {
+        result=Rx149RecoveryResult::StaleFaultSerial;
+    } else if(!interface||closing||detached||
+              __atomic_load_n(&closingRequested,__ATOMIC_ACQUIRE)!=0||
+              __atomic_load_n(&counters[Attached],__ATOMIC_ACQUIRE)==0||
+              !radio) {
+        result=Rx149RecoveryResult::BridgeUnavailable;
+    } else if(radioGeneration!=authority.powerGeneration) {
+        result=Rx149RecoveryResult::WrongPowerGeneration;
+    } else if(activeRx149LeaseValid&&
+              activeRx149Lease.epochs.power==authority.powerGeneration&&
+              NativeP2PRx149DataInput::leaseCurrent(
+                  activeRx149Lease,lockedNow)) {
+        // A still-current owner for this generation is never invalidated.
+        // Expired/ended cached leases (including same-generation copies) are
+        // tombstoned below; the main gate separately proves no live producer.
+        result=Rx149RecoveryResult::CurrentOwnerActive;
+    } else if(activeRx149Version==UINT64_MAX||
+              (rx149RecoveryPreparedFaultSerial!=authority.faultSerial&&
+               activeRx149Version>=UINT64_MAX-1)) {
+        // Recovery needs one fresh version. If the version was already
+        // prepared by an earlier Busy result, it must not be bumped again.
+        result=Rx149RecoveryResult::VersionExhausted;
+    } else {
+        if(rx149RecoveryPreparedFaultSerial!=authority.faultSerial) {
+            if(activeRx149LeaseValid) {
+                const uint64_t ownerSerial=activeRx149Lease.ownerSerial;
+                const auto epochs=activeRx149Lease.epochs;
+                discarded+=revokeRx149LeaseLocked(ownerSerial,&epochs,
+                                                   lockedNow);
+                if(activeRx149LeaseValid) {
+                    result=Rx149RecoveryResult::CurrentOwnerActive;
+                }
+            } else {
+                ++activeRx149Version;
+            }
+            if(result==Rx149RecoveryResult::Recovered)
+                rx149RecoveryPreparedFaultSerial=authority.faultSerial;
+        }
+
+        if(result==Rx149RecoveryResult::Recovered) {
+            // Recovery starts before the next ARM. Drop every old RX slot,
+            // including permit-bearing entries, while preserving the latest
+            // bounded receipt for permit packets.
+            discarded+=drainRxQueueForRecoveryLocked(lockedNow);
+            gateState=__atomic_load_n(&rx149InputGateState,__ATOMIC_ACQUIRE);
+            if(Rx149InputGateState::faultSerial(gateState)!=
+                   authority.faultSerial||
+               !Rx149InputGateState::blocked(gateState)) {
+                result=Rx149RecoveryResult::FaultRaced;
+            } else if(Rx149InputGateState::ticketCount(gateState)!=0) {
+                result=Rx149RecoveryResult::InputTicketActive;
+            } else if(inputCalls!=0) {
+                result=Rx149RecoveryResult::WorkerActive;
+            } else if(rx.count!=0) {
+                result=Rx149RecoveryResult::PermitQueueNotDrained;
+            } else if(!Rx149InputGateState::recover(
+                          &rx149InputGateState,authority.faultSerial)) {
+                const auto after=__atomic_load_n(
+                    &rx149InputGateState,__ATOMIC_ACQUIRE);
+                if(Rx149InputGateState::ticketCount(after)!=0)
+                    result=Rx149RecoveryResult::InputTicketActive;
+                else
+                    result=Rx149RecoveryResult::FaultRaced;
+            }
+        }
+    }
+
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+    for(size_t i=0;i<discarded;++i)add(RxRejected);
+    return result;
 }
 #if defined(ITL_NATIVE_AWDL_RX149_TEST_HOOKS)
 void setRx149TestHookForTests(Rx149TestHook hook) {
@@ -818,8 +919,8 @@ void poll(bool ready,uint32_t generation,
         }
         const bool have=selected<rx.count&&removeRxAt(selected,&item);
         if(have&&rx149Lease&&
-           (__atomic_load_n(&rx149InputGateState,__ATOMIC_ACQUIRE)&
-            kRx149InputBlockedBit)==0&&
+           !Rx149InputGateState::blocked(
+               __atomic_load_n(&rx149InputGateState,__ATOMIC_ACQUIRE))&&
            activeRx149LeaseValid&&
            item.rx149GuardVersion==activeRx149Version&&
            item.interfaceIncarnation==interfaceIncarnation&&
@@ -897,8 +998,8 @@ void poll(bool ready,uint32_t generation,
                 radio&&__atomic_load_n(&closingRequested,__ATOMIC_ACQUIRE)==0&&
                 __atomic_load_n(&counters[Attached],__ATOMIC_ACQUIRE)!=0&&
                 radioGeneration==generation&&
-                (__atomic_load_n(&rx149InputGateState,__ATOMIC_ACQUIRE)&
-                 kRx149InputBlockedBit)==0&&
+                !Rx149InputGateState::blocked(
+                    __atomic_load_n(&rx149InputGateState,__ATOMIC_ACQUIRE))&&
                 interfaceIncarnation==item.interfaceIncarnation;
             const bool permitStillCurrent=stillAttached&&rx149Lease&&
                 activeRx149LeaseValid&&
@@ -1006,8 +1107,8 @@ CaptureResult captureRx149Data(
     runRx149TestHook(Rx149TestHookPoint::CaptureAuthorization);
 #endif
     const uint64_t captureNow=nowUs();
-    if((__atomic_load_n(&rx149InputGateState,__ATOMIC_ACQUIRE)&
-        kRx149InputBlockedBit)!=0||
+    if(Rx149InputGateState::blocked(
+           __atomic_load_n(&rx149InputGateState,__ATOMIC_ACQUIRE))||
        !NativeP2PRx149DataInput::stillCurrent(permit,lease,captureNow)) {
         IOSimpleLockUnlockEnableInterrupt(lock,irq);
         add(RxRejected);
@@ -1029,8 +1130,8 @@ CaptureResult captureRx149Data(
         }
     }
     const bool authorityCurrent=
-        (__atomic_load_n(&rx149InputGateState,__ATOMIC_ACQUIRE)&
-         kRx149InputBlockedBit)==0&&
+        !Rx149InputGateState::blocked(
+            __atomic_load_n(&rx149InputGateState,__ATOMIC_ACQUIRE))&&
         activeRx149LeaseValid&&
         activeRx149Version!=0&&sameRx149LeaseIdentity(activeRx149Lease,lease)&&
         sameRx149PermitIdentity(activeRx149Lease,permit)&&

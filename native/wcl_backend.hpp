@@ -69,11 +69,17 @@ private:
     void finishJoin(uint16_t, uint32_t);
     void maybeConnected();
     void publishLink(bool);
+    void deferScan(const ScanPlan &);
+    void finishQueuedScan(uint32_t);
+    void retryDeferredScan();
     Status submitJoin(const JoinPlan &);
+    void deferJoin(const JoinPlan &);
+    void clearDeferredJoin();
+    void cancelDeferredJoin();
     void retryDeferredJoin();
     Operations operations_ {};
     bool stopped_ {true}, ready_ {}, addressChanging_ {};
-    bool scanPending_ {}, scanDraining_ {}, scanAbortNotification_ {}, joinPending_ {}, deferred_ {};
+    bool scanPending_ {}, scanQueued_ {}, scanDraining_ {}, scanAbortNotification_ {}, joinPending_ {}, deferred_ {};
     bool associated_ {}, firstBeacon_ {}, authorized_ {}, bssValid_ {};
     bool linkPublished_ {};
     uint8_t linkedAddress_[6] {};
@@ -83,6 +89,8 @@ private:
     bool addressPreviousReady_ {}, addressPreviousAuthorized_ {};
     uint32_t scanRemaining_ {}, joinRemaining_ {};
     uint32_t scanGeneration_ {}, nextGeneration_ {};
+    ScanPlan deferredScanPlan_ {};
+    uint32_t nextJoinGeneration_ {}, deferredJoinGeneration_ {};
     uint32_t scanRejectField_ {0xffffffffU}, joinRejectField_ {0xffffffffU};
     uint8_t target_[6] {};
     JoinPlan deferredJoin_ {};

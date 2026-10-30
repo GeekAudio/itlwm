@@ -4,6 +4,7 @@
 #include "../awdl_native_bsd_data_25G332.hpp"
 #include "../awdl_data_frame.hpp"
 #include "../p2p_rx149_data_input.hpp"
+#include "../rx149_input_gate_state.hpp"
 
 #include <thread>
 
@@ -104,4 +105,21 @@ int main() {
     publishRx149DataInputLease(lease);
     assert(dev.refs==0);
     assert(allocated==freed);
+
+    using namespace Rx149InputGateState;
+    Word gate=0;
+    assert(invalidate(&gate)==1);
+    std::atomic<bool> raceStart{false};
+    std::thread staleRecovery([&] {
+        while(!raceStart.load(std::memory_order_acquire)) {}
+        (void)recover(&gate,1);
+    });
+    std::thread racingFault([&] {
+        while(!raceStart.load(std::memory_order_acquire)) {}
+        (void)invalidate(&gate);
+    });
+    raceStart.store(true,std::memory_order_release);
+    staleRecovery.join();
+    racingFault.join();
+    assert(blocked(gate)&&faultSerial(gate)==2&&ticketCount(gate)==0);
 }

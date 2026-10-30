@@ -8062,6 +8062,9 @@ void ItlIwx::nativeP2pTick()
     NativeAwdlBSD::poll(com.sc_ic.ic_state==IEEE80211_S_RUN&&
         !(com.sc_flags&(IWX_FLAG_HW_ERR|IWX_FLAG_SHUTDOWN|IWX_FLAG_RFKILL)),uint32_t(com.sc_generation));
 #endif
+    // Recovery uses a main-gate/lifecycle-fenced successful-init proof. It
+    // does not create a ROC owner, grant a lease or arm a diagnostic window.
+    tahoeRx149RecoverInput();
 
     IOEthernetController *controller = getController();
     tahoeRxPreOwnerPublish(controller);

@@ -1237,6 +1237,104 @@ void ItlIwx::tahoeClearStopBlockState()
     __atomic_store_n(&nativeLifecycleStopRejectFingerprint_, uint64_t(0),
                      __ATOMIC_RELEASE);
 }
+
+IOReturn ItlIwx::tahoeRx149RecoverInputAction(
+    OSObject *, void *context, void *flushOut, void *, void *)
+{
+#if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+    auto *owner = static_cast<ItlIwx *>(context);
+    auto *flush = static_cast<bool *>(flushOut);
+    if (!owner || !flush || !owner->tahoeP2pOnMainGate())
+        return kIOReturnNotReady;
+    TahoeLifecycleGuard lifecycle(owner, true, false, flush);
+    if (!lifecycle)
+        return kIOReturnBusy;
+    if (!NativeAwdlBSD::rx149DataInputBlocked())
+        return kIOReturnSuccess;
+
+    auto &sc = owner->com;
+    auto &ic = sc.sc_ic;
+    const uint64_t proof = __atomic_load_n(
+        &owner->nativeRx149InitProof_, __ATOMIC_ACQUIRE);
+    const uint32_t generation = uint32_t(proof >> 32);
+    const uint32_t faultSerial = uint32_t(proof);
+    const auto roc = owner->nativeP2pRocEvents_.snapshot();
+    const auto trace = owner->nativeAwdlRxEventTimeline_.snapshot();
+    const auto probe = owner->nativeP2pProbe_.snapshot();
+    uint32_t blockers = 0;
+    if (!proof || !generation || sc.sc_generation <= 0 ||
+        generation != uint32_t(sc.sc_generation) ||
+        faultSerial != NativeAwdlBSD::rx149DataInputFaultSerial())
+        blockers |= 1u;
+    if (ic.ic_state != IEEE80211_S_RUN ||
+        (ic.ic_if.if_flags & (IFF_UP | IFF_RUNNING)) != (IFF_UP | IFF_RUNNING) ||
+        (sc.sc_flags & (IWX_FLAG_HW_ERR | IWX_FLAG_SHUTDOWN | IWX_FLAG_RFKILL)) ||
+        ic.ic_tahoe_init_error || ic.ic_tahoe_init_stage != 14)
+        blockers |= 2u;
+    if (owner->nativeP2pBusy() || owner->nativeP2pResourcesRetained() ||
+        __atomic_load_n(&owner->nativeP2pProbeQueued_, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&owner->nativeP2pProbeOwner_, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&owner->nativeP2pNswqPaused_, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&owner->nativeP2pManualArmRequested_, __ATOMIC_ACQUIRE) ||
+        probe.resourceMayExist)
+        blockers |= 4u;
+    if (owner->tahoe_p2p_rx_lease_.active ||
+        (sc.sc_p2p_roc.phase != IWX_P2P_ROC_IDLE &&
+         sc.sc_p2p_roc.phase != IWX_P2P_ROC_COMPLETE) ||
+        (roc.submitted && (!roc.cleanupAllowed || roc.outcomeUnknown)) ||
+        trace.active || (trace.ownerPresent && !trace.producerClosed) ||
+        trace.pendingDrainCount || trace.untrackedPendingDrainCount ||
+        trace.untrackedPendingIdentityOverflowCount)
+        blockers |= 8u;
+
+    if (!blockers) {
+        NativeAwdlBSD::Rx149RecoveryAuthority authority{};
+        authority.faultSerial = faultSerial;
+        authority.powerGeneration = generation;
+        authority.fullInitializationSucceeded = true;
+        authority.faultSourceClear = true;
+        const auto result = NativeAwdlBSD::recoverRx149DataInput(authority);
+        if (result == NativeAwdlBSD::Rx149RecoveryResult::Recovered)
+            ++owner->nativeRx149RecoveryCount_;
+        else
+            blockers |= 16u;
+        if (auto *controller = owner->getController())
+            controller->setProperty("NativeP2PRx149RecoveryResult",
+                static_cast<uint32_t>(result), 32);
+    }
+    if (auto *controller = owner->getController()) {
+        controller->setProperty("NativeP2PRx149RecoveryInitGeneration", generation, 32);
+        controller->setProperty("NativeP2PRx149RecoveryInitFaultSerial", faultSerial, 32);
+        controller->setProperty("NativeP2PRx149RecoveryFaultSerial",
+            NativeAwdlBSD::rx149DataInputFaultSerial(), 32);
+        controller->setProperty("NativeP2PRx149RecoveryBlockers", blockers, 32);
+        controller->setProperty("NativeP2PRx149RecoveryCount",
+            owner->nativeRx149RecoveryCount_, 32);
+    }
+    return blockers ? kIOReturnNotReady : kIOReturnSuccess;
+#else
+    (void)context;
+    (void)flushOut;
+    return kIOReturnUnsupported;
+#endif
+}
+
+void ItlIwx::tahoeRx149RecoverInput()
+{
+#if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+    if (!NativeAwdlBSD::rx149DataInputBlocked())
+        return;
+    bool flush = false;
+    // The watchdog owns a different workloop. Never wait for the main gate
+    // or the lifecycle fence, and flush deferred work only after releasing it.
+    if (tahoeP2pOnMainGate())
+        (void)tahoeRx149RecoverInputAction(nullptr, this, &flush, nullptr, nullptr);
+    else if (auto *gate = tahoeP2pCommandGate())
+        (void)gate->attemptAction(tahoeRx149RecoverInputAction, this, &flush);
+    if (flush)
+        tahoeFlushLifecycleTasks();
+#endif
+}
 #endif
 
 #ifdef AIRPORT_TAHOE
@@ -5195,6 +5293,9 @@ void ItlIwx::tahoeRetireStoppedQueuesAfterSoftStop(
 int ItlIwx::
 iwx_stop_device(struct iwx_softc *sc)
 {
+#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+    __atomic_store_n(&nativeRx149InitProof_, uint64_t(0), __ATOMIC_RELEASE);
+#endif
 #if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
     NativeRxPreOwner::StopActivity observerStopActivity(&nativeRxPreOwnerStopDepth_);
     tahoeRxPreOwnerStop();
@@ -15732,6 +15833,15 @@ iwx_init(struct _ifnet *ifp)
 
     //    rw_assert_wrlock(&sc->ioctl_rwl);
 
+#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+    __atomic_store_n(&nativeRx149InitProof_, uint64_t(0), __ATOMIC_RELEASE);
+    // Do not manufacture a recovery identity after signed generation exhaustion.
+    if (sc->sc_generation < 0 || sc->sc_generation == INT32_MAX) {
+        NativeAwdlBSD::invalidateRx149DataInputFast();
+        return EOVERFLOW;
+    }
+    const uint32_t rx149InitFaultSerial = NativeAwdlBSD::rx149DataInputFaultSerial();
+#endif
     generation = ++sc->sc_generation;
 #ifdef AIRPORT_TAHOE
     __atomic_store_n(&nativeFwDiagnosticAliveGeneration_, 0U,
@@ -15824,6 +15934,16 @@ iwx_init(struct _ifnet *ifp)
         return err;
     }
     ic->ic_tahoe_init_stage = 14;
+#if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+    // An IRQ fault during this initialization invalidates the proof. A fault
+    // after this check is still rejected by recovery's exact-serial CAS.
+    if (generation == sc->sc_generation && generation > 0 &&
+        rx149InitFaultSerial == NativeAwdlBSD::rx149DataInputFaultSerial() &&
+        !(sc->sc_flags & (IWX_FLAG_HW_ERR | IWX_FLAG_SHUTDOWN | IWX_FLAG_RFKILL)))
+        __atomic_store_n(&nativeRx149InitProof_,
+            (uint64_t(uint32_t(generation)) << 32) | rx149InitFaultSerial,
+            __ATOMIC_RELEASE);
+#endif
     tahoeDriverEvent(ITL_TAHOE_EVT_DRIVER_READY);
     tahoeMccScheduleIfReady(sc);
 #else

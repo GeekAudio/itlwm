@@ -5,6 +5,7 @@
 #include "../awdl_data_frame.hpp"
 #include "../p2p_rx149_data_input.hpp"
 #include "../p2p_rx149_input_receipt_publisher.hpp"
+#include "../rx149_input_gate_state.hpp"
 
 #include <map>
 #include <string>
@@ -22,6 +23,10 @@ namespace {
 NativeAwdlBSD::Rx149TestHookPoint hookPoint=
     NativeAwdlBSD::Rx149TestHookPoint::LeaseAuthorization;
 uint64_t hookTime=0;
+NativeAwdlBSD::Rx149RecoveryAuthority hookRecoveryAuthority{};
+NativeAwdlBSD::Rx149RecoveryResult hookRecoveryResult=
+    NativeAwdlBSD::Rx149RecoveryResult::NotBlocked;
+bool hookRecoveryAttempted=false;
 void setTimeAtHook(NativeAwdlBSD::Rx149TestHookPoint point) {
     if(point==hookPoint) {
         fakeTime=hookTime;
@@ -37,6 +42,19 @@ void invalidateAtTicket(NativeAwdlBSD::Rx149TestHookPoint point) {
 void invalidateBeforeReservation(NativeAwdlBSD::Rx149TestHookPoint point) {
     if(point==NativeAwdlBSD::Rx149TestHookPoint::BeforeInputTicketReservation) {
         NativeAwdlBSD::invalidateRx149DataInputFast();
+        NativeAwdlBSD::setRx149TestHookForTests(nullptr);
+    }
+}
+void invalidateRevokeAndAttemptRecovery(
+    NativeAwdlBSD::Rx149TestHookPoint point) {
+    if(point==NativeAwdlBSD::Rx149TestHookPoint::AfterInputTicket) {
+        NativeAwdlBSD::invalidateRx149DataInputFast();
+        NativeAwdlBSD::revokeRx149DataInput();
+        hookRecoveryAuthority.faultSerial=
+            NativeAwdlBSD::rx149DataInputFaultSerial();
+        hookRecoveryResult=NativeAwdlBSD::recoverRx149DataInput(
+            hookRecoveryAuthority);
+        hookRecoveryAttempted=true;
         NativeAwdlBSD::setRx149TestHookForTests(nullptr);
     }
 }
@@ -92,6 +110,24 @@ Descriptor validDescriptor(uint8_t raw=0x41,
 }
 
 void gateMatrix() {
+    using namespace NativeAwdlBSD::Rx149InputGateState;
+    Word state=0;
+    assert(invalidate(&state)==1&&blocked(state));
+    assert(!reserveTicket(&state));
+    assert(invalidate(&state)==2&&blocked(state));
+    assert(!recover(&state,1)); // old init proof cannot clear a newer fault
+    assert(recover(&state,2)&&!blocked(state));
+    assert(reserveTicket(&state)&&ticketCount(state)==1);
+    assert(invalidate(&state)==3&&blocked(state)&&ticketCount(state)==1);
+    assert(!recover(&state,3)); // a late DLIL ticket must drain first
+    assert(releaseTicket(&state)&&ticketCount(state)==0);
+    assert(recover(&state,3)&&!blocked(state));
+    assert(!releaseTicket(&state)); // no ticket underflow/serial corruption
+    Word saturated=(Word{kMaxFaultSerial}<<kFaultSerialShift)|kBlockedBit;
+    assert(invalidate(&saturated)==kMaxFaultSerial);
+    assert(permanentlyBlocked(saturated)&&blocked(saturated));
+    assert(!recover(&saturated,kMaxFaultSerial));
+
     auto lease=validLease();
     auto descriptor=validDescriptor();
     Permit permit{};
@@ -242,7 +278,8 @@ CaptureResult captureFrameResult(const Lease &lease,Permit *captured,
     if(!makePermit(lease,descriptor,&permit))
         return CaptureResult::Rejected;
     if(captured)*captured=permit;
-    return captureRx149Data(bytes,length,false,lease,permit,72);
+    return captureRx149Data(bytes,length,false,lease,permit,
+                            lease.epochs.power);
 }
 
 Permit captureFrame(const Lease &lease,const uint8_t *destination=own,
@@ -502,6 +539,129 @@ int fastInvalidationWinsBeforeTicketCas() {
     return 0;
 }
 
+Rx149RecoveryAuthority recoveryAuthority(uint32_t serial,uint32_t power) {
+    Rx149RecoveryAuthority authority{};
+    authority.faultSerial=serial;
+    authority.powerGeneration=power;
+    authority.fullInitializationSucceeded=true;
+    authority.faultSourceClear=true;
+    return authority;
+}
+
+int recoveryPurgesOldOwnerAndQueue() {
+    FakeIf dev;
+    prepare(dev);
+    auto old=validLease();
+    publishRx149DataInputLease(old);
+    (void)captureFrame(old);
+    assert(snapshot().value[RxPending]==1);
+    invalidateRx149DataInputFast();
+    const uint32_t serial=rx149DataInputFaultSerial();
+    assert(serial==1&&rx149DataInputBlocked());
+
+    auto stale=recoveryAuthority(serial+1,73);
+    assert(recoverRx149DataInput(stale)==Rx149RecoveryResult::StaleFaultSerial);
+    auto incomplete=recoveryAuthority(serial,73);
+    incomplete.fullInitializationSucceeded=false;
+    assert(recoverRx149DataInput(incomplete)==
+           Rx149RecoveryResult::InvalidAuthority);
+    assert(rx149DataInputBlocked()&&snapshot().value[RxPending]==1);
+
+    // A new full-init generation can tombstone the old cached lease. No ROC
+    // START or lease is required to recover the pre-ARM receive fence.
+    poll(true,73);
+    auto authority=recoveryAuthority(serial,73);
+    assert(recoverRx149DataInput(authority)==Rx149RecoveryResult::Recovered);
+    assert(!rx149DataInputBlocked()&&snapshot().value[RxPending]==0);
+    Permit stalePermit{};
+    assert(captureFrameResult(old,&stalePermit)==CaptureResult::Rejected);
+    publishRx149DataInputLease(old); // tombstoned owner cannot reopen
+    assert(captureFrameResult(old,&stalePermit)==CaptureResult::Rejected);
+
+    auto current=old;
+    current.ownerSerial=old.ownerSerial+1;
+    current.epochs={72,73,73,72};
+    publishRx149DataInputLease(current);
+    assert(captureFrameResult(current,&stalePermit)==CaptureResult::Captured);
+    poll(true,73,&current);
+    assert(delivered==1);
+    assert(close()&&allocated==freed);
+    return 0;
+}
+
+int recoveryPreservesCurrentOwner() {
+    FakeIf dev;
+    prepare(dev);
+    const auto current=validLease();
+    publishRx149DataInputLease(current);
+    (void)captureFrame(current);
+    invalidateRx149DataInputFast();
+    const auto serial=rx149DataInputFaultSerial();
+    auto authority=recoveryAuthority(serial,72);
+
+    assert(recoverRx149DataInput(authority)==
+           Rx149RecoveryResult::CurrentOwnerActive);
+    assert(rx149DataInputBlocked()&&snapshot().value[RxPending]==1);
+    // Once the bridge's cached lease expires, the same completed-init proof
+    // can tombstone it without needing a second reset or clearing the fence.
+    fakeTime=current.startUs+NativeP2PRx149DataInput::kSessionWindowUs;
+    ++fakeTime;
+    assert(recoverRx149DataInput(authority)==Rx149RecoveryResult::Recovered);
+    assert(!rx149DataInputBlocked()&&snapshot().value[RxPending]==0);
+    fakeTime=current.nowUs; // distinguish lease high-water from time expiry
+    publishRx149DataInputLease(current);
+    Permit stalePermit{};
+    assert(captureFrameResult(current,&stalePermit)==CaptureResult::Rejected);
+    assert(close()&&allocated==freed);
+    return 0;
+}
+
+int recoveryWaitsForAdmittedInputTicket() {
+    FakeIf dev;
+    prepare(dev);
+    poll(true,73);
+    auto lease=validLease();
+    lease.epochs={72,73,73,72};
+    publishRx149DataInputLease(lease);
+    (void)captureFrame(lease);
+    hookRecoveryAuthority=recoveryAuthority(0,73);
+    hookRecoveryAttempted=false;
+    NativeAwdlBSD::setRx149TestHookForTests(
+        invalidateRevokeAndAttemptRecovery);
+    poll(true,73,&lease);
+    NativeAwdlBSD::setRx149TestHookForTests(nullptr);
+
+    assert(hookRecoveryAttempted);
+    assert(hookRecoveryResult==Rx149RecoveryResult::InputTicketActive);
+    assert(delivered==1); // an already issued DLIL ticket may finish
+    assert(rx149DataInputBlocked());
+    // The worker pin and ticket have both retired; the same generation-bound
+    // proof can now reopen before any fresh ROC lease exists.
+    assert(recoverRx149DataInput(hookRecoveryAuthority)==
+           Rx149RecoveryResult::Recovered);
+    assert(!rx149DataInputBlocked()&&snapshot().value[RxPending]==0);
+    assert(close()&&allocated==freed);
+    return 0;
+}
+
+int recoveryCannotOverrideCloseTimeout() {
+    FakeIf dev;
+    prepare(dev);
+    invalidateRx149DataInputFast();
+    const auto serial=rx149DataInputFaultSerial();
+    detachDelay=true;
+    assert(!close());
+    assert(rx149DataInputBlocked());
+    auto authority=recoveryAuthority(serial,72);
+    assert(recoverRx149DataInput(authority)==
+           Rx149RecoveryResult::BridgeUnavailable);
+    assert(rx149DataInputBlocked());
+    detachDelay=false;
+    assert(close());
+    assert(allocated==freed);
+    return 0;
+}
+
 int admittedTicketMayFinishAfterFastInvalidation() {
     FakeIf dev;
     prepare(dev);
@@ -667,6 +827,10 @@ int main(int argc,char **argv) {
         case 15:return fastInvalidationFencesTicket();
         case 16:return admittedTicketMayFinishAfterFastInvalidation();
         case 17:return fastInvalidationWinsBeforeTicketCas();
+        case 18:return recoveryPurgesOldOwnerAndQueue();
+        case 19:return recoveryPreservesCurrentOwner();
+        case 20:return recoveryWaitsForAdmittedInputTicket();
+        case 21:return recoveryCannotOverrideCloseTimeout();
         default:return 2;
     }
 }

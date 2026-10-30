@@ -48,10 +48,12 @@ Status Backend::scanRequest(const void *data, size_t n) {
     if (decoded != DecodeResult::Ok)
         return decoded == DecodeResult::Malformed ? Status::BadRequest : Status::Unsupported;
     if (!ready()) return Status::NotReady;
-    if (addressChanging_ || scanPending_ || scanDraining_ || joinPending_) return Status::Busy;
+    if (addressChanging_ || scanDraining_ || joinPending_) return Status::Busy;
+    if (scanPending_ && !scanQueued_) return Status::Busy;
     if (plan.privateAddressRequired && (!operations_.privateAddressReady ||
         !operations_.privateAddressReady(operations_.context))) return Status::Unsupported;
     if (!operations_.scan) return Status::Unsupported;
+    if (scanPending_ && scanQueued_) finishQueuedScan(NativeAborted);
     scanPending_ = true;
     scanRemaining_ = 20000;
     // The caller's request identifier is not a hardware completion identity.
@@ -61,8 +63,48 @@ Status Backend::scanRequest(const void *data, size_t n) {
     scanGeneration_ = plan.identifier;
     ++scanRequests_;
     const Status result = operations_.scan(operations_.context, plan);
-    if (result != Status::Ok) { scanPending_ = false; scanRemaining_ = 0; }
+    if (result == Status::Busy) {
+        // The HAL may still own its asynchronous generation-zero init scan
+        // after DriverReady. Keep this exact WCL plan and host generation until
+        // that lease drains or the bounded request expires.
+        deferScan(plan);
+        return Status::Ok;
+    }
+    if (result != Status::Ok) {
+        scanPending_ = false; scanRemaining_ = scanGeneration_ = 0;
+    }
     return result;
+}
+void Backend::deferScan(const ScanPlan &plan) {
+    deferredScanPlan_ = plan;
+    scanQueued_ = true;
+}
+void Backend::finishQueuedScan(uint32_t status) {
+    if (!scanQueued_) return;
+    scanQueued_ = false;
+    scanPending_ = false;
+    scanRemaining_ = scanGeneration_ = 0;
+    erase(&deferredScanPlan_, sizeof(deferredScanPlan_));
+    uint8_t payload[4]; write32(payload, status);
+    post(ScanFinished, payload, sizeof(payload));
+}
+void Backend::retryDeferredScan() {
+    if (stopped_ || !ready_ || !scanPending_ || !scanQueued_ ||
+        !scanGeneration_ || deferredScanPlan_.identifier != scanGeneration_ ||
+        !operations_.scan) return;
+    const uint32_t generation = scanGeneration_;
+    const Status result = operations_.scan(operations_.context, deferredScanPlan_);
+    // All entry points are serialized by the native workqueue gate. Keep the
+    // generation check as a fail-closed guard against synchronous re-entry.
+    if (!scanQueued_ || generation != scanGeneration_ ||
+        deferredScanPlan_.identifier != generation) return;
+    if (result == Status::Busy) return;
+    if (result != Status::Ok) {
+        finishQueuedScan(result == Status::NotReady ? NativeOffline : NativeFailed);
+        return;
+    }
+    scanQueued_ = false;
+    erase(&deferredScanPlan_, sizeof(deferredScanPlan_));
 }
 Status Backend::submitJoin(const JoinPlan &plan) {
     if (!operations_.join) return Status::Unsupported;
@@ -79,6 +121,27 @@ Status Backend::submitJoin(const JoinPlan &plan) {
     if (result != Status::Ok) { joinPending_ = false; joinRemaining_ = 0; }
     return result;
 }
+void Backend::deferJoin(const JoinPlan &plan) {
+    clearDeferredJoin();
+    if (!++nextJoinGeneration_) ++nextJoinGeneration_;
+    deferredJoinGeneration_ = nextJoinGeneration_;
+    deferredJoin_ = plan;
+    copyBytes(target_, plan.bssid, sizeof(target_));
+    deferred_ = joinPending_ = true;
+    joinRemaining_ = 30000;
+}
+void Backend::clearDeferredJoin() {
+    deferred_ = false;
+    deferredJoinGeneration_ = 0;
+    erase(&deferredJoin_, sizeof(deferredJoin_));
+}
+void Backend::cancelDeferredJoin() {
+    if (!deferred_) return;
+    clearDeferredJoin();
+    joinPending_ = false;
+    joinRemaining_ = 0;
+    post(JoinAborted, nullptr, 0);
+}
 Status Backend::joinRequest(const void *data, size_t n) {
     JoinPlan plan {};
     const auto decoded = decodeJoin(data, n, plan, &joinRejectField_);
@@ -86,20 +149,40 @@ Status Backend::joinRequest(const void *data, size_t n) {
         return decoded == DecodeResult::Malformed ? Status::BadRequest : Status::Unsupported;
     Status result = Status::NotReady;
     if (stopped_) result = Status::NotReady;
-    else if (joinPending_ || scanPending_ || scanDraining_) result = Status::Busy;
-    else if (addressChanging_) {
-        deferredJoin_ = plan;
-        deferred_ = joinPending_ = true;
-        copyBytes(target_, plan.bssid, sizeof(target_));
-        joinRemaining_ = 30000;
-        result = Status::Ok; // Accepted; no success event until real completion.
-    } else if (ready_) result = submitJoin(plan);
+    else {
+        // A new WCL Join supersedes only a request that this backend accepted
+        // but has not submitted to the radio. Active joins retain the existing
+        // Busy behavior; a Busy retry can never overwrite an in-flight join.
+        if (joinPending_ && deferred_)
+            cancelDeferredJoin();
+        if (joinPending_ || scanPending_ || scanDraining_) {
+            result = Status::Busy;
+        } else if (addressChanging_) {
+            deferJoin(plan);
+            result = Status::Ok;
+        } else if (ready_) {
+            result = submitJoin(plan);
+            if (result == Status::Busy) {
+                // Tahoe init submits its generation-zero firmware scan before
+                // publishing DriverReady. The radio can therefore reject the
+                // first Join as Busy while that scan drains. Preserve this
+                // exact decoded request and let terminal/tick retry it within
+                // the normal bounded join admission window.
+                deferJoin(plan);
+                result = Status::Ok;
+            }
+        }
+    }
     if (result == Status::Ok) ++joinRequests_;
     erase(&plan, sizeof(plan));
     return result;
 }
 Status Backend::abortScan() {
     if (stopped_) return Status::NotReady;
+    if (scanQueued_) {
+        finishQueuedScan(NativeAborted);
+        return Status::Ok;
+    }
     if (scanPending_) {
         if (!operations_.cancelScan) return Status::Unsupported;
         const Status cancelled = operations_.cancelScan(operations_.context);
@@ -115,6 +198,7 @@ Status Backend::leave(bool abortJoin) {
     if (stopped_) return Status::NotReady;
     joinPending_ = deferred_ = associated_ = firstBeacon_ = authorized_ = bssValid_ = false;
     joinRemaining_ = 0;
+    deferredJoinGeneration_ = 0;
     erase(&deferredJoin_, sizeof(deferredJoin_));
     erase(associatedBss_, sizeof(associatedBss_));
     erase(associatedFrame_, sizeof(associatedFrame_));
@@ -155,9 +239,16 @@ void Backend::driverState(bool isReady) {
     post(DriverAvailability, availability, sizeof(availability));
     if (!isReady) {
         if (scanPending_) {
-            scanPending_ = false; scanDraining_ = true; scanAbortNotification_ = false;
-            uint8_t payload[4]; write32(payload, NativeOffline);
-            post(ScanFinished, payload, sizeof(payload));
+            if (scanQueued_) {
+                // No scan command reached the radio, so there is no firmware
+                // completion to drain after power-off.
+                finishQueuedScan(NativeOffline);
+            } else {
+                scanPending_ = false; scanDraining_ = true;
+                scanAbortNotification_ = false; scanRemaining_ = 0;
+                uint8_t payload[4]; write32(payload, NativeOffline);
+                post(ScanFinished, payload, sizeof(payload));
+            }
         }
         finishJoin(1, NativeOffline);
         authorized_ = false;
@@ -165,20 +256,27 @@ void Backend::driverState(bool isReady) {
 }
 void Backend::retryDeferredJoin() {
     if (stopped_ || !ready_ || addressChanging_ || !deferred_) return;
+    const uint32_t generation = deferredJoinGeneration_;
+    if (!generation) return;
     const uint32_t remaining = joinRemaining_;
     const Status result = submitJoin(deferredJoin_);
+    // Entry points are serialized by the owning driver gate, but retain an
+    // explicit generation check so a superseded plan is never revived if a
+    // radio adapter synchronously re-enters its event path.
+    if (!deferred_ || generation != deferredJoinGeneration_) return;
     if (result == Status::Busy || result == Status::NotReady) {
-        // Native address restarts can finish init before their unowned initial
-        // firmware scan drains. Keep the same owned key and bounded deadline.
+        // Keep the same owned JoinPlan and its original admission deadline.
         deferred_ = joinPending_ = true; joinRemaining_ = remaining;
         return;
     }
-    deferred_ = false;
-    erase(&deferredJoin_, sizeof(deferredJoin_));
+    clearDeferredJoin();
     if (result != Status::Ok) { joinPending_ = true; finishJoin(1, NativeFailed); }
 }
 void Backend::observeScanComplete(uint32_t generation, uint32_t firmwareStatus) {
     if (firmwareStatus != 1 && firmwareStatus != 2) return;
+    // Only the firmware's unowned init-scan completion can release a queued
+    // WCL scan that never reached the radio. It is not this request's 237.
+    if (!generation) retryDeferredScan();
     // A genuine terminal event may also release the HAL's generation-zero
     // initial scan. It never completes a native scan, but can unblock a join.
     retryDeferredJoin();
@@ -200,6 +298,10 @@ void Backend::observeScanComplete(uint32_t generation, uint32_t firmwareStatus) 
 
 void Backend::observeScanReset(uint32_t generation) {
     if (stopped_ || !generation || generation != scanGeneration_) return;
+    if (scanQueued_) {
+        finishQueuedScan(NativeOffline);
+        return;
+    }
     const bool notify = scanPending_ || (scanDraining_ && scanAbortNotification_);
     const uint32_t status = scanPending_ ? NativeOffline : NativeAborted;
     scanPending_ = scanDraining_ = scanAbortNotification_ = false;
@@ -225,6 +327,9 @@ void Backend::observeAssociation(uint16_t status, const uint8_t *bssid) {
 }
 void Backend::observeAuthorization(bool up) {
     if (stopped_) return;
+    // Authorization may still be reported for the previous association while
+    // a Busy Join is queued. A later accepted retry starts with fresh auth state.
+    if (deferred_ && up) return;
     authorized_ = up;
     if (!up && linkPublished_) {
         publishLink(false);
@@ -297,8 +402,8 @@ void Backend::maybeConnected() {
 }
 void Backend::finishJoin(uint16_t status, uint32_t driverStatus) {
     if (!joinPending_) return;
-    joinPending_ = deferred_ = false; joinRemaining_ = 0;
-    erase(&deferredJoin_, sizeof(deferredJoin_));
+    joinPending_ = false; joinRemaining_ = 0;
+    clearDeferredJoin();
     uint8_t payload[ConnectionEventSize] {};
     write16(payload, status); copyBytes(payload + 4, target_, 6);
     write32(payload + 12, driverStatus);
@@ -320,15 +425,29 @@ void Backend::tick(uint32_t elapsed) {
         reportedBeacons_ = associatedBeacons_;
         beaconBaselineValid_ = true;
     }
-    retryDeferredJoin();
     if (scanPending_) {
-        if (elapsed >= scanRemaining_) {
+        if (scanQueued_) {
+            if (elapsed >= scanRemaining_) {
+                finishQueuedScan(NativeTimeout);
+            } else {
+                scanRemaining_ -= elapsed;
+                retryDeferredScan();
+            }
+        } else if (elapsed >= scanRemaining_) {
             scanPending_ = false; scanDraining_ = true; scanAbortNotification_ = false; scanRemaining_ = 0;
             uint8_t payload[4]; write32(payload, NativeTimeout);
             post(ScanFinished, payload, sizeof(payload));
         } else scanRemaining_ -= elapsed;
     }
-    if (joinPending_) {
+    if (joinPending_ && deferred_) {
+        if (elapsed >= joinRemaining_) {
+            finishJoin(1, NativeTimeout);
+            if (operations_.leave) operations_.leave(operations_.context);
+        } else {
+            joinRemaining_ -= elapsed;
+            retryDeferredJoin();
+        }
+    } else if (joinPending_) {
         if (elapsed >= joinRemaining_) {
             finishJoin(1, NativeTimeout);
             if (operations_.leave) operations_.leave(operations_.context);
@@ -340,9 +459,11 @@ void Backend::stop() {
     linkPublished_ = false;
     erase(linkedAddress_, sizeof(linkedAddress_));
     erase(&deferredJoin_, sizeof(deferredJoin_));
+    erase(&deferredScanPlan_, sizeof(deferredScanPlan_));
     erase(associatedBss_, sizeof(associatedBss_));
     erase(associatedFrame_, sizeof(associatedFrame_));
-    scanPending_ = scanDraining_ = scanAbortNotification_ = joinPending_ = deferred_ = false;
+    scanPending_ = scanQueued_ = scanDraining_ = scanAbortNotification_ = joinPending_ = false;
+    clearDeferredJoin();
 }
 Status Backend::copyBss(void *out, size_t n) const {
     if (stopped_ || !bssValid_) return Status::NotReady;

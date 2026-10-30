@@ -73,6 +73,29 @@ struct Rx149InputReceipt {
     uint32_t ifnetInputResultPresent=0;
     int32_t ifnetInputResult=0;
 };
+struct Rx149RecoveryAuthority {
+    // Captured before a complete HAL initialization begins. Recovery is valid
+    // only when this exact blocked-fault serial is still current afterward.
+    uint32_t faultSerial=0;
+    // Generation produced by that successful full initialization.
+    uint32_t powerGeneration=0;
+    bool fullInitializationSucceeded=false;
+    bool faultSourceClear=false;
+};
+enum class Rx149RecoveryResult : uint32_t {
+    Recovered=0,
+    NotBlocked=1,
+    InvalidAuthority=2,
+    StaleFaultSerial=3,
+    BridgeUnavailable=4,
+    WrongPowerGeneration=5,
+    CurrentOwnerActive=6,
+    VersionExhausted=7,
+    WorkerActive=8,
+    InputTicketActive=9,
+    PermitQueueNotDrained=10,
+    FaultRaced=11
+};
 struct Snapshot {
     uint64_t value[Count];
     Rx149InputReceipt rx149Input;
@@ -125,6 +148,13 @@ void revokeRx149DataInput(uint64_t ownerSerial,
 // paths. It performs no clock read, queue walk, KPI, wait, or allocation.
 void invalidateRx149DataInputFast();
 bool rx149DataInputBlocked();
+// Sample at HAL initialization entry, then attach the same serial and the
+// new generation only after full init/READY completes with the source fault
+// clear. The bridge never clears its fence from a plain Wi-Fi-ready or
+// preflight result; this pre-ARM transition does not require a future ROC.
+uint32_t rx149DataInputFaultSerial();
+Rx149RecoveryResult recoverRx149DataInput(
+          const Rx149RecoveryAuthority &authority);
 #if defined(ITL_NATIVE_AWDL_RX149_TEST_HOOKS)
 enum class Rx149TestHookPoint : uint8_t {
     LeaseAuthorization,

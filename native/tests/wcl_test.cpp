@@ -9,14 +9,36 @@ namespace {
 struct Emitted { uint32_t kind; std::vector<uint8_t> body; };
 struct Fixture {
     Backend backend;
-    unsigned scans {}, joins {}, leaves {};
+    unsigned scans {}, joins {}, leaves {}, cancels {};
+    unsigned busyJoinResponses {};
+    unsigned busyScanResponses {};
     uint32_t generation {};
     bool privateReady {true};
     Status joinStatus {Status::Ok};
+    Status scanStatus {Status::Ok};
+    uint8_t lastScanChannels[32] {}, lastScanSsid[32] {}, lastScanSsidLength {};
+    uint8_t lastJoinBssid[6] {}, lastJoinSsid[32] {}, lastJoinPmk[32] {};
+    uint8_t lastJoinSsidLength {}, lastJoinPasswordLength {};
     std::vector<Emitted> messages;
-    static Status scan(void *x, const ScanPlan &p) { auto f=static_cast<Fixture *>(x); ++f->scans; f->generation=p.identifier; return Status::Ok; }
-    static Status join(void *x, const JoinPlan &) { auto f=static_cast<Fixture *>(x); ++f->joins; return f->joinStatus; }
-    static Status cancel(void *) { return Status::Ok; }
+    static Status scan(void *x, const ScanPlan &p) {
+        auto f=static_cast<Fixture *>(x); ++f->scans; f->generation=p.identifier;
+        memcpy(f->lastScanChannels,p.channels,sizeof(f->lastScanChannels));
+        memcpy(f->lastScanSsid,p.ssid,sizeof(f->lastScanSsid));
+        f->lastScanSsidLength=p.ssidLength;
+        if (f->busyScanResponses) { --f->busyScanResponses; return Status::Busy; }
+        return f->scanStatus;
+    }
+    static Status join(void *x, const JoinPlan &p) {
+        auto f=static_cast<Fixture *>(x); ++f->joins;
+        memcpy(f->lastJoinBssid,p.bssid,sizeof(f->lastJoinBssid));
+        memcpy(f->lastJoinSsid,p.ssid,sizeof(f->lastJoinSsid));
+        memcpy(f->lastJoinPmk,p.pmk,sizeof(f->lastJoinPmk));
+        f->lastJoinSsidLength=p.ssidLength;
+        f->lastJoinPasswordLength=p.passwordLength;
+        if (f->busyJoinResponses) { --f->busyJoinResponses; return Status::Busy; }
+        return f->joinStatus;
+    }
+    static Status cancel(void *x) { ++static_cast<Fixture *>(x)->cancels; return Status::Ok; }
     static void leave(void *x) { ++static_cast<Fixture *>(x)->leaves; }
     static bool privacy(void *x) { return static_cast<Fixture *>(x)->privateReady; }
     static void emit(void *x, uint32_t k, const void *p, size_t n) {
@@ -231,6 +253,96 @@ int main() {
         assert(f.backend.scanRequest(scan.data(),scan.size())==Status::Ok);
     }
     {
+        // Busy from an occupied init-scan lease is accepted as one owned WCL
+        // request. Generation zero releases it, but does not complete it; only
+        // its own matching firmware terminal event emits native 237.
+        Fixture f; f.busyScanResponses=2;
+        auto request=scanWire();
+        assert(f.backend.scanRequest(request.data(),request.size())==Status::Ok);
+        const uint32_t generation=f.generation;
+        uint8_t expectedChannels[32] {};
+        memcpy(expectedChannels,f.lastScanChannels,sizeof(expectedChannels));
+        assert(generation && f.backend.scanning() && f.backend.scanDraining()==false);
+        assert(f.backend.joinRequest(join.data(),join.size())==Status::Busy);
+        memset(request.data(),0,request.size()); // Retry owns the decoded plan, not caller storage.
+        f.backend.tick(1000);
+        assert(f.scans==2 && f.generation==generation && f.backend.scanning());
+        f.backend.observeScanComplete(0,1);
+        assert(f.scans==3 && f.generation==generation && f.backend.scanning());
+        assert(!memcmp(f.lastScanChannels,expectedChannels,sizeof(expectedChannels)));
+        assert(f.backend.event237EmitCalls()==0 && f.count(ScanFinished)==0);
+        f.backend.observeScanComplete(generation,1);
+        assert(!f.backend.scanning() && f.backend.event237EmitCalls()==1);
+        assert(f.count(ScanFinished)==1 && read32(f.messages.back().body.data())==0);
+    }
+    {
+        // A newer valid scan replaces a queued-only request exactly once. A
+        // stale old-generation terminal cannot submit or complete the new one.
+        Fixture f; f.busyScanResponses=5;
+        auto first=scanWire(), second=scanWire();
+        assert(f.backend.scanRequest(first.data(),first.size())==Status::Ok);
+        const uint32_t oldGeneration=f.generation;
+        assert(f.backend.scanRequest(second.data(),second.size())==Status::Ok);
+        const uint32_t newGeneration=f.generation;
+        assert(newGeneration && newGeneration!=oldGeneration);
+        assert(f.backend.scanning() && f.count(ScanFinished)==1);
+        assert(read32(f.messages.back().body.data())==0xe00002eb);
+        f.backend.observeScanComplete(oldGeneration,1);
+        assert(f.scans==2 && f.backend.scanning() && f.count(ScanFinished)==1);
+        f.busyScanResponses=0;
+        f.backend.tick(1000);
+        assert(f.scans==3 && f.generation==newGeneration && f.backend.scanning());
+        assert(f.count(ScanFinished)==1);
+        f.backend.observeScanComplete(newGeneration,1);
+        assert(!f.backend.scanning() && f.count(ScanFinished)==2);
+        assert(read32(f.messages.back().body.data())==0);
+    }
+    {
+        // A queued scan was never submitted, so abort/off complete it locally
+        // without invoking the HAL cancel path or waiting for firmware drain.
+        Fixture f; f.busyScanResponses=1;
+        assert(f.backend.scanRequest(scan.data(),scan.size())==Status::Ok);
+        assert(f.backend.scanning() && !f.backend.scanDraining());
+        assert(f.backend.abortScan()==Status::Ok);
+        assert(!f.backend.scanning() && !f.backend.scanDraining());
+        assert(f.cancels==0 && f.count(ScanFinished)==1);
+        assert(read32(f.messages.back().body.data())==0xe00002eb);
+        f.backend.observeScanComplete(0,1);
+        assert(f.cancels==0 && f.count(ScanFinished)==1);
+
+        Fixture down; down.busyScanResponses=1;
+        assert(down.backend.scanRequest(scan.data(),scan.size())==Status::Ok);
+        down.backend.driverState(false);
+        assert(!down.backend.scanning() && !down.backend.scanDraining());
+        assert(down.count(ScanFinished)==1);
+        assert(read32(down.messages.back().body.data())==0xe00002d7);
+        down.backend.driverState(true);
+        down.backend.observeScanComplete(0,1);
+        down.backend.tick(1000);
+        assert(down.scans==1 && down.count(ScanFinished)==1);
+    }
+    {
+        // Queued Busy retries are one-at-a-time and bounded by the original
+        // 20 s deadline. NotReady and hard failure remain synchronous errors.
+        Fixture f; f.busyScanResponses=100;
+        assert(f.backend.scanRequest(scan.data(),scan.size())==Status::Ok);
+        for (unsigned i=0;i<20;++i) f.backend.tick(1000);
+        assert(!f.backend.scanning() && !f.backend.scanDraining());
+        assert(f.count(ScanFinished)==1 && f.backend.event237EmitCalls()==1);
+        assert(read32(f.messages.back().body.data())==0xe00002d6);
+        const unsigned calls=f.scans;
+        f.backend.tick(1000);
+        assert(f.scans==calls && f.count(ScanFinished)==1);
+        for (auto status : {Status::NotReady, Status::Failed}) {
+            Fixture rejected; rejected.scanStatus=status;
+            assert(rejected.backend.scanRequest(scan.data(),scan.size())==status);
+            assert(!rejected.backend.scanning() && !rejected.backend.scanDraining());
+            assert(!rejected.count(ScanFinished));
+            rejected.backend.tick(20000);
+            assert(!rejected.count(ScanFinished));
+        }
+    }
+    {
         Fixture f;
         assert(f.backend.joinRequest(join.data(), join.size()) == Status::Ok && f.joins == 1);
         f.backend.observeAuthorization(true); assert(!f.count(Connection) && !f.count(Link));
@@ -313,6 +425,101 @@ int main() {
         f.backend.observeAssociation(0,join.data()+0x21c);
         assert(f.count(Association)==1);
         f.backend.stop();
+    }
+    {
+        // A lower radio Busy (for example while Tahoe's generation-zero init
+        // scan owns the HAL lease) is accepted as a bounded deferred Join. The
+        // exact decoded request survives caller-buffer mutation and retries on
+        // the init scan's generation-zero terminal event.
+        Fixture f; f.busyJoinResponses=2;
+        auto request=joinWire();
+        uint8_t expectedBssid[6] {};
+        memcpy(expectedBssid,request.data()+0x21c,sizeof(expectedBssid));
+        assert(f.backend.joinRequest(request.data(),request.size())==Status::Ok);
+        assert(f.joins==1 && f.backend.joining() && !f.count(Connection));
+        assert(!memcmp(f.lastJoinBssid,expectedBssid,sizeof(expectedBssid)));
+        f.backend.observeAuthorization(true);
+        f.backend.observeAssociation(0,expectedBssid);
+        assert(!f.count(Association) && !f.count(Connection) && !f.count(Link));
+        assert(f.backend.scanRequest(scan.data(),scan.size())==Status::Busy);
+        f.backend.tick(1000); // One bounded retry per tick; no busy-wait loop.
+        assert(f.joins==2 && f.backend.joining() && !f.count(Connection));
+        auto replacement=joinWire(); replacement[0x21c]=2; replacement[0x21d]=7;
+        request[0x21c]=2; request[0x21d]=9; // Caller storage is no longer authoritative.
+        f.joinStatus=Status::Ok; f.busyJoinResponses=0;
+        f.backend.observeScanComplete(0,1);
+        assert(f.joins==3 && f.backend.joining() && !f.count(Connection));
+        assert(!memcmp(f.lastJoinBssid,expectedBssid,sizeof(expectedBssid)));
+        f.backend.observeAuthorization(true);
+        f.backend.observeAssociation(0,expectedBssid);
+        uint8_t frame[38]={0x80}, ies[2]={0,0}, ssid[1]={'x'};
+        Beacon b {ssid,expectedBssid,ies,frame,1,2,sizeof(frame),0x1006,100,0,6,-45,-95,50};
+        f.backend.observeBeacon(b);
+        assert(f.count(Link)==1 && f.count(Connection)==1);
+        f.backend.stop();
+    }
+    {
+        // A newer request replaces a queued Busy retry, signals cancellation
+        // for the old WCL request, and owns the only plan retried/completed.
+        Fixture f; f.busyJoinResponses=1;
+        auto oldRequest=joinWire();
+        uint8_t oldBssid[6] {};
+        memcpy(oldBssid,oldRequest.data()+0x21c,sizeof(oldBssid));
+        assert(f.backend.joinRequest(oldRequest.data(),oldRequest.size())==Status::Ok);
+        assert(f.joins==1 && f.backend.joining());
+        auto newRequest=joinWire(); newRequest[0x21c]=2; newRequest[0x21d]=4;
+        uint8_t newBssid[6] {};
+        memcpy(newBssid,newRequest.data()+0x21c,sizeof(newBssid));
+        assert(f.backend.joinRequest(newRequest.data(),newRequest.size())==Status::Ok);
+        assert(f.joins==2 && f.backend.joining() && f.count(JoinAborted)==1);
+        assert(!memcmp(f.lastJoinBssid,newBssid,sizeof(newBssid)));
+        f.backend.observeScanComplete(0,1); // Stale initial-scan terminal cannot revive the old plan.
+        assert(f.joins==2 && f.count(JoinAborted)==1);
+        f.backend.observeAuthorization(true);
+        f.backend.observeAssociation(0,oldBssid);
+        assert(!f.count(Association));
+        f.backend.observeAssociation(0,newBssid);
+        uint8_t frame[38]={0x80}, ies[2]={0,0}, ssid[1]={'x'};
+        Beacon b {ssid,newBssid,ies,frame,1,2,sizeof(frame),0x1006,100,0,6,-45,-95,50};
+        f.backend.observeBeacon(b);
+        assert(f.count(Association)==1 && f.count(Link)==1 && f.count(Connection)==1);
+    }
+    {
+        // Power-off fails the accepted-but-unsubmitted request once and clears
+        // its plan; a later READY or stale scan completion cannot revive it.
+        Fixture f; f.busyJoinResponses=3;
+        assert(f.backend.joinRequest(join.data(),join.size())==Status::Ok);
+        assert(f.joins==1 && f.backend.joining());
+        f.backend.driverState(false);
+        assert(!f.backend.joining() && f.count(Connection)==1);
+        assert(read32(f.messages.back().body.data()+12)==0xe00002d7);
+        f.backend.driverState(true);
+        f.backend.observeScanComplete(0,1);
+        f.backend.tick(1000);
+        assert(f.joins==1 && !f.backend.joining() && f.count(Connection)==1);
+    }
+    {
+        // Repeated Busy admission retries are bounded by the original 30 s
+        // deadline and produce a terminal timeout instead of waiting forever.
+        Fixture f; f.busyJoinResponses=100;
+        assert(f.backend.joinRequest(join.data(),join.size())==Status::Ok);
+        assert(f.backend.joining() && f.joins==1);
+        for (unsigned i=0;i<30;++i) f.backend.tick(1000);
+        assert(!f.backend.joining() && f.joins==30 && f.count(Connection)==1);
+        assert(read32(f.messages.back().body.data()+12)==0xe00002d6 && f.leaves==1);
+        f.backend.tick(1000);
+        assert(f.joins==30 && f.count(Connection)==1);
+    }
+    {
+        // Only Busy is converted into an accepted deferred request. Preserve
+        // existing NotReady and hard-failure return behavior.
+        for (auto status : {Status::NotReady, Status::Failed}) {
+            Fixture f; f.joinStatus=status;
+            assert(f.backend.joinRequest(join.data(),join.size())==status);
+            assert(f.joins==1 && !f.backend.joining() && !f.count(Connection));
+            f.backend.tick(30000);
+            assert(f.joins==1 && !f.backend.joining() && !f.count(Connection));
+        }
     }
     {
         Fixture f; f.backend.beginAddressChange();
