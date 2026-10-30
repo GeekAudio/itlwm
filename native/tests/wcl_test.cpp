@@ -276,7 +276,7 @@ int main() {
         assert(f.count(ScanFinished)==1 && read32(f.messages.back().body.data())==0);
     }
     {
-        // A newer valid scan replaces a queued-only request exactly once. A
+        // A newer valid scan replaces a Busy-pending request exactly once. A
         // stale old-generation terminal cannot submit or complete the new one.
         Fixture f; f.busyScanResponses=5;
         auto first=scanWire(), second=scanWire();
@@ -298,8 +298,8 @@ int main() {
         assert(read32(f.messages.back().body.data())==0);
     }
     {
-        // A queued scan was never submitted, so abort/off complete it locally
-        // without invoking the HAL cancel path or waiting for firmware drain.
+        // Abort/off retire the WCL Busy-pending request once without assuming
+        // whether HAL already started a drain or canceling an unknown lease.
         Fixture f; f.busyScanResponses=1;
         assert(f.backend.scanRequest(scan.data(),scan.size())==Status::Ok);
         assert(f.backend.scanning() && !f.backend.scanDraining());
@@ -320,6 +320,30 @@ int main() {
         down.backend.observeScanComplete(0,1);
         down.backend.tick(1000);
         assert(down.scans==1 && down.count(ScanFinished)==1);
+    }
+    {
+        // A matching terminal may arrive after scan() returned Busy while HAL
+        // was already draining. Retire that deferred state so the next scan is
+        // an ordinary admitted scan and AbortScan uses the real HAL cancel.
+        Fixture f; f.busyScanResponses=1;
+        assert(f.backend.scanRequest(scan.data(),scan.size())==Status::Ok);
+        const uint32_t drained=f.generation;
+        f.backend.observeScanComplete(drained,1);
+        assert(!f.backend.scanning() && f.count(ScanFinished)==1);
+        assert(read32(f.messages.back().body.data())==0);
+
+        f.busyScanResponses=0;
+        assert(f.backend.scanRequest(scan.data(),scan.size())==Status::Ok);
+        const uint32_t active=f.generation;
+        assert(active && active!=drained && f.backend.scanning());
+        assert(f.backend.abortScan()==Status::Ok);
+        assert(f.cancels==1 && f.backend.scanDraining());
+        assert(f.count(ScanFinished)==1);
+        f.backend.observeScanComplete(drained,1); // Duplicate old terminal is stale.
+        assert(f.backend.scanDraining() && f.count(ScanFinished)==1);
+        f.backend.observeScanComplete(active,1);
+        assert(!f.backend.scanDraining() && f.count(ScanFinished)==2);
+        assert(read32(f.messages.back().body.data())==0xe00002eb);
     }
     {
         // Queued Busy retries are one-at-a-time and bounded by the original
@@ -386,6 +410,70 @@ int main() {
         assert(f.messages.back().body[6] == 0);
         assert(!memcmp(f.messages.back().body.data(), join.data()+0x21c, 6));
         f.backend.observeAuthorization(false); assert(f.count(Link) == 2);
+    }
+    {
+        // A radio Busy happens before radioJoin mutates controller state. A
+        // queued attempt must therefore leave an existing association, BSS,
+        // authorization-backed LQM, and native link untouched through timeout.
+        Fixture f;
+        auto oldRequest=joinWire(), newRequest=joinWire();
+        newRequest[0x221]=3;
+        uint8_t oldBssid[6] {}, newBssid[6] {};
+        memcpy(oldBssid,oldRequest.data()+0x21c,sizeof(oldBssid));
+        memcpy(newBssid,newRequest.data()+0x21c,sizeof(newBssid));
+        assert(f.backend.joinRequest(oldRequest.data(),oldRequest.size())==Status::Ok);
+        f.backend.observeAssociation(0,oldBssid);
+        f.backend.observeAuthorization(true);
+        uint8_t frame[38]={0x80}, ies[2]={0,0}, ssid[1]={'x'};
+        Beacon oldBeacon {ssid,oldBssid,ies,frame,1,2,sizeof(frame),0x1006,100,0,6,-45,-95,50};
+        f.backend.observeBeacon(oldBeacon);
+        assert(f.count(Link)==1 && f.count(Connection)==1);
+        f.backend.tick(1000); // Baseline for the existing connected association.
+        uint8_t originalBss[BeaconPrefixSize + MaximumIEBytes] {};
+        assert(f.backend.copyBss(originalBss,sizeof(originalBss))==Status::Ok);
+
+        f.busyJoinResponses=100;
+        assert(f.backend.joinRequest(newRequest.data(),newRequest.size())==Status::Ok);
+        assert(f.backend.joining() && f.joins==2 && f.leaves==0);
+        assert(f.count(Link)==1);
+        uint8_t bss[BeaconPrefixSize + MaximumIEBytes] {};
+        assert(f.backend.copyBss(bss,sizeof(bss))==Status::Ok);
+        assert(!memcmp(bss,originalBss,sizeof(bss)));
+
+        // Old-AP events continue to refresh the existing connection while the
+        // new request is queued; stale old state cannot complete the new Join.
+        f.backend.observeAuthorization(true);
+        f.backend.observeAssociation(0,oldBssid);
+        f.backend.observeBeacon(oldBeacon);
+        f.backend.tick(1000);
+        assert(f.count(BeaconLqm)==1 && f.count(Connection)==1 && f.count(Link)==1);
+        assert(f.backend.copyBss(bss,sizeof(bss))==Status::Ok);
+        assert(!memcmp(bss,originalBss,sizeof(bss)));
+
+        f.backend.tick(30000);
+        assert(!f.backend.joining() && f.joins==3 && f.leaves==0);
+        assert(f.count(Connection)==2 && f.count(Link)==1);
+        assert(read32(f.messages.back().body.data()+12)==0xe00002d6);
+        assert(!memcmp(f.messages.back().body.data()+4,newBssid,sizeof(newBssid)));
+        assert(f.backend.copyBss(bss,sizeof(bss))==Status::Ok);
+        assert(!memcmp(bss,originalBss,sizeof(bss)));
+        f.backend.tick(1000);
+        assert(f.count(BeaconLqm)==3); // Existing authorization and beacon state survived.
+        assert(f.leaves==0);
+
+        // AbortJoin also only cancels a request which was never submitted;
+        // explicit Leave remains the operation that disconnects the old AP.
+        newRequest[0x221]=4;
+        assert(f.backend.joinRequest(newRequest.data(),newRequest.size())==Status::Ok);
+        assert(f.backend.joining() && f.leaves==0);
+        assert(f.backend.leave(true)==Status::Ok);
+        assert(!f.backend.joining() && f.count(JoinAborted)==1 && f.leaves==0);
+        assert(f.count(Link)==1);
+        assert(f.backend.copyBss(bss,sizeof(bss))==Status::Ok);
+        assert(!memcmp(bss,originalBss,sizeof(bss)));
+        f.backend.tick(1000);
+        assert(f.count(BeaconLqm)==4);
+        assert(f.backend.leave(false)==Status::Ok && f.leaves==1);
     }
     {
         Fixture f;
@@ -506,9 +594,9 @@ int main() {
         assert(f.backend.joining() && f.joins==1);
         for (unsigned i=0;i<30;++i) f.backend.tick(1000);
         assert(!f.backend.joining() && f.joins==30 && f.count(Connection)==1);
-        assert(read32(f.messages.back().body.data()+12)==0xe00002d6 && f.leaves==1);
+        assert(read32(f.messages.back().body.data()+12)==0xe00002d6 && f.leaves==0);
         f.backend.tick(1000);
-        assert(f.joins==30 && f.count(Connection)==1);
+        assert(f.joins==30 && f.count(Connection)==1 && f.leaves==0);
     }
     {
         // Only Busy is converted into an accepted deferred request. Preserve
