@@ -25,4 +25,19 @@ class ProfileIsolation(unittest.TestCase):
     self.assertEqual(count,1 if profile=='rx149_preowner' else 0)
     if profile=='ordinary_wifi':self.assertFalse(any(x.startswith('-DITL_NATIVE_AWDL_') for x in command))
     self.assertIn('-fsyntax-only',command);self.assertNotIn('-c',command);self.assertNotIn('-o',command)
+ def test_rx_correlation_irq_hook_is_preowner_profile_only(self):
+  source=(ROOT/'itlwm/hal_iwx/ItlIwx.cpp').read_text()
+  start=source.index('void ItlIwx::tahoeRxPreOwnerIrq(')
+  end=source.index('\nvoid ItlIwx::tahoeRxPreOwnerEvent(',start)
+  function=source[start:end]
+  guard='#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)'
+  guard_start=function.index(guard)
+  guard_end=function.index('#endif',guard_start)
+  guarded=function[guard_start:guard_end]
+  unguarded=function[:guard_start]+function[guard_end:]
+  for symbol in ('tahoeP2pOnMainGate', 'tahoeRxRocCorrelationSync',
+                 'nativeRxRocCorrelation_'):
+   with self.subTest(symbol=symbol):
+    self.assertIn(symbol,guarded)
+    self.assertNotIn(symbol,unguarded)
 if __name__=='__main__':unittest.main()

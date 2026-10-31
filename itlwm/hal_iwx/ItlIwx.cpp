@@ -8324,6 +8324,7 @@ void ItlIwx::tahoeRxPreOwnerIrq(uint32_t cause, bool msix)
         NativeRxPreOwner::IrqSource::Legacy;
     event.irqCause = cause; // IRQ cause only; not a host ring or physical PHY id.
     (void)nativeRxPreOwner_.record(event);
+#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
     // attach() sets pci.workloop to getMainWorkLoop(), and the registered
     // IOFilterInterruptEventSource is added to that same workloop. This hook
     // therefore shares the serialized RX/main-gate context with START/END,
@@ -8334,6 +8335,7 @@ void ItlIwx::tahoeRxPreOwnerIrq(uint32_t cause, bool msix)
                 NativeIwxRocRxCorrelation::State::kActive)
             nativeRxRocCorrelation_.observeRxInterrupt(event.nowUs, msix);
     }
+#endif
 }
 
 void ItlIwx::tahoeRxPreOwnerEvent(NativeRxPreOwner::EventKind kind,
