@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "ca538fb05b980f1d85f27e6672646f9515df087231c591fbc4552b6fce1e71c2"
+      "sha256": "d6a0dda1ae79f371b7a9474743910e9fa249902e6aefc0363d7b7bef609cc459"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "46042ae8f18067c615a875abd2af37e34e3d575657494dad998b0e12e4b6eedd"
+      "sha256": "ef84f269c4eda4d559b044959a2598c22b77f32770003852d50b95397ec0f432"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -30,7 +30,7 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "1a323c6561566e1fd6d5e7066395bc4184d8996ab95a2141c440b7651cbdb227"
+      "sha256": "3696a4e601c10554e81b6e0f1c7782be1ffbaf68a43a5333577d6cabc977633c"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-31T11:55:56+08:00",
-  "runtime_scope": "Test093 runtime remains 6 passed, 2 partial, 31 uncovered and 1 regressed. Test094 safe RX observer, immutable init dispatch and Group2 trace passed offline merged validation and were backed up and deployed; next-boot Wi-Fi and native AWDL/AirDrop remain unverified. Interactive principle map distinguishes the RX/TX data path from BLE discovery and diagnostic tools."
+  "updated_at": "2026-10-31T12:25:08+08:00",
+  "runtime_scope": "Test094 current-boot verification: 4 passed, 3 partial, 33 uncovered. A controlled power cycle reproduced private-address restart power notifications; Wi-Fi gateway and interface-bound HTTPS passed. Test095 diagnostic and bounded power-notification fixes remain in development and are not deployed. No new AWDL data ingress or AirDrop result."
 }
