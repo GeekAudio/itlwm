@@ -1601,7 +1601,7 @@ AirportItlwm::observeNativeAddressRestartEvent(
             event == NativePowerTrace::AddressRestartEvent::kDriverReady;
         const bool stale = entry.powerEpoch != epoch ||
             entry.transitionRevision != revision ||
-            ((entry.powerFlags & 2U) != (powerFlags & 2U)) ||
+            ((entry.powerFlags & 3U) != (powerFlags & 3U)) ||
             (eventReady && (!(entry.powerFlags & 2U) || !(powerFlags & 2U))) ||
             (!eventReady && ((entry.powerFlags & 2U) || (powerFlags & 2U))) ||
             (entry.faultSerialValid && (!faultSerialValid ||

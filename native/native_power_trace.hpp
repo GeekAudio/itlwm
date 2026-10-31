@@ -257,24 +257,31 @@ public:
         if (!active_) return AddressRestartDecision::kPass;
         const bool oldEntry = entry.addressRestartId != id_ &&
             entry.transitionRevision <= startRevision_;
+        const bool snapshotMatchesCurrent =
+            entry.powerEpoch == currentEpoch &&
+            entry.transitionRevision == currentRevision &&
+            (entry.powerFlags & 3U) == (currentPowerFlags & 3U) &&
+            (!entry.faultSerialValid || (currentFaultSerialValid &&
+                entry.faultSerial == currentFaultSerial));
+        const bool staleEntry = oldEntry || !snapshotMatchesCurrent;
 
         // Current transaction state takes precedence over stale queued events.
         // A real fault, explicit OFF, or elapsed deadline must end suppression
         // even when the next item in the ring belongs to an older lifecycle.
         if (!currentFaultSerialValid || currentFaultSerial != faultSerial_) {
             retire(AddressRestartOutcome::kCancelledFaultSerial);
-            return oldEntry ? AddressRestartDecision::kStale
-                            : AddressRestartDecision::kPass;
+            return staleEntry ? AddressRestartDecision::kStale
+                              : AddressRestartDecision::kPass;
         }
         if (currentEpoch != powerEpoch_ || !(currentPowerFlags & 1U)) {
             retire(AddressRestartOutcome::kCancelledEpochOrOff);
-            return oldEntry ? AddressRestartDecision::kStale
-                            : AddressRestartDecision::kPass;
+            return staleEntry ? AddressRestartDecision::kStale
+                              : AddressRestartDecision::kPass;
         }
         if (nowNanoseconds >= deadlineNanoseconds_) {
             retire(AddressRestartOutcome::kExpired);
-            return oldEntry ? AddressRestartDecision::kStale
-                            : AddressRestartDecision::kPass;
+            return staleEntry ? AddressRestartDecision::kStale
+                              : AddressRestartDecision::kPass;
         }
 
         // Old READY/STOPPED entries can sit in the ring until after a newer

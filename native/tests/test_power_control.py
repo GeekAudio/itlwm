@@ -215,6 +215,10 @@ struct AirportItlwm:IO80211Controller {
  IOReturn enable(IO80211SkywalkInterface*);
  IOReturn enableAdapter(IONetworkInterface*);IOReturn disableAdapter(IONetworkInterface*);
 };
+struct TestNativeBackend {bool ready=false;unsigned driverStateCalls=0;
+ void driverState(bool value){ready=value;++driverStateCalls;}};
+struct AirportItlwmSkywalkInterface {AirportItlwm*instance=nullptr;
+ TestNativeBackend*nativeBackend=nullptr;};
 struct Fixture {AirportItlwm a;HAL hal;Queue q;Gate gate;NativeIF net;IONetworkInterface bsd;Timer timer;
  Fixture():gate{&a,&q},net{&q}{_fWorkloop=&q;_fCommandGate=&gate;a.fHalService=&hal;
  hal.publicEpoch=&a.nativePowerEpoch;
@@ -230,6 +234,14 @@ struct Fixture {AirportItlwm a;HAL hal;Queue q;Gate gate;NativeIF net;IONetworkI
 ingress_source=(ROOT/'native/wcl_backend.cpp').read_text()
 methods.extend('\nnamespace NativeWifi {\n'+function_from(ingress_source,marker)+'\n}\n'
  for marker in ['bool Ingress::signal(unsigned','bool Ingress::append(unsigned'])
+consumer_source=(ROOT/'AirportItlwm/AirportItlwmSkywalkInterface.cpp').read_text()
+consumer_start=consumer_source.index(
+    '            const bool staleRetiredTransaction =',
+    consumer_source.index('void AirportItlwmSkywalkInterface::consumeNative('))
+consumer_end_marker='                self->instance->postNativePowerChangedIfNeeded();'
+consumer_end=consumer_source.index(consumer_end_marker,consumer_start)+len(consumer_end_marker)
+consumer_snippet=consumer_source[consumer_start:consumer_end]
+consumer_shim='''\nstatic void consumePowerDecision(AirportItlwmSkywalkInterface *self, bool ready,\n    NativePowerTrace::AddressRestartDecision decision) {\n    auto backend = self->nativeBackend;\n'''+consumer_snippet+'''\n}\n'''
 main=r'''
 
 int main(){unsigned scenarios=0;
@@ -628,11 +640,34 @@ int main(){unsigned scenarios=0;
   assert(f.a.observeNativeAddressRestartEvent(NativePowerTrace::AddressRestartEvent::kDriverReady,
    oldReady)==NativePowerTrace::AddressRestartDecision::kStale);
   assert(f.state()==1&&f.a.postNativePowerChangedIfNeeded()&&f.net.messages==1);++scenarios;}
- printf("{\"actual_body_scenarios\":%u,\"concurrent_off_ready_iterations\":128,\"address_restart_scenarios\":11,\"ingress_ring_scenarios\":1,\"io_requests\":0}\n",scenarios);
+ {Fixture f;f.a.nativePowerFlags=3;f.a.nativePowerEpoch=5;f.hal.faultSerial=7;
+  uint64_t id=0;assert(f.a.beginNativeAddressRestartNotification(&id)==0&&id);
+  assert(f.a.commitNativeAddressRestartNotification(id,true,true));
+  NativePowerTrace::PowerIngressContext sameIdReady{};
+  f.a.observeNativePowerEvent(ITL_TAHOE_EVT_DRIVER_READY,&sameIdReady);
+  assert(sameIdReady.addressRestartId==id&&sameIdReady.faultSerial==7);
+  NativeWifi::Ingress ingress;ingress.lock_=IOSimpleLockAlloc();ingress.call_=reinterpret_cast<void*>(1);
+  assert(ingress.signal(ITL_TAHOE_EVT_DRIVER_READY,0,nullptr,0,&sameIdReady));
+  ++f.hal.faultSerial;NativePowerTrace::PowerIngressContext currentStop{};
+  f.a.observeNativePowerEvent(ITL_TAHOE_EVT_DRIVER_STOPPED,&currentStop);
+  assert(currentStop.addressRestartId==id&&currentStop.faultSerial==8&&
+   !(currentStop.powerFlags&2U));
+  assert(ingress.signal(ITL_TAHOE_EVT_DRIVER_STOPPED,0,nullptr,0,&currentStop));
+  const auto queuedReady=ingress.entries_[0].powerContext;
+  const auto decision=f.a.observeNativeAddressRestartEvent(
+   NativePowerTrace::AddressRestartEvent::kDriverReady,queuedReady);
+  assert(decision==NativePowerTrace::AddressRestartDecision::kStale&&
+   !f.a.nativeAddressRestartNotification.active());
+  TestNativeBackend backend;AirportItlwmSkywalkInterface consumer{&f.a,&backend};
+  f.q.gated=true;consumePowerDecision(&consumer,true,decision);f.q.gated=false;
+  assert(!backend.ready&&backend.driverStateCalls==0&&f.net.messages==1&&
+   !f.a.nativePowerNotificationState.lastPostedReady());
+  IOSimpleLockFree(ingress.lock_);++scenarios;}
+ printf("{\"actual_body_scenarios\":%u,\"concurrent_off_ready_iterations\":128,\"address_restart_scenarios\":12,\"ingress_ring_scenarios\":2,\"io_requests\":0}\n",scenarios);
 }
 '''
 with tempfile.TemporaryDirectory(prefix='native-power-control-') as d:
-    cpp=Path(d)/'test.cpp';exe=Path(d)/'test';cpp.write_text(shim+'\n'+'\n'.join(methods)+main)
+    cpp=Path(d)/'test.cpp';exe=Path(d)/'test';cpp.write_text(shim+'\n'+'\n'.join(methods)+consumer_shim+main)
     subprocess.run(['xcrun','clang++','-std=c++17','-O1','-g','-fsanitize=address,undefined','-fno-omit-frame-pointer','-I',str(ROOT),str(cpp),'-o',str(exe)],check=True)
     result=subprocess.check_output([str(exe)],text=True);print(result,end='')
 print('source_sha256='+hashlib.sha256(source.encode()).hexdigest())
