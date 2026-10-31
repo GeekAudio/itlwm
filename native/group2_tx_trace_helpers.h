@@ -12,6 +12,7 @@
 #define IWX_GROUP2_TX_TRACE_SCHEMA 1u
 #define IWX_GROUP2_TX_TRACE_CAPACITY 32u
 #define IWX_GROUP2_TX_SLOT_CAPACITY 32u
+#define IWX_GROUP2_TX_RING_COUNT_MAX 1024u
 #define IWX_GROUP2_TX_TAG_MAGIC 0x47525449u /* LE bytes: ITRG */
 #define IWX_GROUP2_TX_TAG_VERSION 1u
 #define IWX_GROUP2_TX_TAG_TYPE 0x0942u
@@ -472,7 +473,7 @@ static inline int iwx_group2_tx_slot_prepare(
         return 0;
     iwx_group2_tx_slot_clear(slot);
     if (!iwx_group2_tx_tag_valid(tag) || ring_count == 0 ||
-        ring_count > 256 || index >= ring_count)
+        ring_count > IWX_GROUP2_TX_RING_COUNT_MAX || index >= ring_count)
         return 0;
     uint64_t generation = 0;
     if (!iwx_group2_tx_trace_next_slot_generation(trace, &generation))
@@ -510,7 +511,8 @@ static inline int iwx_group2_tx_trace_prepare_slot(
     if (slot_out != NULL)
         __builtin_memset(slot_out, 0, sizeof(*slot_out));
     if (trace == NULL || !iwx_group2_tx_tag_valid(tag) ||
-        ring_count == 0 || ring_count > 256 || index >= ring_count)
+        ring_count == 0 ||
+        ring_count > IWX_GROUP2_TX_RING_COUNT_MAX || index >= ring_count)
         return 0;
     if (!iwx_group2_tx_trace_try_lock(trace)) {
         iwx_group2_tx_trace_note_lost(trace);
@@ -591,7 +593,8 @@ static inline uint32_t iwx_group2_tx_match_completion(
         return IWX_GROUP2_TX_MATCH_RESET_AMBIGUOUS;
     if (identity_epoch == UINT32_MAX)
         return IWX_GROUP2_TX_MATCH_UNKNOWN;
-    if (slots == NULL || ring_count == 0 || ring_count > 256 ||
+    if (slots == NULL || ring_count == 0 ||
+        ring_count > IWX_GROUP2_TX_RING_COUNT_MAX ||
         old_tail >= ring_count || checked_index >= ring_count ||
         old_queued > ring_count)
         return IWX_GROUP2_TX_MATCH_BAD_RANGE;
@@ -643,7 +646,8 @@ static inline int iwx_group2_tx_interval_has_sidecar_sparse(
     uint32_t checked_index, uint32_t queue_id)
 {
     if (slots == NULL || slot_capacity == 0 || slot_capacity > 256 ||
-        ring_count == 0 || ring_count > 256 || old_tail >= ring_count ||
+        ring_count == 0 ||
+        ring_count > IWX_GROUP2_TX_RING_COUNT_MAX || old_tail >= ring_count ||
         checked_index >= ring_count || old_queued > ring_count)
         return 0;
     const uint32_t distance =
@@ -679,7 +683,8 @@ static inline uint32_t iwx_group2_tx_match_completion_sparse(
     if (identity_epoch == UINT32_MAX)
         return IWX_GROUP2_TX_MATCH_UNKNOWN;
     if (slots == NULL || slot_capacity == 0 || slot_capacity > 256 ||
-        ring_count == 0 || ring_count > 256 || old_tail >= ring_count ||
+        ring_count == 0 ||
+        ring_count > IWX_GROUP2_TX_RING_COUNT_MAX || old_tail >= ring_count ||
         checked_index >= ring_count || old_queued > ring_count)
         return IWX_GROUP2_TX_MATCH_BAD_RANGE;
     const uint32_t distance =
@@ -905,7 +910,8 @@ static inline uint32_t iwx_group2_tx_trace_retire_interval(
             iwx_group2_tx_trace_note_lost(trace);
         return 0;
     }
-    if (ring_count == 0 || ring_count > 256 || old_tail >= ring_count ||
+    if (ring_count == 0 ||
+        ring_count > IWX_GROUP2_TX_RING_COUNT_MAX || old_tail >= ring_count ||
         checked_index >= ring_count || old_queued > ring_count) {
         iwx_group2_tx_trace_note_lost(trace);
         iwx_group2_tx_trace_unlock(trace);

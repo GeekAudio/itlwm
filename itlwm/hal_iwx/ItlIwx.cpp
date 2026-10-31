@@ -135,6 +135,8 @@
 
 #ifdef AIRPORT_TAHOE
 static uint32_t gTahoeStaAuthTraceInstance = 0;
+static_assert(IWX_GROUP2_TX_RING_COUNT_MAX == IWX_MIN_256_BA_QUEUE_SIZE_GEN3,
+              "Group2 observation must accept the largest allocated host TX ring");
 static_assert(__atomic_always_lock_free(sizeof(uint64_t), nullptr),
               "Tahoe TX rate snapshot must use a lock-free 64-bit access");
 static_assert(__atomic_always_lock_free(sizeof(uint64_t), nullptr),

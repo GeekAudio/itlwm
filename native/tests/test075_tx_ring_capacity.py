@@ -380,6 +380,7 @@ CPP_EXTRACTED_HARNESS = r"""
 #include <cstring>
 #include <initializer_list>
 #include "iwx_tx_ring_capacity.hpp"
+#include "iwx_tx_completion_observation.hpp"
 
 #define nitems(array) (sizeof(array) / sizeof((array)[0]))
 #define le16toh(value) (value)
@@ -413,9 +414,16 @@ struct iwx_tx_ring {
     iwx_tx_data data[1024];
 };
 struct iwx_tid_data { uint16_t qid; };
+struct TahoeGroup2TxTrace {};
+struct TahoeAuthTrace { TahoeGroup2TxTrace group2_tx; };
+struct ieee80211com {
+    void *ic_bss;
+    TahoeAuthTrace ic_tahoe_auth_trace;
+};
 struct iwx_softc {
     iwx_tx_ring txq[8];
     iwx_tid_data sc_tid_data[9];
+    ieee80211com sc_ic;
     int first_data_qid = 1;
     int sc_tx_timer;
     uint32_t sc_tx_output_epoch;
@@ -429,13 +437,51 @@ struct iwx_compressed_ba_tfd {
     uint16_t tfd_index;
 };
 struct iwx_compressed_ba_notif { iwx_compressed_ba_tfd tfd[8]; };
+struct iwx_rx_packet {};
 struct iwx_flush_queue_info {
     uint16_t tid;
     uint16_t read_after_flush;
     uint16_t queue_num;
 };
 struct iwx_tx_path_flush_cmd_rsp { iwx_flush_queue_info queues[8]; };
-struct ieee80211com { void *ic_bss; };
+
+/*
+ * The extracted production loops include observer-only Tahoe telemetry.
+ * Pull in the real event schema above so those production symbols stay
+ * checked, while keeping the test focused on ring guards and reclaim logic.
+ * These adapters intentionally do not change any queue decision.
+ */
+static iwx_tx_completion_event_input txCompletionRxInput(
+    uint32_t kind, uint32_t stage, uint32_t reason, const iwx_rx_packet *) {
+    iwx_tx_completion_event_input event{};
+    event.kind = kind;
+    event.stage = stage;
+    event.terminal_reason = reason;
+    return event;
+}
+static void txCompletionSetBaFacts(
+    iwx_tx_completion_event_input *, const iwx_compressed_ba_notif *) {}
+static void txCompletionSetBaTfdFacts(
+    iwx_tx_completion_event_input *, const iwx_compressed_ba_tfd *) {}
+static void txCompletionSetRingFacts(
+    iwx_tx_completion_event_input *, const iwx_tx_ring *) {}
+class TxCompletionTerminalScope {
+public:
+    TxCompletionTerminalScope(iwx_softc *,
+                              const iwx_tx_completion_event_input &event)
+        : event_(event) {}
+    void setReason(uint32_t reason) { event_.terminal_reason = reason; }
+    iwx_tx_completion_event_input &event() { return event_; }
+    void dismiss() {}
+private:
+    iwx_tx_completion_event_input event_;
+};
+
+static uint64_t tahoeMonotonicNs() { return 1; }
+static bool iwx_group2_tx_trace_retire_flushed_interval(
+    void *, uint64_t, uint32_t, uint32_t, uint32_t, uint32_t, uint32_t) {
+    return true;
+}
 
 struct TahoeP2pQueue { bool p2pOwned[8]{}; };
 struct TahoeP2pActionState {};
@@ -504,6 +550,8 @@ static void runBaReclaimLoop(iwx_softc *sc,
     uint8_t qid;
     int i;
     iwx_tx_ring *ring;
+    // The extracted function's packet argument is only read by telemetry.
+    iwx_rx_packet *pkt = nullptr;
 @@BA_RECLAIM_LOOP@@
     (void)tid;
 }
