@@ -37,6 +37,7 @@ def main() -> None:
     callback = function_body(
         rx, r"IOReturn\s+ItlIwx::tahoeP2pRxDrainAction\([^)]*\)"
     )
+    consume = function_body(rx, r"void\s+ItlIwx::tahoeP2pRxConsume\(\)")
     tap = function_body(
         rx, r"void\s+ItlIwx::tahoeP2pTapAction\([^)]*\)"
     )
@@ -54,21 +55,38 @@ def main() -> None:
     assert "owner->getMainWorkLoop()->inGate()" in callback
     assert "owner->tahoeP2pRxDrain()" in callback
 
-    # Observer mutation and snapshot occur only after the main-gate handoff.
-    epochs_start = drain.index("const IntelAwdlPeer::RuntimeEpochs epochs")
-    observe_at = drain.index("tahoe_awdl_peer_observer_.observe(")
+    # Queue mutation now lives in the main-gate consume helper. The watchdog
+    # drain retries the gate non-blockingly, consumes only after the gate check,
+    # then takes a fresh publication epoch/time before snapshotting the observer.
+    consume_call = drain.index("tahoeP2pRxConsume();")
+    assert fallback_start < consume_call < fallback_end
+    consume_gate = consume.index("if (!tahoeP2pOnMainGate())")
+    consume_time = consume.index("const uint64_t nowUs = tahoeP2pRxMonotonicUs()")
+    consume_epochs_start = consume.index("const IntelAwdlPeer::RuntimeEpochs epochs")
+    observe_at = consume.index("tahoe_awdl_peer_observer_.observe(")
+    assert consume_gate < consume_time < consume_epochs_start < observe_at
+    assert "tahoe_awdl_peer_observer_.observe(" not in drain
+
+    drain_epochs_start = drain.index("const IntelAwdlPeer::RuntimeEpochs epochs")
     snapshot_at = drain.index("tahoe_awdl_peer_observer_.snapshot(")
-    assert fallback_end < epochs_start < observe_at < snapshot_at
-    epochs = drain[epochs_start:drain.index("};", epochs_start)]
-    assert "nativeP2pProbeGeneration_ != 0" in epochs
-    assert "IEEE80211_S_RUN" in epochs
-    assert "IWX_FLAG_SHUTDOWN | IWX_FLAG_HW_ERR" in epochs
-    assert "tahoe_p2p_rx_lease_" not in epochs
-    assert "lease.active" not in epochs
+    assert consume_call < fallback_end < drain_epochs_start < snapshot_at
+    for body, epochs_start in ((consume, consume_epochs_start),
+                               (drain, drain_epochs_start)):
+        epochs = body[epochs_start:body.index("};", epochs_start)]
+        assert "nativeP2pProbeGeneration_ != 0" in epochs
+        assert "IEEE80211_S_RUN" in epochs
+        assert "IWX_FLAG_SHUTDOWN | IWX_FLAG_HW_ERR" in epochs
+        assert "tahoe_p2p_rx_lease_" not in epochs
+        assert "lease.active" not in epochs
 
     # Receive time and three record generations are captured at the RX tap.
     assert "tahoeP2pRxMonotonicUs()" in tap
-    assert re.search(r"tahoeP2pRxMonotonicUs\(\),\s*gp2TimestampUs,\s*gp2TimestampPresent\);", tap)
+    assert re.search(
+        r"tahoe_p2p_rx_router_\.tapActionFrame\([\s\S]*?"
+        r"tahoeP2pRxMonotonicUs\(\),\s*gp2TimestampUs,\s*"
+        r"gp2TimestampPresent,",
+        tap,
+    )
     assert "out.generation = lease.contextGeneration;" in router
     assert "out.powerGeneration = lease.powerGeneration;" in router
     assert "out.stationGeneration = lease.stationGeneration;" in router
@@ -80,7 +98,7 @@ def main() -> None:
     assert properties
     forbidden = ("Mac", "Address", "Name", "Raw", "Bytes", "Payload")
     assert not [name for name in properties if any(word in name for word in forbidden)]
-    assert "bzero(&record, sizeof(record));" in drain
+    assert "bzero(&record, sizeof(record));" in consume
 
 
 if __name__ == "__main__":
