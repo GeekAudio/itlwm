@@ -2076,7 +2076,7 @@ void ItlIwx::tahoePublishOrdinaryTxCompletionSnapshot(
     const uint64_t relatedCutLostCount =
         IwxTxCompletionPublish::lostCount(&nativeStaCompletionPending_);
     if (relatedCutLostCount != nativeStaCompletionPublishedLostCount_ &&
-        controller->setProperty("NativeStaCompletionRelatedCutLostCount",
+        controller->setProperty("NativeStaCompletionLiveRelatedCutLostCount",
                                 relatedCutLostCount, 64))
         nativeStaCompletionPublishedLostCount_ = relatedCutLostCount;
     const uint64_t relatedRecordDroppedCount = __atomic_load_n(
@@ -2084,7 +2084,7 @@ void ItlIwx::tahoePublishOrdinaryTxCompletionSnapshot(
         __ATOMIC_ACQUIRE);
     if (relatedRecordDroppedCount !=
             nativeStaCompletionPublishedRelatedDroppedCount_ &&
-        controller->setProperty("NativeStaCompletionRelatedRecordDroppedCount",
+        controller->setProperty("NativeStaCompletionLiveRelatedRecordDroppedCount",
                                 relatedRecordDroppedCount, 64))
         nativeStaCompletionPublishedRelatedDroppedCount_ =
             relatedRecordDroppedCount;

@@ -261,6 +261,32 @@ class Test098CompletionPublication(unittest.TestCase):
         decoded = decoder.decode_scalars(values)
         self.assertIsNone(decoded["publication"])
 
+    def test_live_loss_counters_do_not_mutate_versioned_snapshot_fields(self):
+        source = PRODUCTION_CPP.read_text(encoding="utf-8")
+        ordinary = extract_function(source,
+            "void ItlIwx::tahoePublishOrdinaryTxCompletionSnapshot(")
+        self.assertIn(
+            '"NativeStaCompletionLiveRelatedCutLostCount"', ordinary)
+        self.assertIn(
+            '"NativeStaCompletionLiveRelatedRecordDroppedCount"', ordinary)
+        self.assertNotIn(
+            'setProperty("NativeStaCompletionRelatedCutLostCount"', ordinary)
+        self.assertNotIn(
+            'setProperty("NativeStaCompletionRelatedRecordDroppedCount"', ordinary)
+
+        values = self.publication_fixture()
+        properties = {
+            "NativeStaCompletion" + key: value
+            for key, value in values.items()
+        }
+        properties["NativeStaCompletionLiveRelatedCutLostCount"] = 99
+        properties["NativeStaCompletionLiveRelatedRecordDroppedCount"] = 77
+        decoded = decoder.decode_scalars(decoder.completion_scalars(properties))
+        self.assertEqual(decoded["related_cut_lost_count"], 0)
+        self.assertEqual(decoded["related_record_dropped_count"], 0)
+        self.assertNotIn("live_related_cut_lost_count", decoded)
+        self.assertNotIn("live_related_record_dropped_count", decoded)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -19,6 +19,11 @@ after the scalar batch succeeds. A successful batch carries a publication
 sequence equal to its even snapshot version and a source marker:
 `1` for ordinary completion, `2` for a frozen watchdog snapshot. The decoder
 continues to accept older schema-2 snapshots without those additive fields.
+The changing `LiveRelatedCutLostCount` and
+`LiveRelatedRecordDroppedCount` properties are standalone live counters; they
+are deliberately distinct from the similarly named counters inside the
+versioned snapshot, so they cannot make an older even snapshot appear torn or
+fresh.
 
 The watchdog-owned completion snapshot remains frozen once pending; ordinary
 periodic publication does not overwrite it. These fields prove only a local
