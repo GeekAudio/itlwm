@@ -22,10 +22,11 @@
       <div class="nav-label">项目</div>
       <nav class="primary-nav" aria-label="主要导航">
         <a href="#overview"><span class="nav-glyph" aria-hidden="true">01</span><span>当前流程</span></a>
-        <a href="#milestones"><span class="nav-glyph" aria-hidden="true">02</span><span>验收里程碑</span></a>
-        <a href="#development-timeline"><span class="nav-glyph" aria-hidden="true">03</span><span>开发时间线</span></a>
-        <a href="#test-records"><span class="nav-glyph" aria-hidden="true">04</span><span>本轮记录</span></a>
-        <a href="#acceptance"><span class="nav-glyph" aria-hidden="true">05</span><span>下一步</span></a>
+        <a href="#principle-map"><span class="nav-glyph" aria-hidden="true">02</span><span>原理图</span></a>
+        <a href="#milestones"><span class="nav-glyph" aria-hidden="true">03</span><span>验收里程碑</span></a>
+        <a href="#development-timeline"><span class="nav-glyph" aria-hidden="true">04</span><span>开发时间线</span></a>
+        <a href="#test-records"><span class="nav-glyph" aria-hidden="true">05</span><span>本轮记录</span></a>
+        <a href="#acceptance"><span class="nav-glyph" aria-hidden="true">06</span><span>下一步</span></a>
       </nav>
 
       <div class="side-divider"></div>
@@ -66,6 +67,167 @@
       </header>
 
       <section id="workflow-overview" class="workflow-overview" aria-label="当前数据通路与卡点"></section>
+
+      <section class="content-section principle-map" id="principle-map" aria-labelledby="principle-map-title">
+        <div class="section-heading">
+          <div>
+            <div class="section-kicker">RADIO TO AIRDROP</div>
+            <h2 id="principle-map-title">Intel 原生 AirDrop 链路原理图</h2>
+            <p>展开节点查看每一跳的职责、验收条件和证据边界。绿色是接收路径，蓝色是反向发送，虚线框表示旁路观察。</p>
+          </div>
+          <span class="section-count">RX ⇄ TX</span>
+        </div>
+
+        <div class="principle-card">
+          <div class="principle-status" aria-label="当前版本实测状态">
+            <div class="principle-stat"><span>当前运行候选</span><strong id="principle-running-candidate">读取中</strong></div>
+            <div class="principle-stat"><span>本轮验收矩阵</span><strong id="principle-validation-summary">读取中</strong></div>
+            <div class="principle-stat is-warning"><span>AWDL 原生 RX</span><strong id="principle-rx-summary">读取中</strong></div>
+            <div class="principle-stat is-warning"><span>真实 AirDrop</span><strong id="principle-airdrop-summary">读取中</strong></div>
+          </div>
+
+          <div class="principle-legend" aria-label="图例">
+            <span><i class="legend-line" aria-hidden="true"></i>iPhone → Mac 原生接收路径</span>
+            <span><i class="legend-line control" aria-hidden="true"></i>Mac → iPhone 原生发送路径</span>
+            <span><i class="legend-line observation" aria-hidden="true"></i>外部观察支路，不是功能链路</span>
+          </div>
+
+          <div class="awdl-plane-note" aria-label="BLE发现、AWDL控制面和数据面关系">
+            <strong>BLE：发现 / 触发，不承载文件</strong>
+            <span class="plane-arrow" aria-hidden="true">→</span>
+            <span>PSF / MIF AWDL 控制面</span>
+            <span class="plane-arrow" aria-hidden="true">→</span>
+            <span>共同频道 · 可用 AW 时隙</span>
+            <span class="plane-arrow" aria-hidden="true">→</span>
+            <span>AWDL 802.11 数据帧承载应用数据</span>
+            <small>关系示意，不代表本轮已观测通过</small>
+          </div>
+
+          <section class="principle-lane" aria-labelledby="rx-lane-title">
+            <div class="principle-lane-heading">
+              <div><h3 id="rx-lane-title">A · iPhone → Intel → macOS：接收方向</h3><p>发现/触发与 AWDL 802.11 数据路径分层显示，最后落到 AirDrop 文件收件。</p></div>
+              <span class="lane-tag receive">INBOUND · RX</span>
+            </div>
+            <div class="path-flow" aria-label="接收路径前半段">
+              <details class="path-node receive-node">
+                <summary><span class="path-number">01</span><span class="path-node-copy"><strong>iPhone BLE 发现 / 触发</strong><small>发现附近设备并启动后续连接协商</small></span><i class="path-caret" aria-hidden="true"></i></summary>
+                <div class="path-node-body"><p><strong>职责：</strong>提供邻近设备发现或唤起入口；后续 AWDL 会话和数据包仍需单独建立并验证。</p><p><strong>证据边界：</strong>BLE 可见或触发成功，不等于 Intel 收到 AWDL 控制帧，更不等于收到文件数据。</p></div>
+              </details>
+              <span class="path-arrow" aria-hidden="true"><svg viewBox="0 0 28 16"><path d="M2 8h22m-6-6 6 6-6 6"/></svg></span>
+              <details class="path-node receive-node">
+                <summary><span class="path-number">02</span><span class="path-node-copy"><strong>AWDL 802.11 控制 / 数据</strong><small>邻居同步、服务会话及数据帧走无线链路</small></span><i class="path-caret" aria-hidden="true"></i></summary>
+                <div class="path-node-body"><p><strong>职责：</strong>Apple 无线直连协议的控制与数据交换在 802.11 空口承载；控制帧、管理 Beacon 与数据帧是不同证据类型。</p><p><strong>验收：</strong>需要识别真实 AWDL 帧并建立发送端、频道、时钟和 Intel RX 观察的逐帧对应。</p></div>
+              </details>
+              <span class="path-arrow" aria-hidden="true"><svg viewBox="0 0 28 16"><path d="M2 8h22m-6-6 6 6-6 6"/></svg></span>
+              <details class="path-node receive-node">
+                <summary><span class="path-number">03</span><span class="path-node-copy"><strong>Intel 固件 / 149 RX</strong><small>固件调度 PHY、过滤并产生接收通知</small></span><i class="path-caret" aria-hidden="true"></i></summary>
+                <div class="path-node-body"><p><strong>职责：</strong>固件与无线硬件接收并分类帧，主机侧需确认通知、PHY/频道和 descriptor 的对应关系。</p><p><strong>验收边界：</strong>把频道驻留 START/END、管理帧和 AWDL 数据帧分开记录；驻留 ACK 或看到管理帧都不能证明 Intel 主机收到 AWDL 数据。当前候选结果见上方状态卡和本轮矩阵。</p></div>
+              </details>
+              <span class="path-arrow" aria-hidden="true"><svg viewBox="0 0 28 16"><path d="M2 8h22m-6-6 6 6-6 6"/></svg></span>
+              <details class="path-node receive-node">
+                <summary><span class="path-number">04</span><span class="path-node-copy"><strong>DMA completion</strong><small>RX 环完成项指向可读的接收描述符</small></span><i class="path-caret" aria-hidden="true"></i></summary>
+                <div class="path-node-body"><p><strong>职责：</strong>中断/完成通知到达后，驱动按 DMA 映射和 ring 状态读取描述符。</p><p><strong>验收：</strong>completion、主机映射生命周期和同一条记录身份都需闭合。观测到 RBID 或 raw 字节本身不证明 DMA 所有权、内容新鲜度或缓冲区安全。</p></div>
+              </details>
+            </div>
+            <div class="path-bridge"><svg viewBox="0 0 18 22" aria-hidden="true"><path d="M9 1v16m-6-6 6 6 6-6"/></svg><span>完成通知交给主机 RX 软件路径；仍需逐层校验，不会自动进入网络接口</span></div>
+            <div class="path-flow" aria-label="接收路径后半段">
+              <details class="path-node receive-node">
+                <summary><span class="path-number">05</span><span class="path-node-copy"><strong>RX_MPDU 解析 / 校验</strong><small>解码通知、descriptor、长度、状态与 PHY 元数据</small></span><i class="path-caret" aria-hidden="true"></i></summary>
+                <div class="path-node-body"><p><strong>职责：</strong>区分 descriptor 版本，验证长度、状态、频道/PHY 归属，再识别管理帧、控制帧或数据帧。</p><p><strong>验收：</strong>必须把接收通知与同一 descriptor/ring slot 对上；候选字节或管理帧不能代替 AWDL 数据帧。</p><p><a href="#stage-4">查看阶段 4 · AWDL 接收</a></p></div>
+              </details>
+              <span class="path-arrow" aria-hidden="true"><svg viewBox="0 0 28 16"><path d="M2 8h22m-6-6 6 6-6 6"/></svg></span>
+              <details class="path-node receive-node">
+                <summary><span class="path-number">06</span><span class="path-node-copy"><strong>Owner / 数据门禁 / 解封装</strong><small>核对归属、频道、地址与长度，再解析并交付 IPv6</small></span><i class="path-caret" aria-hidden="true"></i></summary>
+                <div class="path-node-body"><p><strong>职责：</strong>核对 RX owner、频道、源/目的地址和长度；依数据帧契约去掉 802.11、LLC/SNAP 与 AWDL 头，并把 IPv6 交给 awdl0。</p><p><strong>边界：</strong>当前解码器拒绝 protected frames。STA 密钥更新属于普通 Wi‑Fi 链路，不是 AWDL 数据门禁；AirDrop 应用数据的保密由会话层 TLS 提供。</p><p><strong>验收：</strong>逐项证明门禁与解封装；软件路径存在不代表 descriptor 已获准或数据已交付。</p></div>
+              </details>
+              <span class="path-arrow" aria-hidden="true"><svg viewBox="0 0 28 16"><path d="M2 8h22m-6-6 6 6-6 6"/></svg></span>
+              <details class="path-node receive-node">
+                <summary><span class="path-number">07</span><span class="path-node-copy"><strong>原生 awdl0 / ifnet</strong><small>解封后的网络帧进入 macOS 原生接口</small></span><i class="path-caret" aria-hidden="true"></i></summary>
+                <div class="path-node-body"><p><strong>职责：</strong>把接纳的数据帧交给 BSD/网络接口输入路径，使本机协议栈能真实消费数据。</p><p><strong>验收：</strong>需有对应包的 ifnet 入站或受控接收回执；接口 UP/RUNNING 只说明接口状态。</p><p><a href="#stage-6">查看阶段 6 · 原生 awdl0</a></p></div>
+              </details>
+              <span class="path-arrow" aria-hidden="true"><svg viewBox="0 0 28 16"><path d="M2 8h22m-6-6 6 6-6 6"/></svg></span>
+              <details class="path-node receive-node">
+                <summary><span class="path-number">08</span><span class="path-node-copy"><strong>IPv6 邻居 / mDNS / TCP / TLS</strong><small>发现分享服务并建立加密应用会话</small></span><i class="path-caret" aria-hidden="true"></i></summary>
+                <div class="path-node-body"><p><strong>职责：</strong>IPv6 邻居可达并通过 mDNS 发现服务后，AirDrop 在用户选择对端时建立 TCP/TLS 会话并交换身份凭据。</p><p><strong>验收：</strong>分别记录邻居、mDNS 应答、TCP/TLS 会话和真实文件收件；链路本地 IPv6 或服务发现本身不表示传输成功。</p><p><a href="#stage-7">查看阶段 7 · IPv6 与服务发现</a> · <a href="https://support.apple.com/en-ca/guide/security/sec2261183f4/web" target="_blank" rel="noopener">Apple Platform Security · AirDrop security</a></p></div>
+              </details>
+              <span class="path-arrow" aria-hidden="true"><svg viewBox="0 0 28 16"><path d="M2 8h22m-6-6 6 6-6 6"/></svg></span>
+              <details class="path-node receive-node">
+                <summary><span class="path-number">09</span><span class="path-node-copy"><strong>AirDrop 文件收件</strong><small>应用层完成校验、接收并保存文件</small></span><i class="path-caret" aria-hidden="true"></i></summary>
+                <div class="path-node-body"><p><strong>最终验收：</strong>在 iPhone 与 Mac 两个方向都完成真实文件收发，保留接收端文件和会话结果作为证据。</p><p><strong>证据边界：</strong>以当前候选的第 8 阶段状态为准；链路就绪、邻居发现或 listener ready 不能替代文件收件。</p><p><a href="#stage-8">查看阶段 8 · 双向 AirDrop</a></p></div>
+              </details>
+            </div>
+            <p class="lane-caption">点击任一节点可展开职责与验收边界。箭头描述待逐层打通的逻辑方向，不表示当前链路已经贯通。</p>
+          </section>
+
+          <section class="principle-lane" aria-labelledby="tx-lane-title">
+            <div class="principle-lane-heading">
+              <div><h3 id="tx-lane-title">B · Mac → iPhone：反向发送方向</h3><p>从系统分享会话开始，经过原生接口和 Intel TX 路径，最终以对端实际收件闭环。</p></div>
+              <span class="lane-tag send">OUTBOUND · TX</span>
+            </div>
+            <div class="path-flow" aria-label="反向发送路径">
+              <details class="path-node send-node">
+                <summary><span class="path-number">01</span><span class="path-node-copy"><strong>Mac 选择文件 / 分享会话</strong><small>应用层形成待发送文件和对端会话</small></span><i class="path-caret" aria-hidden="true"></i></summary>
+                <div class="path-node-body"><p><strong>职责：</strong>AirDrop UI 和系统分享服务完成文件选择、会话建立及发送数据准备。</p><p><strong>验收：</strong>用户界面显示可选设备不表示文件已交给网络接口。</p></div>
+              </details>
+              <span class="path-arrow control-arrow" aria-hidden="true"><svg viewBox="0 0 28 16"><path d="M2 8h22m-6-6 6 6-6 6"/></svg></span>
+              <details class="path-node send-node">
+                <summary><span class="path-number">02</span><span class="path-node-copy"><strong>网络栈 → native awdl0</strong><small>应用数据封装后交由 AWDL 网络接口发送</small></span><i class="path-caret" aria-hidden="true"></i></summary>
+                <div class="path-node-body"><p><strong>验收：</strong>需要从原生接口和 BSD 输出队列确认目标数据确实被接纳。</p><p><strong>边界：</strong>本地 send 返回、接口计数或队列入队都不证明固件发射或对端收到。</p><p><a href="#stage-6">查看阶段 6 · 原生 awdl0</a></p></div>
+              </details>
+              <span class="path-arrow control-arrow" aria-hidden="true"><svg viewBox="0 0 28 16"><path d="M2 8h22m-6-6 6 6-6 6"/></svg></span>
+              <details class="path-node send-node">
+                <summary><span class="path-number">03</span><span class="path-node-copy"><strong>Owner / admission / TX 队列</strong><small>选定 AWDL owner、队列和可发送时隙</small></span><i class="path-caret" aria-hidden="true"></i></summary>
+                <div class="path-node-body"><p><strong>职责：</strong>验证当前 owner、频道/时隙、队列资源和 DMA 描述符归属。</p><p><strong>验收：</strong>追踪提交、固件完成、实际空口发送与对端回执；只看到本地返回值不能跳过后续门槛。</p><p><a href="#stage-5">查看阶段 5 · AWDL 发送</a></p></div>
+              </details>
+              <span class="path-arrow control-arrow" aria-hidden="true"><svg viewBox="0 0 28 16"><path d="M2 8h22m-6-6 6 6-6 6"/></svg></span>
+              <details class="path-node send-node">
+                <summary><span class="path-number">04</span><span class="path-node-copy"><strong>Intel 固件 / DMA TX</strong><small>驱动提交后由固件调度并完成无线发送</small></span><i class="path-caret" aria-hidden="true"></i></summary>
+                <div class="path-node-body"><p><strong>验收：</strong>区分描述符提交、TX completion 和空口发射；completion 只说明固件报告了相应结果。</p><p><strong>证据边界：</strong>以当前候选的本轮矩阵为准；本地 TX completion 不等于 iPhone 收到或保存文件。</p></div>
+              </details>
+              <span class="path-arrow control-arrow" aria-hidden="true"><svg viewBox="0 0 28 16"><path d="M2 8h22m-6-6 6 6-6 6"/></svg></span>
+              <details class="path-node send-node">
+                <summary><span class="path-number">05</span><span class="path-node-copy"><strong>AWDL 802.11 → iPhone 保存</strong><small>对端接收、校验并完成文件落盘</small></span><i class="path-caret" aria-hidden="true"></i></summary>
+                <div class="path-node-body"><p><strong>最终验收：</strong>用 iPhone 实际收到并打开 Mac 发出的文件证明发送方向闭环，再反向传回文件。</p><p><strong>边界：</strong>旁路抓包、Intel 本地完成通知和对端 AirDrop 文件结果是不同证据级别。</p><p><a href="#stage-8">查看阶段 8 · 双向 AirDrop</a></p></div>
+              </details>
+            </div>
+          </section>
+
+          <section class="principle-lane" aria-labelledby="sta-lane-title">
+            <div class="principle-lane-heading">
+              <div><h3 id="sta-lane-title">C · 常规 Wi-Fi STA 与 AWDL 共用 Intel 无线硬件</h3><p>互联网链路和直连链路是两条逻辑路径；电源、固件调度和射频资源来自同一设备。</p></div>
+              <span class="lane-tag">PARALLEL LOGICAL PATHS</span>
+            </div>
+            <div class="shared-radio" aria-label="STA 常规联网路径">
+              <div class="shared-radio-node"><strong>Wi-Fi 路由器 / AP</strong><small>家庭或办公网络侧</small></div>
+              <span class="shared-radio-link" aria-hidden="true">⇄</span>
+              <div class="shared-radio-node shared-radio-core"><strong>Intel 无线芯片 / 固件</strong><small>STA + AWDL 共用设备；按电源与无线调度运行</small></div>
+              <span class="shared-radio-link" aria-hidden="true">⇄</span>
+              <div class="shared-radio-node"><strong>en1 / IP 网络</strong><small>网关、DNS、HTTPS 等常规 STA 流量</small></div>
+            </div>
+            <p class="shared-resource-note"><svg viewBox="0 0 18 18" aria-hidden="true"><circle cx="9" cy="9" r="7" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M9 8v4m0-7v.5" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.5"/></svg><span>STA 联网成功可作为常规 Wi-Fi 证据；它不代替 AWDL 的接收、awdl0 入站或 AirDrop 验收。两条路径共用芯片资源，切换、频道驻留、固件状态和电源生命周期可能相互影响。</span></p>
+          </section>
+
+          <section class="test094-overlay" aria-labelledby="test094-title">
+            <div class="test094-heading"><h3 id="test094-title">Test094 · RX completion 与 power / lifecycle / task queue 观察层</h3><span class="test094-chip" id="principle-test094-chip">状态随里程碑数据更新</span></div>
+            <p class="test094-state" id="principle-test094-status">当前实测候选和下一候选状态从本页里程碑数据读取。</p>
+            <div class="test094-work">
+              <article><h4>Completion 观察</h4><p>观察固定范围的 slot/head/epoch/raw RBID/flags 等数值；不保存包体，也不把 raw tag 当 DMA pin 或所有权证明。</p></article>
+              <article><h4>Power / lifecycle</h4><p>把 V2 电源请求代次与 HAL、driver generation 和故障代次并列，查看开关和初始化生命周期的先后关系。</p></article>
+              <article><h4>Task queue</h4><p>记录 init dispatch 上下文和过期判断；离线原理说明不代表已部署、已通过内核并发验证或已打通数据路径。</p></article>
+            </div>
+          </section>
+
+          <aside class="observation-branch" aria-label="旁路观察工具，不属于 Intel AirDrop 功能链路">
+            <div><h3>旁路观察 · 位于功能链路之外</h3><p>虚线表示只用于观察和对时，不会把旁路结果算作 Intel 原生收发。</p></div>
+            <div class="observation-tools">
+              <div class="observation-tool"><strong>OpenWrt / 外部监听</strong><span>可记录 AP/监听器看到的频道帧、发送时段和路由器侧事件；不能证明 Intel 驱动接纳或 macOS ifnet 收到。</span></div>
+              <div class="observation-tool"><strong>USB iPhone 日志 / 屏幕记录</strong><span>可记录 iPhone 侧发现、分享 UI 或接收结果；不能替代 Mac 端 RX_MPDU、awdl0 入站和应用文件校验。</span></div>
+            </div>
+          </aside>
+
+          <div class="principle-footnote"><span>当前数据：<strong id="principle-data-version">读取中</strong>。图中箭头说明目标链路，不代表任何未通过阶段已打通。</span><span><a href="#stage-4">AWDL 接收验收</a> · <a href="#stage-8">双向文件验收</a></span></div>
+        </div>
+      </section>
 
       <section id="progress-overview" class="progress-overview secondary-progress" aria-label="历史验收覆盖与当前版本复验进度"></section>
 
