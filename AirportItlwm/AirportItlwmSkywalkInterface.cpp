@@ -21,6 +21,37 @@
 #include "../native/wcl_channels.hpp"
 extern IOCommandGate *_fCommandGate;
 
+// Numeric control-call timing only. Producer recording is bounded and does
+// not publish properties; the serialized native consumer publishes snapshots.
+class NativeControlTraceScope {
+public:
+    NativeControlTraceScope(AirportItlwm *controller,
+                            NativePowerTrace::Operation operation)
+        : controller_(controller), operation_(operation) {
+        if (controller_) callId_ = controller_->beginNativeControlTrace(
+            operation_, NativePowerTrace::Phase::kCallBegin, 0, -1);
+    }
+    ~NativeControlTraceScope() {
+        if (!ended_) record(NativePowerTrace::Phase::kCallEnd, 0, -1);
+    }
+    void record(NativePowerTrace::Phase phase, uint32_t detail = 0,
+                int32_t result = -1) {
+        if (controller_) controller_->recordNativeControlTrace(
+            callId_, operation_, phase, detail, result);
+    }
+    IOReturn finish(IOReturn result) {
+        record(NativePowerTrace::Phase::kCallEnd, 0, int32_t(result));
+        ended_ = true;
+        return result;
+    }
+    uint32_t callId() const { return callId_; }
+private:
+    AirportItlwm *controller_;
+    NativePowerTrace::Operation operation_;
+    uint32_t callId_ {0};
+    bool ended_ {false};
+};
+
 static void publishCurrentTxRateDiagnostics(
     AirportItlwmSkywalkInterface *interface,
     const IwxTxRate::Snapshot &snapshot,
@@ -382,7 +413,9 @@ init(IOService *provider)
     memcpy(permanentAddress, fHalService->get80211Controller()->ic_myaddr, 6);
     ether_addr hardware {}; memcpy(&hardware, permanentAddress, 6);
     setInitMacAddress(hardware);
-    NativeWifi::Operations operations {this, radioScan, radioJoin, radioLeave, emitNative, privateReady, radioCancelScan};
+    NativeWifi::Operations operations {this, radioScan, radioJoin, radioLeave,
+        emitNative, privateReady, radioCancelScan, scanMonotonicNanoseconds,
+        scanBusyDetail};
     nativeBackend->initialize(operations);
     retain(); instance->retain(); nativeLease = true;
 #endif
@@ -960,17 +993,34 @@ setASSOCIATE(struct apple80211_assoc_data *ad)
 IOReturn AirportItlwmSkywalkInterface::
 setDISASSOCIATE(struct apple80211_disassoc_data *ad)
 {
+#ifdef AIRPORT_TAHOE
+    NativeControlTraceScope trace(instance, NativePowerTrace::Operation::kAppleDisassociate);
+    const auto finish = [&](IOReturn result) { return trace.finish(result); };
+#else
+    const auto finish = [](IOReturn result) { return result; };
+#endif
     XYLog("%s\n", __FUNCTION__);
     struct ieee80211com *ic = fHalService->get80211Controller();
 
+#ifdef AIRPORT_TAHOE
+    trace.record(NativePowerTrace::Phase::kDisassociateBegin, uint32_t(ic->ic_state));
+#endif
     if (ic->ic_state < IEEE80211_S_SCAN)
-        return kIOReturnSuccess;
+        return finish(kIOReturnSuccess);
     
-    if (ic->ic_state > IEEE80211_S_AUTH && ic->ic_bss != NULL)
-        IEEE80211_SEND_MGMT(ic, ic->ic_bss, IEEE80211_FC0_SUBTYPE_DEAUTH, IEEE80211_REASON_AUTH_LEAVE);
+    if (ic->ic_state > IEEE80211_S_AUTH && ic->ic_bss != NULL) {
+        const int result = IEEE80211_SEND_MGMT(ic, ic->ic_bss,
+            IEEE80211_FC0_SUBTYPE_DEAUTH, IEEE80211_REASON_AUTH_LEAVE);
+#ifdef AIRPORT_TAHOE
+        trace.record(NativePowerTrace::Phase::kDisassociateMgmtEnd,
+                     uint32_t(ic->ic_state), result);
+#else
+        (void)result;
+#endif
+    }
     
     if (ic->ic_state == IEEE80211_S_ASSOC || ic->ic_state == IEEE80211_S_AUTH)
-        return kIOReturnSuccess;
+        return finish(kIOReturnSuccess);
     
     disassocIsVoluntary = true;
 
@@ -982,7 +1032,13 @@ setDISASSOCIATE(struct apple80211_disassoc_data *ad)
     ic->ic_assoc_status = APPLE80211_STATUS_UNAVAILABLE;
     ic->ic_deauth_reason = APPLE80211_REASON_ASSOC_LEAVING;
     ieee80211_new_state(ic, IEEE80211_S_SCAN, -1);
-    return kIOReturnSuccess;
+#ifdef AIRPORT_TAHOE
+    // The net80211 macro discards its callback return value. Record completion
+    // timing without inventing an error/success result for that callback.
+    trace.record(NativePowerTrace::Phase::kDisassociateStateEnd,
+                 uint32_t(ic->ic_state), -1);
+#endif
+    return finish(kIOReturnSuccess);
 }
 
 IOReturn AirportItlwmSkywalkInterface::
@@ -1324,6 +1380,11 @@ enum NativeRequest { Scan = 1, Join = 2, AbortScan = 3, AbortJoin = 4,
 IOReturn AirportItlwmSkywalkInterface::nativeRequest(OSObject *, void *object,
     void *operation, void *data, void *length) {
     auto self = static_cast<AirportItlwmSkywalkInterface *>(object);
+    if (self->instance && (uintptr_t(operation) == Leave || uintptr_t(operation) == AbortJoin))
+        self->instance->recordNativeControlTrace(uint32_t(uintptr_t(length)),
+            uintptr_t(operation) == Leave ? NativePowerTrace::Operation::kWclLeave :
+                                           NativePowerTrace::Operation::kWclAbortJoin,
+            NativePowerTrace::Phase::kNativeActionBegin, 0, -1);
     auto backend = self->nativeBackend;
     if (!backend) return kIOReturnNotReady;
     const uintptr_t op = uintptr_t(operation);
@@ -1379,8 +1440,15 @@ IOReturn AirportItlwmSkywalkInterface::nativeRequest(OSObject *, void *object,
                 return result;
             }
         case AbortScan: return nativeStatus(backend->abortScan());
-        case AbortJoin: return nativeStatus(backend->leave(true));
-        case Leave: return nativeStatus(backend->leave(false));
+        case AbortJoin:
+        case Leave: {
+            const IOReturn result = nativeStatus(backend->leave(op == AbortJoin));
+            if (self->instance) self->instance->recordNativeControlTrace(
+                uint32_t(uintptr_t(length)), op == Leave ? NativePowerTrace::Operation::kWclLeave :
+                                                        NativePowerTrace::Operation::kWclAbortJoin,
+                NativePowerTrace::Phase::kNativeActionEnd, 0, int32_t(result));
+            return result;
+        }
         case Bss: return nativeStatus(backend->copyBss(data, NativeWifi::BeaconPrefixSize + NativeWifi::MaximumIEBytes));
         case BeaconFrame: return nativeStatus(backend->copyBeacon(data, 0x808));
         case NativeStop:
@@ -1425,10 +1493,18 @@ IOReturn AirportItlwmSkywalkInterface::setWCL_SCAN_ABORT(void *) {
     return _fCommandGate->runAction(nativeRequest, this, reinterpret_cast<void *>(AbortScan));
 }
 IOReturn AirportItlwmSkywalkInterface::setWCL_JOIN_ABORT(apple80211_wcl_abort_join *) {
-    return _fCommandGate->runAction(nativeRequest, this, reinterpret_cast<void *>(AbortJoin));
+    NativeControlTraceScope trace(instance, NativePowerTrace::Operation::kWclAbortJoin);
+    const IOReturn result = _fCommandGate->runAction(nativeRequest, this,
+        reinterpret_cast<void *>(AbortJoin), nullptr,
+        reinterpret_cast<void *>(uintptr_t(trace.callId())));
+    return trace.finish(result);
 }
 IOReturn AirportItlwmSkywalkInterface::setWCL_LEAVE_NETWORK(apple80211_leave_network *) {
-    return _fCommandGate->runAction(nativeRequest, this, reinterpret_cast<void *>(Leave));
+    NativeControlTraceScope trace(instance, NativePowerTrace::Operation::kWclLeave);
+    const IOReturn result = _fCommandGate->runAction(nativeRequest, this,
+        reinterpret_cast<void *>(Leave), nullptr,
+        reinterpret_cast<void *>(uintptr_t(trace.callId())));
+    return trace.finish(result);
 }
 IOReturn AirportItlwmSkywalkInterface::getWCL_BSS_INFO(apple80211_beacon_msg *out) {
     return _fCommandGate->runAction(nativeRequest, this, reinterpret_cast<void *>(Bss), out);
@@ -1498,15 +1574,16 @@ IOReturn AirportItlwmSkywalkInterface::applyNativeAddressGated(const void *data,
     if (!_fCommandGate || !_fCommandGate->getWorkLoop() ||
         !_fCommandGate->getWorkLoop()->inGate() || !nativeBackend || !instance ||
         !fHalService) return kIOReturnNotReady;
+    NativeControlTraceScope trace(instance, NativePowerTrace::Operation::kAddress);
     setProperty("NativeAddressStage", 1U, 32);
-    if (addressQuarantined) return kIOReturnNotPermitted;
+    if (addressQuarantined) return trace.finish(kIOReturnNotPermitted);
     if (!data || length != 6 || !instance->bsdInterface ||
-        !instance->bsdInterface->getIfnet()) return kIOReturnBadArgument;
+        !instance->bsdInterface->getIfnet()) return trace.finish(kIOReturnBadArgument);
     uint8_t address[6]; memcpy(address, data, sizeof(address));
     uint8_t bits = 0;
     for (unsigned i = 0; i < 6; ++i) bits |= address[i];
     if (!bits || (address[0] & 1) ||
-        (!(address[0] & 2) && memcmp(address, permanentAddress, 6))) return kIOReturnBadArgument;
+        (!(address[0] & 2) && memcmp(address, permanentAddress, 6))) return trace.finish(kIOReturnBadArgument);
     auto ic = fHalService->get80211Controller();
     const bool unchanged = memcmp(address, ic->ic_myaddr, 6) == 0;
     const bool restart = (ic->ic_if.if_flags & (IFF_UP | IFF_RUNNING)) != 0;
@@ -1515,11 +1592,11 @@ IOReturn AirportItlwmSkywalkInterface::applyNativeAddressGated(const void *data,
         // bounded Busy retry. Do not let a MAC change re-enable the radio after
         // Off has claimed the current epoch; a stopped radio can still commit
         // the requested address without restarting hardware.
-        if (restart && !instance->nativePowerRequested()) return kIOReturnBusy;
+        if (restart && !instance->nativePowerRequested()) return trace.finish(kIOReturnBusy);
         // Do not overwrite an in-flight init or another address transaction.
         if (((ic->ic_if.if_flags & IFF_UP) && !(ic->ic_if.if_flags & IFF_RUNNING)) ||
-            nativeBackend->joining() || nativeBackend->changingAddress()) return kIOReturnBusy;
-        if (!ic->ic_tahoe_scan_state) return kIOReturnUnsupported;
+            nativeBackend->joining() || nativeBackend->changingAddress()) return trace.finish(kIOReturnBusy);
+        if (!ic->ic_tahoe_scan_state) return trace.finish(kIOReturnUnsupported);
         addressQuarantined = true;
         setProperty("NativeAddressQuarantined", kOSBooleanTrue);
         nativeBackend->beginAddressChange();
@@ -1527,7 +1604,9 @@ IOReturn AirportItlwmSkywalkInterface::applyNativeAddressGated(const void *data,
         if (restart) {
             // Native SET_MAC_ADDRESS precedes the new WCL join. Quiesce the
             // previous association/scan before changing any address layer.
+            trace.record(NativePowerTrace::Phase::kAddressQuiesceBegin);
             const IOReturn result = fHalService->disable(instance->bsdInterface);
+            trace.record(NativePowerTrace::Phase::kAddressQuiesceEnd, 0, int32_t(result));
             setProperty("NativeAddressQuiesceResult", uint32_t(result), 32);
             if (result == kIOReturnBusy) {
                 // The HAL's nonblocking state-task barrier did not acquire a
@@ -1535,13 +1614,13 @@ IOReturn AirportItlwmSkywalkInterface::applyNativeAddressGated(const void *data,
                 nativeBackend->cancelAddressChange();
                 addressQuarantined = false;
                 setProperty("NativeAddressQuarantined", kOSBooleanFalse);
-                return result;
+                return trace.finish(result);
             }
-            if (result != kIOReturnSuccess) return result;
+            if (result != kIOReturnSuccess) return trace.finish(result);
         }
         if ((ic->ic_if.if_flags & (IFF_UP | IFF_RUNNING)) ||
             ic->ic_tahoe_scan_state(ic) != ITL_TAHOE_SCAN_STOPPED)
-            return kIOReturnNotReady;
+            return trace.finish(kIOReturnNotReady);
         nativeBackend->addressHardwareStopped();
     } else {
         addressQuarantined = true;
@@ -1551,25 +1630,29 @@ IOReturn AirportItlwmSkywalkInterface::applyNativeAddressGated(const void *data,
     // remains quarantined, with no fallback to the permanent address.
     setProperty("NativeAddressStage", 3U, 32);
     if (ifnet_set_lladdr(instance->bsdInterface->getIfnet(), address, 6))
-        return kIOReturnError;
+        return trace.finish(kIOReturnError);
     if (!instance->bsdInterface->setProperty(kIOMACAddress, address, 6))
-        return kIOReturnNoMemory;
+        return trace.finish(kIOReturnNoMemory);
     if (!NativeWifi::updateRegistrationAddress(this, registrationState, address))
-        return kIOReturnError;
+        return trace.finish(kIOReturnError);
     memcpy(requestedAddress, address, 6);
     addressWasRequested = true;
+    trace.record(NativePowerTrace::Phase::kAddressCommit,
+                 (unchanged ? 1U : 0U) | (restart ? 2U : 0U), 0);
     if (!unchanged) {
         if_setlladdr(&ic->ic_if, address);
         if (restart) {
             setProperty("NativeAddressStage", 4U, 32);
+            trace.record(NativePowerTrace::Phase::kEnableBegin);
             const IOReturn result = fHalService->enable(instance->bsdInterface);
-            if (result != kIOReturnSuccess) return result;
+            trace.record(NativePowerTrace::Phase::kEnableEnd, 0, int32_t(result));
+            if (result != kIOReturnSuccess) return trace.finish(result);
         }
     }
     addressQuarantined = false;
     setProperty("NativeAddressQuarantined", kOSBooleanFalse);
     setProperty("NativeAddressStage", 5U, 32);
-    return kIOReturnSuccess;
+    return trace.finish(kIOReturnSuccess);
 }
 bool AirportItlwmSkywalkInterface::nativePrivateAddressReady() const { return nativeAddressReady(true); }
 bool AirportItlwmSkywalkInterface::nativeAddressReady(bool requirePrivate) const {
@@ -1621,12 +1704,22 @@ void AirportItlwmSkywalkInterface::emitNative(void *context, uint32_t event,
 NativeWifi::Status AirportItlwmSkywalkInterface::radioScan(void *context,
     const NativeWifi::ScanPlan &plan) {
     auto self = static_cast<AirportItlwmSkywalkInterface *>(context);
-    if (self->fHalService->nativeP2pBusy()) return NativeWifi::Status::Busy;
+    self->nativeScanBusyReasonCode = 0;
+    if (self->fHalService->nativeP2pBusy()) {
+        self->nativeScanBusyReasonCode = 1;
+        return NativeWifi::Status::Busy;
+    }
     auto ic = self->fHalService->get80211Controller();
     if (!(ic->ic_if.if_flags & IFF_RUNNING)) return NativeWifi::Status::NotReady;
     if (!ic->ic_tahoe_scan_state) return NativeWifi::Status::Unsupported;
-    if (ic->ic_tahoe_scan_state(ic) != 0 || ic->ic_state == IEEE80211_S_AUTH ||
-        ic->ic_state == IEEE80211_S_ASSOC) return NativeWifi::Status::Busy;
+    if (ic->ic_tahoe_scan_state(ic) != 0) {
+        self->nativeScanBusyReasonCode = 2;
+        return NativeWifi::Status::Busy;
+    }
+    if (ic->ic_state == IEEE80211_S_AUTH || ic->ic_state == IEEE80211_S_ASSOC) {
+        self->nativeScanBusyReasonCode = 3;
+        return NativeWifi::Status::Busy;
+    }
     uint8_t source[6] {};
     if (plan.privateAddressRequired && !NativeWifi::secureRandomScanAddress(
         source, ic->ic_myaddr, self->previousScanAddress)) return NativeWifi::Status::Failed;
@@ -1646,6 +1739,7 @@ NativeWifi::Status AirportItlwmSkywalkInterface::radioScan(void *context,
         ieee80211_begin_cache_bgscan(&ic->ic_if);
         if (!(ic->ic_flags & IEEE80211_F_BGSCAN)) {
             ic->ic_tahoe_scan_requested = false;
+            self->nativeScanBusyReasonCode = 4;
             return NativeWifi::Status::Busy;
         }
     } else if (ic->ic_state == IEEE80211_S_SCAN) {
@@ -1665,6 +1759,36 @@ NativeWifi::Status AirportItlwmSkywalkInterface::radioScan(void *context,
     }
     NativeWifi::erase(source,sizeof(source));
     return NativeWifi::Status::Ok;
+}
+uint64_t AirportItlwmSkywalkInterface::scanMonotonicNanoseconds(void *) {
+    AbsoluteTime now = 0;
+    uint64_t nanoseconds = 0;
+    clock_get_uptime(&now);
+    absolutetime_to_nanoseconds(now, &nanoseconds);
+    return nanoseconds;
+}
+NativeWifi::ScanBusyDetail AirportItlwmSkywalkInterface::scanBusyDetail(void *context) {
+    auto self = static_cast<AirportItlwmSkywalkInterface *>(context);
+    return {self->nativeScanBusyReasonCode};
+}
+void AirportItlwmSkywalkInterface::publishNativeScanTrace() {
+    if (!nativeBackend || !_fCommandGate || !_fCommandGate->getWorkLoop() ||
+        !_fCommandGate->getWorkLoop()->inGate() || ml_at_interrupt_context()) return;
+    // Copy into owned storage on the backend gate, never a large RX stack
+    // temporary. All bytes are initialized and contain numeric metadata only.
+    nativeBackend->copyScanTrace(&nativeScanTraceSnapshot);
+    if (!nativeScanTracePublished || memcmp(&nativeScanTraceSnapshot,
+            &publishedNativeScanTrace, sizeof(nativeScanTraceSnapshot))) {
+        if (setProperty("NativeScanTraceSnapshot", &nativeScanTraceSnapshot,
+                        sizeof(nativeScanTraceSnapshot))) {
+            setProperty("NativeScanTraceSchema", 1U, 32);
+            setProperty("NativeScanTraceRecordBytes",
+                        uint32_t(sizeof(NativeWifi::ScanTraceRecord)), 32);
+            memcpy(&publishedNativeScanTrace, &nativeScanTraceSnapshot,
+                   sizeof(nativeScanTraceSnapshot));
+            nativeScanTracePublished = true;
+        }
+    }
 }
 NativeWifi::Status AirportItlwmSkywalkInterface::radioCancelScan(void *context) {
     auto self = static_cast<AirportItlwmSkywalkInterface *>(context);
@@ -1812,12 +1936,18 @@ void AirportItlwmSkywalkInterface::consumeNative(void *context, const NativeWifi
             // this owned, serialized consumer after a real HAL state event.
             self->instance->publishNativePowerState();
             self->instance->wakeNativePowerWaiters();
-            self->postMessage(APPLE80211_M_POWER_CHANGED, nullptr, 0, true);
+            self->instance->postNativePowerChangedIfNeeded();
             break;
         case ITL_TAHOE_EVT_RESET_BEGIN:
             if (!backend->changingAddress()) backend->driverState(false);
+            self->instance->postNativePowerChangedIfNeeded();
             break;
-        case 9: backend->tick(entry.value); break;
+        case 9:
+            backend->tick(entry.value);
+            // A transition remains pending even if its original signal was
+            // dropped; this bounded existing tick rechecks the current pair.
+            self->instance->postNativePowerChangedIfNeeded();
+            break;
         case 10: backend->observeAuthorization(entry.value != 0); break;
         case IEEE80211_EVT_COUNTRY_CODE_UPDATE:
             self->postMessage(APPLE80211_M_COUNTRY_CODE_CHANGED, nullptr, 0, false); break;
@@ -1825,6 +1955,8 @@ void AirportItlwmSkywalkInterface::consumeNative(void *context, const NativeWifi
     // Publish counters only from the watchdog or rare control events; beacon RX
     // never performs IORegistry allocation on its producer dynamic stack.
     if (entry.kind != ITL_TAHOE_EVT_BEACON) {
+        self->publishNativeScanTrace();
+        self->instance->publishNativePowerTrace();
         // These are emit-call counts, not acknowledgements from the native
         // WCL cache. Publish only on this owned consumer, never on RX/IRQ.
         const auto emitted201 = backend->event201EmitCalls();

@@ -11,17 +11,17 @@
     "developer-tools/test088/afpacket-sender/fixtures/probe-spec.json": "6b6f784461de4409e34da05e59e17203f970400935977ed6a43c1a3aa5d82b1b",
     "developer-tools/test088/afpacket-sender/test_sender_host_negative.py": "544e5a10959e6754f99a16e087c734698336643168ada7a1d76bd0763338b213",
     "developer-tools/test088/afpacket-sender/test_sender_timing.py": "74f084accc7299ab795171e9020dbd99fafb49262a0365f9a25ea59583a21c81",
-    "developer-tools/test088/controlled_run_test088.py": "b90639682b6a7ab89a1538dae1fd0093f096049a53da48abb54788128595a66a",
+    "developer-tools/test088/controlled_run_test088.py": "6a2e8f9e71762e7e8c65db9678f31b815bb074f73241b5c9c775359457e58850",
     "developer-tools/test088/netstat_counters.py": "4b7139d31f9633c58dc8d2e96be07c9415ad7a2cc904aede5b1e836428cc6413",
     "developer-tools/test088/send_timing.py": "390e87a3ba8b8e8cfb68d9a3084c3ee3dc6998751797548c152aac035005672a",
-    "developer-tools/test088/tests/test_controlled_run_test088.py": "1920d2ec2ce5a9c611cf3f83f73c6a573ac15fa344de695f278722486b7447a1",
+    "developer-tools/test088/tests/test_controlled_run_test088.py": "d75cb01107ef7658958a7c3749478ea9f699c0998c37477a0898915e97b90d09",
     "developer-tools/test088/tests/test_netstat_counters.py": "d6266ea743550c67685df4cd4504cc44498f7c35b6078d674c86cd31a535c12a",
     "developer-tools/test088/tests/test_send_timing.py": "24777254cea821ade788dc2515f624ea25293ecc0968a5892ec98ebbf6ee54fa"
   },
   "frozen_test087_source_manifest_sha256": "8f7cdc404900ca943ecfa86ef5ce8a5adf5e48eb80273e5f618768daa2a2152c",
   "sender_binary_sha256": "f134be242075e19f38b61ca105d89dfa148133fd3dafdf37480fcd3d7c0fd222",
   "offline_validation": {
-    "python_tests": 29,
+    "python_tests": 31,
     "sender_host_tests": 9,
     "passed": true,
     "aarch64_static_build": true

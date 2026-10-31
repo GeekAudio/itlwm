@@ -30,6 +30,9 @@
 #include "ItlIwn.hpp"
 
 #include "AirportItlwmEthernetInterface.hpp"
+#ifdef AIRPORT_TAHOE
+#include "../native/native_power_trace.hpp"
+#endif
 
 enum
 {
@@ -277,7 +280,13 @@ public:
     uint32_t nativePowerReadyCount {0};
     uint32_t nativePowerStoppedCount {0};
     uint32_t nativePowerResetCount {0};
-    uint32_t nativePowerEpoch {0}; // Serialized by the native command gate.
+    uint32_t nativePowerEpoch {0}; // Atomic; serialized transitions still run on the command gate.
+    uint64_t nativePowerTransitionRevision {0}; // Atomic accesses, serialized with nativePowerStateLock when available.
+    uint32_t nativePowerTracePublishedSequence {0};
+    NativePowerTrace::NotificationState nativePowerNotificationState {};
+    IOSimpleLock *nativePowerStateLock {nullptr};
+    IOSimpleLock *nativePowerTraceLock {nullptr};
+    NativePowerTrace::Ledger nativePowerTrace {};
     uint32_t nativePowerOffAttempts {0};
     uint32_t nativePowerOffRetries {0};
     uint32_t nativePowerOffResult {uint32_t(kIOReturnNotReady)};
@@ -285,12 +294,27 @@ public:
     bool nativePowerRequested() const {
         return (__atomic_load_n(&nativePowerFlags, __ATOMIC_ACQUIRE) & 1U) != 0;
     }
-    IOReturn waitForNativePower(uint32_t);
-    IOReturn disableAdapterWithRetry(uint32_t);
+    bool initializeNativePowerLocks();
+    void releaseNativePowerLocks();
+    IOReturn waitForNativePower(uint32_t, uint32_t traceCallId);
+    IOReturn disableAdapterWithRetry(uint32_t, uint32_t traceCallId);
     void wakeNativePowerWaiters();
     static IOReturn nativePowerAction(OSObject *, void *, void *, void *, void *);
     void publishNativePowerState();
-    void observeNativePowerEvent(int);
+    uint32_t observeNativePowerEvent(int);
+    // Call only from the serialized native event/tick consumer, never HAL IRQ
+    // ingress. The cache belongs to that consumer and stores the pair sampled
+    // before the postMessage call, not an assumed OS acknowledgement.
+    bool postNativePowerChangedIfNeeded();
+    bool nativePowerStateSnapshot(uint32_t *powerFlags, uint64_t *revision) const;
+    uint32_t updateNativePowerFlags(uint32_t clearMask, uint32_t setMask,
+                                    bool readyRequiresRequested = false);
+    uint32_t beginNativeControlTrace(NativePowerTrace::Operation,
+        NativePowerTrace::Phase, uint32_t detail, int32_t result);
+    void recordNativeControlTrace(uint32_t callId,
+        NativePowerTrace::Operation, NativePowerTrace::Phase,
+        uint32_t detail, int32_t result);
+    void publishNativePowerTrace();
     CCStream *nativeLogger {nullptr};
     OSObject *nativeFaultReporter {nullptr};
     uint32_t nativeCaptureStarted {0};

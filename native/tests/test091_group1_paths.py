@@ -105,6 +105,8 @@ typedef uint16_t u_int16_t;
 #define IEEE80211_KDE_IGTK 9
 #define IEEE80211_REASON_AUTH_LEAVE 3
 #define IEEE80211_FC0_SUBTYPE_DEAUTH 0xc0
+#define IEEE80211_F_TX_MGMT_ONLY 0x00000001u
+#define IEEE80211_F_BGSCAN 0x08000000u
 #define IEEE80211_EAPOL_KEY_ENCRYPTED 0x1000u
 #define EAPOL_KEY_ENCRYPTED IEEE80211_EAPOL_KEY_ENCRYPTED
 #define EAPOL_KEY_SECURE 0x0200u
@@ -113,6 +115,7 @@ typedef uint16_t u_int16_t;
 #define IFF_DEBUG 0x01u
 #define LINK_STATE_UP 1
 #define IEEE80211_S_SCAN 1
+#define IEEE80211_S_RUN 4
 
 static const uint8_t iwx_test_oui[3] = {0x00, 0x0f, 0xac};
 #define IEEE80211_OUI iwx_test_oui
@@ -195,6 +198,9 @@ typedef int (*mgmt_callback)(struct ieee80211com *, struct ieee80211_node *,
 
 struct ieee80211com {
     int ic_opmode;
+    unsigned ic_flags;
+    unsigned ic_xflags;
+    int ic_state;
     struct ieee80211_if ic_if;
     struct ieee80211_stats ic_stats;
     struct ieee80211_key ic_nw_keys[6];
@@ -206,15 +212,22 @@ struct ieee80211com {
     int (*ic_tahoe_set_key_observed)(struct ieee80211com *,
         struct ieee80211_node *, struct ieee80211_key *, uint32_t,
         struct IwxStaAuthSubmitReceipt *);
+    uint32_t (*ic_tahoe_scan_state)(struct ieee80211com *);
     struct IwxStaAuthTrace ic_tahoe_auth_trace;
 #endif
 };
+
+void ieee80211_recv_rsn_group_msg1(struct ieee80211com *,
+    struct ieee80211_eapol_key *, struct ieee80211_node *);
+void ieee80211_recv_wpa_group_msg1(struct ieee80211com *,
+    struct ieee80211_eapol_key *, struct ieee80211_node *);
 
 static unsigned g_key_calls;
 static unsigned g_mgmt_calls;
 static unsigned g_m2_calls;
 static unsigned g_mic_calls;
 static unsigned g_decrypt_calls;
+static unsigned g_scan_state_calls;
 static int g_key_result;
 static int g_mgmt_result;
 static int g_m2_result;
@@ -224,6 +237,8 @@ static unsigned g_expected_kid;
 static uint8_t g_expected_key[16];
 #ifdef AIRPORT_TAHOE
 static const uint64_t kMonotonicBase = 0x102030405060ULL;
+static uint32_t g_scan_phase;
+static uint32_t g_last_m2_preceding_kind;
 #endif
 
 #ifdef AIRPORT_TAHOE
@@ -304,10 +319,27 @@ static int ieee80211_cipher_keylen(enum ieee80211_cipher cipher)
 static int ieee80211_send_group_msg2(struct ieee80211com *ic,
     struct ieee80211_node *ni, struct ieee80211_key *key)
 {
-    (void)ic; (void)ni; (void)key;
+    (void)ni; (void)key;
+#ifdef AIRPORT_TAHOE
+    struct IwxStaAuthTraceSnapshot snapshot;
+    assert(iwx_sta_auth_trace_snapshot(&ic->ic_tahoe_auth_trace, &snapshot));
+    assert(snapshot.live_count != 0);
+    g_last_m2_preceding_kind = snapshot.live[snapshot.live_count - 1].kind;
+#else
+    (void)ic;
+#endif
     ++g_m2_calls;
     return g_m2_result;
 }
+
+#ifdef AIRPORT_TAHOE
+static uint32_t scan_state_callback(struct ieee80211com *ic)
+{
+    (void)ic;
+    ++g_scan_state_calls;
+    return g_scan_phase;
+}
+#endif
 
 static void ieee80211_new_state(struct ieee80211com *ic, int state, int arg)
 {
@@ -329,9 +361,14 @@ static void reset_globals(void)
 {
     g_key_calls = g_mgmt_calls = g_m2_calls = 0;
     g_mic_calls = g_decrypt_calls = 0;
+    g_scan_state_calls = 0;
     g_key_result = g_mgmt_result = g_m2_result = 0;
     g_mic_result = g_decrypt_result = 0;
     g_expected_kid = 1;
+#ifdef AIRPORT_TAHOE
+    g_scan_phase = 0;
+    g_last_m2_preceding_kind = 0;
+#endif
     for (unsigned i = 0; i < sizeof(g_expected_key); ++i)
         g_expected_key[i] = (uint8_t)(0xd3u ^ (i * 7u));
 }
@@ -349,6 +386,8 @@ static void init_fixture(struct fixture *fixture)
 #ifdef AIRPORT_TAHOE
     iwx_sta_auth_trace_init(&fixture->ic.ic_tahoe_auth_trace, 3);
     fixture->ic.ic_tahoe_set_key_observed = key_callback_observed;
+    fixture->ic.ic_tahoe_scan_state = scan_state_callback;
+    fixture->ic.ic_state = IEEE80211_S_RUN;
 #endif
 }
 
@@ -411,6 +450,76 @@ static int bytes_contain(const void *haystack, size_t haystack_length,
         if (memcmp(bytes + i, pattern, needle_length) == 0)
             return 1;
     return 0;
+}
+
+static void assert_group2_callsite_gate(struct fixture *fixture,
+    uint32_t expected_flags, uint32_t expected_phase)
+{
+    struct IwxStaAuthTraceSnapshot snapshot;
+    assert(iwx_sta_auth_trace_snapshot(&fixture->ic.ic_tahoe_auth_trace,
+                                      &snapshot));
+    assert(g_last_m2_preceding_kind ==
+           IWX_STA_TRACE_GROUP2_CALLSITE_GATE);
+    assert(g_scan_state_calls == 1);
+
+    const struct IwxStaAuthTraceEvent *gate = NULL;
+    const struct IwxStaAuthTraceEvent *group2 = NULL;
+    uint32_t gate_index = UINT32_MAX;
+    uint32_t group2_index = UINT32_MAX;
+    unsigned gate_count = 0;
+    unsigned group2_count = 0;
+    for (uint32_t i = 0; i < snapshot.live_count; ++i) {
+        const struct IwxStaAuthTraceEvent *event = &snapshot.live[i];
+        if (event->kind == IWX_STA_TRACE_GROUP2_CALLSITE_GATE) {
+            gate = event;
+            gate_index = i;
+            ++gate_count;
+        } else if (event->kind == IWX_STA_TRACE_GROUP2_RESULT) {
+            group2 = event;
+            group2_index = i;
+            ++group2_count;
+        }
+    }
+    assert(gate_count == 1 && group2_count == 1);
+    assert(gate_index + 1 == group2_index);
+    assert(gate->attempt_id != 0 && gate->attempt_id == group2->attempt_id);
+    assert(gate->stage == IWX_STA_STAGE_GROUP2_CALLSITE_GATE);
+    assert(gate->result == IEEE80211_S_RUN);
+    assert(gate->flags == expected_flags);
+    assert(gate->detail == expected_phase);
+}
+
+static void test_rsn_group2_callsite_gate_capture(void)
+{
+    reset_globals();
+    struct fixture f; init_fixture(&f);
+    f.ic.ic_flags = IEEE80211_F_BGSCAN;
+    f.ic.ic_xflags = IEEE80211_F_TX_MGMT_ONLY;
+    g_scan_phase = 2; /* ITL_TAHOE_SCAN_DRAINING */
+    struct ieee80211_eapol_key *key = init_rsn_group1(&f, 6, 1, 1);
+    ieee80211_recv_rsn_group_msg1(&f.ic, key, &f.ni);
+    assert(g_m2_calls == 1 && f.ni.ni_replaycnt == 6);
+    assert(f.ni.ni_port_valid == 1);
+    assert_group2_callsite_gate(&f,
+        IWX_STA_FLAG_GROUP2_TX_MGMT_ONLY |
+        IWX_STA_FLAG_GROUP2_BGSCAN |
+        IWX_STA_FLAG_GROUP2_SCAN_PHASE_PRESENT, 2);
+}
+
+static void test_wpa_group2_callsite_gate_capture(void)
+{
+    reset_globals();
+    struct fixture f; init_fixture(&f);
+    f.ic.ic_flags = IEEE80211_F_BGSCAN;
+    f.ic.ic_xflags = 0;
+    g_scan_phase = 4; /* ITL_TAHOE_SCAN_STOPPED */
+    struct ieee80211_eapol_key *key = init_wpa_group1(&f, 6);
+    ieee80211_recv_wpa_group_msg1(&f.ic, key, &f.ni);
+    assert(g_m2_calls == 1 && f.ni.ni_replaycnt == 6);
+    assert(f.ni.ni_port_valid == 1);
+    assert_group2_callsite_gate(&f,
+        IWX_STA_FLAG_GROUP2_BGSCAN |
+        IWX_STA_FLAG_GROUP2_SCAN_PHASE_PRESENT, 4);
 }
 #endif
 
@@ -576,6 +685,10 @@ int main(void)
     test_callback_result(EAGAIN, 0, 1, 1, "callback-eagain");
     test_group2_failure_ignored();
     test_wpa_group1_callback_eagain();
+#ifdef AIRPORT_TAHOE
+    test_rsn_group2_callsite_gate_capture();
+    test_wpa_group2_callsite_gate_capture();
+#endif
     return 0;
 }
 '''
@@ -598,6 +711,7 @@ def main() -> None:
         for marker in (
             "static uint64_t ieee80211_tahoe_trace_time_us(void)",
             "static void ieee80211_tahoe_trace_group(struct ieee80211com *ic",
+            "static void ieee80211_tahoe_trace_group2_callsite_gate(",
             "static int ieee80211_tahoe_install_group_key(struct ieee80211com *ic",
         )
     )

@@ -22,6 +22,7 @@
 #include "../native/awdl_native_lifecycle_25G332.hpp"
 #endif
 #include <IOKit/IOUserClient.h>
+#include <libkern/c++/OSData.h>
 #include <kern/clock.h>
 #include <kern/task.h>
 #endif
@@ -45,6 +46,11 @@ static IOReturn publishNativeAwdlClosingAction(
 
 #ifdef AIRPORT_TAHOE
 namespace {
+struct NativePowerActionContext {
+    apple80211_power_data request;
+    uint32_t traceCallId;
+};
+
 uint64_t nativePowerUptimeNanoseconds()
 {
     AbsoluteTime uptime = 0;
@@ -135,6 +141,33 @@ void AirportItlwm::releaseAll()
 }
 
 #ifdef AIRPORT_TAHOE
+bool AirportItlwm::initializeNativePowerLocks()
+{
+    if (!nativePowerStateLock) nativePowerStateLock = IOSimpleLockAlloc();
+    if (!nativePowerStateLock) {
+        releaseNativePowerLocks();
+        return false;
+    }
+    if (!nativePowerTraceLock) nativePowerTraceLock = IOSimpleLockAlloc();
+    if (!nativePowerTraceLock) {
+        releaseNativePowerLocks();
+        return false;
+    }
+    return true;
+}
+
+void AirportItlwm::releaseNativePowerLocks()
+{
+    if (nativePowerTraceLock) {
+        IOSimpleLockFree(nativePowerTraceLock);
+        nativePowerTraceLock = nullptr;
+    }
+    if (nativePowerStateLock) {
+        IOSimpleLockFree(nativePowerStateLock);
+        nativePowerStateLock = nullptr;
+    }
+}
+
 void AirportItlwm::releaseNativeCapture()
 {
     // The native fault wrapper owns its corecapture reporter and timer. Keep
@@ -208,6 +241,7 @@ bool AirportItlwm::init(OSDictionary *properties)
     XYLog("%s\n", __PRETTY_FUNCTION__);
     bool ret = ITL_STARTUP_RESULT(nullptr, "parent-init", super::init(properties));
 #ifdef AIRPORT_TAHOE
+    if (!ret || !initializeNativePowerLocks()) return false;
     awdlSyncEnable = false;
 #else
     awdlSyncEnable = true;
@@ -776,6 +810,7 @@ void AirportItlwm::free()
     }
 #ifdef AIRPORT_TAHOE
     releaseNativeCapture();
+    releaseNativePowerLocks();
 #endif
     super::free();
 }
@@ -1311,33 +1346,186 @@ getPOWER(OSObject *object,
 }
 
 #ifdef AIRPORT_TAHOE
-void AirportItlwm::observeNativePowerEvent(int event)
+uint32_t AirportItlwm::updateNativePowerFlags(uint32_t clearMask,
+                                               uint32_t setMask,
+                                               bool readyRequiresRequested)
 {
-    // This ingress can run from a HAL task or interrupt context. No IOKit
-    // properties or allocations here; GET/SET publish a numeric snapshot.
+    IOSimpleLock *lock = nativePowerStateLock;
+    if (!lock) {
+        // Defensive fallback during partial teardown or a broken lifecycle.
+        // Normal startup refuses to continue unless this state lock exists.
+        uint32_t flags = __atomic_load_n(&nativePowerFlags, __ATOMIC_ACQUIRE);
+        uint32_t updated = 0;
+        for (;;) {
+            uint32_t effectiveSetMask = setMask;
+            if (readyRequiresRequested && !(flags & 1U)) effectiveSetMask &= ~2U;
+            updated = (flags & ~clearMask) | effectiveSetMask;
+            if (__atomic_compare_exchange_n(&nativePowerFlags, &flags, updated,
+                    false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+                break;
+        }
+        if ((flags & 2U) != (updated & 2U))
+            __atomic_fetch_add(&nativePowerTransitionRevision, uint64_t(1), __ATOMIC_ACQ_REL);
+        return flags;
+    }
+
+    const IOInterruptState irq = IOSimpleLockLockDisableInterrupt(lock);
+    const uint32_t flags = __atomic_load_n(&nativePowerFlags, __ATOMIC_RELAXED);
+    uint32_t effectiveSetMask = setMask;
+    if (readyRequiresRequested && !(flags & 1U)) effectiveSetMask &= ~2U;
+    const uint32_t updated = (flags & ~clearMask) | effectiveSetMask;
+    if ((flags & 2U) != (updated & 2U))
+        __atomic_fetch_add(&nativePowerTransitionRevision, uint64_t(1), __ATOMIC_RELAXED);
+    __atomic_store_n(&nativePowerFlags, updated, __ATOMIC_RELEASE);
+    IOSimpleLockUnlockEnableInterrupt(lock, irq);
+    return flags;
+}
+
+bool AirportItlwm::nativePowerStateSnapshot(uint32_t *powerFlags,
+                                            uint64_t *revision) const
+{
+    IOSimpleLock *lock = nativePowerStateLock;
+    if (!lock || !powerFlags || !revision) return false;
+    const IOInterruptState irq = IOSimpleLockLockDisableInterrupt(lock);
+    *powerFlags = __atomic_load_n(&nativePowerFlags, __ATOMIC_RELAXED);
+    *revision = __atomic_load_n(&nativePowerTransitionRevision, __ATOMIC_RELAXED);
+    IOSimpleLockUnlockEnableInterrupt(lock, irq);
+    return true;
+}
+
+uint32_t AirportItlwm::observeNativePowerEvent(int event)
+{
+    // HAL ingress may run at interrupt level. Keep this path to counters,
+    // bounded lock-protected metadata, and atomic state; never publish IOKit
+    // properties or allocate here.
     if (event == ITL_TAHOE_EVT_DRIVER_READY) {
         __atomic_fetch_add(&nativePowerReadyCount, 1U, __ATOMIC_RELAXED);
-        uint32_t flags = __atomic_load_n(&nativePowerFlags, __ATOMIC_ACQUIRE);
-        while ((flags & 1U) && !__atomic_compare_exchange_n(&nativePowerFlags,
-            &flags, flags | 2U, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {}
-        // One-word CAS prevents a late READY from overriding a newer Off.
+        updateNativePowerFlags(0, 2U, true);
     } else if (event == ITL_TAHOE_EVT_DRIVER_STOPPED) {
         __atomic_fetch_add(&nativePowerStoppedCount, 1U, __ATOMIC_RELAXED);
-        __atomic_fetch_and(&nativePowerFlags, ~2U, __ATOMIC_ACQ_REL);
+        updateNativePowerFlags(2U, 0, false);
     } else if (event == ITL_TAHOE_EVT_RESET_BEGIN) {
         __atomic_fetch_add(&nativePowerResetCount, 1U, __ATOMIC_RELAXED);
-        __atomic_fetch_and(&nativePowerFlags, ~2U, __ATOMIC_ACQ_REL);
-    } else return;
+        updateNativePowerFlags(2U, 0, false);
+    } else {
+        return __atomic_load_n(&nativePowerFlags, __ATOMIC_ACQUIRE);
+    }
     __atomic_store_n(&nativePowerLastEvent, uint32_t(event), __ATOMIC_RELEASE);
+    beginNativeControlTrace(NativePowerTrace::Operation::kHalEvent,
+        NativePowerTrace::Phase::kDriverEvent, uint32_t(event), 0);
+    return __atomic_load_n(&nativePowerFlags, __ATOMIC_ACQUIRE);
+}
+
+uint32_t AirportItlwm::beginNativeControlTrace(
+    NativePowerTrace::Operation operation, NativePowerTrace::Phase phase,
+    uint32_t detail, int32_t result)
+{
+    IOSimpleLock *traceLock = nativePowerTraceLock;
+    if (!traceLock) return 0;
+
+    uint32_t powerFlags = __atomic_load_n(&nativePowerFlags, __ATOMIC_ACQUIRE);
+    uint64_t revision = UINT64_MAX;
+    nativePowerStateSnapshot(&powerFlags, &revision);
+    uint32_t interfaceFlags = 0;
+    if (_fWorkloop && _fWorkloop->inGate() && fHalService)
+        interfaceFlags = fHalService->get80211Controller()->ic_if.if_flags &
+            (IFF_UP | IFF_RUNNING);
+    const uint32_t epoch = __atomic_load_n(&nativePowerEpoch, __ATOMIC_ACQUIRE);
+    const uint64_t monotonicNs = nativePowerUptimeNanoseconds();
+
+    const IOInterruptState irq = IOSimpleLockLockDisableInterrupt(traceLock);
+    const uint32_t callId = nativePowerTrace.begin(operation, phase,
+        monotonicNs, epoch, powerFlags, interfaceFlags,
+        revision, detail, result);
+    IOSimpleLockUnlockEnableInterrupt(traceLock, irq);
+    return callId;
+}
+
+void AirportItlwm::recordNativeControlTrace(
+    uint32_t callId, NativePowerTrace::Operation operation,
+    NativePowerTrace::Phase phase, uint32_t detail, int32_t result)
+{
+    IOSimpleLock *traceLock = nativePowerTraceLock;
+    if (!traceLock || !callId) return;
+
+    uint32_t powerFlags = __atomic_load_n(&nativePowerFlags, __ATOMIC_ACQUIRE);
+    uint64_t revision = UINT64_MAX;
+    nativePowerStateSnapshot(&powerFlags, &revision);
+    uint32_t interfaceFlags = 0;
+    if (_fWorkloop && _fWorkloop->inGate() && fHalService)
+        interfaceFlags = fHalService->get80211Controller()->ic_if.if_flags &
+            (IFF_UP | IFF_RUNNING);
+    const uint32_t epoch = __atomic_load_n(&nativePowerEpoch, __ATOMIC_ACQUIRE);
+    const uint64_t monotonicNs = nativePowerUptimeNanoseconds();
+
+    const IOInterruptState irq = IOSimpleLockLockDisableInterrupt(traceLock);
+    nativePowerTrace.record(callId, operation, phase,
+        monotonicNs, epoch, powerFlags, interfaceFlags,
+        revision, detail, result);
+    IOSimpleLockUnlockEnableInterrupt(traceLock, irq);
+}
+
+void AirportItlwm::publishNativePowerTrace()
+{
+    if (ml_at_interrupt_context()) return;
+    IOSimpleLock *traceLock = nativePowerTraceLock;
+    if (!traceLock) return;
+
+    NativePowerTrace::Snapshot snapshot {};
+    uint32_t sequence = 0;
+    const IOInterruptState irq = IOSimpleLockLockDisableInterrupt(traceLock);
+    sequence = nativePowerTrace.sequence();
+    if (sequence == __atomic_load_n(&nativePowerTracePublishedSequence,
+                                     __ATOMIC_RELAXED)) {
+        IOSimpleLockUnlockEnableInterrupt(traceLock, irq);
+        return;
+    }
+    nativePowerTrace.snapshot(&snapshot);
+    IOSimpleLockUnlockEnableInterrupt(traceLock, irq);
+
+    OSData *data = OSData::withBytes(&snapshot, sizeof(snapshot));
+    if (!data) return;
+    if (setProperty("NativePowerTrace", data)) {
+        setProperty("NativePowerTraceSchema", NativePowerTrace::kSchemaVersion, 32);
+        setProperty("NativePowerTraceSequence", sequence, 32);
+        __atomic_store_n(&nativePowerTracePublishedSequence, sequence, __ATOMIC_RELEASE);
+    }
+    data->release();
+}
+
+bool AirportItlwm::postNativePowerChangedIfNeeded()
+{
+    if (ml_at_interrupt_context() || !fNetIf) return false;
+    uint32_t powerFlags = 0;
+    uint64_t revision = 0;
+    if (!nativePowerStateSnapshot(&powerFlags, &revision)) return false;
+    const uint32_t ready = (powerFlags & 2U) ? 1U : 0U;
+    if (!nativePowerNotificationState.changed(ready, revision)) return false;
+
+    const uint32_t callId = beginNativeControlTrace(
+        NativePowerTrace::Operation::kHalEvent,
+        NativePowerTrace::Phase::kNotificationCall, ready, 0);
+    // POWER_CHANGED carries no state payload; consumers query GET_POWER. This
+    // records only that the call was made, not an OS acknowledgement.
+    fNetIf->postMessage(APPLE80211_M_POWER_CHANGED, nullptr, 0, true);
+    nativePowerNotificationState.didPost(ready, revision);
+    recordNativeControlTrace(callId, NativePowerTrace::Operation::kHalEvent,
+        NativePowerTrace::Phase::kCallEnd, ready, 0);
+    return true;
 }
 
 void AirportItlwm::publishNativePowerState()
 {
     if (ml_at_interrupt_context()) return;
+    uint32_t powerFlags = __atomic_load_n(&nativePowerFlags, __ATOMIC_ACQUIRE);
+    uint64_t revision = UINT64_MAX;
+    const bool stableState = nativePowerStateSnapshot(&powerFlags, &revision);
     setProperty("NativePowerGetCount", __atomic_load_n(&nativePowerGetCount, __ATOMIC_RELAXED), 32);
     setProperty("NativePowerSetCount", __atomic_load_n(&nativePowerSetCount, __ATOMIC_RELAXED), 32);
-    setProperty("NativePowerRequested", __atomic_load_n(&nativePowerFlags, __ATOMIC_ACQUIRE) & 1U, 32);
-    setProperty("NativePowerReady", (__atomic_load_n(&nativePowerFlags, __ATOMIC_ACQUIRE) >> 1) & 1U, 32);
+    setProperty("NativePowerRequested", powerFlags & 1U, 32);
+    setProperty("NativePowerReady", (powerFlags >> 1) & 1U, 32);
+    setProperty("NativePowerReadyTransitionRevision",
+        stableState ? revision : UINT64_MAX, 64);
     setProperty("NativePowerLastResult", __atomic_load_n(&nativePowerLastResult, __ATOMIC_ACQUIRE), 32);
     setProperty("NativePowerLastEvent", __atomic_load_n(&nativePowerLastEvent, __ATOMIC_ACQUIRE), 32);
     setProperty("NativePowerReadyCount", __atomic_load_n(&nativePowerReadyCount, __ATOMIC_RELAXED), 32);
@@ -1357,17 +1545,24 @@ void AirportItlwm::publishNativePowerState()
         if (ic->ic_tahoe_scan_state)
             setProperty("NativePowerScanPhase", ic->ic_tahoe_scan_state(ic), 32);
     }
+    publishNativePowerTrace();
 }
 
 IOReturn AirportItlwm::nativePowerAction(OSObject *owner, void *argument,
     void *, void *, void *)
 {
     auto self = OSDynamicCast(AirportItlwm, owner);
-    auto request = static_cast<const apple80211_power_data *>(argument);
+    auto context = static_cast<const NativePowerActionContext *>(argument);
+    auto request = context ? &context->request : nullptr;
     if (!self || !request || !_fWorkloop || !_fWorkloop->inGate() ||
         _fWorkloop->onThread() || !self->fHalService || !self->bsdInterface ||
         !self->fNetIf || self->fNetIf->getControllerWorkQueue() != _fWorkloop ||
         !self->watchdogTimer) return kIOReturnNotReady;
+    const uint32_t traceCallId = context->traceCallId;
+    self->recordNativeControlTrace(traceCallId,
+        NativePowerTrace::Operation::kPowerSet,
+        NativePowerTrace::Phase::kNativeActionBegin,
+        request->power_state[0] ? 1U : 0U, 0);
     auto ifp = &self->fHalService->get80211Controller()->ic_if;
     const bool on = request->power_state[0] != 0;
     if (on) {
@@ -1379,13 +1574,13 @@ IOReturn AirportItlwm::nativePowerAction(OSObject *owner, void *argument,
             // retries. Let this newer On own policy/epoch, then wait for a real
             // READY event if the interface is still activating.
             __atomic_store_n(&self->nativePowerOffPending, false, __ATOMIC_RELEASE);
-            const uint32_t previous = __atomic_fetch_or(
-                &self->nativePowerFlags, 1U, __ATOMIC_ACQ_REL);
-            const uint32_t epoch = ++self->nativePowerEpoch;
+            const uint32_t previous = self->updateNativePowerFlags(0, 1U);
+            const uint32_t epoch = __atomic_add_fetch(
+                &self->nativePowerEpoch, 1U, __ATOMIC_ACQ_REL);
             self->wakeNativePowerWaiters();
             if (flags == (IFF_UP | IFF_RUNNING) && (previous & 2U))
                 return kIOReturnSuccess;
-            if (flags & IFF_UP) return self->waitForNativePower(epoch);
+            if (flags & IFF_UP) return self->waitForNativePower(epoch, traceCallId);
             if (flags & IFF_RUNNING) return kIOReturnBusy;
             // The radio reached fully down while the action gate was yielded;
             // continue through the ordinary enable path below.
@@ -1393,57 +1588,71 @@ IOReturn AirportItlwm::nativePowerAction(OSObject *owner, void *argument,
         if (flags) {
             if (flags == (IFF_UP | IFF_RUNNING) &&
                 (__atomic_load_n(&self->nativePowerFlags, __ATOMIC_ACQUIRE) & 2U)) {
-                const uint32_t previous = __atomic_fetch_or(
-                    &self->nativePowerFlags, 1U, __ATOMIC_ACQ_REL);
+                const uint32_t previous = self->updateNativePowerFlags(0, 1U);
                 // An On request can arrive while a bounded Off retry sleeps
                 // outside this gate. Advance the serialized epoch and wake it
                 // so it cannot stop a radio that the caller just re-enabled.
                 if (!(previous & 1U)) {
-                    ++self->nativePowerEpoch;
+                    __atomic_add_fetch(&self->nativePowerEpoch, 1U, __ATOMIC_ACQ_REL);
                     self->wakeNativePowerWaiters();
                 }
                 return kIOReturnSuccess;
             }
             if ((flags & IFF_UP) &&
                 (__atomic_load_n(&self->nativePowerFlags, __ATOMIC_ACQUIRE) & 1U))
-                return self->waitForNativePower(self->nativePowerEpoch);
+                return self->waitForNativePower(
+                    __atomic_load_n(&self->nativePowerEpoch, __ATOMIC_ACQUIRE),
+                    traceCallId);
             return kIOReturnBusy;
         }
-        __atomic_store_n(&self->nativePowerFlags, 1U, __ATOMIC_RELEASE);
+        self->updateNativePowerFlags(2U, 1U);
         __atomic_store_n(&self->nativePowerOffPending, false, __ATOMIC_RELEASE);
-        const uint32_t epoch = ++self->nativePowerEpoch;
+        const uint32_t epoch = __atomic_add_fetch(
+            &self->nativePowerEpoch, 1U, __ATOMIC_ACQ_REL);
+        self->recordNativeControlTrace(traceCallId,
+            NativePowerTrace::Operation::kPowerSet,
+            NativePowerTrace::Phase::kEnableBegin, epoch, 0);
         const IOReturn result = self->enableAdapter(self->bsdInterface);
         if (result != kIOReturnSuccess) {
-            __atomic_fetch_and(&self->nativePowerFlags, ~3U, __ATOMIC_ACQ_REL);
+            self->updateNativePowerFlags(3U, 0);
         }
-        return result == kIOReturnSuccess ? self->waitForNativePower(epoch) : result;
+        self->recordNativeControlTrace(traceCallId,
+            NativePowerTrace::Operation::kPowerSet,
+            NativePowerTrace::Phase::kEnableEnd,
+            0, result);
+        return result == kIOReturnSuccess
+            ? self->waitForNativePower(epoch, traceCallId) : result;
     }
-    const uint32_t previousPolicy = __atomic_fetch_and(
-        &self->nativePowerFlags, ~1U, __ATOMIC_ACQ_REL);
-    const uint32_t epoch = ++self->nativePowerEpoch;
+    const uint32_t previousPolicy = self->updateNativePowerFlags(1U, 0);
+    const uint32_t epoch = __atomic_add_fetch(
+        &self->nativePowerEpoch, 1U, __ATOMIC_ACQ_REL);
     __atomic_store_n(&self->nativePowerOffPending, true, __ATOMIC_RELEASE);
     __atomic_store_n(&self->nativePowerOffAttempts, 0U, __ATOMIC_RELAXED);
     __atomic_store_n(&self->nativePowerOffRetries, 0U, __ATOMIC_RELAXED);
     __atomic_store_n(&self->nativePowerOffResult, uint32_t(kIOReturnNotReady), __ATOMIC_RELEASE);
-    const IOReturn stopped = self->disableAdapterWithRetry(epoch);
+    const IOReturn stopped = self->disableAdapterWithRetry(epoch, traceCallId);
     const uint32_t finalIfFlags = ifp->if_flags & (IFF_UP | IFF_RUNNING);
     const IOReturn stopResult = stopped == kIOReturnSuccess && finalIfFlags
         ? kIOReturnNotReady : stopped;
-    const bool currentEpoch = epoch == self->nativePowerEpoch;
+    const bool currentEpoch = epoch == __atomic_load_n(
+        &self->nativePowerEpoch, __ATOMIC_ACQUIRE);
     if (currentEpoch) {
         if (stopResult != kIOReturnSuccess && (previousPolicy & 1U) && finalIfFlags &&
             !(__atomic_load_n(&self->nativePowerFlags, __ATOMIC_ACQUIRE) & 1U))
-            __atomic_fetch_or(&self->nativePowerFlags, 1U, __ATOMIC_ACQ_REL);
+            self->updateNativePowerFlags(0, 1U);
         __atomic_store_n(&self->nativePowerOffPending, false, __ATOMIC_RELEASE);
         __atomic_store_n(&self->nativePowerOffResult, uint32_t(stopResult), __ATOMIC_RELEASE);
     }
     self->wakeNativePowerWaiters();
     if (stopResult != kIOReturnSuccess) return stopResult;
-    __atomic_fetch_and(&self->nativePowerFlags, ~2U, __ATOMIC_ACQ_REL);
+    self->updateNativePowerFlags(2U, 0);
+    self->recordNativeControlTrace(traceCallId,
+        NativePowerTrace::Operation::kPowerSet,
+        NativePowerTrace::Phase::kNativeActionEnd, 0, stopResult);
     return kIOReturnSuccess;
 }
 
-IOReturn AirportItlwm::disableAdapterWithRetry(uint32_t epoch)
+IOReturn AirportItlwm::disableAdapterWithRetry(uint32_t epoch, uint32_t traceCallId)
 {
     // iwx_stop may return Busy while a net80211 state task is active. Each
     // commandSleep releases this gate so the worker and its interrupt path can
@@ -1460,22 +1669,52 @@ IOReturn AirportItlwm::disableAdapterWithRetry(uint32_t epoch)
         uint64_t(kRetryWindowMilliseconds) * kNanosecondsPerMillisecond;
     const uint64_t retryDeadlineNanoseconds =
         nativePowerUptimeNanoseconds() + kRetryWindowNanoseconds;
+    recordNativeControlTrace(traceCallId,
+        NativePowerTrace::Operation::kPowerSet,
+        NativePowerTrace::Phase::kDisableBegin,
+        kRetryWindowMilliseconds, 0);
 
     for (unsigned attempt = 0; attempt < kRetryCount; ++attempt) {
         const uint32_t policy = __atomic_load_n(&nativePowerFlags, __ATOMIC_ACQUIRE);
-        if (epoch != nativePowerEpoch || (policy & 1U)) return kIOReturnAborted;
-        if (nativePowerUptimeNanoseconds() >= retryDeadlineNanoseconds)
+        if (epoch != __atomic_load_n(&nativePowerEpoch, __ATOMIC_ACQUIRE) ||
+            (policy & 1U)) {
+            recordNativeControlTrace(traceCallId,
+                NativePowerTrace::Operation::kPowerSet,
+                NativePowerTrace::Phase::kDisableEnd, attempt,
+                kIOReturnAborted);
+            return kIOReturnAborted;
+        }
+        if (nativePowerUptimeNanoseconds() >= retryDeadlineNanoseconds) {
+            recordNativeControlTrace(traceCallId,
+                NativePowerTrace::Operation::kPowerSet,
+                NativePowerTrace::Phase::kTimeout, attempt, kIOReturnBusy);
             return kIOReturnBusy;
+        }
 
         __atomic_fetch_add(&nativePowerOffAttempts, 1U, __ATOMIC_RELAXED);
         const IOReturn result = disableAdapter(bsdInterface);
-        if (result != kIOReturnBusy) return result;
+        if (result != kIOReturnBusy) {
+            recordNativeControlTrace(traceCallId,
+                NativePowerTrace::Operation::kPowerSet,
+                NativePowerTrace::Phase::kDisableEnd, attempt + 1U, result);
+            return result;
+        }
         __atomic_fetch_add(&nativePowerOffRetries, 1U, __ATOMIC_RELAXED);
-        if (attempt + 1U == kRetryCount) return kIOReturnBusy;
+        if (attempt + 1U == kRetryCount) {
+            recordNativeControlTrace(traceCallId,
+                NativePowerTrace::Operation::kPowerSet,
+                NativePowerTrace::Phase::kDisableEnd, attempt + 1U,
+                kIOReturnBusy);
+            return kIOReturnBusy;
+        }
 
         const uint64_t nowNanoseconds = nativePowerUptimeNanoseconds();
-        if (nowNanoseconds >= retryDeadlineNanoseconds)
+        if (nowNanoseconds >= retryDeadlineNanoseconds) {
+            recordNativeControlTrace(traceCallId,
+                NativePowerTrace::Operation::kPowerSet,
+                NativePowerTrace::Phase::kTimeout, attempt + 1U, kIOReturnBusy);
             return kIOReturnBusy;
+        }
         const uint64_t remainingNanoseconds =
             retryDeadlineNanoseconds - nowNanoseconds;
         const uint64_t sleepNanoseconds = remainingNanoseconds < kRetryDelayNanoseconds
@@ -1488,12 +1727,23 @@ IOReturn AirportItlwm::disableAdapterWithRetry(uint32_t epoch)
         for (;;) {
             const IOReturn wake = _fCommandGate->commandSleep(
                 &nativePowerFlags, deadline, THREAD_INTERRUPTIBLE);
-            if (wake != THREAD_AWAKENED && wake != THREAD_TIMED_OUT)
+            if (wake != THREAD_AWAKENED && wake != THREAD_TIMED_OUT) {
+                recordNativeControlTrace(traceCallId,
+                    NativePowerTrace::Operation::kPowerSet,
+                    NativePowerTrace::Phase::kDisableEnd, attempt + 1U,
+                    kIOReturnAborted);
                 return kIOReturnAborted;
+            }
             const uint32_t wakePolicy = __atomic_load_n(
                 &nativePowerFlags, __ATOMIC_ACQUIRE);
-            if (epoch != nativePowerEpoch || (wakePolicy & 1U))
+            if (epoch != __atomic_load_n(&nativePowerEpoch, __ATOMIC_ACQUIRE) ||
+                (wakePolicy & 1U)) {
+                recordNativeControlTrace(traceCallId,
+                    NativePowerTrace::Operation::kPowerSet,
+                    NativePowerTrace::Phase::kDisableEnd, attempt + 1U,
+                    kIOReturnAborted);
                 return kIOReturnAborted;
+            }
             // Power/event notifications can wake commandSleep before the
             // retry interval ends. Keep sleeping to this deadline instead of
             // burning an off attempt on every early wake.
@@ -1501,24 +1751,51 @@ IOReturn AirportItlwm::disableAdapterWithRetry(uint32_t epoch)
                 break;
         }
     }
+    recordNativeControlTrace(traceCallId,
+        NativePowerTrace::Operation::kPowerSet,
+        NativePowerTrace::Phase::kDisableEnd, kRetryCount, kIOReturnBusy);
     return kIOReturnBusy;
 }
 
-IOReturn AirportItlwm::waitForNativePower(uint32_t epoch)
+IOReturn AirportItlwm::waitForNativePower(uint32_t epoch, uint32_t traceCallId)
 {
     constexpr unsigned kWaitSliceMilliseconds = 50;
     AbsoluteTime deadline;
     clock_interval_to_deadline(12, kSecondScale, &deadline);
+    recordNativeControlTrace(traceCallId,
+        NativePowerTrace::Operation::kPowerSet,
+        NativePowerTrace::Phase::kWaitBegin, 12000, 0);
     for (;;) {
         const uint32_t policy = __atomic_load_n(&nativePowerFlags, __ATOMIC_ACQUIRE);
-        if (epoch != nativePowerEpoch || !(policy & 1U)) return kIOReturnAborted;
+        if (epoch != __atomic_load_n(&nativePowerEpoch, __ATOMIC_ACQUIRE) ||
+            !(policy & 1U)) {
+            recordNativeControlTrace(traceCallId,
+                NativePowerTrace::Operation::kPowerSet,
+                NativePowerTrace::Phase::kWaitEnd, 0, kIOReturnAborted);
+            return kIOReturnAborted;
+        }
         const auto flags = fHalService->get80211Controller()->ic_if.if_flags & (IFF_UP | IFF_RUNNING);
-        if ((policy & 2U) && flags == (IFF_UP | IFF_RUNNING)) return kIOReturnSuccess;
-        if (!(flags & IFF_UP)) return kIOReturnError;
+        if ((policy & 2U) && flags == (IFF_UP | IFF_RUNNING)) {
+            recordNativeControlTrace(traceCallId,
+                NativePowerTrace::Operation::kPowerSet,
+                NativePowerTrace::Phase::kWaitEnd, flags, kIOReturnSuccess);
+            return kIOReturnSuccess;
+        }
+        if (!(flags & IFF_UP)) {
+            recordNativeControlTrace(traceCallId,
+                NativePowerTrace::Operation::kPowerSet,
+                NativePowerTrace::Phase::kWaitEnd, flags, kIOReturnError);
+            return kIOReturnError;
+        }
 
         AbsoluteTime now;
         clock_get_uptime(&now);
-        if (now >= deadline) return kIOReturnTimeout;
+        if (now >= deadline) {
+            recordNativeControlTrace(traceCallId,
+                NativePowerTrace::Operation::kPowerSet,
+                NativePowerTrace::Phase::kTimeout, 12000, kIOReturnTimeout);
+            return kIOReturnTimeout;
+        }
 
         // READY may update the atomics without waking this gate waiter. Poll
         // in short slices, keeping one absolute deadline for the whole request.
@@ -1528,8 +1805,12 @@ IOReturn AirportItlwm::waitForNativePower(uint32_t epoch)
         if (sliceDeadline > deadline) sliceDeadline = deadline;
         const IOReturn wake = _fCommandGate->commandSleep(
             &nativePowerFlags, sliceDeadline, THREAD_INTERRUPTIBLE);
-        if (wake != THREAD_AWAKENED && wake != THREAD_TIMED_OUT)
+        if (wake != THREAD_AWAKENED && wake != THREAD_TIMED_OUT) {
+            recordNativeControlTrace(traceCallId,
+                NativePowerTrace::Operation::kPowerSet,
+                NativePowerTrace::Phase::kWaitEnd, 0, kIOReturnAborted);
             return kIOReturnAborted;
+        }
         // Both an event wake and a slice timeout return to the state checks at
         // the top of the loop before the total deadline can report a timeout.
     }
@@ -1549,6 +1830,7 @@ setPOWER(OSObject *object,
 #ifdef AIRPORT_TAHOE
     __atomic_fetch_add(&nativePowerSetCount, 1U, __ATOMIC_RELAXED);
     IOReturn result = kIOReturnBadArgument;
+    uint32_t traceCallId = 0;
     if (pd && pd->version == APPLE80211_VERSION && pd->num_radios > 0 &&
         pd->num_radios <= APPLE80211_MAX_RADIO) {
         // Intel has one radio policy. TX-only/RX-only and mixed requests are
@@ -1562,11 +1844,21 @@ setPOWER(OSObject *object,
             if (!ml_at_interrupt_context() && _fCommandGate && _fWorkloop &&
                 !_fWorkloop->onThread()) {
                 const apple80211_power_data request = *pd;
+                traceCallId = beginNativeControlTrace(
+                    NativePowerTrace::Operation::kPowerSet,
+                    NativePowerTrace::Phase::kCallBegin,
+                    request.power_state[0] ? 1U : 0U, 0);
+                NativePowerActionContext context {request, traceCallId};
                 result = _fCommandGate->runAction(nativePowerAction,
-                    const_cast<apple80211_power_data *>(&request));
+                    &context);
             }
         }
     }
+    recordNativeControlTrace(traceCallId,
+        NativePowerTrace::Operation::kPowerSet,
+        NativePowerTrace::Phase::kCallEnd,
+        pd && pd->num_radios ? pd->power_state[0] : UINT32_MAX,
+        result);
     __atomic_store_n(&nativePowerLastResult, uint32_t(result), __ATOMIC_RELEASE);
     publishNativePowerState();
     return result;

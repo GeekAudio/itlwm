@@ -45,6 +45,17 @@ int main(int argc, char **argv) {
         input.monotonic_us = 102 + i;
         iwx_sta_auth_trace_record(&trace, &input);
     }
+    input.monotonic_us = 999;
+    input.attempt_id = attempt;
+    input.kind = IWX_STA_TRACE_GROUP2_CALLSITE_GATE;
+    input.stage = IWX_STA_STAGE_GROUP2_CALLSITE_GATE;
+    input.source = IWX_STA_SOURCE_LOCAL_GROUP1;
+    input.result = 4; /* IEEE80211_S_RUN */
+    input.flags = IWX_STA_FLAG_GROUP2_TX_MGMT_ONLY |
+        IWX_STA_FLAG_GROUP2_BGSCAN |
+        IWX_STA_FLAG_GROUP2_SCAN_PHASE_PRESENT;
+    input.detail = 2; /* Tahoe scan phase: DRAINING */
+    iwx_sta_auth_trace_record(&trace, &input);
     IwxStaAuthTraceSnapshot snapshot{};
     if (!iwx_sta_auth_trace_snapshot(&trace, &snapshot)) return 2;
     FILE *out = std::fopen(argv[1], "wb");
@@ -73,6 +84,20 @@ int main(int argc, char **argv) {
         self.assertEqual(result['first'][-1]['attempt_id'], 1)
         self.assertEqual(result['first'][-1]['result'], 35)
         self.assertGreater(result['live'][0]['sequence'], result['first'][-1]['sequence'])
+
+    def test_group2_callsite_gate_snapshot_is_labeled_as_pre_enqueue_only(self):
+        result = decoder.decode(self.raw)
+        row = next(item for item in result['live']
+                   if item['event'] == 'group2_callsite_gate_snapshot')
+        self.assertEqual(row['stage_label'], 'group2_callsite_gate')
+        self.assertEqual(row['attempt_id'], 1)
+        self.assertEqual(row['state_label'], 'run')
+        self.assertTrue(row['tx_mgmt_only'])
+        self.assertTrue(row['background_scan'])
+        self.assertEqual(row['scan_phase']['value'], 2)
+        self.assertEqual(row['scan_phase']['label'], 'draining')
+        self.assertIn('does not prove enqueue', row['observation_scope'])
+        self.assertIn('peer receipt', row['observation_scope'])
 
     def test_saved_plist_round_trip_and_ambiguous_owner_rejected(self):
         prop = 'NativeGroupKeyForensicSnapshot'

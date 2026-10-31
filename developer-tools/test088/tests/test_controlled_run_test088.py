@@ -223,6 +223,91 @@ class ControlledRunTest088Tests(unittest.TestCase):
         self.assertEqual(error.exception.code, "BOOT_EPOCH_TOO_OLD")
         run.assert_not_called()
 
+    def test_native_ready_forwards_all_candidate_identity_keywords(self):
+        expected = {
+            "candidate": "25G332-Test092",
+            "expected_uuid": "DFF15CEA-C784-3428-A48C-E8128831F13E",
+            "expected_archive_binary_sha256": "b" * 64,
+            "minimum_boot_epoch_exclusive": 100,
+            "profile": "native_awdl_rx149_preowner_observation",
+        }
+        seen = {}
+
+        def strict_parser(line, *, candidate, expected_uuid,
+                          expected_archive_binary_sha256,
+                          minimum_boot_epoch_exclusive, profile):
+            seen.update({
+                "candidate": candidate,
+                "expected_uuid": expected_uuid,
+                "expected_archive_binary_sha256": expected_archive_binary_sha256,
+                "minimum_boot_epoch_exclusive": minimum_boot_epoch_exclusive,
+                "profile": profile,
+            })
+            return {"boot_epoch": 101}
+
+        with mock.patch.object(adapter.BASE, "_parse_native_ready", strict_parser):
+            originals = adapter._decorate_run(
+                adapter._RunCapture(expected["candidate"]),
+                expected_epoch=101,
+                candidate=expected["candidate"],
+                expected_uuid=expected["expected_uuid"],
+                expected_archive_binary_sha256=expected[
+                    "expected_archive_binary_sha256"],
+                minimum_boot_epoch_exclusive=expected[
+                    "minimum_boot_epoch_exclusive"],
+                profile=expected["profile"])
+            try:
+                actual = adapter.BASE._parse_native_ready(
+                    "NATIVE_READY fixture",
+                    candidate=expected["candidate"],
+                    expected_uuid=expected["expected_uuid"],
+                    expected_archive_binary_sha256=expected[
+                        "expected_archive_binary_sha256"],
+                    minimum_boot_epoch_exclusive=expected[
+                        "minimum_boot_epoch_exclusive"],
+                    profile=expected["profile"])
+            finally:
+                adapter._restore_run(originals)
+
+        self.assertEqual(seen, expected)
+        self.assertEqual(actual, {"boot_epoch": 101})
+
+    def test_native_ready_rejects_identity_change_before_parser(self):
+        expected = {
+            "candidate": "25G332-Test092",
+            "expected_uuid": "DFF15CEA-C784-3428-A48C-E8128831F13E",
+            "expected_archive_binary_sha256": "b" * 64,
+            "minimum_boot_epoch_exclusive": 100,
+            "profile": "native_awdl_rx149_preowner_observation",
+        }
+        parser = mock.Mock(return_value={"boot_epoch": 101})
+        with mock.patch.object(adapter.BASE, "_parse_native_ready", parser):
+            originals = adapter._decorate_run(
+                adapter._RunCapture(expected["candidate"]),
+                expected_epoch=101,
+                candidate=expected["candidate"],
+                expected_uuid=expected["expected_uuid"],
+                expected_archive_binary_sha256=expected[
+                    "expected_archive_binary_sha256"],
+                minimum_boot_epoch_exclusive=expected[
+                    "minimum_boot_epoch_exclusive"],
+                profile=expected["profile"])
+            try:
+                with self.assertRaises(adapter.BASE.CoordinatorError) as error:
+                    adapter.BASE._parse_native_ready(
+                        "NATIVE_READY fixture",
+                        candidate=expected["candidate"],
+                        expected_uuid=expected["expected_uuid"],
+                        expected_archive_binary_sha256="c" * 64,
+                        minimum_boot_epoch_exclusive=expected[
+                            "minimum_boot_epoch_exclusive"],
+                        profile=expected["profile"])
+            finally:
+                adapter._restore_run(originals)
+
+        self.assertEqual(error.exception.code, "NATIVE_READY_EXPECTATION_CHANGED")
+        parser.assert_not_called()
+
     def test_bad_or_unknown_first_line_is_retained_and_attach_is_non_gating(self):
         for wire, classification in (
                 ('{"event":"SENDER_RESULT"', "malformed_known_event_json"),

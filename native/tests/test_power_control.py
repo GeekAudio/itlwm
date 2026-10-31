@@ -10,8 +10,17 @@ def function(marker):
         depth += (source[end]=='{')-(source[end]=='}'); end+=1
     return source[start:end]
 methods=[function(s) for s in [
+    'bool AirportItlwm::initializeNativePowerLocks(',
+    'void AirportItlwm::releaseNativePowerLocks(',
+    'bool AirportItlwm::init(OSDictionary *properties)',
     'IOReturn AirportItlwm::\ngetPOWER(',
-    'void AirportItlwm::observeNativePowerEvent(',
+    'uint32_t AirportItlwm::updateNativePowerFlags(',
+    'bool AirportItlwm::nativePowerStateSnapshot(',
+    'uint32_t AirportItlwm::observeNativePowerEvent(',
+    'uint32_t AirportItlwm::beginNativeControlTrace(',
+    'void AirportItlwm::recordNativeControlTrace(',
+    'void AirportItlwm::publishNativePowerTrace(',
+    'bool AirportItlwm::postNativePowerChangedIfNeeded(',
     'void AirportItlwm::publishNativePowerState(',
     'IOReturn AirportItlwm::nativePowerAction(',
     'IOReturn AirportItlwm::waitForNativePower(',
@@ -30,6 +39,9 @@ shim=r'''
 #include <thread>
 #include <cstdio>
 #include <functional>
+#include <mutex>
+#include <vector>
+#include "native/native_power_trace.hpp"
 #define AIRPORT_TAHOE 1
 #define XYLog(...) do {} while (0)
 using IOReturn=int32_t;
@@ -51,13 +63,34 @@ static void absolutetime_to_nanoseconds(AbsoluteTime value,uint64_t*out){*out=va
 static uint64_t nativePowerUptimeNanoseconds(){AbsoluteTime t=0;uint64_t n=0;
  clock_get_uptime(&t);absolutetime_to_nanoseconds(t,&n);return n;}
 constexpr unsigned APPLE80211_VERSION=1,APPLE80211_MAX_RADIO=4,APPLE80211_POWER_ON=1;
+constexpr unsigned APPLE80211_M_POWER_CHANGED=1001;
 constexpr unsigned ITL_TAHOE_EVT_DRIVER_READY=6,ITL_TAHOE_EVT_DRIVER_STOPPED=7,ITL_TAHOE_EVT_RESET_BEGIN=8;
 constexpr unsigned IFF_UP=1,IFF_RUNNING=0x40,kWatchDogTimerPeriod=1000;
-static bool irq=false;
+static thread_local bool irq=false;
 static bool ml_at_interrupt_context(){return irq;}
 struct OSObject {virtual ~OSObject()=default;};
 #define OSDynamicCast(T,p) dynamic_cast<T*>(p)
+struct OSDictionary:OSObject{};
+static bool parentInitResult=true;
+struct IO80211Controller:OSObject {bool init(OSDictionary*){return parentInitResult;}};
+#define super IO80211Controller
+#define ITL_STARTUP_RESULT(provider,stage,result) (result)
+using IOInterruptState=bool;
+struct IOSimpleLock {std::mutex mutex;};
+static int lockAllocationFailAt=-1,lockAllocationAttempts=0;
+static IOSimpleLock*IOSimpleLockAlloc(){const int attempt=lockAllocationAttempts++;
+ if(attempt==lockAllocationFailAt)return nullptr;return new IOSimpleLock();}
+static void IOSimpleLockFree(IOSimpleLock*p){delete p;}
+static IOInterruptState IOSimpleLockLockDisableInterrupt(IOSimpleLock*p){
+ const bool previous=irq;irq=true;p->mutex.lock();return previous;}
+static void IOSimpleLockUnlockEnableInterrupt(IOSimpleLock*p,IOInterruptState previous){
+ p->mutex.unlock();irq=previous;}
+struct OSData:OSObject {std::vector<uint8_t> bytes;
+ static OSData*withBytes(const void*p,size_t n){auto*d=new OSData();
+ const auto*b=static_cast<const uint8_t*>(p);d->bytes.assign(b,b+n);return d;}
+ void release(){delete this;}};
 struct apple80211_power_data {uint32_t version,num_radios,power_state[4];};
+struct NativePowerActionContext {apple80211_power_data request;uint32_t traceCallId;};
 struct IONetworkInterface:OSObject {};
 struct FakeIC {struct {uint32_t if_flags=0;} ic_if;uint32_t ic_tahoe_init_stage=0;int32_t ic_tahoe_init_error=0; uint32_t(*ic_tahoe_scan_state)(FakeIC*)=nullptr;};
 struct HAL {FakeIC ic;IOReturn result=0,disableResult=0;unsigned enabled=0,disabled=0,disableBusyCount=0;bool stuck=false;
@@ -68,7 +101,9 @@ struct HAL {FakeIC ic;IOReturn result=0,disableResult=0;unsigned enabled=0,disab
 struct Timer {unsigned started=0,stopped=0;void setTimeoutMS(unsigned){}void enable(){++started;}
  void cancelTimeout(){++stopped;}void disable(){}};
 struct Queue {bool gated=false,worker=false;bool inGate(){return gated;}bool onThread(){return worker;}};
-struct NativeIF {Queue*q;Queue*getControllerWorkQueue(){return q;}};
+struct NativeIF {Queue*q;unsigned messages=0;std::function<void()>onPost;
+ Queue*getControllerWorkQueue(){return q;}
+ void postMessage(unsigned,void*,unsigned,bool){++messages;if(onPost)onPost();}};
 using IO80211SkywalkInterface=NativeIF;
 static Queue*_fWorkloop=nullptr;
 struct Gate {using Action=IOReturn(*)(OSObject*,void*,void*,void*,void*);
@@ -90,28 +125,44 @@ struct Gate {using Action=IOReturn(*)(OSObject*,void*,void*,void*,void*);
  IOReturn runAction(Action action,void*a){const bool old=q->gated;q->gated=!loseGate;
  IOReturn r=action(owner,a,nullptr,nullptr,nullptr);q->gated=old;return r;}};
 static Gate*_fCommandGate=nullptr;
-struct AirportItlwm:OSObject {
+struct AirportItlwm:IO80211Controller {
  HAL*fHalService=nullptr;IONetworkInterface*bsdInterface=nullptr;NativeIF*fNetIf=nullptr;Timer*watchdogTimer=nullptr;
- uint8_t power_state=0;bool nativeActivationAttempted=false;
+ uint8_t power_state=0;bool nativeActivationAttempted=false,awdlSyncEnable=false;
+ uint8_t geo_location_cc[2] {};
  uint32_t nativePowerFlags=0,nativePowerGetCount=0,nativePowerSetCount=0,
  nativePowerLastResult=uint32_t(kIOReturnNotReady),nativePowerLastEvent=0,
  nativePowerReadyCount=0,nativePowerStoppedCount=0,nativePowerResetCount=0,nativePowerEpoch=0,
+ nativePowerTracePublishedSequence=0,
  nativePowerOffAttempts=0,nativePowerOffRetries=0,nativePowerOffResult=uint32_t(kIOReturnNotReady);
+ uint64_t nativePowerTransitionRevision=0;
+ NativePowerTrace::NotificationState nativePowerNotificationState;
+ IOSimpleLock*nativePowerStateLock=nullptr,*nativePowerTraceLock=nullptr;
+ NativePowerTrace::Ledger nativePowerTrace;
  bool nativePowerOffPending=false;
  unsigned properties=0;std::map<std::string,uint64_t> metadata;
  bool offPending()const{return __atomic_load_n(&nativePowerOffPending,__ATOMIC_ACQUIRE);}
  void setProperty(const char*k,uint64_t value,unsigned){assert(!irq);++properties;metadata[k]=value;}
+ bool setProperty(const char*k,OSData*d){assert(!irq&&d);++properties;metadata[k]=d->bytes.size();return true;}
+ bool init(OSDictionary*);
+ bool initializeNativePowerLocks();void releaseNativePowerLocks();
+ ~AirportItlwm(){releaseNativePowerLocks();}
  IOReturn getPOWER(OSObject*,apple80211_power_data*);
  IOReturn setPOWER(OSObject*,apple80211_power_data*);
- void observeNativePowerEvent(int);void publishNativePowerState();
- IOReturn waitForNativePower(uint32_t);void wakeNativePowerWaiters();
- IOReturn disableAdapterWithRetry(uint32_t);
+ uint32_t updateNativePowerFlags(uint32_t,uint32_t,bool=false);
+ bool nativePowerStateSnapshot(uint32_t*,uint64_t*)const;
+ uint32_t observeNativePowerEvent(int);
+ uint32_t beginNativeControlTrace(NativePowerTrace::Operation,NativePowerTrace::Phase,uint32_t,int32_t);
+ void recordNativeControlTrace(uint32_t,NativePowerTrace::Operation,NativePowerTrace::Phase,uint32_t,int32_t);
+ void publishNativePowerTrace();bool postNativePowerChangedIfNeeded();void publishNativePowerState();
+ IOReturn waitForNativePower(uint32_t,uint32_t);void wakeNativePowerWaiters();
+ IOReturn disableAdapterWithRetry(uint32_t,uint32_t);
  static IOReturn nativePowerAction(OSObject*,void*,void*,void*,void*);
  IOReturn enable(IO80211SkywalkInterface*);
  IOReturn enableAdapter(IONetworkInterface*);IOReturn disableAdapter(IONetworkInterface*);
 };
 struct Fixture {AirportItlwm a;HAL hal;Queue q;Gate gate;NativeIF net;IONetworkInterface bsd;Timer timer;
  Fixture():gate{&a,&q},net{&q}{_fWorkloop=&q;_fCommandGate=&gate;a.fHalService=&hal;
+ assert(a.init(nullptr));
  a.fNetIf=&net;a.bsdInterface=&bsd;a.watchdogTimer=&timer;
  gate.onSleep=[this]{assert(!q.gated);ready();q.gated=true;a.wakeNativePowerWaiters();q.gated=false;};}
  apple80211_power_data request(unsigned value){return {1,4,{value,value,value,value}};}
@@ -123,6 +174,19 @@ struct Fixture {AirportItlwm a;HAL hal;Queue q;Gate gate;NativeIF net;IONetworkI
 main=r'''
 
 int main(){unsigned scenarios=0;
+ {parentInitResult=false;const int attempts=lockAllocationAttempts;AirportItlwm failed;
+ assert(!failed.init(nullptr)&&!failed.nativePowerStateLock&&!failed.nativePowerTraceLock);
+ assert(lockAllocationAttempts==attempts);parentInitResult=true;++scenarios;}
+ {lockAllocationFailAt=lockAllocationAttempts;AirportItlwm failed;
+ assert(!failed.init(nullptr)&&!failed.nativePowerStateLock&&!failed.nativePowerTraceLock);
+ lockAllocationFailAt=-1;++scenarios;}
+ {lockAllocationFailAt=lockAllocationAttempts+1;AirportItlwm failed;
+ assert(!failed.init(nullptr)&&!failed.nativePowerStateLock&&!failed.nativePowerTraceLock);
+ lockAllocationFailAt=-1;++scenarios;}
+ {AirportItlwm failed;failed.nativePowerTraceLock=IOSimpleLockAlloc();
+ lockAllocationFailAt=lockAllocationAttempts;
+ assert(!failed.initializeNativePowerLocks()&&!failed.nativePowerStateLock&&
+  !failed.nativePowerTraceLock);lockAllocationFailAt=-1;++scenarios;}
  {Fixture f;assert(f.state()==0&&f.a.nativePowerGetCount==1);++scenarios;}
  {Fixture f;auto p=f.request(1),copy=p;f.hal.result=kIOReturnError;
  assert(f.a.setPOWER(nullptr,&p)==kIOReturnError&&!memcmp(&p,&copy,sizeof p));
@@ -257,6 +321,44 @@ int main(){unsigned scenarios=0;
  assert(f.a.setPOWER(nullptr,&off)==kIOReturnBusy&&f.state()==1);
  assert(f.a.nativePowerFlags==3&&f.timer.stopped==timerStops);
  f.hal.disableResult=0;assert(f.a.setPOWER(nullptr,&off)==0&&f.state()==0);++scenarios;}
+ {Fixture f;assert(f.a.postNativePowerChangedIfNeeded()&&f.net.messages==1);
+ assert(!f.a.postNativePowerChangedIfNeeded()&&f.net.messages==1);
+ f.a.updateNativePowerFlags(0,1U);f.ready();assert(f.a.nativePowerTransitionRevision==1);
+ assert(f.a.postNativePowerChangedIfNeeded()&&f.net.messages==2);
+ assert(!f.a.postNativePowerChangedIfNeeded()&&f.net.messages==2);++scenarios;}
+ {Fixture f;f.a.updateNativePowerFlags(0,1U);f.ready();
+ const uint64_t revision=f.a.nativePowerTransitionRevision;
+ f.a.updateNativePowerFlags(1U,0); // Requested changes do not revise actual READY.
+ assert(f.a.nativePowerTransitionRevision==revision);
+ f.a.observeNativePowerEvent(ITL_TAHOE_EVT_DRIVER_READY); // Late READY cannot override Off.
+ assert(f.a.nativePowerTransitionRevision==revision&&f.a.nativePowerFlags==2U);
+ assert(f.a.postNativePowerChangedIfNeeded()&&f.net.messages==1);
+ assert(!f.a.postNativePowerChangedIfNeeded()&&f.net.messages==1);++scenarios;}
+ {Fixture f;f.a.updateNativePowerFlags(0,1U);f.ready();
+ assert(f.a.nativePowerTransitionRevision==1);
+ f.ready();assert(f.a.nativePowerTransitionRevision==1); // Duplicate READY is not a transition.
+ f.a.observeNativePowerEvent(ITL_TAHOE_EVT_DRIVER_STOPPED);
+ assert(f.a.nativePowerTransitionRevision==2);
+ f.a.observeNativePowerEvent(ITL_TAHOE_EVT_DRIVER_STOPPED); // Repeated Off is not a transition.
+ assert(f.a.nativePowerTransitionRevision==2);
+ assert(f.a.postNativePowerChangedIfNeeded()&&f.net.messages==1);
+ assert(!f.a.postNativePowerChangedIfNeeded()&&f.net.messages==1);++scenarios;}
+ {Fixture f;f.a.updateNativePowerFlags(0,1U);f.ready();
+ f.a.observeNativePowerEvent(ITL_TAHOE_EVT_DRIVER_STOPPED);f.ready();
+ assert(f.a.nativePowerTransitionRevision==3);
+ assert(f.a.postNativePowerChangedIfNeeded()&&f.net.messages==1);
+ assert(!f.a.postNativePowerChangedIfNeeded()&&f.net.messages==1);++scenarios;}
+ {Fixture f;assert(f.a.postNativePowerChangedIfNeeded()&&f.net.messages==1);
+ f.a.updateNativePowerFlags(0,1U);f.ready();
+ f.a.observeNativePowerEvent(ITL_TAHOE_EVT_DRIVER_STOPPED);
+ assert(f.a.nativePowerTransitionRevision==2&&!(f.a.nativePowerFlags&2U));
+ assert(f.a.postNativePowerChangedIfNeeded()&&f.net.messages==2);
+ assert(!f.a.postNativePowerChangedIfNeeded()&&f.net.messages==2);++scenarios;}
+ {Fixture f;f.a.updateNativePowerFlags(0,1U);
+ f.net.onPost=[&]{f.net.onPost=nullptr;f.ready();};
+ assert(f.a.postNativePowerChangedIfNeeded()&&f.net.messages==1);
+ assert(f.a.postNativePowerChangedIfNeeded()&&f.net.messages==2);
+ assert(!f.a.postNativePowerChangedIfNeeded()&&f.net.messages==2);++scenarios;}
  {for(unsigned i=0;i<128;++i){Fixture f;auto off=f.request(0);f.a.nativePowerFlags=1;
  f.hal.ic.ic_if.if_flags=IFF_UP|IFF_RUNNING;std::thread ready([&]{f.a.observeNativePowerEvent(6);});
  assert(f.a.setPOWER(nullptr,&off)==0);ready.join();assert(f.state()==0&&f.a.nativePowerFlags==0);}++scenarios;}
@@ -265,6 +367,6 @@ int main(){unsigned scenarios=0;
 '''
 with tempfile.TemporaryDirectory(prefix='native-power-control-') as d:
     cpp=Path(d)/'test.cpp';exe=Path(d)/'test';cpp.write_text(shim+'\n'+'\n'.join(methods)+main)
-    subprocess.run(['xcrun','clang++','-std=c++17','-O1','-g','-fsanitize=address,undefined','-fno-omit-frame-pointer',str(cpp),'-o',str(exe)],check=True)
+    subprocess.run(['xcrun','clang++','-std=c++17','-O1','-g','-fsanitize=address,undefined','-fno-omit-frame-pointer','-I',str(ROOT),str(cpp),'-o',str(exe)],check=True)
     result=subprocess.check_output([str(exe)],text=True);print(result,end='')
 print('source_sha256='+hashlib.sha256(source.encode()).hexdigest())

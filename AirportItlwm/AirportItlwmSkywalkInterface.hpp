@@ -413,6 +413,9 @@ public:
 private:
     static IOReturn nativeRequest(OSObject *, void *, void *, void *, void *);
     static NativeWifi::Status radioScan(void *, const NativeWifi::ScanPlan &);
+    static uint64_t scanMonotonicNanoseconds(void *);
+    static NativeWifi::ScanBusyDetail scanBusyDetail(void *);
+    void publishNativeScanTrace();
     static NativeWifi::Status radioCancelScan(void *);
     static NativeWifi::Status radioJoin(void *, const NativeWifi::JoinPlan &);
     static void radioLeave(void *);
@@ -426,6 +429,10 @@ private:
     uint8_t requestedAddress[6] {};
     uint8_t previousScanAddress[6] {}, pendingScanAddress[6] {};
     uint32_t pendingScanAddressGeneration {};
+    uint32_t nativeScanBusyReasonCode {};
+    bool nativeScanTracePublished {};
+    NativeWifi::ScanTraceSnapshot nativeScanTraceSnapshot {};
+    NativeWifi::ScanTraceSnapshot publishedNativeScanTrace {};
     bool addressWasRequested {}, addressQuarantined {}, nativeLease {};
     uint64_t publishedScanCount {}, publishedJoinCount {}, publishedBeaconCount {};
     uint64_t beaconLqmEmitCalls {};

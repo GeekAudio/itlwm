@@ -645,6 +645,7 @@ def _router_facade(capture: _RunCapture):
 
 def _decorate_run(capture: _RunCapture, *, expected_epoch: int,
                   candidate: str, expected_uuid: str,
+                  expected_archive_binary_sha256: str,
                   minimum_boot_epoch_exclusive: int, profile: str):
     original_modules = BASE._modules
     original_append = BASE._append_parent_clock_event
@@ -662,9 +663,17 @@ def _decorate_run(capture: _RunCapture, *, expected_epoch: int,
             phase = "BEGIN" if event.endswith("BEGIN") else "END"
             capture.go_write[phase] = sample
 
-    def parse_native_ready(line, **_kwargs):
+    def parse_native_ready(line, *, candidate: str, expected_uuid: str,
+                           expected_archive_binary_sha256: str,
+                           minimum_boot_epoch_exclusive: int, profile: str):
+        if (candidate != bound_candidate or expected_uuid != bound_uuid or
+                expected_archive_binary_sha256 != bound_archive_binary_sha256 or
+                minimum_boot_epoch_exclusive != bound_minimum_boot_epoch_exclusive or
+                profile != bound_profile):
+            raise BASE.CoordinatorError("NATIVE_READY_EXPECTATION_CHANGED")
         value = original_parse_ready(
             line, candidate=candidate, expected_uuid=expected_uuid,
+            expected_archive_binary_sha256=expected_archive_binary_sha256,
             minimum_boot_epoch_exclusive=minimum_boot_epoch_exclusive,
             profile=profile)
         if value.get("boot_epoch") != expected_epoch:
@@ -672,6 +681,12 @@ def _decorate_run(capture: _RunCapture, *, expected_epoch: int,
         if value.get("boot_epoch", 0) <= minimum_boot_epoch_exclusive:
             raise BASE.CoordinatorError("BOOT_EPOCH_TOO_OLD")
         return value
+
+    bound_candidate = candidate
+    bound_uuid = expected_uuid
+    bound_archive_binary_sha256 = expected_archive_binary_sha256
+    bound_minimum_boot_epoch_exclusive = minimum_boot_epoch_exclusive
+    bound_profile = profile
 
     BASE._modules = injected_modules
     BASE._append_parent_clock_event = append_parent_clock_event
@@ -716,6 +731,8 @@ def run_test088_once(*, host: str, control_path: str,
         originals = _decorate_run(
             capture, expected_epoch=boot_epoch, candidate=candidate,
             expected_uuid=metadata["expected_loaded_uuid"],
+            expected_archive_binary_sha256=metadata["source_binding"][
+                "expected_binary_sha256"],
             minimum_boot_epoch_exclusive=minimum_boot_epoch_exclusive,
             profile=metadata["profile"])
         try:

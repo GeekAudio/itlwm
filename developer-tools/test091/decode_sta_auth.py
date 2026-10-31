@@ -22,11 +22,32 @@ KINDS = {
     8: 'local_deauth_output_result', 9: 'group1_local_failure',
     10: 'run_established', 11: 'association_loss_requested',
     12: 'driver_deauth_cleanup', 13: 'association_loss_completed',
+    14: 'group2_callsite_gate_snapshot',
+}
+STAGES = {
+    0: 'none', 1: 'not_expected', 2: 'replay_reject', 3: 'mic_reject',
+    4: 'decrypt_reject', 5: 'gtk_missing', 6: 'gtk_length',
+    7: 'validated', 8: 'igtk_length', 9: 'igtk_id',
+    10: 'group1_terminal', 11: 'key_decision', 12: 'key_prewrite',
+    13: 'key_callback', 14: 'group2_output', 15: 'rx_reason',
+    16: 'state_request', 17: 'state_completed', 18: 'association_complete',
+    19: 'driver_cleanup_enter', 20: 'driver_cleanup_return',
+    21: 'group2_callsite_gate',
 }
 SOURCES = {
     0: 'unknown', 1: 'receive_handler_not_authenticated_peer_proof',
     2: 'local_group1', 3: 'driver_cleanup', 4: 'hal_command',
     5: 'software_crypto',
+}
+KNOWN_FLAGS_MASK = 0xFFF
+GROUP2_CALLSITE_FLAGS = {
+    'tx_mgmt_only': 1 << 9,
+    'background_scan': 1 << 10,
+    'scan_phase_present': 1 << 11,
+}
+IEEE80211_STATES = {0: 'init', 1: 'scan', 2: 'auth', 3: 'assoc', 4: 'run'}
+TAHOE_SCAN_PHASES = {
+    0: 'idle', 1: 'active', 2: 'draining', 3: 'reset_wait', 4: 'stopped',
 }
 
 
@@ -38,12 +59,30 @@ def decode_record(raw: bytes) -> dict:
             'result', 'flags', 'detail')
     row = dict(zip(keys, fields))
     if (row['sequence'] == 0 or row['kind'] not in KINDS or
-            row['stage'] > 20 or row['component'] > 2 or
-            row['source'] not in SOURCES or row['flags'] & ~0x1ff):
+            row['stage'] not in STAGES or row['component'] > 2 or
+            row['source'] not in SOURCES or row['flags'] & ~KNOWN_FLAGS_MASK):
         raise ValueError('unknown or invalid numeric record')
     row['monotonic_us'] = row.pop('monotonic_us_low') | (row.pop('monotonic_us_high') << 32)
     row['event'] = KINDS[row['kind']]
+    row['stage_label'] = STAGES[row['stage']]
     row['source_label'] = SOURCES[row['source']]
+    if row['kind'] == 14:
+        row['observation_scope'] = (
+            'pre-enqueue callsite before send_group_msg2; does not prove '
+            'enqueue, TX submission, or peer receipt'
+        )
+        row['state_label'] = IEEE80211_STATES.get(row['result'], 'unknown')
+        row['tx_mgmt_only'] = bool(row['flags'] & GROUP2_CALLSITE_FLAGS['tx_mgmt_only'])
+        row['background_scan'] = bool(row['flags'] & GROUP2_CALLSITE_FLAGS['background_scan'])
+        if row['flags'] & GROUP2_CALLSITE_FLAGS['scan_phase_present']:
+            phase = row['detail']
+            row['scan_phase'] = {
+                'value': phase,
+                'label': TAHOE_SCAN_PHASES.get(phase, 'unknown'),
+                'note': 'stopped may also mean the HAL scan lock was unavailable',
+            }
+        else:
+            row['scan_phase'] = None
     return row
 
 
@@ -93,6 +132,7 @@ def decode(raw: bytes) -> dict:
         'Captured means a bounded record copy, not complete causal history; ordering is append order.',
         'Receive-handler association identity is sampled at append, not at handler entry.',
         'Local deauth coverage here is Group1 and driver cleanup, not every system disconnect source.',
+        'Group2 callsite flags are sampled before send_group_msg2; they do not prove TX-gate state, hardware submission, or peer receipt.',
     ]
     return result
 

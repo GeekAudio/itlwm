@@ -32,37 +32,217 @@ void Backend::initialize(const Operations &operations) {
     operations_ = operations;
     stopped_ = false;
 }
-void Backend::post(uint32_t kind, const void *bytes, size_t n) {
+void Backend::post(uint32_t kind, const void *bytes, size_t n, uint32_t scanTraceSerial) {
     if (!stopped_ && operations_.emit) {
-        if (kind == ScanBeacon) ++event201EmitCalls_;
+        if (kind == ScanBeacon) {
+            ++event201EmitCalls_;
+            if (scanPending_) traceBeacon201(scanTraceRequestSerial_);
+        }
         if (kind == ScanFinished) {
             ++event237EmitCalls_;
             if (bytes && n == 4) last237Status_ = read32(static_cast<const uint8_t *>(bytes));
+            traceNative237EmitCall(scanTraceSerial);
         }
         operations_.emit(operations_.context, kind, bytes, n);
     }
+}
+uint64_t Backend::monotonicNowNanoseconds() {
+    uint64_t now = scanTraceFallbackClockNs_;
+    if (operations_.monotonicNanoseconds) {
+        now = operations_.monotonicNanoseconds(operations_.context);
+    }
+    // Treat a broken or transiently unavailable adapter clock as a repeated
+    // timestamp, never as time moving backwards within this boot.
+    if (now < scanTraceLastClockNs_) now = scanTraceLastClockNs_;
+    else scanTraceLastClockNs_ = now;
+    return now;
+}
+ScanTraceRecord *Backend::findScanTrace(uint32_t serial) {
+    if (!serial) return nullptr;
+    for (unsigned i = 0; i != ScanTraceCapacity; ++i)
+        if (scanTrace_[i].valid && scanTrace_[i].requestSerial == serial)
+            return &scanTrace_[i];
+    return nullptr;
+}
+uint32_t Backend::beginScanTrace() {
+    unsigned slot = scanTraceNextSlot_;
+    scanTraceNextSlot_ = (scanTraceNextSlot_ + 1) % ScanTraceCapacity;
+    if (scanTrace_[slot].valid) ++scanTraceOverwriteCount_;
+    else ++scanTraceCount_;
+    if (!++nextScanTraceSerial_) ++nextScanTraceSerial_;
+    ScanTraceRecord &record = scanTrace_[slot];
+    erase(&record, sizeof(record));
+    record.valid = true;
+    record.requestSerial = nextScanTraceSerial_;
+    record.generation = 0;
+    record.lastAdmissionStatus = Status::Failed; // No admission decision yet.
+    record.lastBusyClass = ScanBusyClass::None;
+    record.nativeTerminalSource = ScanTerminalSource::None;
+    record.firmwareStatus = 0xffffffffU;
+    record.native237Status = 0xffffffffU;
+    record.requestMonotonicNs = monotonicNowNanoseconds();
+    record.clockSource = operations_.monotonicNanoseconds
+        ? ScanTraceClock::MonotonicCallback : ScanTraceClock::TickFallback;
+    ++scanTraceRequestCount_;
+    return record.requestSerial;
+}
+void Backend::linkScanReplacement(uint32_t replacedSerial, uint32_t replacementSerial) {
+    auto replacement = findScanTrace(replacementSerial);
+    if (!replacement || !replacedSerial) return;
+    replacement->replacesSerial = replacedSerial;
+    ++scanTraceReplacementCount_;
+    if (auto previous = findScanTrace(replacedSerial))
+        previous->replacedBySerial = replacementSerial;
+}
+void Backend::traceAdmission(uint32_t serial, Status status,
+                             ScanBusyClass busyClass, uint32_t busyCode,
+                             bool radioAttempt, uint64_t radioAttemptStartNs) {
+    auto record = findScanTrace(serial);
+    if (!record) return;
+    const uint64_t now = monotonicNowNanoseconds();
+    ++record->admissionAttempts;
+    if (radioAttempt) {
+        ++record->radioAttempts;
+        if (!record->hasFirstRadioAttempt) {
+            record->firstRadioAttemptMonotonicNs = radioAttemptStartNs;
+            record->hasFirstRadioAttempt = true;
+        }
+        record->lastRadioAttemptMonotonicNs = radioAttemptStartNs;
+    }
+    record->lastAdmissionStatus = status;
+    if (status == Status::Busy) {
+        ++record->busyAttempts;
+        record->lastBusyClass = busyClass;
+        record->lastBusyReasonCode = busyCode;
+    } else if (status == Status::Ok) {
+        record->acceptedMonotonicNs = now;
+        record->hasAccepted = true;
+    }
+}
+void Backend::traceFirmwareTerminal(uint32_t serial, uint32_t status,
+                                    uint64_t consumedNs) {
+    auto record = findScanTrace(serial);
+    if (!record) return;
+    record->hasFirmwareTerminal = true;
+    record->firmwareStatus = status;
+    record->firmwareTerminalConsumedMonotonicNs = consumedNs;
+}
+void Backend::traceNative237Intent(uint32_t serial, uint32_t status,
+                                   ScanTerminalSource source) {
+    auto record = findScanTrace(serial);
+    if (!record) return;
+    record->hasNative237 = true;
+    record->native237Status = status;
+    record->nativeTerminalSource = source;
+}
+void Backend::traceNative237EmitCall(uint32_t serial) {
+    auto record = findScanTrace(serial);
+    if (!record) return;
+    ++record->native237EmitCallCount;
+    record->native237EmitCallMonotonicNs = monotonicNowNanoseconds();
+    record->native237EmitCalled = true;
+}
+void Backend::traceBeacon201(uint32_t serial) {
+    auto record = findScanTrace(serial);
+    if (!record) return;
+    const uint64_t now = monotonicNowNanoseconds();
+    if (!record->hasFirst201) {
+        record->first201MonotonicNs = now;
+        record->hasFirst201 = true;
+    }
+    record->last201MonotonicNs = now;
+    ++record->event201Count;
+}
+void Backend::traceStaleTerminal() {
+    ++scanTraceStaleTerminalCount_;
+    if (auto record = findScanTrace(scanTraceRequestSerial_))
+        ++record->staleTerminals;
+}
+ScanBusyDetail Backend::radioBusyDetail() const {
+    if (operations_.busyScanDetail)
+        return operations_.busyScanDetail(operations_.context);
+    return {0};
+}
+void Backend::emitScanFinished(uint32_t serial, uint32_t status,
+                               ScanTerminalSource source) {
+    traceNative237Intent(serial, status, source);
+    uint8_t payload[4]; write32(payload, status);
+    post(ScanFinished, payload, sizeof(payload), serial);
+}
+void Backend::copyScanTrace(ScanTraceSnapshot *out) const {
+    if (!out) return;
+    erase(out, sizeof(*out));
+    out->version = ScanTraceSchemaVersion;
+    out->count = scanTraceCount_;
+    out->requestCount = scanTraceRequestCount_;
+    out->replacementCount = scanTraceReplacementCount_;
+    out->overwriteCount = scanTraceOverwriteCount_;
+    out->staleTerminalCount = scanTraceStaleTerminalCount_;
+    const unsigned oldest = (scanTraceNextSlot_ + ScanTraceCapacity - scanTraceCount_) % ScanTraceCapacity;
+    for (unsigned i = 0; i != scanTraceCount_; ++i)
+        copyBytes(&out->records[i], &scanTrace_[(oldest + i) % ScanTraceCapacity],
+                  sizeof(ScanTraceRecord));
 }
 Status Backend::scanRequest(const void *data, size_t n) {
     ScanPlan plan {};
     const auto decoded = decodeScan(data, n, plan, &scanRejectField_);
     if (decoded != DecodeResult::Ok)
         return decoded == DecodeResult::Malformed ? Status::BadRequest : Status::Unsupported;
-    if (!ready()) return Status::NotReady;
-    if (addressChanging_ || scanDraining_ || joinPending_) return Status::Busy;
-    if (scanPending_ && !scanQueued_) return Status::Busy;
+    const uint32_t traceSerial = beginScanTrace();
+    if (!ready()) {
+        traceAdmission(traceSerial, Status::NotReady, ScanBusyClass::None, 0, false);
+        return Status::NotReady;
+    }
+    if (addressChanging_) {
+        traceAdmission(traceSerial, Status::Busy, ScanBusyClass::BackendAddressChange, 0, false);
+        return Status::Busy;
+    }
+    if (scanDraining_) {
+        traceAdmission(traceSerial, Status::Busy, ScanBusyClass::BackendScanDrain, 0, false);
+        return Status::Busy;
+    }
+    if (joinPending_) {
+        traceAdmission(traceSerial, Status::Busy, ScanBusyClass::BackendJoinPending, 0, false);
+        return Status::Busy;
+    }
+    if (scanPending_ && !scanQueued_) {
+        traceAdmission(traceSerial, Status::Busy, ScanBusyClass::BackendActiveScan, 0, false);
+        return Status::Busy;
+    }
     if (plan.privateAddressRequired && (!operations_.privateAddressReady ||
-        !operations_.privateAddressReady(operations_.context))) return Status::Unsupported;
-    if (!operations_.scan) return Status::Unsupported;
-    if (scanPending_ && scanQueued_) finishQueuedScan(NativeAborted);
+        !operations_.privateAddressReady(operations_.context))) {
+        traceAdmission(traceSerial, Status::Unsupported, ScanBusyClass::None, 0, false);
+        return Status::Unsupported;
+    }
+    if (!operations_.scan) {
+        traceAdmission(traceSerial, Status::Unsupported, ScanBusyClass::None, 0, false);
+        return Status::Unsupported;
+    }
+    if (scanPending_ && scanQueued_) {
+        const uint32_t replacedSerial = scanTraceRequestSerial_;
+        finishQueuedScan(NativeAborted, ScanTerminalSource::RequestReplacement);
+        linkScanReplacement(replacedSerial, traceSerial);
+    }
     scanPending_ = true;
+    scanTraceRequestSerial_ = traceSerial;
     scanRemaining_ = 20000;
     // The caller's request identifier is not a hardware completion identity.
     // A fresh host generation is held unchanged through real completion/drain.
     if (!++nextGeneration_) ++nextGeneration_;
     plan.identifier = nextGeneration_;
     scanGeneration_ = plan.identifier;
+    if (auto trace = findScanTrace(traceSerial)) trace->generation = plan.identifier;
     ++scanRequests_;
+    const uint64_t radioAttemptStartNs = monotonicNowNanoseconds();
     const Status result = operations_.scan(operations_.context, plan);
+    ScanBusyClass busyClass = ScanBusyClass::None;
+    uint32_t busyCode = 0;
+    if (result == Status::Busy) {
+        const ScanBusyDetail detail = radioBusyDetail();
+        busyCode = detail.code;
+        busyClass = busyCode ? ScanBusyClass::RadioReported : ScanBusyClass::RadioUnclassified;
+    }
+    traceAdmission(traceSerial, result, busyClass, busyCode, true, radioAttemptStartNs);
     if (result == Status::Busy) {
         // Busy does not distinguish a live HAL lease from a scan attempt that
         // has already entered drain. Keep this exact WCL plan/generation until
@@ -71,7 +251,7 @@ Status Backend::scanRequest(const void *data, size_t n) {
         return Status::Ok;
     }
     if (result != Status::Ok) {
-        scanPending_ = false; scanRemaining_ = scanGeneration_ = 0;
+        scanPending_ = false; scanRemaining_ = scanGeneration_ = scanTraceRequestSerial_ = 0;
     }
     return result;
 }
@@ -79,7 +259,7 @@ void Backend::deferScan(const ScanPlan &plan) {
     deferredScanPlan_ = plan;
     scanQueued_ = true;
 }
-void Backend::finishQueuedScan(uint32_t status) {
+void Backend::finishQueuedScan(uint32_t status, ScanTerminalSource source) {
     if (!scanQueued_) return;
     // Retire the WCL-side entry only; Busy does not imply the HAL had no side
     // effects, so its own generation/lease cleanup remains with the HAL.
@@ -87,22 +267,35 @@ void Backend::finishQueuedScan(uint32_t status) {
     scanPending_ = false;
     scanRemaining_ = scanGeneration_ = 0;
     erase(&deferredScanPlan_, sizeof(deferredScanPlan_));
-    uint8_t payload[4]; write32(payload, status);
-    post(ScanFinished, payload, sizeof(payload));
+    const uint32_t traceSerial = scanTraceRequestSerial_;
+    scanTraceRequestSerial_ = 0;
+    emitScanFinished(traceSerial, status, source);
 }
 void Backend::retryDeferredScan() {
     if (stopped_ || !ready_ || !scanPending_ || !scanQueued_ ||
         !scanGeneration_ || deferredScanPlan_.identifier != scanGeneration_ ||
         !operations_.scan) return;
     const uint32_t generation = scanGeneration_;
+    const uint32_t traceSerial = scanTraceRequestSerial_;
+    const uint64_t radioAttemptStartNs = monotonicNowNanoseconds();
     const Status result = operations_.scan(operations_.context, deferredScanPlan_);
+    ScanBusyClass busyClass = ScanBusyClass::None;
+    uint32_t busyCode = 0;
+    if (result == Status::Busy) {
+        const ScanBusyDetail detail = radioBusyDetail();
+        busyCode = detail.code;
+        busyClass = busyCode ? ScanBusyClass::RadioReported : ScanBusyClass::RadioUnclassified;
+    }
+    traceAdmission(traceSerial, result, busyClass, busyCode, true,
+                   radioAttemptStartNs);
     // All entry points are serialized by the native workqueue gate. Keep the
     // generation check as a fail-closed guard against synchronous re-entry.
     if (!scanQueued_ || generation != scanGeneration_ ||
         deferredScanPlan_.identifier != generation) return;
     if (result == Status::Busy) return;
     if (result != Status::Ok) {
-        finishQueuedScan(result == Status::NotReady ? NativeOffline : NativeFailed);
+        finishQueuedScan(result == Status::NotReady ? NativeOffline : NativeFailed,
+            result == Status::NotReady ? ScanTerminalSource::DriverOffline : ScanTerminalSource::AdmissionFailure);
         return;
     }
     scanQueued_ = false;
@@ -192,7 +385,7 @@ Status Backend::abortScan() {
     if (scanQueued_) {
         // The WCL request was not admitted successfully. Retire its event
         // state without guessing whether HAL is already draining a scan.
-        finishQueuedScan(NativeAborted);
+        finishQueuedScan(NativeAborted, ScanTerminalSource::RequestAbort);
         return Status::Ok;
     }
     if (scanPending_) {
@@ -260,12 +453,12 @@ void Backend::driverState(bool isReady) {
             if (scanQueued_) {
                 // Retire the WCL request. Busy alone cannot prove whether HAL
                 // started a drain; HAL retains ownership of its radio lease.
-                finishQueuedScan(NativeOffline);
+                finishQueuedScan(NativeOffline, ScanTerminalSource::DriverOffline);
             } else {
                 scanPending_ = false; scanDraining_ = true;
                 scanAbortNotification_ = false; scanRemaining_ = 0;
-                uint8_t payload[4]; write32(payload, NativeOffline);
-                post(ScanFinished, payload, sizeof(payload));
+                emitScanFinished(scanTraceRequestSerial_, NativeOffline,
+                                 ScanTerminalSource::DriverOffline);
             }
         }
         finishJoin(1, NativeOffline);
@@ -298,13 +491,20 @@ void Backend::retryDeferredJoin() {
 }
 void Backend::observeScanComplete(uint32_t generation, uint32_t firmwareStatus) {
     if (firmwareStatus != 1 && firmwareStatus != 2) return;
+    const uint64_t consumedNs = monotonicNowNanoseconds();
     // An unowned init-scan terminal can release a HAL lease and permit one
     // retry. It is not completion evidence for the queued WCL request.
     if (!generation) retryDeferredScan();
     // A genuine terminal event may also release the HAL's generation-zero
     // initial scan. It never completes a native scan, but can unblock a join.
     retryDeferredJoin();
-    if (!generation || generation != scanGeneration_) return;
+    if (!generation) return;
+    if (generation != scanGeneration_) {
+        traceStaleTerminal();
+        return;
+    }
+    const uint32_t traceSerial = scanTraceRequestSerial_;
+    traceFirmwareTerminal(traceSerial, firmwareStatus, consumedNs);
     if (scanDraining_) {
         scanDraining_ = false;
         scanGeneration_ = scanRemaining_ = 0;
@@ -312,32 +512,40 @@ void Backend::observeScanComplete(uint32_t generation, uint32_t firmwareStatus) 
         erase(&deferredScanPlan_, sizeof(deferredScanPlan_));
         if (scanAbortNotification_) {
             scanAbortNotification_ = false;
-            uint8_t payload[4]; write32(payload, NativeAborted);
-            post(ScanFinished, payload, sizeof(payload));
+            scanTraceRequestSerial_ = 0;
+            emitScanFinished(traceSerial, NativeAborted,
+                firmwareStatus == 1 ? ScanTerminalSource::FirmwareComplete : ScanTerminalSource::FirmwareAborted);
+        } else {
+            scanTraceRequestSerial_ = 0;
         }
         return;
     }
-    if (!ready() || !scanPending_) return;
+    if (!ready() || !scanPending_) {
+        scanTraceRequestSerial_ = 0;
+        return;
+    }
     scanPending_ = scanQueued_ = false;
     scanRemaining_ = scanGeneration_ = 0;
     erase(&deferredScanPlan_, sizeof(deferredScanPlan_));
-    uint8_t payload[4] {}; write32(payload, firmwareStatus == 1 ? 0 : NativeAborted);
-    post(ScanFinished, payload, sizeof(payload));
+    scanTraceRequestSerial_ = 0;
+    emitScanFinished(traceSerial, firmwareStatus == 1 ? 0 : NativeAborted,
+        firmwareStatus == 1 ? ScanTerminalSource::FirmwareComplete : ScanTerminalSource::FirmwareAborted);
 }
 
 void Backend::observeScanReset(uint32_t generation) {
     if (stopped_ || !generation || generation != scanGeneration_) return;
     if (scanQueued_) {
-        finishQueuedScan(NativeOffline);
+        finishQueuedScan(NativeOffline, ScanTerminalSource::ResetDrained);
         return;
     }
     const bool notify = scanPending_ || (scanDraining_ && scanAbortNotification_);
     const uint32_t status = scanPending_ ? NativeOffline : NativeAborted;
     scanPending_ = scanDraining_ = scanAbortNotification_ = false;
     scanRemaining_ = scanGeneration_ = 0;
+    const uint32_t traceSerial = scanTraceRequestSerial_;
+    scanTraceRequestSerial_ = 0;
     if (notify) {
-        uint8_t payload[4]; write32(payload, status);
-        post(ScanFinished, payload, sizeof(payload));
+        emitScanFinished(traceSerial, status, ScanTerminalSource::ResetDrained);
     }
 }
 void Backend::addressHardwareStopped() {
@@ -443,6 +651,9 @@ void Backend::finishJoin(uint16_t status, uint32_t driverStatus) {
 }
 void Backend::tick(uint32_t elapsed) {
     if (stopped_) return;
+    const uint64_t delta = uint64_t(elapsed) * 1000000ULL;
+    scanTraceFallbackClockNs_ = delta > UINT64_MAX - scanTraceFallbackClockNs_
+        ? UINT64_MAX : scanTraceFallbackClockNs_ + delta;
     if (ready() && linkPublished_ && associated_ && authorized_ && bssValid_) {
         // InfraInterface's default createLQMData() returns null on 25G241.
         // Publish the audited native LQM event directly, with only the real
@@ -460,15 +671,15 @@ void Backend::tick(uint32_t elapsed) {
     if (scanPending_) {
         if (scanQueued_) {
             if (elapsed >= scanRemaining_) {
-                finishQueuedScan(NativeTimeout);
+                finishQueuedScan(NativeTimeout, ScanTerminalSource::RequestTimeout);
             } else {
                 scanRemaining_ -= elapsed;
                 retryDeferredScan();
             }
         } else if (elapsed >= scanRemaining_) {
             scanPending_ = false; scanDraining_ = true; scanAbortNotification_ = false; scanRemaining_ = 0;
-            uint8_t payload[4]; write32(payload, NativeTimeout);
-            post(ScanFinished, payload, sizeof(payload));
+            emitScanFinished(scanTraceRequestSerial_, NativeTimeout,
+                             ScanTerminalSource::RequestTimeout);
         } else scanRemaining_ -= elapsed;
     }
     if (joinPending_ && deferred_) {

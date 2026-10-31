@@ -92,6 +92,29 @@ static void ieee80211_tahoe_trace_group(struct ieee80211com *ic,
     (void)iwx_sta_auth_trace_record(&ic->ic_tahoe_auth_trace, &input);
 }
 
+/* Capture only the net80211 gate state at the pre-enqueue callsite, directly
+ * before send_group_msg2. This is not evidence that enqueue succeeded, that
+ * if_start drained the frame, that iwx_tx submitted it, or that firmware/peer
+ * received it. The HAL scan-state callback is a lock-bounded read-only query. */
+static void ieee80211_tahoe_trace_group2_callsite_gate(
+    struct ieee80211com *ic, uint32_t attempt)
+{
+    uint32_t flags = 0;
+    uint32_t scanPhase = 0;
+    if (ic->ic_xflags & IEEE80211_F_TX_MGMT_ONLY)
+        flags |= IWX_STA_FLAG_GROUP2_TX_MGMT_ONLY;
+    if (ic->ic_flags & IEEE80211_F_BGSCAN)
+        flags |= IWX_STA_FLAG_GROUP2_BGSCAN;
+    if (ic->ic_tahoe_scan_state != NULL) {
+        scanPhase = (*ic->ic_tahoe_scan_state)(ic);
+        flags |= IWX_STA_FLAG_GROUP2_SCAN_PHASE_PRESENT;
+    }
+    ieee80211_tahoe_trace_group(ic, attempt,
+        IWX_STA_TRACE_GROUP2_CALLSITE_GATE,
+        IWX_STA_STAGE_GROUP2_CALLSITE_GATE, IWX_STA_COMPONENT_NONE,
+        IWX_STA_SOURCE_LOCAL_GROUP1, ic->ic_state, flags, scanPhase, 0);
+}
+
 static int ieee80211_tahoe_install_group_key(struct ieee80211com *ic,
     struct ieee80211_node *ni, struct ieee80211_key *key, uint32_t attempt,
     uint16_t component)
@@ -1184,6 +1207,9 @@ ieee80211_recv_rsn_group_msg1(struct ieee80211com *ic,
               ether_sprintf(ni->ni_macaddr));
     
     /* send message 2 to authenticator */
+#ifdef AIRPORT_TAHOE
+    ieee80211_tahoe_trace_group2_callsite_gate(ic, traceAttempt);
+#endif
     group2Result = ieee80211_send_group_msg2(ic, ni, NULL);
 #ifdef AIRPORT_TAHOE
     ieee80211_tahoe_trace_group(ic, traceAttempt,
@@ -1414,6 +1440,9 @@ ieee80211_recv_wpa_group_msg1(struct ieee80211com *ic,
               ether_sprintf(ni->ni_macaddr));
     
     /* send message 2 to authenticator */
+#ifdef AIRPORT_TAHOE
+    ieee80211_tahoe_trace_group2_callsite_gate(ic, traceAttempt);
+#endif
     int group2Result = ieee80211_send_group_msg2(ic, ni, k);
 #ifdef AIRPORT_TAHOE
     ieee80211_tahoe_trace_group(ic, traceAttempt,

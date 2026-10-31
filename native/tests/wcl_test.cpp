@@ -13,6 +13,12 @@ struct Fixture {
     unsigned busyJoinResponses {};
     unsigned busyScanResponses {};
     uint32_t generation {};
+    uint32_t busyReasonCode {};
+    uint64_t nowNs {100};
+    uint64_t scanAdvanceNs {}, finishedEmitAdvanceNs {};
+    unsigned reentrantScanOnCall {};
+    std::vector<uint8_t> reentrantScanWire;
+    Status reentrantScanResult {Status::Failed};
     bool privateReady {true};
     Status joinStatus {Status::Ok};
     Status scanStatus {Status::Ok};
@@ -25,8 +31,15 @@ struct Fixture {
         memcpy(f->lastScanChannels,p.channels,sizeof(f->lastScanChannels));
         memcpy(f->lastScanSsid,p.ssid,sizeof(f->lastScanSsid));
         f->lastScanSsidLength=p.ssidLength;
-        if (f->busyScanResponses) { --f->busyScanResponses; return Status::Busy; }
-        return f->scanStatus;
+        const Status result = f->busyScanResponses
+            ? (--f->busyScanResponses, Status::Busy) : f->scanStatus;
+        f->nowNs += f->scanAdvanceNs;
+        if (f->reentrantScanOnCall == f->scans) {
+            f->reentrantScanOnCall = 0;
+            f->reentrantScanResult = f->backend.scanRequest(
+                f->reentrantScanWire.data(), f->reentrantScanWire.size());
+        }
+        return result;
     }
     static Status join(void *x, const JoinPlan &p) {
         auto f=static_cast<Fixture *>(x); ++f->joins;
@@ -41,8 +54,11 @@ struct Fixture {
     static Status cancel(void *x) { ++static_cast<Fixture *>(x)->cancels; return Status::Ok; }
     static void leave(void *x) { ++static_cast<Fixture *>(x)->leaves; }
     static bool privacy(void *x) { return static_cast<Fixture *>(x)->privateReady; }
+    static uint64_t monotonic(void *x) { return static_cast<Fixture *>(x)->nowNs; }
+    static ScanBusyDetail busyDetail(void *x) { return {static_cast<Fixture *>(x)->busyReasonCode}; }
     static void emit(void *x, uint32_t k, const void *p, size_t n) {
         auto f = static_cast<Fixture *>(x);
+        if (k == ScanFinished) f->nowNs += f->finishedEmitAdvanceNs;
         if (k == Link) {
             assert(p && n == 16);
             auto bytes = static_cast<const uint8_t *>(p);
@@ -58,7 +74,7 @@ struct Fixture {
         if (n) e.body.assign(static_cast<const uint8_t *>(p), static_cast<const uint8_t *>(p) + n);
         f->messages.push_back(e);
     }
-    Fixture() { backend.initialize({this, scan, join, leave, emit, privacy, cancel}); backend.driverState(true); messages.clear(); }
+    Fixture() { backend.initialize({this, scan, join, leave, emit, privacy, cancel, monotonic, busyDetail}); backend.driverState(true); messages.clear(); }
     unsigned count(uint32_t k) const { unsigned n = 0; for (auto &e : messages) if (e.kind == k) ++n; return n; }
 };
 std::vector<uint8_t> scanWire() {
@@ -161,13 +177,23 @@ int main() {
     {
         Fixture f;
         // An absent callback does not count as an emitted201/237 notification.
-        f.backend.initialize({&f,Fixture::scan,Fixture::join,Fixture::leave,nullptr,Fixture::privacy,Fixture::cancel});
+        f.backend.initialize({&f,Fixture::scan,Fixture::join,Fixture::leave,nullptr,
+            Fixture::privacy,Fixture::cancel,nullptr,nullptr});
         assert(f.backend.scanRequest(scan.data(),scan.size())==Status::Ok);
         uint8_t bssid[6]={2,0,0,0,0,1},ssid[1]={'x'},ies[2]={0,0},frame[38]={0x80};
         Beacon b {ssid,bssid,ies,frame,1,2,sizeof(frame),0x1006,100,0,6,-45,-95,50};
-        f.backend.observeBeacon(b);f.backend.observeScanComplete(f.generation,2);
+        f.backend.observeBeacon(b); f.backend.tick(1500);
+        f.backend.observeScanComplete(f.generation,2);
         assert(f.backend.pendingScanBeacons()==1 && !f.backend.event201EmitCalls() && !f.backend.event237EmitCalls());
         assert(f.backend.last237Status()==0xffffffffU);
+        ScanTraceSnapshot trace {};
+        f.backend.copyScanTrace(&trace);
+        assert(trace.count==1 && trace.records[0].clockSource==ScanTraceClock::TickFallback);
+        assert(trace.records[0].requestMonotonicNs==0 &&
+               trace.records[0].firmwareTerminalConsumedMonotonicNs==1500000000ULL);
+        assert(trace.records[0].hasNative237 && !trace.records[0].native237EmitCalled);
+        assert(trace.records[0].native237EmitCallCount==0 &&
+               trace.records[0].native237EmitCallMonotonicNs==0);
     }
     {
         Fixture f;
@@ -354,6 +380,12 @@ int main() {
         assert(!f.backend.scanning() && !f.backend.scanDraining());
         assert(f.count(ScanFinished)==1 && f.backend.event237EmitCalls()==1);
         assert(read32(f.messages.back().body.data())==0xe00002d6);
+        ScanTraceSnapshot timeoutTrace {};
+        f.backend.copyScanTrace(&timeoutTrace);
+        assert(timeoutTrace.count==1 && timeoutTrace.records[0].hasNative237);
+        assert(timeoutTrace.records[0].nativeTerminalSource==ScanTerminalSource::RequestTimeout);
+        assert(timeoutTrace.records[0].native237Status==0xe00002d6 &&
+               timeoutTrace.records[0].native237EmitCalled);
         const unsigned calls=f.scans;
         f.backend.tick(1000);
         assert(f.scans==calls && f.count(ScanFinished)==1);
@@ -362,9 +394,173 @@ int main() {
             assert(rejected.backend.scanRequest(scan.data(),scan.size())==status);
             assert(!rejected.backend.scanning() && !rejected.backend.scanDraining());
             assert(!rejected.count(ScanFinished));
+            ScanTraceSnapshot failedTrace {};
+            rejected.backend.copyScanTrace(&failedTrace);
+            assert(failedTrace.count==1 && failedTrace.records[0].lastAdmissionStatus==status);
+            assert(!failedTrace.records[0].hasNative237 && !failedTrace.records[0].hasFirmwareTerminal);
             rejected.backend.tick(20000);
             assert(!rejected.count(ScanFinished));
         }
+    }
+    {
+        // Per-generation timing ties the native request, Busy admission, only
+        // the 201 emits made while that scan is pending, and the matching real
+        // firmware terminal/237. The optional clock is adapter-monotonic.
+        Fixture f; f.busyScanResponses=2; f.busyReasonCode=0x42;
+        f.scanAdvanceNs=10; f.finishedEmitAdvanceNs=100;
+        f.nowNs=100;
+        assert(f.backend.scanRequest(scan.data(),scan.size())==Status::Ok);
+        const uint32_t generation=f.generation;
+        uint8_t bssid[6]={2,0,0,0,0,1},ssid[1]={'x'},ies[2]={0,0},frame[38]={0x80};
+        Beacon b {ssid,bssid,ies,frame,1,2,sizeof(frame),0x1006,100,0,6,-45,-95,50};
+        f.nowNs=200; f.backend.observeBeacon(b);
+        f.nowNs=300; f.backend.observeBeacon(b);
+        f.nowNs=400; f.backend.tick(1000); // One bounded Busy retry.
+        f.busyScanResponses=0;
+        f.nowNs=500; f.backend.tick(1000); // Same generation is now admitted.
+        f.nowNs=600; f.backend.observeScanComplete(generation+1,1); // Stale real event.
+        assert(f.backend.scanning() && f.count(ScanFinished)==0);
+        f.nowNs=700; f.backend.observeScanComplete(generation,1);
+
+        ScanTraceSnapshot trace {};
+        f.backend.copyScanTrace(&trace);
+        assert(trace.version==ScanTraceSchemaVersion && trace.count==1 &&
+               trace.requestCount==1 && trace.replacementCount==0);
+        const auto &r=trace.records[0];
+        assert(r.requestSerial && r.generation==generation);
+        assert(r.clockSource==ScanTraceClock::MonotonicCallback);
+        assert(r.requestMonotonicNs==100 && r.firstRadioAttemptMonotonicNs==100);
+        assert(r.lastRadioAttemptMonotonicNs==500 && r.acceptedMonotonicNs==510 && r.hasAccepted);
+        assert(r.radioAttempts==3 && r.busyAttempts==2 && r.lastAdmissionStatus==Status::Ok);
+        assert(r.lastBusyClass==ScanBusyClass::RadioReported && r.lastBusyReasonCode==0x42);
+        assert(r.event201Count==2 && r.first201MonotonicNs==200 && r.last201MonotonicNs==300);
+        assert(r.staleTerminals==1 && trace.staleTerminalCount==1);
+        assert(r.hasFirmwareTerminal && r.firmwareStatus==1 &&
+               r.firmwareTerminalConsumedMonotonicNs==700);
+        assert(r.hasNative237 && r.native237Status==0 && r.native237EmitCalled &&
+               r.nativeTerminalSource==ScanTerminalSource::FirmwareComplete &&
+               r.native237EmitCallCount==1 && r.native237EmitCallMonotonicNs==700);
+    }
+    {
+        // A backend-side Busy request is recorded without being mislabeled as
+        // a HAL scan attempt or replacing the already active generation.
+        Fixture f;
+        assert(f.backend.scanRequest(scan.data(),scan.size())==Status::Ok);
+        const uint32_t active=f.generation;
+        assert(f.backend.scanRequest(scan.data(),scan.size())==Status::Busy);
+        ScanTraceSnapshot trace {};
+        f.backend.copyScanTrace(&trace);
+        assert(trace.count==2 && trace.records[0].generation==active);
+        assert(trace.records[1].generation==0 && trace.records[1].radioAttempts==0);
+        assert(trace.records[1].lastAdmissionStatus==Status::Busy &&
+               trace.records[1].lastBusyClass==ScanBusyClass::BackendActiveScan);
+        f.backend.observeScanComplete(active,1);
+    }
+    {
+        // A request rejected while address change has made the backend not
+        // ready must not replace or abort the older Busy-queued scan.
+        Fixture f; f.busyScanResponses=4;
+        assert(f.backend.scanRequest(scan.data(),scan.size())==Status::Ok);
+        const uint32_t queuedGeneration=f.generation;
+        f.backend.beginAddressChange();
+        assert(f.backend.scanRequest(scan.data(),scan.size())==Status::NotReady);
+        assert(f.backend.scanning() && f.backend.event237EmitCalls()==0);
+        f.backend.cancelAddressChange();
+        f.busyScanResponses=0;
+        f.backend.tick(1000);
+        assert(f.backend.scanning() && f.generation==queuedGeneration);
+        f.backend.observeScanComplete(queuedGeneration,1);
+        ScanTraceSnapshot trace {};
+        f.backend.copyScanTrace(&trace);
+        assert(trace.count==2 && trace.replacementCount==0 && trace.overwriteCount==0);
+        assert(trace.records[0].generation==queuedGeneration &&
+               trace.records[0].nativeTerminalSource==ScanTerminalSource::FirmwareComplete);
+        assert(trace.records[1].generation==0 && trace.records[1].lastAdmissionStatus==Status::NotReady);
+    }
+    {
+        // A queue that leaves Busy and then fails records both admissions and
+        // the emitted failure terminal against the same generation.
+        Fixture f; f.busyScanResponses=1;
+        assert(f.backend.scanRequest(scan.data(),scan.size())==Status::Ok);
+        const uint32_t generation=f.generation;
+        f.scanStatus=Status::Failed;
+        f.nowNs=200; f.backend.tick(1000);
+        ScanTraceSnapshot trace {};
+        f.backend.copyScanTrace(&trace);
+        assert(trace.count==1 && trace.records[0].generation==generation);
+        assert(trace.records[0].radioAttempts==2 && trace.records[0].busyAttempts==1);
+        assert(trace.records[0].lastAdmissionStatus==Status::Failed);
+        assert(trace.records[0].hasNative237 && trace.records[0].native237EmitCalled &&
+               trace.records[0].native237Status==0xe00002bc &&
+               trace.records[0].nativeTerminalSource==ScanTerminalSource::AdmissionFailure);
+    }
+    {
+        // A synchronous re-entrant scanRequest can replace A with B while A's
+        // HAL callback is still on stack. The returning A result and start
+        // timestamp must stay attached to A, even though B is now current.
+        Fixture f; f.busyScanResponses=1;
+        assert(f.backend.scanRequest(scan.data(),scan.size())==Status::Ok);
+        const uint32_t generationA=f.generation;
+        f.busyScanResponses=2;
+        f.reentrantScanOnCall=2;
+        f.reentrantScanWire=scanWire();
+        f.scanAdvanceNs=7;
+        f.nowNs=1000;
+        f.backend.tick(1000);
+        const uint32_t generationB=f.generation;
+        assert(generationB && generationB!=generationA);
+        assert(f.reentrantScanResult==Status::Ok && f.backend.scanning());
+        ScanTraceSnapshot trace {};
+        f.backend.copyScanTrace(&trace);
+        assert(trace.count==2 && trace.replacementCount==1);
+        const auto &a=trace.records[0];
+        const auto &b=trace.records[1];
+        assert(a.generation==generationA && a.radioAttempts==2 && a.busyAttempts==2);
+        assert(a.lastRadioAttemptMonotonicNs==1000);
+        assert(a.nativeTerminalSource==ScanTerminalSource::RequestReplacement);
+        assert(b.generation==generationB && b.replacesSerial==a.requestSerial);
+        assert(b.radioAttempts==1 && b.busyAttempts==1 && b.lastAdmissionStatus==Status::Busy);
+        assert(b.requestMonotonicNs==1007 && b.lastRadioAttemptMonotonicNs==1007);
+    }
+    {
+        // A replacement closes the old queued generation; a late real terminal
+        // from it is stale and cannot finish the new generation.
+        Fixture f; f.busyScanResponses=4;
+        assert(f.backend.scanRequest(scan.data(),scan.size())==Status::Ok);
+        const uint32_t oldGeneration=f.generation;
+        assert(f.backend.scanRequest(scan.data(),scan.size())==Status::Ok);
+        const uint32_t currentGeneration=f.generation;
+        assert(currentGeneration!=oldGeneration && f.backend.scanning());
+        f.backend.observeScanComplete(oldGeneration,1);
+        assert(f.backend.scanning() && f.count(ScanFinished)==1);
+        f.backend.observeScanComplete(currentGeneration,2);
+        ScanTraceSnapshot trace {};
+        f.backend.copyScanTrace(&trace);
+        assert(trace.count==2 && trace.requestCount==2 && trace.replacementCount==1);
+        assert(trace.overwriteCount==0 && trace.staleTerminalCount==1);
+        assert(trace.records[0].generation==oldGeneration &&
+               trace.records[0].replacedBySerial==trace.records[1].requestSerial &&
+               trace.records[0].nativeTerminalSource==ScanTerminalSource::RequestReplacement &&
+               trace.records[0].native237Status==0xe00002eb);
+        assert(trace.records[1].generation==currentGeneration &&
+               trace.records[1].replacesSerial==trace.records[0].requestSerial &&
+               trace.records[1].staleTerminals==1 &&
+               trace.records[1].nativeTerminalSource==ScanTerminalSource::FirmwareAborted &&
+               trace.records[1].firmwareStatus==2 && trace.records[1].native237Status==0xe00002eb);
+    }
+    {
+        // Storage stays fixed. The seventeenth valid request overwrites the
+        // oldest row and increments the counter; every queued replacement has
+        // its own bounded terminal record.
+        Fixture f; f.busyScanResponses=1000;
+        for (unsigned i=0;i<ScanTraceCapacity+1;++i)
+            assert(f.backend.scanRequest(scan.data(),scan.size())==Status::Ok);
+        ScanTraceSnapshot trace {};
+        f.backend.copyScanTrace(&trace);
+        assert(trace.count==ScanTraceCapacity && trace.requestCount==ScanTraceCapacity+1);
+        assert(trace.replacementCount==ScanTraceCapacity && trace.overwriteCount==1);
+        assert(trace.records[0].requestSerial==2 &&
+               trace.records[trace.count-1].requestSerial==ScanTraceCapacity+1);
     }
     {
         Fixture f;
