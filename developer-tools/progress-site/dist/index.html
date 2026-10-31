@@ -207,9 +207,9 @@
             <p class="shared-resource-note"><svg viewBox="0 0 18 18" aria-hidden="true"><circle cx="9" cy="9" r="7" fill="none" stroke="currentColor" stroke-width="1.4"/><path d="M9 8v4m0-7v.5" fill="none" stroke="currentColor" stroke-linecap="round" stroke-width="1.5"/></svg><span>STA 联网成功可作为常规 Wi-Fi 证据；它不代替 AWDL 的接收、awdl0 入站或 AirDrop 验收。两条路径共用芯片资源，切换、频道驻留、固件状态和电源生命周期可能相互影响。</span></p>
           </section>
 
-          <section class="test094-overlay" aria-labelledby="test094-title">
-            <div class="test094-heading"><h3 id="test094-title">Test094 · RX completion 与 power / lifecycle / task queue 观察层</h3><span class="test094-chip" id="principle-test094-chip">状态随里程碑数据更新</span></div>
-            <p class="test094-state" id="principle-test094-status">当前实测候选和下一候选状态从本页里程碑数据读取。</p>
+          <section class="test094-overlay" aria-labelledby="principle-observation-title">
+            <div class="test094-heading"><h3 id="principle-observation-title">RX completion 与电源、生命周期、任务队列观察层</h3><span class="test094-chip" id="principle-observation-chip">状态随里程碑数据更新</span></div>
+            <p class="test094-state" id="principle-observation-status">当前实测候选和下一候选状态从本页里程碑数据读取。</p>
             <div class="test094-work">
               <article><h4>Completion 观察</h4><p>观察固定范围的 slot/head/epoch/raw RBID/flags 等数值；不保存包体，也不把 raw tag 当 DMA pin 或所有权证明。</p></article>
               <article><h4>Power / lifecycle</h4><p>把 V2 电源请求代次与 HAL、driver generation 和故障代次并列，查看开关和初始化生命周期的先后关系。</p></article>

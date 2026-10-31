@@ -928,50 +928,7 @@
   put("principle-airdrop-summary", airDropStep && airDropStep.detail || airDropStage && airDropStage.evidence);
   put("principle-data-version", `${runtime}${data.updatedAt ? ` · ${data.updatedAt}` : ""}`);
 
-  const timelineSteps = data.timeline && Array.isArray(data.timeline.steps)
-    ? data.timeline.steps : [];
-  const test094Entry = timelineSteps.slice().reverse().find(step =>
-    `${step.id || ""} ${step.label || ""} ${step.candidate || ""}`
-      .toLowerCase().includes("test094"));
-  const nextCandidate = data.nextCandidate || "";
-  const nextState = data.nextCandidateState || data.nextCandidateRole ||
-    data.nextCandidateSummary || "候选状态尚未记录";
-  const stateText = String(nextState);
-  const hasPositiveDeployment = value => {
-    const text = String(value || "");
-    return /已部署|部署完成/.test(text) && !/未部署|待部署/.test(text);
-  };
-  const deploymentChip = value => {
-    if (data.deploymentState === "test094_deployed_awaiting_boot") {
-      return "已部署 · 待重启";
-    }
-    const text = String(value || "");
-    if (!hasPositiveDeployment(text)) return text || "状态来自页面数据";
-    return /待重启|等待重启/.test(text)
-      ? "已部署 · 待重启"
-      : "已部署 · 实机待验";
-  };
-  const chip = document.getElementById("principle-test094-chip");
-  let test094Status = "";
-  let chipText = "";
-
-  if (/test094/i.test(String(runtime))) {
-    test094Status = `${runtime} 已列为当前运行候选；本轮状态以页面验收数据为准。`;
-    chipText = "当前运行候选";
-  } else if (/test094/i.test(String(nextCandidate))) {
-    test094Status = `${nextCandidate} · ${stateText}`;
-    chipText = deploymentChip(stateText);
-  } else if (data.deploymentState === "test094_deployed_awaiting_boot") {
-    test094Status = `Test094 · ${stateText}`;
-    chipText = deploymentChip(stateText);
-  } else if (test094Entry) {
-    const entryState = test094Entry.stateLabel || test094Entry.detail || test094Entry.label;
-    test094Status = `${test094Entry.label || "Test094 时间线记录"} · ${entryState}`;
-    chipText = deploymentChip(entryState);
-  } else {
-    test094Status = `当前运行候选：${runtime}。下一候选状态：${stateText}`;
-    chipText = "未见 Test094 部署记录";
-  }
-  put("principle-test094-status", test094Status);
-  if (chip) chip.textContent = chipText;
+  put("principle-observation-chip", runtime);
+  put("principle-observation-status", workflow.phaseLabel ||
+    data.validationLabel || "观察层结果以当前运行版本的本轮验收为准。");
 })();

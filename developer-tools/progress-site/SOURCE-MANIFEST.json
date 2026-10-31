@@ -5,22 +5,22 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "62bcce4fe422392174158d5e7249f6c2155c57cd77387df3f45bc9cb592245c7"
+      "sha256": "653a1860884cf8d62b9ba58fc592b3f3e4114efff57496cbaa59a4b2db1339a3"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "f8943c6544d275127a71583fabf22bf39f1554b42efb3d78bfcc42701ef99593"
+      "sha256": "2568723f735b33d78c6b4ceb7a9cf9febf8062d70905f932f9d9c0e52b0739f4"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "6a8598200900553fa62d6c17d50c61804791617b2d2e4607bcb506303b999a5c"
+      "sha256": "b3b8d5b6e5c9d14b466f6a8b884a1e4abf4aa8d33cc86a8c267c91f944b686d3"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
       "snapshot_path": "dist/assets/site.js",
-      "sha256": "8aaaf3b34333e50bd11326fb3fa68d35aac2ada2ac602925b5edd85bfd6995dc"
+      "sha256": "232e25ac82dfcfcb1b469b5fb9003481ce8a237f8613144f0ed2db65f5643bdd"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.css",
@@ -30,7 +30,7 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "3696a4e601c10554e81b6e0f1c7782be1ffbaf68a43a5333577d6cabc977633c"
+      "sha256": "e5199b755ee6940db8e3db87ac171d690510d3aba730cc7649ec8345f94b7557"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-31T12:55:11.395805+08:00",
-  "runtime_scope": "Test094 current boot: 4 passed, 3 partial, 33 uncovered. Two separate five-minute Wi-Fi observations and interface-bound HTTPS passed; power notification bounce remains to be revalidated. Test095 source, full build and independent review passed, internal EFI backed up and deployed; reboot/runtime validation pending. No new AWDL data ingress or AirDrop claim."
+  "updated_at": "2026-10-31T13:41:43.459400+08:00",
+  "runtime_scope": "Test095 boot: 6 passed, 3 partial, 30 uncovered, 1 failed. Confirmed unattended Wi-Fi disconnect; separate post-toggle and post-RX windows passed. Local ROC START/END and one channel-149 beacon observed; no AWDL data, native socket reply or AirDrop delivery. Late completion telemetry is not target-window packet proof. Group2 1024-slot observation fix committed with focused offline tests; no new kext build or EFI write."
 }
