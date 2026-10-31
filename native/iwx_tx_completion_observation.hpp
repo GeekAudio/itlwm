@@ -8,7 +8,9 @@
  * Fixed-size numeric observations for RX dispatch and TX-completion handler
  * exits. These are latest-by-kind records plus terminal-reason counters, not
  * an ordered packet ledger. They contain no packet bytes, addresses, nodes,
- * or pointers and make no claim about peer receipt or the live TX ring.
+ * or pointers. Schema 2 may additionally record a bounded read-only scan of
+ * live host TX_CMD headers in the response's reclaim interval; it does not
+ * change ring ownership or claim firmware acceptance or peer receipt.
  *
  * Producers make one CAS attempt only. Invalid input, a saturated counter,
  * or contention increments dropped_count where possible; any such loss makes
@@ -18,8 +20,8 @@
 enum {
     IWX_TX_COMPLETION_KIND_COUNT = 3,
     IWX_TX_COMPLETION_MAX_REASON_COUNT = 10,
-    IWX_TX_COMPLETION_STATE_MAX_BYTES = 768,
-    IWX_TX_COMPLETION_SNAPSHOT_MAX_BYTES = 768
+    IWX_TX_COMPLETION_STATE_MAX_BYTES = 1024,
+    IWX_TX_COMPLETION_SNAPSHOT_MAX_BYTES = 1024
 };
 
 enum iwx_tx_completion_kind {
@@ -104,12 +106,15 @@ enum iwx_tx_completion_presence_flag {
     IWX_TX_COMPLETION_HAS_BA_WIRELESS_TIME = 1u << 22,
     IWX_TX_COMPLETION_HAS_BA_TFD_TID = 1u << 23,
     IWX_TX_COMPLETION_HAS_BA_TFD_INDEX = 1u << 24,
-    IWX_TX_COMPLETION_HAS_OUTPUT_EPOCH = 1u << 25
+    IWX_TX_COMPLETION_HAS_OUTPUT_EPOCH = 1u << 25,
+    IWX_TX_COMPLETION_HAS_RESPONSE_FRAME_CONTROL = 1u << 26,
+    IWX_TX_COMPLETION_HAS_RESPONSE_SEQUENCE_CONTROL = 1u << 27,
+    IWX_TX_COMPLETION_HAS_TXCMD_SCAN = 1u << 28,
+    IWX_TX_COMPLETION_HAS_TXCMD_UNIQUE_CANDIDATE = 1u << 29
 };
 
 enum {
-    IWX_TX_COMPLETION_CALLER_PRESENCE_MASK =
-        (1u << 26) - 1u,
+    IWX_TX_COMPLETION_CALLER_PRESENCE_MASK = (1u << 30) - 1u,
     IWX_TX_COMPLETION_OBSERVER_HAS_SERIAL = 1u << 31
 };
 
@@ -146,6 +151,17 @@ typedef struct iwx_tx_completion_event_record {
     uint32_t ba_wireless_time;
     uint32_t ba_tfd_tid;
     uint32_t ba_tfd_index;
+    uint32_t response_frame_control;
+    uint32_t response_sequence_control;
+    uint32_t txcmd_scan_status;
+    uint32_t txcmd_expected_count;
+    uint32_t txcmd_scanned_count;
+    uint32_t txcmd_candidate_count;
+    uint32_t txcmd_candidate_index;
+    uint32_t txcmd_api_generation;
+    uint32_t txcmd_command_version;
+    uint32_t txcmd_flags;
+    uint32_t txcmd_offload_assist;
 } iwx_tx_completion_event_record;
 
 typedef struct iwx_tx_completion_event_input {
@@ -179,6 +195,17 @@ typedef struct iwx_tx_completion_event_input {
     uint32_t ba_wireless_time;
     uint32_t ba_tfd_tid;
     uint32_t ba_tfd_index;
+    uint32_t response_frame_control;
+    uint32_t response_sequence_control;
+    uint32_t txcmd_scan_status;
+    uint32_t txcmd_expected_count;
+    uint32_t txcmd_scanned_count;
+    uint32_t txcmd_candidate_count;
+    uint32_t txcmd_candidate_index;
+    uint32_t txcmd_api_generation;
+    uint32_t txcmd_command_version;
+    uint32_t txcmd_flags;
+    uint32_t txcmd_offload_assist;
 } iwx_tx_completion_event_input;
 
 typedef struct iwx_tx_completion_observation_state {
@@ -209,7 +236,7 @@ static constexpr uint32_t kKindCount = IWX_TX_COMPLETION_KIND_COUNT;
 static constexpr uint32_t kMaxReasonCount =
     IWX_TX_COMPLETION_MAX_REASON_COUNT;
 
-static_assert(sizeof(iwx_tx_completion_event_record) <= 160,
+static_assert(sizeof(iwx_tx_completion_event_record) <= 192,
               "TX completion record must remain fixed and scalar");
 static_assert(sizeof(iwx_tx_completion_observation_state) <=
                   IWX_TX_COMPLETION_STATE_MAX_BYTES,
@@ -302,7 +329,11 @@ static inline uint32_t allowedPresence(uint32_t kind)
     case IWX_TX_COMPLETION_TX_RSP:
         return rxBase | ring | IWX_TX_COMPLETION_HAS_FRAME_COUNT |
             IWX_TX_COMPLETION_HAS_SSN | IWX_TX_COMPLETION_HAS_RA_TID |
-            IWX_TX_COMPLETION_HAS_STATUS;
+            IWX_TX_COMPLETION_HAS_STATUS |
+            IWX_TX_COMPLETION_HAS_RESPONSE_FRAME_CONTROL |
+            IWX_TX_COMPLETION_HAS_RESPONSE_SEQUENCE_CONTROL |
+            IWX_TX_COMPLETION_HAS_TXCMD_SCAN |
+            IWX_TX_COMPLETION_HAS_TXCMD_UNIQUE_CANDIDATE;
     case IWX_TX_COMPLETION_BA:
         return rxBase | ring | IWX_TX_COMPLETION_HAS_BA_STA_ID |
             IWX_TX_COMPLETION_HAS_BA_FLAGS |
@@ -369,7 +400,35 @@ static inline bool absentValuesAreZero(
         IWX_TX_COMPLETION_ABSENT_ZERO(
             IWX_TX_COMPLETION_HAS_BA_TFD_TID, ba_tfd_tid) &&
         IWX_TX_COMPLETION_ABSENT_ZERO(
-            IWX_TX_COMPLETION_HAS_BA_TFD_INDEX, ba_tfd_index);
+            IWX_TX_COMPLETION_HAS_BA_TFD_INDEX, ba_tfd_index) &&
+        IWX_TX_COMPLETION_ABSENT_ZERO(
+            IWX_TX_COMPLETION_HAS_RESPONSE_FRAME_CONTROL,
+            response_frame_control) &&
+        IWX_TX_COMPLETION_ABSENT_ZERO(
+            IWX_TX_COMPLETION_HAS_RESPONSE_SEQUENCE_CONTROL,
+            response_sequence_control) &&
+        IWX_TX_COMPLETION_ABSENT_ZERO(
+            IWX_TX_COMPLETION_HAS_TXCMD_SCAN, txcmd_scan_status) &&
+        IWX_TX_COMPLETION_ABSENT_ZERO(
+            IWX_TX_COMPLETION_HAS_TXCMD_SCAN, txcmd_expected_count) &&
+        IWX_TX_COMPLETION_ABSENT_ZERO(
+            IWX_TX_COMPLETION_HAS_TXCMD_SCAN, txcmd_scanned_count) &&
+        IWX_TX_COMPLETION_ABSENT_ZERO(
+            IWX_TX_COMPLETION_HAS_TXCMD_SCAN, txcmd_candidate_count) &&
+        IWX_TX_COMPLETION_ABSENT_ZERO(
+            IWX_TX_COMPLETION_HAS_TXCMD_UNIQUE_CANDIDATE,
+            txcmd_candidate_index) &&
+        IWX_TX_COMPLETION_ABSENT_ZERO(
+            IWX_TX_COMPLETION_HAS_TXCMD_UNIQUE_CANDIDATE,
+            txcmd_api_generation) &&
+        IWX_TX_COMPLETION_ABSENT_ZERO(
+            IWX_TX_COMPLETION_HAS_TXCMD_UNIQUE_CANDIDATE,
+            txcmd_command_version) &&
+        IWX_TX_COMPLETION_ABSENT_ZERO(
+            IWX_TX_COMPLETION_HAS_TXCMD_UNIQUE_CANDIDATE, txcmd_flags) &&
+        IWX_TX_COMPLETION_ABSENT_ZERO(
+            IWX_TX_COMPLETION_HAS_TXCMD_UNIQUE_CANDIDATE,
+            txcmd_offload_assist);
 #undef IWX_TX_COMPLETION_ABSENT_ZERO
 }
 
@@ -420,6 +479,46 @@ static inline bool validWidths(const iwx_tx_completion_event_input *in)
     if ((in->presence_flags & IWX_TX_COMPLETION_HAS_BA_TFD_INDEX) &&
         in->ba_tfd_index > UINT16_MAX)
         return false;
+    if ((in->presence_flags & IWX_TX_COMPLETION_HAS_RESPONSE_FRAME_CONTROL) &&
+        in->response_frame_control > UINT16_MAX)
+        return false;
+    if ((in->presence_flags & IWX_TX_COMPLETION_HAS_RESPONSE_SEQUENCE_CONTROL) &&
+        in->response_sequence_control > UINT16_MAX)
+        return false;
+    if ((in->presence_flags & IWX_TX_COMPLETION_HAS_TXCMD_UNIQUE_CANDIDATE) &&
+        (in->txcmd_scan_status != 1 ||
+         in->txcmd_api_generation < 2 || in->txcmd_api_generation > 3 ||
+         in->txcmd_command_version > UINT8_MAX ||
+         in->txcmd_candidate_count != 1 ||
+         in->txcmd_candidate_index >= in->ring_count ||
+         in->txcmd_scanned_count != in->txcmd_expected_count))
+        return false;
+    if (in->presence_flags & IWX_TX_COMPLETION_HAS_TXCMD_SCAN) {
+        const uint32_t responseTuple =
+            IWX_TX_COMPLETION_HAS_RESPONSE_FRAME_CONTROL |
+            IWX_TX_COMPLETION_HAS_RESPONSE_SEQUENCE_CONTROL;
+        if ((in->presence_flags & responseTuple) != responseTuple)
+            return false;
+        if (in->txcmd_scan_status != 1 && in->txcmd_scan_status != 2)
+            return false;
+        if (in->txcmd_candidate_count > in->txcmd_scanned_count)
+            return false;
+        if (in->txcmd_expected_count == 0 ||
+            in->txcmd_expected_count > in->queued ||
+            in->txcmd_expected_count > in->ring_count ||
+            in->txcmd_scanned_count > in->txcmd_expected_count)
+            return false;
+        if (in->txcmd_scan_status == 1 &&
+            in->txcmd_scanned_count != in->txcmd_expected_count)
+            return false;
+        if (in->txcmd_scan_status == 1 && in->txcmd_candidate_count == 1 &&
+            (in->presence_flags &
+             IWX_TX_COMPLETION_HAS_TXCMD_UNIQUE_CANDIDATE) == 0)
+            return false;
+    } else if (in->presence_flags &
+               IWX_TX_COMPLETION_HAS_TXCMD_UNIQUE_CANDIDATE) {
+        return false;
+    }
     return true;
 }
 
@@ -472,6 +571,17 @@ static inline void copyInput(const iwx_tx_completion_event_input *in,
     out->ba_wireless_time = in->ba_wireless_time;
     out->ba_tfd_tid = in->ba_tfd_tid;
     out->ba_tfd_index = in->ba_tfd_index;
+    out->response_frame_control = in->response_frame_control;
+    out->response_sequence_control = in->response_sequence_control;
+    out->txcmd_scan_status = in->txcmd_scan_status;
+    out->txcmd_expected_count = in->txcmd_expected_count;
+    out->txcmd_scanned_count = in->txcmd_scanned_count;
+    out->txcmd_candidate_count = in->txcmd_candidate_count;
+    out->txcmd_candidate_index = in->txcmd_candidate_index;
+    out->txcmd_api_generation = in->txcmd_api_generation;
+    out->txcmd_command_version = in->txcmd_command_version;
+    out->txcmd_flags = in->txcmd_flags;
+    out->txcmd_offload_assist = in->txcmd_offload_assist;
 }
 
 static inline bool record(iwx_tx_completion_observation_state *state,

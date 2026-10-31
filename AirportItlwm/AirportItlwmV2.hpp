@@ -285,6 +285,13 @@ public:
     uint32_t nativePowerStoppedCount {0};
     uint32_t nativePowerResetCount {0};
     uint32_t nativePowerEpoch {0}; // Atomic; serialized transitions still run on the command gate.
+    // Requested system-PM state is published at enqueue time so delayed Off
+    // and On callouts can reject stale work by generation.
+    uint32_t nativePowerPMRequestEpoch {0};
+    uint32_t nativePowerPMRequestedState {kPowerStateOn};
+    uint32_t nativePowerPMOffCalloutEpoch {0};
+    uint32_t nativePowerPMOnCalloutEpoch {0};
+    bool nativePowerPMRequestValid {false};
     uint64_t nativePowerTransitionRevision {0}; // Atomic accesses, serialized with nativePowerStateLock when available.
     uint32_t nativePowerTracePublishedSequence {0};
     NativePowerTrace::NotificationState nativePowerNotificationState {};
@@ -312,6 +319,8 @@ public:
     }
     bool initializeNativePowerLocks();
     void releaseNativePowerLocks();
+    void setNativePowerStopping(bool stopping);
+    bool retireNativePMPowerCallouts();
     IOReturn waitForNativePower(uint32_t, uint32_t traceCallId);
     IOReturn disableAdapterWithRetry(uint32_t, uint32_t traceCallId);
     void wakeNativePowerWaiters();
@@ -342,10 +351,11 @@ public:
         NativePowerTrace::PowerIngressContext *context = nullptr);
     uint32_t advanceNativePowerEpoch(bool requestedOn);
     uint32_t beginNativeControlTrace(NativePowerTrace::Operation,
-        NativePowerTrace::Phase, uint32_t detail, int32_t result);
+        NativePowerTrace::Phase, uint32_t detail, int32_t result,
+        uint32_t auxiliary = 0);
     void recordNativeControlTrace(uint32_t callId,
         NativePowerTrace::Operation, NativePowerTrace::Phase,
-        uint32_t detail, int32_t result);
+        uint32_t detail, int32_t result, uint32_t auxiliary = 0);
     void publishNativePowerTrace();
     CCStream *nativeLogger {nullptr};
     OSObject *nativeFaultReporter {nullptr};

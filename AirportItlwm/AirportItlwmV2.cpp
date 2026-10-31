@@ -104,6 +104,12 @@ void AirportItlwm::detachWatchdogTimer()
 
 void AirportItlwm::releaseAll()
 {
+#ifdef AIRPORT_TAHOE
+    // A partial-start cleanup can bypass stop(). Close PM admission and drain
+    // its callouts before releasing either the HAL or the command gate.
+    setNativePowerStopping(true);
+    if (!retireNativePMPowerCallouts()) return;
+#endif
     detachWatchdogTimer();
 #ifdef AIRPORT_TAHOE
     // Parent stop must first destroy its monitor, which borrows nativeLogger.
@@ -141,7 +147,9 @@ void AirportItlwm::releaseAll()
     }
     OSSafeReleaseNULL(watchdogTimer);
     OSSafeReleaseNULL(fWatchdogWorkLoop);
+#ifndef AIRPORT_TAHOE
     unregistPM();
+#endif
 }
 
 #ifdef AIRPORT_TAHOE
@@ -158,6 +166,20 @@ bool AirportItlwm::initializeNativePowerLocks()
         return false;
     }
     return true;
+}
+
+void AirportItlwm::setNativePowerStopping(bool stopping)
+{
+    IOSimpleLock *lock = nativePowerStateLock;
+    if (lock) {
+        const IOInterruptState irq = IOSimpleLockLockDisableInterrupt(lock);
+        __atomic_store_n(&nativePowerStopping, stopping, __ATOMIC_RELEASE);
+        IOSimpleLockUnlockEnableInterrupt(lock, irq);
+        return;
+    }
+    // Lock allocation failure already prevents start from succeeding. Keep
+    // teardown fail-closed if a partial initialization reaches this path.
+    __atomic_store_n(&nativePowerStopping, stopping, __ATOMIC_RELEASE);
 }
 
 void AirportItlwm::releaseNativePowerLocks()
@@ -796,7 +818,7 @@ void AirportItlwm::stop(IOService *provider)
 #ifdef AIRPORT_TAHOE
     // Close admission before any stop/drain work can yield. A request already
     // inside the command gate is retired by the terminal action below.
-    __atomic_store_n(&nativePowerStopping, true, __ATOMIC_RELEASE);
+    setNativePowerStopping(true);
 #endif
 #if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
     // The HAL uses this same command gate for the final address check and
@@ -839,6 +861,15 @@ void AirportItlwm::stop(IOService *provider)
             nativePowerStopAction, nullptr);
     if (terminalPowerResult != kIOReturnSuccess) {
         XYLog("Native power stop gate unavailable; owner retained\n");
+        return;
+    }
+#endif
+#ifdef AIRPORT_TAHOE
+    // PM setPowerState callouts are external to the controller gate. Drain
+    // them now, while the HAL, workloop, and policy maker are still alive.
+    // setPowerState rejects new callouts after the stop latch is published.
+    if (!retireNativePMPowerCallouts()) {
+        XYLog("Native PM callout retirement failed; owner retained\n");
         return;
     }
 #endif
@@ -1853,7 +1884,7 @@ uint32_t AirportItlwm::observeNativePowerEvent(
 
 uint32_t AirportItlwm::beginNativeControlTrace(
     NativePowerTrace::Operation operation, NativePowerTrace::Phase phase,
-    uint32_t detail, int32_t result)
+    uint32_t detail, int32_t result, uint32_t auxiliary)
 {
     IOSimpleLock *traceLock = nativePowerTraceLock;
     if (!traceLock) return 0;
@@ -1862,7 +1893,8 @@ uint32_t AirportItlwm::beginNativeControlTrace(
     uint64_t revision = UINT64_MAX;
     nativePowerStateSnapshot(&powerFlags, &revision);
     uint32_t interfaceFlags = 0;
-    if (_fWorkloop && _fWorkloop->inGate() && fHalService)
+    if (_fWorkloop && _fWorkloop->inGate() && fHalService &&
+        !__atomic_load_n(&nativePowerStopping, __ATOMIC_ACQUIRE))
         interfaceFlags = fHalService->get80211Controller()->ic_if.if_flags &
             (IFF_UP | IFF_RUNNING);
     const uint32_t epoch = __atomic_load_n(&nativePowerEpoch, __ATOMIC_ACQUIRE);
@@ -1871,14 +1903,15 @@ uint32_t AirportItlwm::beginNativeControlTrace(
     const IOInterruptState irq = IOSimpleLockLockDisableInterrupt(traceLock);
     const uint32_t callId = nativePowerTrace.begin(operation, phase,
         monotonicNs, epoch, powerFlags, interfaceFlags,
-        revision, detail, result);
+        revision, detail, result, auxiliary);
     IOSimpleLockUnlockEnableInterrupt(traceLock, irq);
     return callId;
 }
 
 void AirportItlwm::recordNativeControlTrace(
     uint32_t callId, NativePowerTrace::Operation operation,
-    NativePowerTrace::Phase phase, uint32_t detail, int32_t result)
+    NativePowerTrace::Phase phase, uint32_t detail, int32_t result,
+    uint32_t auxiliary)
 {
     IOSimpleLock *traceLock = nativePowerTraceLock;
     if (!traceLock || !callId) return;
@@ -1887,7 +1920,8 @@ void AirportItlwm::recordNativeControlTrace(
     uint64_t revision = UINT64_MAX;
     nativePowerStateSnapshot(&powerFlags, &revision);
     uint32_t interfaceFlags = 0;
-    if (_fWorkloop && _fWorkloop->inGate() && fHalService)
+    if (_fWorkloop && _fWorkloop->inGate() && fHalService &&
+        !__atomic_load_n(&nativePowerStopping, __ATOMIC_ACQUIRE))
         interfaceFlags = fHalService->get80211Controller()->ic_if.if_flags &
             (IFF_UP | IFF_RUNNING);
     const uint32_t epoch = __atomic_load_n(&nativePowerEpoch, __ATOMIC_ACQUIRE);
@@ -1896,7 +1930,7 @@ void AirportItlwm::recordNativeControlTrace(
     const IOInterruptState irq = IOSimpleLockLockDisableInterrupt(traceLock);
     nativePowerTrace.record(callId, operation, phase,
         monotonicNs, epoch, powerFlags, interfaceFlags,
-        revision, detail, result);
+        revision, detail, result, auxiliary);
     IOSimpleLockUnlockEnableInterrupt(traceLock, irq);
 }
 
@@ -2469,19 +2503,107 @@ static IOPMPowerState powerStateArray[kPowerStateCount] =
 void AirportItlwm::unregistPM()
 {
     if (powerOffThreadCall) {
-        thread_call_free(powerOffThreadCall);
-        powerOffThreadCall = NULL;
+#ifdef AIRPORT_TAHOE
+        const bool cancelled = thread_call_cancel_wait(powerOffThreadCall);
+        if (cancelled) {
+            if (pmPolicyMaker)
+                pmPolicyMaker->acknowledgeSetPowerState();
+            release(); // balance the retain paired with the cancelled callout
+            // cancel_wait may cancel a pending invocation without waiting for
+            // an invocation that is already running. Admission is closed, so
+            // a second call drains that running instance or cancels the one
+            // invocation it queued before the stop latch.
+            const bool cancelledAfterDrain =
+                thread_call_cancel_wait(powerOffThreadCall);
+            if (cancelledAfterDrain) {
+                if (pmPolicyMaker)
+                    pmPolicyMaker->acknowledgeSetPowerState();
+                release();
+            }
+        }
+        if (thread_call_isactive(powerOffThreadCall)) return;
+#endif
+        if (thread_call_free(powerOffThreadCall))
+            powerOffThreadCall = NULL;
     }
     if (powerOnThreadCall) {
-        thread_call_free(powerOnThreadCall);
-        powerOnThreadCall = NULL;
+#ifdef AIRPORT_TAHOE
+        const bool cancelled = thread_call_cancel_wait(powerOnThreadCall);
+        if (cancelled) {
+            if (pmPolicyMaker)
+                pmPolicyMaker->acknowledgeSetPowerState();
+            release(); // balance the retain paired with the cancelled callout
+            const bool cancelledAfterDrain =
+                thread_call_cancel_wait(powerOnThreadCall);
+            if (cancelledAfterDrain) {
+                if (pmPolicyMaker)
+                    pmPolicyMaker->acknowledgeSetPowerState();
+                release();
+            }
+        }
+        if (thread_call_isactive(powerOnThreadCall)) return;
+#endif
+        if (thread_call_free(powerOnThreadCall))
+            powerOnThreadCall = NULL;
     }
+}
+
+bool AirportItlwm::retireNativePMPowerCallouts()
+{
+    // cancel_wait can wait for a PM worker that is itself waiting for this
+    // command gate. Require the stop latch and an off-gate caller before drain.
+    if (!__atomic_load_n(&nativePowerStopping, __ATOMIC_ACQUIRE))
+        return false;
+    if (!powerOffThreadCall && !powerOnThreadCall) return true;
+    if (!_fWorkloop || _fWorkloop->inGate()) return false;
+    unregistPM();
+    return powerOffThreadCall == nullptr && powerOnThreadCall == nullptr;
 }
 
 IOReturn AirportItlwm::setPowerState(unsigned long powerStateOrdinal, IOService *policyMaker)
 {
     IOReturn result = IOPMAckImplied;
-    
+#ifdef AIRPORT_TAHOE
+    IOSimpleLock *stateLock = nativePowerStateLock;
+    if (!stateLock) return result;
+    const IOInterruptState irq = IOSimpleLockLockDisableInterrupt(stateLock);
+    if (__atomic_load_n(&nativePowerStopping, __ATOMIC_ACQUIRE)) {
+        IOSimpleLockUnlockEnableInterrupt(stateLock, irq);
+        return result;
+    }
+    if ((__atomic_load_n(&nativePowerPMRequestValid, __ATOMIC_ACQUIRE) &&
+         __atomic_load_n(&nativePowerPMRequestedState, __ATOMIC_RELAXED) ==
+             powerStateOrdinal) ||
+        (powerStateOrdinal != kPowerStateOff &&
+         powerStateOrdinal != kPowerStateOn)) {
+        IOSimpleLockUnlockEnableInterrupt(stateLock, irq);
+        return result;
+    }
+    thread_call_t call = powerStateOrdinal == kPowerStateOff
+        ? powerOffThreadCall : powerOnThreadCall;
+    if (!call) {
+        IOSimpleLockUnlockEnableInterrupt(stateLock, irq);
+        return result;
+    }
+    uint32_t requestEpoch = __atomic_load_n(
+        &nativePowerPMRequestEpoch, __ATOMIC_RELAXED) + 1U;
+    if (requestEpoch == 0) requestEpoch = 1U;
+    __atomic_store_n(&nativePowerPMRequestEpoch, requestEpoch, __ATOMIC_RELEASE);
+    __atomic_store_n(&nativePowerPMRequestedState,
+        uint32_t(powerStateOrdinal), __ATOMIC_RELAXED);
+    if (powerStateOrdinal == kPowerStateOff)
+        __atomic_store_n(&nativePowerPMOffCalloutEpoch,
+            requestEpoch, __ATOMIC_RELAXED);
+    else
+        __atomic_store_n(&nativePowerPMOnCalloutEpoch,
+            requestEpoch, __ATOMIC_RELAXED);
+    __atomic_store_n(&nativePowerPMRequestValid, true, __ATOMIC_RELEASE);
+    retain();
+    if (thread_call_enter(call))
+        release();
+    result = 5000000;
+    IOSimpleLockUnlockEnableInterrupt(stateLock, irq);
+#else
     if (__atomic_load_n(&pmPowerState, __ATOMIC_ACQUIRE) == powerStateOrdinal)
         return result;
     switch (powerStateOrdinal) {
@@ -2505,6 +2627,7 @@ IOReturn AirportItlwm::setPowerState(unsigned long powerStateOrdinal, IOService 
         default:
             break;
     }
+#endif
     return result;
 }
 
@@ -2514,38 +2637,54 @@ IOReturn AirportItlwm::setWakeOnMagicPacket(bool active)
     return kIOReturnSuccess;
 }
 
-static void handleSetPowerStateOff(thread_call_param_t param0,
-                             thread_call_param_t param1)
+static IOReturn dispatchSetPowerStateOff(OSObject *owner, void *,
+    void *, void *, void *)
 {
-    AirportItlwm *self = (AirportItlwm *)param0;
+    auto self = OSDynamicCast(AirportItlwm, owner);
+    if (!self) return kIOReturnBadArgument;
+    self->setPowerStateOff();
+    self->release();
+    return kIOReturnSuccess;
+}
 
-    if (param1 == 0)
-    {
-        self->getCommandGate()->runAction((IOCommandGate::Action)
-                                           handleSetPowerStateOff,
-                                           (void *) 1);
-    }
-    else
-    {
-        self->setPowerStateOff();
+static IOReturn dispatchSetPowerStateOn(OSObject *owner, void *,
+    void *, void *, void *)
+{
+    auto self = OSDynamicCast(AirportItlwm, owner);
+    if (!self) return kIOReturnBadArgument;
+    self->setPowerStateOn();
+    self->release();
+    return kIOReturnSuccess;
+}
+
+static void handleSetPowerStateOff(thread_call_param_t param0,
+                             thread_call_param_t)
+{
+    auto self = static_cast<AirportItlwm *>(param0);
+    if (!self) return;
+    auto gate = self->getCommandGate();
+    const IOReturn result = gate
+        ? gate->runAction(dispatchSetPowerStateOff, nullptr)
+        : kIOReturnNotReady;
+    if (result != kIOReturnSuccess) {
+        if (self->pmPolicyMaker)
+            self->pmPolicyMaker->acknowledgeSetPowerState();
         self->release();
     }
 }
 
 static void handleSetPowerStateOn(thread_call_param_t param0,
-                            thread_call_param_t param1)
+                            thread_call_param_t)
 {
-    AirportItlwm *self = (AirportItlwm *) param0;
-
-    if (param1 == 0)
-    {
-        self->getCommandGate()->runAction((IOCommandGate::Action)
-                                           handleSetPowerStateOn,
-                                           (void *) 1);
-    }
-    else
-    {
-        self->setPowerStateOn();
+    auto self = static_cast<AirportItlwm *>(param0);
+    if (!self) return;
+    auto gate = self->getCommandGate();
+    const IOReturn result = gate
+        ? gate->runAction(dispatchSetPowerStateOn, nullptr)
+        : kIOReturnNotReady;
+    if (result != kIOReturnSuccess) {
+        if (self->pmPolicyMaker)
+            self->pmPolicyMaker->acknowledgeSetPowerState();
         self->release();
     }
 }
@@ -2555,6 +2694,19 @@ IOReturn AirportItlwm::registerWithPolicyMaker(IOService *policyMaker)
     IOReturn ret;
     
     __atomic_store_n(&pmPowerState, kPowerStateOn, __ATOMIC_RELEASE);
+#ifdef AIRPORT_TAHOE
+    if (nativePowerStateLock) {
+        const IOInterruptState irq = IOSimpleLockLockDisableInterrupt(
+            nativePowerStateLock);
+        __atomic_store_n(&nativePowerPMRequestEpoch, 1U, __ATOMIC_RELAXED);
+        __atomic_store_n(&nativePowerPMRequestedState,
+            uint32_t(kPowerStateOn), __ATOMIC_RELAXED);
+        __atomic_store_n(&nativePowerPMOffCalloutEpoch, 0U, __ATOMIC_RELAXED);
+        __atomic_store_n(&nativePowerPMOnCalloutEpoch, 1U, __ATOMIC_RELAXED);
+        __atomic_store_n(&nativePowerPMRequestValid, true, __ATOMIC_RELEASE);
+        IOSimpleLockUnlockEnableInterrupt(nativePowerStateLock, irq);
+    }
+#endif
     pmPolicyMaker = policyMaker;
     
     powerOffThreadCall = thread_call_allocate(
@@ -2572,14 +2724,229 @@ IOReturn AirportItlwm::registerWithPolicyMaker(IOService *policyMaker)
 void AirportItlwm::setPowerStateOff()
 {
     XYLog("%s\n", __FUNCTION__);
+#ifdef AIRPORT_TAHOE
+    const uint32_t pmEpoch = __atomic_load_n(
+        &nativePowerPMOffCalloutEpoch, __ATOMIC_ACQUIRE);
+    const uint32_t traceCallId = beginNativeControlTrace(
+        NativePowerTrace::Operation::kSystemPower,
+        NativePowerTrace::Phase::kSystemPowerBegin,
+        uint32_t(NativePowerTrace::SystemPowerDetail::kSleep), 0, pmEpoch);
+#endif
+    IOReturn disableResult = kIOReturnNotReady;
+#ifdef AIRPORT_TAHOE
+    const bool pmRequestValid = __atomic_load_n(
+        &nativePowerPMRequestValid, __ATOMIC_ACQUIRE);
+    const uint32_t requestedState = __atomic_load_n(
+        &nativePowerPMRequestedState, __ATOMIC_ACQUIRE);
+    const bool stopping = __atomic_load_n(&nativePowerStopping,
+                                          __ATOMIC_ACQUIRE);
+    const bool supersededByNewerOn = pmRequestValid &&
+        (requestedState != kPowerStateOff ||
+         __atomic_load_n(&nativePowerPMRequestEpoch, __ATOMIC_ACQUIRE) !=
+             pmEpoch);
+    uint32_t outcome = stopping
+        ? uint32_t(NativePowerTrace::SystemPowerDetail::kSleepStopping)
+        : (supersededByNewerOn
+            ? uint32_t(NativePowerTrace::SystemPowerDetail::kSleepSupersededByNewerOn)
+            : uint32_t(NativePowerTrace::SystemPowerDetail::kSleep));
+    if (stopping) {
+        disableResult = kIOReturnNotReady;
+    } else if (supersededByNewerOn) {
+        disableResult = kIOReturnAborted;
+    } else {
+        __atomic_store_n(&pmPowerState, kPowerStateOff, __ATOMIC_RELEASE);
+        disableResult = disableAdapter(bsdInterface);
+    }
+    const uint32_t finalPmEpoch = __atomic_load_n(
+        &nativePowerPMRequestEpoch, __ATOMIC_ACQUIRE);
+    const bool supersededDuringDisable = __atomic_load_n(
+        &nativePowerPMRequestValid, __ATOMIC_ACQUIRE) &&
+        (__atomic_load_n(&nativePowerPMRequestedState, __ATOMIC_ACQUIRE) !=
+             kPowerStateOff || finalPmEpoch != pmEpoch);
+    if (!stopping && supersededDuringDisable)
+        outcome = uint32_t(
+            NativePowerTrace::SystemPowerDetail::kSleepSupersededByNewerOn);
+#else
     __atomic_store_n(&pmPowerState, kPowerStateOff, __ATOMIC_RELEASE);
-    disableAdapter(bsdInterface);
+    disableResult = disableAdapter(bsdInterface);
+#endif
+#ifdef AIRPORT_TAHOE
+    recordNativeControlTrace(traceCallId,
+        NativePowerTrace::Operation::kSystemPower,
+        NativePowerTrace::Phase::kSystemPowerAdapterEnd,
+        outcome, disableResult,
+        __atomic_load_n(&nativePowerPMRequestEpoch, __ATOMIC_ACQUIRE));
+#endif
     pmPolicyMaker->acknowledgeSetPowerState();
+#ifdef AIRPORT_TAHOE
+    recordNativeControlTrace(traceCallId,
+        NativePowerTrace::Operation::kSystemPower,
+        NativePowerTrace::Phase::kSystemPowerAck,
+        uint32_t(NativePowerTrace::SystemPowerDetail::kSleep),
+        kIOReturnSuccess, pmEpoch);
+    publishNativePowerTrace();
+#endif
 }
 
 void AirportItlwm::setPowerStateOn()
 {
     XYLog("%s\n", __FUNCTION__);
+#ifdef AIRPORT_TAHOE
+    const uint32_t pmEpoch = __atomic_load_n(
+        &nativePowerPMOnCalloutEpoch, __ATOMIC_ACQUIRE);
+    const uint32_t traceCallId = beginNativeControlTrace(
+        NativePowerTrace::Operation::kSystemPower,
+        NativePowerTrace::Phase::kSystemPowerBegin,
+        uint32_t(NativePowerTrace::SystemPowerDetail::kWake), 0, pmEpoch);
+    // System sleep quiesces the HAL through disableAdapter(), which also
+    // clears the BSD interface's IFF_UP bit. The system-power callback alone
+    // does not guarantee that IO80211 will issue a second user Wi-Fi On
+    // request after wake. Restore only an interface that is fully down while
+    // the user's native Wi-Fi request is still On. In particular, an explicit
+    // user Off remains authoritative across sleep.
+    uint32_t outcome = uint32_t(
+        NativePowerTrace::SystemPowerDetail::kWakeRequestedOff);
+    IOReturn restoreResult = kIOReturnSuccess;
+    const bool pmRequestValid = __atomic_load_n(
+        &nativePowerPMRequestValid, __ATOMIC_ACQUIRE);
+    const uint32_t pmRequestedState = __atomic_load_n(
+        &nativePowerPMRequestedState, __ATOMIC_ACQUIRE);
+    const bool supersededByNewerOff = pmRequestValid &&
+        (pmRequestedState != kPowerStateOn ||
+         __atomic_load_n(&nativePowerPMRequestEpoch, __ATOMIC_ACQUIRE) !=
+             pmEpoch);
+    const uint32_t requestedFlags = __atomic_load_n(
+        &nativePowerFlags, __ATOMIC_ACQUIRE);
+    const bool stopping = __atomic_load_n(&nativePowerStopping,
+                                          __ATOMIC_ACQUIRE);
+    if (supersededByNewerOff) {
+        outcome = uint32_t(
+            NativePowerTrace::SystemPowerDetail::kWakeSupersededByNewerOff);
+        restoreResult = kIOReturnAborted;
+    } else {
+        // The OS PM request is awake even when user Wi-Fi remains Off.
+        __atomic_store_n(&pmPowerState, kPowerStateOn, __ATOMIC_RELEASE);
+    }
+    if (supersededByNewerOff) {
+        recordNativeControlTrace(traceCallId,
+            NativePowerTrace::Operation::kSystemPower,
+            NativePowerTrace::Phase::kWakeRestoreDecision,
+            outcome, restoreResult, pmEpoch);
+    } else if (!(requestedFlags & 1U)) {
+        outcome = uint32_t(
+            NativePowerTrace::SystemPowerDetail::kWakeRequestedOff);
+        recordNativeControlTrace(traceCallId,
+            NativePowerTrace::Operation::kSystemPower,
+            NativePowerTrace::Phase::kWakeRestoreDecision,
+            uint32_t(NativePowerTrace::SystemPowerDetail::kWakeRequestedOff),
+            kIOReturnSuccess, pmEpoch);
+    } else if (stopping) {
+        outcome = uint32_t(
+            NativePowerTrace::SystemPowerDetail::kWakeStopping);
+        restoreResult = kIOReturnNotReady;
+        recordNativeControlTrace(traceCallId,
+            NativePowerTrace::Operation::kSystemPower,
+            NativePowerTrace::Phase::kWakeRestoreDecision,
+            uint32_t(NativePowerTrace::SystemPowerDetail::kWakeStopping),
+            kIOReturnNotReady, pmEpoch);
+    } else if (!fHalService) {
+        outcome = uint32_t(
+            NativePowerTrace::SystemPowerDetail::kWakeHalUnavailable);
+        restoreResult = kIOReturnNotReady;
+        recordNativeControlTrace(traceCallId,
+            NativePowerTrace::Operation::kSystemPower,
+            NativePowerTrace::Phase::kWakeRestoreDecision,
+            uint32_t(NativePowerTrace::SystemPowerDetail::kWakeHalUnavailable),
+            kIOReturnNotReady, pmEpoch);
+    } else if (!bsdInterface) {
+        outcome = uint32_t(
+            NativePowerTrace::SystemPowerDetail::kWakeInterfaceUnavailable);
+        restoreResult = kIOReturnNotReady;
+        recordNativeControlTrace(traceCallId,
+            NativePowerTrace::Operation::kSystemPower,
+            NativePowerTrace::Phase::kWakeRestoreDecision,
+            uint32_t(NativePowerTrace::SystemPowerDetail::kWakeInterfaceUnavailable),
+            kIOReturnNotReady, pmEpoch);
+    } else {
+        auto controller = fHalService->get80211Controller();
+        if (controller) {
+            const uint32_t interfaceFlags = controller->ic_if.if_flags &
+                (IFF_UP | IFF_RUNNING);
+            if (interfaceFlags == 0) {
+                outcome = uint32_t(
+                    NativePowerTrace::SystemPowerDetail::kWakeRestoreAttempt);
+                recordNativeControlTrace(traceCallId,
+                    NativePowerTrace::Operation::kSystemPower,
+                    NativePowerTrace::Phase::kWakeRestoreDecision,
+                    uint32_t(NativePowerTrace::SystemPowerDetail::kWakeRestoreAttempt),
+                    kIOReturnSuccess, pmEpoch);
+                restoreResult = enableAdapter(bsdInterface);
+                recordNativeControlTrace(traceCallId,
+                    NativePowerTrace::Operation::kSystemPower,
+                    NativePowerTrace::Phase::kSystemPowerAdapterEnd,
+                    uint32_t(NativePowerTrace::SystemPowerDetail::kWakeRestoreAttempt),
+                    restoreResult, pmEpoch);
+                const uint32_t finalPmEpoch = __atomic_load_n(
+                    &nativePowerPMRequestEpoch, __ATOMIC_ACQUIRE);
+                const bool supersededDuringEnable = __atomic_load_n(
+                    &nativePowerPMRequestValid, __ATOMIC_ACQUIRE) &&
+                    (__atomic_load_n(&nativePowerPMRequestedState,
+                                     __ATOMIC_ACQUIRE) != kPowerStateOn ||
+                     finalPmEpoch != pmEpoch);
+                if (supersededDuringEnable) {
+                    outcome = uint32_t(
+                        NativePowerTrace::SystemPowerDetail::kWakeSupersededByNewerOff);
+                    restoreResult = kIOReturnAborted;
+                }
+            } else if (interfaceFlags != (IFF_UP | IFF_RUNNING)) {
+                outcome = uint32_t(
+                    NativePowerTrace::SystemPowerDetail::kWakePartialInterface);
+                restoreResult = kIOReturnBusy;
+                // A partially active interface may still own an init task.
+                // Leave it to that lifecycle rather than start a second one.
+                recordNativeControlTrace(traceCallId,
+                    NativePowerTrace::Operation::kSystemPower,
+                    NativePowerTrace::Phase::kWakeRestoreDecision,
+                    uint32_t(NativePowerTrace::SystemPowerDetail::kWakePartialInterface),
+                    kIOReturnBusy, pmEpoch);
+            } else {
+                outcome = uint32_t(
+                    NativePowerTrace::SystemPowerDetail::kWakeAlreadyActive);
+                recordNativeControlTrace(traceCallId,
+                    NativePowerTrace::Operation::kSystemPower,
+                    NativePowerTrace::Phase::kWakeRestoreDecision,
+                    uint32_t(NativePowerTrace::SystemPowerDetail::kWakeAlreadyActive),
+                    kIOReturnSuccess, pmEpoch);
+            }
+        } else {
+            outcome = uint32_t(
+                NativePowerTrace::SystemPowerDetail::kWakeHalUnavailable);
+            restoreResult = kIOReturnNotReady;
+            recordNativeControlTrace(traceCallId,
+                NativePowerTrace::Operation::kSystemPower,
+                NativePowerTrace::Phase::kWakeRestoreDecision,
+                uint32_t(NativePowerTrace::SystemPowerDetail::kWakeHalUnavailable),
+                kIOReturnNotReady, pmEpoch);
+        }
+    }
+    // Pair every wake begin with a final outcome, including intentional skips.
+    // The separate ack entry below proves PM was acknowledged once even when
+    // no adapter operation was attempted or enableAdapter returned an error.
+    recordNativeControlTrace(traceCallId,
+        NativePowerTrace::Operation::kSystemPower,
+        NativePowerTrace::Phase::kWakeRestoreEnd,
+        outcome, restoreResult,
+        __atomic_load_n(&nativePowerPMRequestEpoch, __ATOMIC_ACQUIRE));
+#else
     __atomic_store_n(&pmPowerState, kPowerStateOn, __ATOMIC_RELEASE);
+#endif
     pmPolicyMaker->acknowledgeSetPowerState();
+#ifdef AIRPORT_TAHOE
+    recordNativeControlTrace(traceCallId,
+        NativePowerTrace::Operation::kSystemPower,
+        NativePowerTrace::Phase::kSystemPowerAck,
+        uint32_t(NativePowerTrace::SystemPowerDetail::kWake),
+        kIOReturnSuccess, pmEpoch);
+    publishNativePowerTrace();
+#endif
 }

@@ -113,6 +113,7 @@
 #include "../../native/iwx_stop_retirement.hpp"
 #include "../../native/iwx_dma_info_lifecycle.hpp"
 #include "../../native/iwx_tx_ring_capacity.hpp"
+#include "../../native/iwx_txcmd_identity_observation.hpp"
 #ifdef AIRPORT_TAHOE
 #include "IwxTxRate.hpp"
 #include <kern/clock.h>
@@ -965,7 +966,7 @@ static bool publishCompletionSnapshot(IOEthernetController *controller,
     };
     if (!scalar("SnapshotVersionBegin", finish - 1U))
         return false;
-    bool okay = scalar("Schema", 1) && scalar("SnapshotComplete", 0) &&
+    bool okay = scalar("Schema", 2) && scalar("SnapshotComplete", 0) &&
         scalar("SnapshotAvailable", snapshot.available) &&
         scalar("DroppedCount", snapshot.dropped_count) &&
         scalar("NextSerial", snapshot.next_serial) &&
@@ -1025,6 +1026,17 @@ static bool publishCompletionSnapshot(IOEthernetController *controller,
         PUBLISH_COMPLETION_FIELD("BaWirelessTime", ba_wireless_time);
         PUBLISH_COMPLETION_FIELD("BaTfdTid", ba_tfd_tid);
         PUBLISH_COMPLETION_FIELD("BaTfdIndex", ba_tfd_index);
+        PUBLISH_COMPLETION_FIELD("ResponseFrameControl", response_frame_control);
+        PUBLISH_COMPLETION_FIELD("ResponseSequenceControl", response_sequence_control);
+        PUBLISH_COMPLETION_FIELD("TxCommandScanStatus", txcmd_scan_status);
+        PUBLISH_COMPLETION_FIELD("TxCommandExpectedCount", txcmd_expected_count);
+        PUBLISH_COMPLETION_FIELD("TxCommandScannedCount", txcmd_scanned_count);
+        PUBLISH_COMPLETION_FIELD("TxCommandCandidateCount", txcmd_candidate_count);
+        PUBLISH_COMPLETION_FIELD("TxCommandCandidateIndex", txcmd_candidate_index);
+        PUBLISH_COMPLETION_FIELD("TxCommandApiGeneration", txcmd_api_generation);
+        PUBLISH_COMPLETION_FIELD("TxCommandVersion", txcmd_command_version);
+        PUBLISH_COMPLETION_FIELD("TxCommandFlags", txcmd_flags);
+        PUBLISH_COMPLETION_FIELD("TxCommandOffloadAssist", txcmd_offload_assist);
 #undef PUBLISH_COMPLETION_FIELD
     }
     return okay && scalar("SnapshotComplete", snapshot.available && snapshot.complete ? 1U : 0U) &&
@@ -8312,6 +8324,16 @@ void ItlIwx::tahoeRxPreOwnerIrq(uint32_t cause, bool msix)
         NativeRxPreOwner::IrqSource::Legacy;
     event.irqCause = cause; // IRQ cause only; not a host ring or physical PHY id.
     (void)nativeRxPreOwner_.record(event);
+    // attach() sets pci.workloop to getMainWorkLoop(), and the registered
+    // IOFilterInterruptEventSource is added to that same workloop. This hook
+    // therefore shares the serialized RX/main-gate context with START/END,
+    // iwx_notif_intr(), and iwx_rx_pkt(); it does not wait or acquire a lock.
+    if (tahoeP2pOnMainGate()) {
+        tahoeRxRocCorrelationSync(event.nowUs);
+        if (nativeRxRocCorrelation_.state() ==
+                NativeIwxRocRxCorrelation::State::kActive)
+            nativeRxRocCorrelation_.observeRxInterrupt(event.nowUs, msix);
+    }
 }
 
 void ItlIwx::tahoeRxPreOwnerEvent(NativeRxPreOwner::EventKind kind,
@@ -9023,6 +9045,24 @@ static void txCompletionSetTxRspFacts(
         event->presence_flags |= IWX_TX_COMPLETION_HAS_STATUS;
         event->status = le16toh(response->status.status);
     }
+    const size_t frameControlEnd = offsetof(struct iwx_tx_resp, frame_ctrl) +
+        sizeof(((struct iwx_tx_resp *)nullptr)->frame_ctrl);
+    if (payloadLength >= frameControlEnd) {
+        const struct iwx_tx_resp *response =
+            reinterpret_cast<const struct iwx_tx_resp *>(pkt->data);
+        event->presence_flags |=
+            IWX_TX_COMPLETION_HAS_RESPONSE_FRAME_CONTROL;
+        event->response_frame_control = le16toh(response->frame_ctrl);
+    }
+    const size_t sequenceControlEnd = offsetof(struct iwx_tx_resp, seq_ctl) +
+        sizeof(((struct iwx_tx_resp *)nullptr)->seq_ctl);
+    if (payloadLength >= sequenceControlEnd) {
+        const struct iwx_tx_resp *response =
+            reinterpret_cast<const struct iwx_tx_resp *>(pkt->data);
+        event->presence_flags |=
+            IWX_TX_COMPLETION_HAS_RESPONSE_SEQUENCE_CONTROL;
+        event->response_sequence_control = le16toh(response->seq_ctl);
+    }
     if ((event->presence_flags & IWX_TX_COMPLETION_HAS_FRAME_COUNT) &&
         event->frame_count != 0) {
         const size_t ssnOffset = offsetof(struct iwx_tx_resp, status) +
@@ -9037,6 +9077,7 @@ static void txCompletionSetTxRspFacts(
         }
     }
 }
+
 
 static void txCompletionSetBaFacts(
     iwx_tx_completion_event_input *event,
@@ -9420,6 +9461,121 @@ static bool iwx_tx_response_index(
 }
 
 #ifdef AIRPORT_TAHOE
+/*
+ * Inspect only host-owned command bytes for descriptors that this TX_RSP is
+ * about to reclaim. This is a bounded read-only scan; it does not alter the
+ * firmware SSN boundary or release any descriptor. An unreadable slot keeps
+ * the result incomplete, and duplicate FC/SC tuples remain ambiguous.
+ */
+static void txCompletionScanLiveTxCommands(
+    iwx_tx_completion_event_input *event, struct iwx_softc *sc,
+    struct iwx_tx_ring *ring, uint32_t qid, uint32_t oldTail,
+    uint32_t oldQueued, uint32_t reclaimBoundary,
+    const struct iwx_tx_resp *response, uint32_t commandVersion)
+{
+    if (!event || !sc || !ring || !response || !ring->cmd || qid > UINT8_MAX)
+        return;
+    const uint32_t responseFrameControl = le16toh(response->frame_ctrl);
+    const uint32_t responseSequenceControl = le16toh(response->seq_ctl);
+    iwx_txcmd_identity_scan scan{};
+    if (!iwx_txcmd_identity_scan_begin(&scan, qid, ring->ring_count,
+            oldTail, oldQueued, reclaimBoundary, responseFrameControl,
+            responseSequenceControl))
+        return;
+
+    const bool gen3 = sc->sc_device_family >= IWX_DEVICE_FAMILY_AX210;
+    const uint32_t apiGeneration = gen3 ? 3U : 2U;
+    while (scan.scanned_count < scan.expected_count) {
+        const uint32_t index = iwx_txcmd_identity_expected_index(&scan);
+        iwx_txcmd_identity_candidate candidate{};
+        bool valid = index < nitems(ring->data) &&
+            ring->data[index].m != nullptr;
+        if (valid) {
+            const struct iwx_device_cmd *command = &ring->cmd[index];
+            // TX_CMD is emitted with the narrow/legacy wire group (0).
+            // IWX_LONG_GROUP remains the API-table lookup namespace only.
+            valid = command->hdr.group_id == 0 &&
+                command->hdr.cmd == IWX_TX_CMD &&
+                command->hdr.qid == qid &&
+                command->hdr.idx == (index & UINT8_MAX);
+            if (valid && gen3) {
+                const struct iwx_tx_cmd_gen3 *tx =
+                    reinterpret_cast<const struct iwx_tx_cmd_gen3 *>(
+                        command->data);
+                valid = le16toh(tx->len) >= sizeof(struct ieee80211_frame);
+                if (valid) {
+                    const struct ieee80211_frame *header =
+                        reinterpret_cast<const struct ieee80211_frame *>(
+                            reinterpret_cast<const uint8_t *>(tx) + sizeof(*tx));
+                    valid = (header->i_fc[0] & IEEE80211_FC0_TYPE_MASK) !=
+                        IEEE80211_FC0_TYPE_CTL;
+                    if (valid) {
+                        candidate.qid = qid;
+                        candidate.index = index;
+                        candidate.api_generation = apiGeneration;
+                        candidate.command_version = commandVersion;
+                        candidate.frame_control =
+                            static_cast<uint32_t>(header->i_fc[0]) |
+                            (static_cast<uint32_t>(header->i_fc[1]) << 8);
+                        candidate.sequence_control =
+                            static_cast<uint32_t>(header->i_seq[0]) |
+                            (static_cast<uint32_t>(header->i_seq[1]) << 8);
+                        candidate.command_flags = le16toh(tx->flags);
+                        candidate.offload_assist =
+                            le32toh(tx->offload_assist);
+                    }
+                }
+            } else if (valid) {
+                const struct iwx_tx_cmd_gen2 *tx =
+                    reinterpret_cast<const struct iwx_tx_cmd_gen2 *>(
+                        command->data);
+                valid = le16toh(tx->len) >= sizeof(struct ieee80211_frame);
+                if (valid) {
+                    const struct ieee80211_frame *header =
+                        reinterpret_cast<const struct ieee80211_frame *>(
+                            reinterpret_cast<const uint8_t *>(tx) + sizeof(*tx));
+                    valid = (header->i_fc[0] & IEEE80211_FC0_TYPE_MASK) !=
+                        IEEE80211_FC0_TYPE_CTL;
+                    if (valid) {
+                        candidate.qid = qid;
+                        candidate.index = index;
+                        candidate.api_generation = apiGeneration;
+                        candidate.command_version = commandVersion;
+                        candidate.frame_control =
+                            static_cast<uint32_t>(header->i_fc[0]) |
+                            (static_cast<uint32_t>(header->i_fc[1]) << 8);
+                        candidate.sequence_control =
+                            static_cast<uint32_t>(header->i_seq[0]) |
+                            (static_cast<uint32_t>(header->i_seq[1]) << 8);
+                        candidate.command_flags = le32toh(tx->flags);
+                        candidate.offload_assist = le16toh(tx->offload_assist);
+                    }
+                }
+            }
+        }
+        if (!iwx_txcmd_identity_scan_record(&scan, index, valid ? 1U : 0U,
+                                             valid ? &candidate : nullptr))
+            return;
+    }
+
+    event->presence_flags |= IWX_TX_COMPLETION_HAS_TXCMD_SCAN;
+    event->txcmd_scan_status = scan.status;
+    event->txcmd_expected_count = scan.expected_count;
+    event->txcmd_scanned_count = scan.scanned_count;
+    event->txcmd_candidate_count = scan.candidate_count;
+    if (iwx_txcmd_identity_scan_has_unique_candidate(&scan)) {
+        event->presence_flags |=
+            IWX_TX_COMPLETION_HAS_TXCMD_UNIQUE_CANDIDATE;
+        event->txcmd_candidate_index = scan.first_candidate.index;
+        event->txcmd_api_generation = scan.first_candidate.api_generation;
+        event->txcmd_command_version = scan.first_candidate.command_version;
+        event->txcmd_flags = scan.first_candidate.command_flags;
+        event->txcmd_offload_assist = scan.first_candidate.offload_assist;
+    }
+}
+#endif
+
+#ifdef AIRPORT_TAHOE
 static uint64_t recordStaTxResponse(
     struct iwx_softc *sc, const struct iwx_tx_resp *response,
     const struct iwx_tx_ring *ring, uint32_t queueId, uint32_t ssn,
@@ -9499,6 +9655,7 @@ static void recordStaTxReclaim(
     (void)IwxStaTxObservation::record(&sc->sc_sta_tx_observation, &event);
 }
 #endif
+
 
 void ItlIwx::
 iwx_rx_tx_cmd(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
@@ -9638,14 +9795,18 @@ iwx_rx_tx_cmd(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
                            kTxTimerClearFirmwareResponse);
 #endif
 #ifdef AIRPORT_TAHOE
-        const uint32_t group2OldTail = static_cast<uint32_t>(ring->tail);
-        const uint32_t group2OldQueued = static_cast<uint32_t>(ring->queued);
+        const uint32_t responseOldTail = static_cast<uint32_t>(ring->tail);
+        const uint32_t responseOldQueued = static_cast<uint32_t>(ring->queued);
+        txCompletionScanLiveTxCommands(&txRspCompletion.event(), sc, ring,
+            queueId, responseOldTail, responseOldQueued,
+            static_cast<uint32_t>(checkedIndex), tx_resp,
+            iwx_lookup_cmd_ver(sc, IWX_LONG_GROUP, IWX_TX_CMD));
         auto *group2Trace = &sc->sc_ic.ic_tahoe_auth_trace.group2_tx;
         IwxGroup2TxSlot group2MatchedSlot{};
         const uint32_t group2CompletionMatch =
             iwx_group2_tx_trace_match_completion(
                 group2Trace, tahoeMonotonicNs() / 1000ULL,
-                group2OldTail, group2OldQueued,
+                responseOldTail, responseOldQueued,
                 static_cast<uint32_t>(checkedIndex), queueId,
                 ring->ring_count, static_cast<uint32_t>(sc->sc_generation),
                 __atomic_load_n(&sc->sc_tx_output_epoch, __ATOMIC_ACQUIRE),
@@ -9664,7 +9825,7 @@ iwx_rx_tx_cmd(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
                 IWX_GROUP2_TX_MATCH_NONE : group2CompletionMatch;
         (void)iwx_group2_tx_trace_retire_reclaimed_interval(
             group2Trace, tahoeMonotonicNs() / 1000ULL,
-            group2OldTail, group2OldQueued,
+            responseOldTail, responseOldQueued,
             static_cast<uint32_t>(checkedIndex), queueId, ring->ring_count,
             retirementStatus,
             group2CompletionMatch == IWX_GROUP2_TX_MATCH_UNIQUE ?
@@ -18409,6 +18570,14 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
         
         code = IWX_WIDE_ID(pkt->hdr.group_id, pkt->hdr.cmd);
 #if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+        if (tahoeP2pOnMainGate()) {
+            const uint64_t nowUs = tahoeMonotonicNs() / 1000ULL;
+            tahoeRxRocCorrelationSync(nowUs);
+            if (nativeRxRocCorrelation_.state() ==
+                    NativeIwxRocRxCorrelation::State::kActive)
+                nativeRxRocCorrelation_.observeRxNotification(nowUs,
+                    NativeIwxRocRxCorrelation::RxNotificationStage::kSeen);
+        }
         const auto recordRocNotification = [&](
             NativeIwxRocRxCorrelation::NotificationOutcome outcome,
             bool lengthValidated = false) {
@@ -18445,6 +18614,14 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
 #endif
         if (!iwx_rx_pkt_valid(pkt)) {
 #if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+            if (tahoeP2pOnMainGate()) {
+                const uint64_t nowUs = tahoeMonotonicNs() / 1000ULL;
+                tahoeRxRocCorrelationSync(nowUs);
+                if (nativeRxRocCorrelation_.state() ==
+                        NativeIwxRocRxCorrelation::State::kActive)
+                    nativeRxRocCorrelation_.observeRxNotification(nowUs,
+                        NativeIwxRocRxCorrelation::RxNotificationStage::kRejected);
+            }
             recordRocNotification(
                 NativeIwxRocRxCorrelation::NotificationOutcome::kHeaderRejected);
             if (rocCopyToken.valid)
@@ -18490,6 +18667,14 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
         len = sizeof(pkt->len_n_flags) + iwx_rx_packet_len(pkt);
         if (len < minsz || len > (IWX_RBUF_SIZE - offset)) {
 #if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+            if (tahoeP2pOnMainGate()) {
+                const uint64_t nowUs = tahoeMonotonicNs() / 1000ULL;
+                tahoeRxRocCorrelationSync(nowUs);
+                if (nativeRxRocCorrelation_.state() ==
+                        NativeIwxRocRxCorrelation::State::kActive)
+                    nativeRxRocCorrelation_.observeRxNotification(nowUs,
+                        NativeIwxRocRxCorrelation::RxNotificationStage::kRejected);
+            }
             recordRocNotification(
                 NativeIwxRocRxCorrelation::NotificationOutcome::kLengthRejected);
             if (rocCopyToken.valid)
@@ -18547,6 +18732,17 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
 
 #ifdef AIRPORT_TAHOE
 #if defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+        if (tahoeP2pOnMainGate()) {
+            const uint64_t nowUs = tahoeMonotonicNs() / 1000ULL;
+            tahoeRxRocCorrelationSync(nowUs);
+            if (nativeRxRocCorrelation_.state() ==
+                    NativeIwxRocRxCorrelation::State::kActive) {
+                nativeRxRocCorrelation_.observeRxNotification(nowUs,
+                    code == IWX_REPLY_RX_MPDU_CMD ?
+                        NativeIwxRocRxCorrelation::RxNotificationStage::kRxMpduNotificationValidated :
+                        NativeIwxRocRxCorrelation::RxNotificationStage::kValidatedNonMpdu);
+            }
+        }
         recordRocNotification(
             NativeIwxRocRxCorrelation::NotificationOutcome::kValidated, true);
         if (rocCopyToken.valid)
@@ -19177,6 +19373,12 @@ iwx_notif_intr(struct iwx_softc *sc)
     struct mbuf_list ml = MBUF_LIST_INITIALIZER();
     uint16_t hw;
 #if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+    const uint64_t drainUs = tahoeMonotonicNs() / 1000ULL;
+    tahoeRxRocCorrelationSync(drainUs);
+    if (tahoeP2pOnMainGate() &&
+        nativeRxRocCorrelation_.state() ==
+            NativeIwxRocRxCorrelation::State::kActive)
+        nativeRxRocCorrelation_.observeRxDrain(drainUs);
     tahoeRxPreOwnerEvent(NativeRxPreOwner::EventKind::Drain);
 #endif
     
@@ -19193,15 +19395,18 @@ iwx_notif_intr(struct iwx_softc *sc)
         const uint32_t ringSlot = static_cast<uint32_t>(sc->rxq.cur);
 #if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
         NativeIwxRocRxCorrelation::Token rocCopyToken;
-        tahoeRxRocCorrelationSync(tahoeMonotonicNs() / 1000ULL);
+        const uint64_t hostUptimeUs = tahoeMonotonicNs() / 1000ULL;
+        tahoeRxRocCorrelationSync(hostUptimeUs);
         tahoeRxPreOwnerEvent(NativeRxPreOwner::EventKind::Slot, ringSlot);
+        if (tahoeP2pOnMainGate() && nativeRxRocCorrelation_.state() ==
+                NativeIwxRocRxCorrelation::State::kActive)
+            nativeRxRocCorrelation_.observeRxRingSlot(hostUptimeUs, ringSlot, hw);
         if (sc->sc_device_family == IWX_DEVICE_FAMILY_AX210 &&
             nativeRxPreOwner_.enabled()) {
             const uint32_t driverGeneration = static_cast<uint32_t>(
                 __atomic_load_n(&sc->sc_generation, __ATOMIC_ACQUIRE));
             const uint32_t observationSerial = static_cast<uint32_t>(
                 NativeRxPreOwner::kCaptureSerial);
-            const uint64_t hostUptimeUs = tahoeMonotonicNs() / 1000ULL;
             const NativeIwxCompletionObserver::CopyResult observation =
                 nativeRxCompletionObserver_.tryCopyForIdentity(
                     &sc->rxq.used_desc_dma,

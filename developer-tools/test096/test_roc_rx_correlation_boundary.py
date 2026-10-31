@@ -278,6 +278,13 @@ static void testTraceMismatchDoesNotGateSuccessfulBoundaries()
     // the real tap method; the false trace-owner setting is not an input here.
     assert(owner.notify(1, 1, 2, 120));
     assert(owner.nativeRxRocCorrelation_.state() == State::kActive);
+    owner.nativeRxRocCorrelation_.observeRxInterrupt(125, false);
+    owner.nativeRxRocCorrelation_.observeRxDrain(126);
+    owner.nativeRxRocCorrelation_.observeRxRingSlot(127, 188, 189);
+    owner.nativeRxRocCorrelation_.observeRxNotification(128,
+        RxNotificationStage::kSeen);
+    owner.nativeRxRocCorrelation_.observeRxNotification(129,
+        RxNotificationStage::kRxMpduNotificationValidated);
     Token token = beginKnownSlot(owner, 188, 130);
     assert(token.valid);
     assert(owner.notify(1, 0, 2, 140));
@@ -285,6 +292,10 @@ static void testTraceMismatchDoesNotGateSuccessfulBoundaries()
     assert(owner.nativeRxRocCorrelation_.closeReason() == CloseReason::kEnd);
     assert(owner.nativeRxRocCorrelation_.finishSlot(token));
     assert(owner.nativeRxRocCorrelation_.coverageComplete());
+    assert(owner.nativeRxRocCorrelation_.rxWindowFlags() &
+        kRxWindowBoundaryServicePartial);
+    assert(owner.nativeRxRocCorrelation_.rxWindowStage() ==
+        RxWindowStage::kRxMpduNotificationValidated);
 }
 
 static void testFailedStartAndEndCannotComplete()

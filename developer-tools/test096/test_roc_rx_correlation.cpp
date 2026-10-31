@@ -143,7 +143,7 @@ static void testBeaconSlotSurvivesLaterTrafficAndEndFreeze()
     uint8_t wire[kWireBytes];
     assert(recorder.encode(wire, sizeof(wire)));
     assert(wire[0] == 'I' && wire[7] == '1');
-    assert(get32(wire, 8) == 1);
+    assert(get32(wire, 8) == 2);
     assert(get32(wire, 12) == kHeaderBytes);
     assert(get32(wire, 16) == kRecordBytes);
     assert(get32(wire, 20) == kCapacity);
@@ -439,7 +439,157 @@ static void testNoStartAndEmptySuccessfulWindowPublishExplicitly()
         assert(recorder.encode(wire, sizeof(wire)));
         assert(get32(wire, 120) == 1);
         assert(get32(wire, 124) == 0);
+        assert(get32(wire, 128) == (kRxWindowStarted | kRxWindowEnded));
+        assert(get32(wire, 132) ==
+            static_cast<uint32_t>(RxWindowStage::kNoHostRxInterrupt));
     }
+}
+
+static void testRxWindowStagesAreEpochBoundedAndFrozen()
+{
+    const auto stageFor = [](uint32_t scenario) {
+        Recorder recorder;
+        assert(recorder.arm(1, 7, 50));
+        assert(recorder.beginRoc(epoch(), 100, 200));
+        if (scenario >= 1 && scenario != 10)
+            recorder.observeRxInterrupt(110, scenario == 2);
+        if (scenario >= 2 && scenario != 10)
+            recorder.observeRxDrain(111);
+        if (scenario >= 3 && scenario != 10)
+            recorder.observeRxRingSlot(112, 312, 313);
+        if (scenario >= 4 && scenario != 10)
+            recorder.observeRxNotification(113,
+                RxNotificationStage::kSeen);
+        switch (scenario) {
+        case 5:
+            recorder.observeRxNotification(114,
+                RxNotificationStage::kRejected);
+            break;
+        case 6:
+            recorder.observeRxNotification(114,
+                RxNotificationStage::kValidatedNonMpdu);
+            break;
+        case 7:
+            recorder.observeRxNotification(114,
+                RxNotificationStage::kRxMpduNotificationValidated);
+            break;
+        case 8:
+            recorder.observeRxNotification(114,
+                RxNotificationStage::kRejected);
+            recorder.observeRxNotification(115,
+                RxNotificationStage::kSeen);
+            recorder.observeRxNotification(115,
+                RxNotificationStage::kValidatedNonMpdu);
+            break;
+        case 9:
+            recorder.observeRxNotification(113,
+                RxNotificationStage::kRejected);
+            recorder.observeRxDrain(112); // Monotonic reversal fails closed.
+            break;
+        case 10:
+            recorder.observeRxInterrupt(200, false); // Deadline is exclusive.
+            break;
+        default:
+            break;
+        }
+        assert(recorder.endRoc(epoch(), 150));
+        uint8_t wire[kWireBytes] = {};
+        assert(recorder.encode(wire, sizeof(wire)));
+        assert(get32(wire, 128) & kRxWindowStarted);
+        assert(get32(wire, 128) & kRxWindowEnded);
+        assert(get32(wire, 132) == static_cast<uint32_t>(recorder.rxWindowStage()));
+        return recorder.rxWindowStage();
+    };
+
+    assert(stageFor(0) == RxWindowStage::kNoHostRxInterrupt);
+    assert(stageFor(1) == RxWindowStage::kRxInterruptWithoutDrain);
+    assert(stageFor(2) == RxWindowStage::kDrainWithoutRingSlot);
+    assert(stageFor(3) == RxWindowStage::kRingSlotsWithoutNotification);
+    assert(stageFor(5) == RxWindowStage::kRejectedNotificationsOnly);
+    assert(stageFor(6) == RxWindowStage::kValidatedNonMpduOnly);
+    assert(stageFor(7) == RxWindowStage::kRxMpduNotificationValidated);
+    assert(stageFor(8) == RxWindowStage::kMixedNotificationResults);
+    assert(stageFor(9) == RxWindowStage::kInvalidCountersOrTimeline);
+    assert(stageFor(10) == RxWindowStage::kNoHostRxInterrupt);
+    assert(stageFor(4) == RxWindowStage::kNotificationSeenWithoutValidation);
+
+    Recorder noStart;
+    assert(noStart.arm(1, 7, 50));
+    assert(noStart.closeNoStart(60));
+    uint8_t noStartWire[kWireBytes] = {};
+    assert(noStart.encode(noStartWire, sizeof(noStartWire)));
+    assert(get32(noStartWire, 128) == 0);
+    assert(get32(noStartWire, 132) ==
+        static_cast<uint32_t>(RxWindowStage::kUnknown));
+
+    Recorder frozen;
+    assert(frozen.arm(1, 7, 50));
+    assert(frozen.beginRoc(epoch(), 100, 200));
+    frozen.observeRxInterrupt(110, false);
+    frozen.observeRxDrain(111);
+    frozen.observeRxRingSlot(112, 312, 313);
+    frozen.observeRxNotification(113, RxNotificationStage::kSeen);
+    frozen.observeRxNotification(114,
+        RxNotificationStage::kValidatedNonMpdu);
+    assert(frozen.endRoc(epoch(), 150));
+    uint8_t before[kWireBytes] = {};
+    uint8_t after[kWireBytes] = {};
+    assert(frozen.encode(before, sizeof(before)));
+    frozen.observeRxInterrupt(151, true);
+    frozen.observeRxDrain(152);
+    frozen.observeRxRingSlot(153, 313, 314);
+    assert(frozen.encode(after, sizeof(after)));
+    for (size_t i = 0; i < sizeof(before); ++i)
+        assert(before[i] == after[i]);
+    assert(get32(after, 132) ==
+        static_cast<uint32_t>(RxWindowStage::kValidatedNonMpduOnly));
+    assert(get32(after, 136) == 1);
+    assert(get32(after, 148) == 1);
+    assert(get32(after, 152) == 1);
+    assert(get32(after, 156) == 1);
+    assert(get32(after, 160) == 1);
+    assert(get32(after, 168) == 1);
+    assert(get32(after, 176) == 312 && get32(after, 180) == 312);
+    assert(get32(after, 184) == 313 && get32(after, 188) == 313);
+}
+
+static void testBoundaryPartialServiceRetainsObservedRxMpduNotification()
+{
+    Recorder recorder;
+    assert(recorder.arm(1, 7, 50));
+    assert(recorder.beginRoc(epoch(), 100, 200, true));
+    // The BEGIN/END controls are handled inside one RX service batch. Its
+    // interrupt/drain/slot hooks can fall outside the half-open ROC window,
+    // while these in-window notification observations remain real evidence.
+    recorder.observeRxNotification(110, RxNotificationStage::kSeen);
+    recorder.observeRxNotification(120,
+        RxNotificationStage::kRxMpduNotificationValidated);
+    assert(recorder.endRoc(epoch(), 130, true));
+    assert(recorder.rxWindowStage() ==
+        RxWindowStage::kRxMpduNotificationValidated);
+
+    uint8_t wire[kWireBytes] = {};
+    assert(recorder.encode(wire, sizeof(wire)));
+    const uint32_t flags = get32(wire, 128);
+    assert(flags & kRxWindowStarted);
+    assert(flags & kRxWindowEnded);
+    assert(flags & kRxWindowBoundaryServicePartial);
+    assert(get32(wire, 132) == static_cast<uint32_t>(
+        RxWindowStage::kRxMpduNotificationValidated));
+    assert(get32(wire, 136) == 0);  // No invented host IRQ.
+    assert(get32(wire, 148) == 0);  // No invented drain.
+    assert(get32(wire, 152) == 0);  // No invented ring slot.
+    assert(get32(wire, 156) == 1);
+    assert(get32(wire, 160) == 1);
+    assert(get32(wire, 172) == 1);  // Keep the observed RX_MPDU fact.
+
+    Recorder noNotification;
+    assert(noNotification.arm(1, 7, 50));
+    assert(noNotification.beginRoc(epoch(), 100, 200, true));
+    noNotification.observeRxRingSlot(110, 312, 313);
+    assert(noNotification.endRoc(epoch(), 130, true));
+    assert(noNotification.rxWindowStage() ==
+        RxWindowStage::kBoundarySpanningPartialService);
 }
 
 int main()
@@ -453,6 +603,8 @@ int main()
     testEndFreezesOnlyAfterExistingTokenCompletes();
     testCleanEndCanFinalizeAnExistingToken();
     testNoStartAndEmptySuccessfulWindowPublishExplicitly();
+    testRxWindowStagesAreEpochBoundedAndFrozen();
+    testBoundaryPartialServiceRetainsObservedRxMpduNotification();
     puts("PASS fixed ROC copy correlation, no-overwrite, overflow and close semantics");
     return 0;
 }

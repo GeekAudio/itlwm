@@ -7420,8 +7420,12 @@ void ItlIwx::tahoeP2pTapSessionEvent(struct iwx_softc *sc,
             durationUs != 0 && after.startObservedMonotonicUs != 0 &&
             after.startObservedMonotonicUs <= UINT64_MAX - durationUs) {
             const uint64_t deadlineUs = after.startObservedMonotonicUs + durationUs;
+            // This reducer runs while iwx_rx_pkt() consumes the current RX
+            // ring batch. Its outer interrupt/drain/slot evidence may precede
+            // START in that same batch, so stage attribution must stay marked
+            // partial even though later notification counts remain observable.
             if (nativeRxRocCorrelation_.beginRoc(correlationEpoch,
-                    after.startObservedMonotonicUs, deadlineUs)) {
+                    after.startObservedMonotonicUs, deadlineUs, true)) {
                 nativeRxRocEpoch_ = correlationEpoch;
                 nativeRxRocDeadlineUs_ = deadlineUs;
             }
@@ -7435,7 +7439,7 @@ void ItlIwx::tahoeP2pTapSessionEvent(struct iwx_softc *sc,
         if (reducerReturnedTrue && after.endStatus == 1 &&
             nativeRxRocCorrelation_.state() == State::kActive)
             (void)nativeRxRocCorrelation_.endRoc(correlationEpoch,
-                after.endObservedMonotonicUs);
+                after.endObservedMonotonicUs, true);
         else
             (void)nativeRxRocCorrelation_.close(
                 CloseReason::kInvalidBoundary, hostUs);

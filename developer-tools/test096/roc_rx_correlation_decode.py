@@ -11,13 +11,17 @@ from typing import Any
 
 
 MAGIC = b"IRXROC01"
-SCHEMA_VERSION = 1
-HEADER_BYTES = 128
+SCHEMA_VERSION = 2
+LEGACY_SCHEMA_VERSION = 1
+LEGACY_HEADER_BYTES = 128
+HEADER_BYTES = 192
 RECORD_BYTES = 192
 CAPACITY = 64
 WIRE_BYTES = HEADER_BYTES + RECORD_BYTES * CAPACITY
 
-HEADER = struct.Struct("<8s12I 5Q 8I")
+HEADER_V1 = struct.Struct("<8s12I 5Q 8I")
+HEADER_V2 = struct.Struct("<8s12I 5Q 24I")
+HEADER = HEADER_V1  # Kept for callers constructing legacy v1 fixtures.
 RECORD_HEADER = struct.Struct("<3Q 2I 4H I 8s 4B")
 NOTIFICATION = struct.Struct("<4B I 4H")
 MPDU = struct.Struct("<I 3B x 5H 2B I Q")
@@ -28,6 +32,20 @@ STATE_ACTIVE = 2
 STATE_CLOSED = 3
 KNOWN_STATES = {STATE_DISABLED, STATE_ARMED, STATE_ACTIVE, STATE_CLOSED}
 KNOWN_CLOSE_REASONS = set(range(7))
+RX_WINDOW_STAGES = {
+    0: "unknown",
+    1: "no_host_rx_interrupt_handler_observed",
+    2: "rx_interrupt_without_drain",
+    3: "drain_without_ring_slot",
+    4: "ring_slots_without_notification",
+    5: "rejected_notifications_only",
+    6: "validated_non_mpdu_notifications_only",
+    7: "rx_mpdu_notification_validated_seen",
+    8: "invalid_counters_or_timeline",
+    9: "notification_seen_without_validation",
+    10: "mixed_notification_results",
+    11: "boundary_spanning_partial_rx_service",
+}
 
 RECORD_FINALIZED = 1 << 0
 RECORD_COMPLETION_VALID = 1 << 1
@@ -72,10 +90,13 @@ def _decode_header(blob: bytes) -> dict[str, Any]:
     header_bytes = _read_u32(blob, 12)
     record_bytes = _read_u32(blob, 16)
     capacity = _read_u32(blob, 20)
-    if schema != SCHEMA_VERSION:
+    if schema not in (LEGACY_SCHEMA_VERSION, SCHEMA_VERSION):
         raise DecodeError(f"unsupported schema version {schema}")
+    expected_header = LEGACY_HEADER_BYTES if schema == LEGACY_SCHEMA_VERSION else HEADER_BYTES
+    if len(blob) < expected_header:
+        raise DecodeError("snapshot is shorter than its declared header")
     if (header_bytes, record_bytes, capacity) != (
-            HEADER_BYTES, RECORD_BYTES, CAPACITY):
+            expected_header, RECORD_BYTES, CAPACITY):
         raise DecodeError("wire dimensions do not match schema version")
 
     # Header fields from offset 8 through 127 are twelve DWORDs, five QWORDs,
@@ -108,6 +129,34 @@ def _decode_header(blob: bytes) -> dict[str, Any]:
         "coverageComplete": _read_u32(blob, 120),
         "recordCount": _read_u32(blob, 124),
     }
+    if schema == SCHEMA_VERSION:
+        values.update({
+            "rxWindowFlags": _read_u32(blob, 128),
+            "rxWindowStage": _read_u32(blob, 132),
+            "rxWindowStageName": RX_WINDOW_STAGES.get(_read_u32(blob, 132), "invalid"),
+            "rxInterruptHandlerCalls": _read_u32(blob, 136),
+            "rxLegacyCauseCalls": _read_u32(blob, 140),
+            "rxMsixQueueCauseCalls": _read_u32(blob, 144),
+            "rxDrainCalls": _read_u32(blob, 148),
+            "rxRingSlots": _read_u32(blob, 152),
+            "rxNotificationSeen": _read_u32(blob, 156),
+            "rxNotificationValidated": _read_u32(blob, 160),
+            "rxNotificationRejected": _read_u32(blob, 164),
+            "rxValidatedNonMpdu": _read_u32(blob, 168),
+            "rxMpduNotificationValidated": _read_u32(blob, 172),
+            "rxFirstSlot": _read_u32(blob, 176),
+            "rxLastSlot": _read_u32(blob, 180),
+            "rxFirstHead": _read_u32(blob, 184),
+            "rxLastHead": _read_u32(blob, 188),
+            "rxWindowSummaryAvailable": True,
+        })
+    else:
+        values.update({
+            "rxWindowFlags": None,
+            "rxWindowStage": None,
+            "rxWindowStageName": "not_recorded_in_schema_v1",
+            "rxWindowSummaryAvailable": False,
+        })
     if state not in KNOWN_STATES:
         raise DecodeError(f"unknown capture state {state}")
     if values["closeReason"] not in KNOWN_CLOSE_REASONS:
@@ -136,11 +185,123 @@ def _decode_header(blob: bytes) -> dict[str, Any]:
             state != STATE_CLOSED or values["overflow"] or values["copySkips"] or
             values["invalid"] or values["unfinished"]):
         raise DecodeError("coverage is marked complete despite missing observations")
+    if schema == SCHEMA_VERSION:
+        flags = values["rxWindowFlags"]
+        stage = values["rxWindowStage"]
+        if flags & ~0x1f or stage not in RX_WINDOW_STAGES:
+            raise DecodeError("RX window summary has unknown flags or stage")
+        started = bool(flags & 1)
+        ended = bool(flags & 2)
+        counter_overflow = bool(flags & 4)
+        timeline_invalid = bool(flags & 8)
+        boundary_partial = bool(flags & 16)
+        if (counter_overflow or timeline_invalid) and started and ended:
+            if stage != 8:
+                raise DecodeError("invalid RX timeline/counter lacks invalid stage")
+        elif (values["rxLegacyCauseCalls"] + values["rxMsixQueueCauseCalls"] !=
+                values["rxInterruptHandlerCalls"]):
+            raise DecodeError("RX interrupt source counts do not sum to total")
+        if not counter_overflow:
+            if values["rxNotificationValidated"] != (
+                    values["rxValidatedNonMpdu"] +
+                    values["rxMpduNotificationValidated"]):
+                raise DecodeError("RX notification validation counts disagree")
+            if values["rxNotificationSeen"] < (
+                    values["rxNotificationValidated"] +
+                    values["rxNotificationRejected"]):
+                raise DecodeError("RX notification stages exceed seen count")
+        has_slot = values["rxRingSlots"] != 0
+        slot_values = (
+            values["rxFirstSlot"], values["rxLastSlot"],
+            values["rxFirstHead"], values["rxLastHead"])
+        if has_slot and any(value >= 512 for value in slot_values):
+            raise DecodeError("RX ring slot/head is outside its ring")
+        if not has_slot and any(slot_values):
+            raise DecodeError("RX slot/head values exist without slot visits")
+        service_coverage_gap = (
+            (values["rxInterruptHandlerCalls"] == 0 and
+             (values["rxDrainCalls"] or values["rxRingSlots"] or
+              values["rxNotificationSeen"])) or
+            (values["rxDrainCalls"] == 0 and
+             (values["rxRingSlots"] or values["rxNotificationSeen"])) or
+            (values["rxRingSlots"] == 0 and values["rxNotificationSeen"] != 0))
+        if service_coverage_gap and not boundary_partial:
+            # Keep v2 fail-closed for timelines that cannot be explained by a
+            # START/END notification sharing a host RX service batch.
+            raise DecodeError("RX service-stage counters contradict without boundary evidence")
+        if (service_coverage_gap and boundary_partial and started and ended and
+                not (counter_overflow or timeline_invalid) and
+                values["rxNotificationSeen"] == 0 and
+                values["rxNotificationValidated"] == 0 and
+                values["rxNotificationRejected"] == 0 and stage != 11):
+            raise DecodeError("unclassified boundary service gap lacks partial stage")
+        if stage != 0 and not (started and ended):
+            raise DecodeError("classified RX summary lacks successful START/END")
+        if started and ended and stage == 0:
+            raise DecodeError("successful RX START/END lacks a classified stage")
+        if ended and state != STATE_CLOSED:
+            raise DecodeError("RX summary says END while ROC is open")
+        if stage == 1 and not (
+                values["rxInterruptHandlerCalls"] == 0 and
+                values["rxDrainCalls"] == 0 and
+                values["rxRingSlots"] == 0 and
+                values["rxNotificationSeen"] == 0):
+            raise DecodeError("no-interrupt stage contradicts RX path counts")
+        if stage == 2 and not (
+                values["rxInterruptHandlerCalls"] and
+                not values["rxDrainCalls"] and
+                not values["rxRingSlots"] and
+                not values["rxNotificationSeen"]):
+            raise DecodeError("interrupt-without-drain stage contradicts counts")
+        if stage == 3 and not (
+                values["rxDrainCalls"] and not values["rxRingSlots"] and
+                not values["rxNotificationSeen"]):
+            raise DecodeError("drain-without-slot stage contradicts counts")
+        if stage == 4 and not (
+                values["rxRingSlots"] and not values["rxNotificationSeen"]):
+            raise DecodeError("slot-without-notification stage contradicts counts")
+        if stage == 5 and not (
+                values["rxNotificationSeen"] and
+                values["rxNotificationRejected"] and
+                not values["rxNotificationValidated"] and
+                values["rxNotificationSeen"] ==
+                    values["rxNotificationRejected"]):
+            raise DecodeError("rejected-only stage contradicts counts")
+        if stage == 6 and not (
+                values["rxNotificationValidated"] and
+                values["rxValidatedNonMpdu"] ==
+                    values["rxNotificationValidated"] and
+                not values["rxNotificationRejected"] and
+                values["rxNotificationSeen"] ==
+                    values["rxNotificationValidated"]):
+            raise DecodeError("validated-control-only stage contradicts counts")
+        if stage == 7 and not values["rxMpduNotificationValidated"]:
+            raise DecodeError("RX_MPDU notification stage contradicts counts")
+        if stage == 8 and not (counter_overflow or timeline_invalid):
+            raise DecodeError("invalid RX stage lacks overflow/timeline flag")
+        if stage == 9 and not (
+                values["rxNotificationSeen"] >
+                values["rxNotificationValidated"] +
+                values["rxNotificationRejected"]):
+            raise DecodeError("unclassified-notification stage contradicts counts")
+        if stage == 10 and not (
+                values["rxNotificationRejected"] and
+                values["rxNotificationValidated"] and
+                values["rxNotificationSeen"] ==
+                    values["rxNotificationValidated"] +
+                    values["rxNotificationRejected"]):
+            raise DecodeError("mixed-notification stage contradicts counts")
+        if stage == 11 and not (
+                started and ended and boundary_partial and service_coverage_gap and
+                values["rxNotificationSeen"] == 0 and
+                values["rxNotificationValidated"] == 0 and
+                values["rxNotificationRejected"] == 0):
+            raise DecodeError("partial RX service stage contradicts evidence")
     return values
 
 
-def _decode_record(blob: bytes, index: int) -> dict[str, Any]:
-    base = HEADER_BYTES + index * RECORD_BYTES
+def _decode_record(blob: bytes, index: int, header_bytes: int) -> dict[str, Any]:
+    base = header_bytes + index * RECORD_BYTES
     (sequence, copy_us, mapping_incarnation, capture_serial, driver_generation,
      ring, slot, head, flags, copy_status, completion, notification_count,
      notification_overflow, slot_parse_flags, reserved) = \
@@ -231,10 +392,14 @@ def _decode_record(blob: bytes, index: int) -> dict[str, Any]:
 def decode(blob: bytes, *, expected_identity: dict[str, int] | None = None,
            require_closed: bool = False) -> dict[str, Any]:
     """Decode one snapshot. Missing expected identity fields remain unknown."""
-    if len(blob) != WIRE_BYTES:
-        raise DecodeError(f"expected exactly {WIRE_BYTES} bytes, got {len(blob)}")
+    if len(blob) < LEGACY_HEADER_BYTES:
+        raise DecodeError(f"expected at least {LEGACY_HEADER_BYTES} bytes, got {len(blob)}")
     header = _decode_header(blob)
-    records = [_decode_record(blob, i) for i in range(header["recordCount"])]
+    expected_bytes = header["headerBytes"] + RECORD_BYTES * CAPACITY
+    if len(blob) != expected_bytes:
+        raise DecodeError(f"expected exactly {expected_bytes} bytes, got {len(blob)}")
+    records = [_decode_record(blob, i, header["headerBytes"])
+               for i in range(header["recordCount"])]
     if header["state"] == STATE_CLOSED:
         if any(not record["recordFlags"] & RECORD_FINALIZED for record in records):
             raise DecodeError("closed snapshot contains an unfinished record")
@@ -289,6 +454,11 @@ def decode(blob: bytes, *, expected_identity: dict[str, int] | None = None,
             "secondMpduInOneSlotFullyRepresented": False,
             "maximumNotificationsPerSlot": 4,
             "notificationEventsPastCapacityFullyRepresented": False,
+            "hostRxStageIsRfReceipt": False,
+            "rxMpduNotificationValidatedIsAwdlOrDataProof": False,
+            "endControlNotificationDoesNotProveFullWindowActivity": True,
+            "boundaryPartialMayOmitOuterRxServiceStages": True,
+            "boundaryPartialPreservesObservedNotificationCounts": True,
         },
     }
 

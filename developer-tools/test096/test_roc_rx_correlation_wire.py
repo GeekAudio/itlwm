@@ -34,6 +34,12 @@ int main() {
     epoch.rocGeneration = 6;
     epoch.sessionToken = 99;
     if (!recorder.beginRoc(epoch, 2000, 97000)) return 2;
+    recorder.observeRxInterrupt(2100, false);
+    recorder.observeRxDrain(2200);
+    recorder.observeRxRingSlot(2300, 188, 189);
+    recorder.observeRxNotification(2400, RxNotificationStage::kSeen);
+    recorder.observeRxNotification(2490,
+        RxNotificationStage::kRxMpduNotificationValidated);
 
     NativeIwxCompletionObserver::CopyResult copy;
     copy.status = NativeIwxCompletionObserver::CopyStatus::kCopied;
@@ -122,6 +128,13 @@ class RocCorrelationWireTests(unittest.TestCase):
                                          "deadlineUs": 97000,
                                      })
             self.assertTrue(decoded["coverageComplete"])
+            self.assertEqual(decoded["rxWindowStage"], 7)
+            self.assertEqual(decoded["rxWindowStageName"],
+                             "rx_mpdu_notification_validated_seen")
+            self.assertEqual(decoded["rxInterruptHandlerCalls"], 1)
+            self.assertEqual(decoded["rxDrainCalls"], 1)
+            self.assertEqual(decoded["rxRingSlots"], 1)
+            self.assertEqual(decoded["rxMpduNotificationValidated"], 1)
             record = decoded["records"][0]
             self.assertEqual(record["sequence"], 1)
             self.assertEqual(record["completionSequence"], 66)

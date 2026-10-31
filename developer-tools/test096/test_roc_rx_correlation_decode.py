@@ -30,7 +30,8 @@ IDENTITY = {
 def fixture(*, state=decoder.STATE_CLOSED, reason=2, retained=1,
             full_slots=1, overflow=0, skips=0, invalid=0, unfinished=0,
             coverage=None, copy_status=1, identity=None, slots=None,
-            notification_overflow=False, mpdu=True):
+            notification_overflow=False, mpdu=True, schema=decoder.SCHEMA_VERSION,
+            rx_counts=None):
     identity = dict(IDENTITY if identity is None else identity)
     if coverage is None:
         coverage = int(state == decoder.STATE_CLOSED and reason == 2 and
@@ -39,19 +40,40 @@ def fixture(*, state=decoder.STATE_CLOSED, reason=2, retained=1,
     start = identity["startUs"] if reason != 1 else 0
     deadline = identity["deadlineUs"] if reason != 1 else 0
     closed = 4000 if state == decoder.STATE_CLOSED else 0
-    blob = bytearray(decoder.WIRE_BYTES)
-    decoder.HEADER.pack_into(
-        blob, 0, decoder.MAGIC, decoder.SCHEMA_VERSION,
-        decoder.HEADER_BYTES, decoder.RECORD_BYTES, decoder.CAPACITY,
+    header_bytes = (decoder.LEGACY_HEADER_BYTES if
+                    schema == decoder.LEGACY_SCHEMA_VERSION else
+                    decoder.HEADER_BYTES)
+    wire_bytes = header_bytes + decoder.RECORD_BYTES * decoder.CAPACITY
+    blob = bytearray(wire_bytes)
+    base_header = (
+        decoder.MAGIC, schema, header_bytes, decoder.RECORD_BYTES, decoder.CAPACITY,
         state, reason, identity["captureSerial"], identity["driverGeneration"],
         identity["contextGeneration"], identity["powerGeneration"],
         identity["stationGeneration"], identity["rocGeneration"],
         identity["sessionToken"], identity["armUs"], start, deadline, closed,
         full_slots, retained, overflow, skips, invalid, unfinished, coverage,
-        retained,
     )
+    if schema == decoder.LEGACY_SCHEMA_VERSION:
+        decoder.HEADER_V1.pack_into(blob, 0, *base_header, retained)
+    else:
+        counts = dict(rx_counts or {})
+        flags = counts.get("flags", 3 if state == decoder.STATE_CLOSED and reason == 2
+                           else 1 if state == decoder.STATE_ACTIVE else 0)
+        stage = counts.get(
+            "stage", 1 if flags == 3 else 0)
+        summary = (
+            flags, stage,
+            counts.get("irq", 0), counts.get("legacy", 0),
+            counts.get("msix", 0), counts.get("drain", 0),
+            counts.get("ring", 0), counts.get("seen", 0),
+            counts.get("validated", 0), counts.get("rejected", 0),
+            counts.get("non_mpdu", 0), counts.get("mpdu_dispatch", 0),
+            counts.get("first_slot", 0), counts.get("last_slot", 0),
+            counts.get("first_head", 0), counts.get("last_head", 0),
+        )
+        decoder.HEADER_V2.pack_into(blob, 0, *base_header, retained, *summary)
     for index in range(retained):
-        offset = decoder.HEADER_BYTES + index * decoder.RECORD_BYTES
+        offset = header_bytes + index * decoder.RECORD_BYTES
         slot = slots[index] if slots is not None else index
         completion_ok = copy_status == 1
         record_flags = decoder.RECORD_FINALIZED
@@ -196,6 +218,131 @@ class RocCorrelationDecodeTests(unittest.TestCase):
         self.assertFalse(decoder.decode(open_blob)["closed"])
         with self.assertRaisesRegex(decoder.DecodeError, "still active"):
             decoder.decode(open_blob, require_closed=True)
+
+    def test_v1_snapshot_remains_readable_without_inventing_rx_summary(self):
+        result = decoder.decode(fixture(schema=decoder.LEGACY_SCHEMA_VERSION))
+        self.assertEqual(result["schemaVersion"], 1)
+        self.assertFalse(result["rxWindowSummaryAvailable"])
+        self.assertEqual(result["rxWindowStageName"], "not_recorded_in_schema_v1")
+
+    def test_v2_control_only_summary_does_not_claim_airdrop(self):
+        result = decoder.decode(fixture(rx_counts={
+            "flags": 3, "stage": 6, "irq": 1, "legacy": 1,
+            "drain": 1, "ring": 1, "seen": 1, "validated": 1,
+            "non_mpdu": 1, "first_slot": 312, "last_slot": 312,
+            "first_head": 313, "last_head": 313,
+        }))
+        self.assertTrue(result["rxWindowSummaryAvailable"])
+        self.assertEqual(
+            result["rxWindowStageName"],
+            "validated_non_mpdu_notifications_only",
+        )
+        self.assertFalse(result["evidenceLimits"]["hostRxStageIsRfReceipt"])
+        self.assertTrue(
+            result["evidenceLimits"][
+                "endControlNotificationDoesNotProveFullWindowActivity"])
+
+    def test_v2_rejects_summary_stage_inconsistent_with_counts(self):
+        blob = fixture(rx_counts={
+            "flags": 3, "stage": 2, "irq": 1, "legacy": 1,
+            "drain": 1,
+        })
+        with self.assertRaisesRegex(decoder.DecodeError, "interrupt-without-drain"):
+            decoder.decode(blob)
+
+    def test_v2_unknown_means_no_successful_start_end_pair(self):
+        no_start = decoder.decode(fixture(
+            reason=1, rx_counts={"flags": 0, "stage": 0},
+        ))
+        self.assertEqual(no_start["rxWindowStageName"], "unknown")
+        self.assertEqual(no_start["rxWindowFlags"], 0)
+
+        incomplete = decoder.decode(fixture(
+            reason=3, rx_counts={"flags": 1, "stage": 0},
+        ))
+        self.assertEqual(incomplete["rxWindowStageName"], "unknown")
+        self.assertTrue(incomplete["rxWindowFlags"] & 1)
+        self.assertFalse(incomplete["rxWindowFlags"] & 2)
+
+    def test_v2_notification_seen_without_classification_is_separate(self):
+        result = decoder.decode(fixture(rx_counts={
+            "flags": 3, "stage": 9, "irq": 1, "legacy": 1,
+            "drain": 1, "ring": 1, "seen": 1,
+            "first_slot": 312, "last_slot": 312,
+            "first_head": 313, "last_head": 313,
+        }))
+        self.assertEqual(
+            result["rxWindowStageName"],
+            "notification_seen_without_validation",
+        )
+
+    def test_v2_rxmpdu_notification_is_not_peer_receipt(self):
+        result = decoder.decode(fixture(rx_counts={
+            "flags": 3, "stage": 7, "irq": 1, "legacy": 1,
+            "drain": 1, "ring": 1, "seen": 1, "validated": 1,
+            "mpdu_dispatch": 1, "first_slot": 312, "last_slot": 312,
+            "first_head": 313, "last_head": 313,
+        }))
+        self.assertEqual(result["rxWindowStageName"],
+                         "rx_mpdu_notification_validated_seen")
+        self.assertFalse(result["evidenceLimits"]
+                         ["rxMpduNotificationValidatedIsAwdlOrDataProof"])
+        self.assertFalse(result["evidenceLimits"]["peerOrSocketReceiptProven"])
+
+    def test_v2_invalid_counter_stage_is_explicit_and_bounded(self):
+        result = decoder.decode(fixture(rx_counts={
+            "flags": 15, "stage": 8,
+        }))
+        self.assertEqual(result["rxWindowStageName"],
+                         "invalid_counters_or_timeline")
+        bad = fixture(rx_counts={"flags": 3, "stage": 8})
+        with self.assertRaisesRegex(decoder.DecodeError,
+                                    "lacks overflow/timeline flag"):
+            decoder.decode(bad)
+
+    def test_v2_boundary_partial_service_keeps_notification_facts(self):
+        result = decoder.decode(fixture(rx_counts={
+            "flags": 3 | 16,
+            "stage": 7,
+            "seen": 2,
+            "validated": 1,
+            "mpdu_dispatch": 1,
+        }))
+        self.assertEqual(result["rxWindowStageName"],
+                         "rx_mpdu_notification_validated_seen")
+        self.assertTrue(result["rxWindowFlags"] & 16)
+        self.assertEqual(result["rxInterruptHandlerCalls"], 0)
+        self.assertEqual(result["rxDrainCalls"], 0)
+        self.assertEqual(result["rxRingSlots"], 0)
+        self.assertEqual(result["rxNotificationSeen"], 2)
+        self.assertEqual(result["rxMpduNotificationValidated"], 1)
+        self.assertTrue(result["evidenceLimits"]
+                        ["boundaryPartialMayOmitOuterRxServiceStages"])
+        self.assertTrue(result["evidenceLimits"]
+                        ["boundaryPartialPreservesObservedNotificationCounts"])
+
+    def test_v2_boundary_partial_stage_requires_positive_boundary_flag(self):
+        no_boundary = fixture(rx_counts={"flags": 3, "stage": 11})
+        with self.assertRaisesRegex(decoder.DecodeError,
+                                    "partial RX service stage contradicts evidence"):
+            decoder.decode(no_boundary)
+
+        contradictory = fixture(rx_counts={
+            "flags": 3 | 16, "stage": 1, "ring": 1,
+            "first_slot": 312, "last_slot": 312,
+            "first_head": 313, "last_head": 313,
+        })
+        with self.assertRaisesRegex(decoder.DecodeError,
+                                    "unclassified boundary service gap lacks partial stage"):
+            decoder.decode(contradictory)
+
+        partial = decoder.decode(fixture(rx_counts={
+            "flags": 3 | 16, "stage": 11, "ring": 1,
+            "first_slot": 312, "last_slot": 312,
+            "first_head": 313, "last_head": 313,
+        }))
+        self.assertEqual(partial["rxWindowStageName"],
+                         "boundary_spanning_partial_rx_service")
 
 
 if __name__ == "__main__":

@@ -22,6 +22,7 @@ enum class Operation : uint32_t {
     kWclLeave = 4,
     kWclAbortJoin = 5,
     kHalEvent = 6,
+    kSystemPower = 7,
 };
 
 enum class Phase : uint32_t {
@@ -45,6 +46,29 @@ enum class Phase : uint32_t {
     kNotificationCall = 17,
     kTimeout = 18,
     kCallEnd = 19,
+    kSystemPowerBegin = 20,
+    kWakeRestoreDecision = 21,
+    kWakeRestoreEnd = 22,
+    kSystemPowerAck = 23,
+    kSystemPowerAdapterEnd = 24,
+};
+
+// `Entry::detail` for Operation::kSystemPower. These values are diagnostic
+// outcomes only; epoch, requested/ready flags, interface flags, and result are
+// captured separately in the same fixed-size record.
+enum class SystemPowerDetail : uint32_t {
+    kSleep = 1,
+    kWake = 2,
+    kWakeRequestedOff = 3,
+    kWakeStopping = 4,
+    kWakeHalUnavailable = 5,
+    kWakeInterfaceUnavailable = 6,
+    kWakeAlreadyActive = 7,
+    kWakePartialInterface = 8,
+    kWakeRestoreAttempt = 9,
+    kSleepStopping = 10,
+    kWakeSupersededByNewerOff = 11,
+    kSleepSupersededByNewerOn = 12,
 };
 
 struct Entry {
@@ -59,7 +83,9 @@ struct Entry {
     uint32_t interfaceFlags;   // only IFF_UP | IFF_RUNNING
     uint32_t detail;           // operation-local numeric state/event
     int32_t result;            // IOReturn or errno, UINT32_MAX if unknown
-    uint32_t reserved;
+    // Numeric auxiliary context; used for PM request generation on system
+    // power events. Existing records and all other operations leave it zero.
+    uint32_t auxiliary;
 };
 
 struct Snapshot {
@@ -78,20 +104,21 @@ public:
     uint32_t begin(Operation operation, Phase phase, uint64_t monotonicNs,
                    uint32_t powerEpoch, uint32_t powerFlags,
                    uint32_t interfaceFlags, uint64_t transitionRevision,
-                   uint32_t detail, int32_t result) {
+                   uint32_t detail, int32_t result, uint32_t auxiliary = 0) {
         uint32_t callId = nextCallId_++;
         if (callId == 0) callId = nextCallId_++;
         append(callId, operation, phase, monotonicNs, powerEpoch, powerFlags,
-               interfaceFlags, transitionRevision, detail, result);
+               interfaceFlags, transitionRevision, detail, result, auxiliary);
         return callId;
     }
 
     void record(uint32_t callId, Operation operation, Phase phase,
                 uint64_t monotonicNs, uint32_t powerEpoch,
                 uint32_t powerFlags, uint32_t interfaceFlags,
-                uint64_t transitionRevision, uint32_t detail, int32_t result) {
+                uint64_t transitionRevision, uint32_t detail, int32_t result,
+                uint32_t auxiliary = 0) {
         append(callId, operation, phase, monotonicNs, powerEpoch, powerFlags,
-               interfaceFlags, transitionRevision, detail, result);
+               interfaceFlags, transitionRevision, detail, result, auxiliary);
     }
 
     void snapshot(Snapshot *out) const {
@@ -114,7 +141,8 @@ private:
     void append(uint32_t callId, Operation operation, Phase phase,
                 uint64_t monotonicNs, uint32_t powerEpoch,
                 uint32_t powerFlags, uint32_t interfaceFlags,
-                uint64_t transitionRevision, uint32_t detail, int32_t result) {
+                uint64_t transitionRevision, uint32_t detail, int32_t result,
+                uint32_t auxiliary) {
         uint32_t sequence = nextSequence_++;
         if (sequence == 0) sequence = nextSequence_++;
         Entry entry {};
@@ -129,6 +157,7 @@ private:
         entry.interfaceFlags = interfaceFlags;
         entry.detail = detail;
         entry.result = result;
+        entry.auxiliary = auxiliary;
         entries_[(sequence - 1) % kCapacity] = entry;
         if (count_ < kCapacity) ++count_;
     }

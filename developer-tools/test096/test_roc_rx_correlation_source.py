@@ -292,6 +292,70 @@ class RocRxCorrelationSourceTests(unittest.TestCase):
         self.assertLess(finish_at, sync_after_finish)
         self.assertLess(sync_after_finish, cursor_at)
 
+    def test_summary_hooks_share_the_registered_main_workloop_gate(self):
+        attach = extract_function(self.current_cpp, "bool ItlIwx::attach(")
+        self.assertIn("pci.workloop = getMainWorkLoop();", attach)
+
+        iwx_attach = extract_function(
+            self.current_cpp, "iwx_attach(struct iwx_softc *sc"
+        )
+        self.assertIn("rxInterruptWorkloop_ = pa->workloop;", iwx_attach)
+        self.assertIn("rxInterruptWorkloop_->addEventSource(sc->sc_ih)",
+                      iwx_attach)
+        self.assertIn("IOFilterInterruptEventSource::filterInterruptEventSource(",
+                      iwx_attach)
+
+        main_gate = self.current_hpp[
+            self.current_hpp.index("bool tahoeP2pOnMainGate()"):
+            self.current_hpp.index("IOCommandGate *tahoeP2pCommandGate()")
+        ]
+        self.assertIn("getMainWorkLoop()", main_gate)
+        self.assertIn("loop->inGate()", main_gate)
+
+        irq_observer = extract_function(
+            self.current_cpp, "void ItlIwx::tahoeRxPreOwnerIrq("
+        )
+        self.assertIn("if (tahoeP2pOnMainGate())", irq_observer)
+        self.assertIn("observeRxInterrupt(event.nowUs, msix)", irq_observer)
+        for blocking_or_heavy_call in (
+            "IOSimpleLock", "IORecursiveLock", "runAction(", "setProperty(",
+            "IWX_READ(", "IWX_WRITE(", "tryCopyForIdentity(",
+        ):
+            self.assertNotIn(blocking_or_heavy_call, irq_observer)
+
+        legacy_irq = extract_function(
+            self.current_cpp, "iwx_intr(OSObject *object"
+        )
+        msix_irq = extract_function(
+            self.current_cpp, "iwx_intr_msix(OSObject *object"
+        )
+        self.assertIn("that->tahoeRxPreOwnerIrq(uint32_t(r1), false);",
+                      legacy_irq)
+        self.assertIn("that->iwx_notif_intr(sc);", legacy_irq)
+        self.assertIn("that->tahoeRxPreOwnerIrq(inta_fh, true);", msix_irq)
+        self.assertIn("that->iwx_notif_intr(sc);", msix_irq)
+
+        drain = extract_function(
+            self.current_cpp, "iwx_notif_intr(struct iwx_softc *sc"
+        )
+        self.assertIn("observeRxDrain(drainUs)", drain)
+        self.assertIn("observeRxRingSlot(hostUptimeUs, ringSlot, hw)", drain)
+        self.assertLess(drain.index("observeRxDrain(drainUs)"),
+                        drain.index("const uint32_t ringSlot"))
+        self.assertLess(drain.index("observeRxRingSlot(hostUptimeUs"),
+                        drain.index("iwx_rx_pkt(sc, data, &ml, ringSlot"))
+
+        packet = extract_function(
+            self.current_cpp,
+            "iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data",
+        )
+        summary_at = packet.index("RxNotificationStage::kRxMpduNotificationValidated")
+        actual_owner_dispatch_at = packet.index(
+            "if (code == IWX_REPLY_RX_MPDU_CMD && ++nmpdu == 1)"
+        )
+        self.assertLess(summary_at, actual_owner_dispatch_at)
+        self.assertIn("tahoeP2pOnMainGate()", packet[:summary_at])
+
 
 if __name__ == "__main__":
     unittest.main()

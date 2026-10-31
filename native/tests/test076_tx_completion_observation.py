@@ -62,6 +62,8 @@ def check_production_wiring() -> tuple[str, str, str]:
         assert f"IWX_TX_COMPLETION_TX_RSP_{reason}" in tx_body
     assert tx_body.index("bus_dmamap_sync(") < tx_body.index(
         "IwxTxWatchdog::clear(") < tx_body.index("iwx_ampdu_txq_advance(")
+    assert tx_body.index("txCompletionScanLiveTxCommands(") < tx_body.index(
+        "iwx_ampdu_txq_advance(")
     single_branch = tx_body[tx_body.index("} else {"):]
     assert single_branch.index("responseIndexValid") < single_branch.index(
         "IwxTxWatchdog::clear(") < single_branch.index("iwx_ampdu_txq_advance(")
@@ -91,10 +93,21 @@ def check_production_wiring() -> tuple[str, str, str]:
         braced_source(source, "static bool iwx_tx_response_index(")
     sta_helpers_start = source.index(
         "#ifdef AIRPORT_TAHOE\nstatic uint64_t recordStaTxResponse(")
-    sta_helpers_end = source.index(
-        "\n#endif\n\nvoid ItlIwx::\niwx_rx_tx_cmd", sta_helpers_start) + \
-        len("\n#endif")
+    sta_method_start = source.index(
+        "void ItlIwx::\niwx_rx_tx_cmd", sta_helpers_start)
+    sta_helpers_end = source.rfind("#endif", sta_helpers_start,
+                                  sta_method_start) + len("#endif")
+    assert sta_helpers_end > sta_helpers_start
     sta_helpers = source[sta_helpers_start:sta_helpers_end]
+    command_scan = braced_source(
+        source, "static void txCompletionScanLiveTxCommands(")
+    assert "ring->data[index].m != nullptr" in command_scan
+    assert "command->hdr.group_id == 0" in command_scan
+    assert "command->hdr.cmd == IWX_TX_CMD" in command_scan
+    assert "command->hdr.idx == (index & UINT8_MAX)" in command_scan
+    assert "candidate.command_flags = le32toh(tx->flags)" in command_scan
+    assert "candidate.sequence_control" in command_scan
+    assert "iwx_ampdu_txq_advance" not in command_scan
     return helpers, ring, tx_body, sta_helpers
 
 
@@ -108,9 +121,12 @@ CPP_HANDLER_PREFIX = r"""
 #include "native/iwx_tx_progress_observation.hpp"
 #include "native/iwx_tx_ring_capacity.hpp"
 #include "native/iwx_sta_tx_observation.hpp"
+#include "native/group2_tx_trace_helpers.h"
 
 #define AIRPORT_TAHOE 1
 #define IWX_RBUF_SIZE 2048
+#define IWX_TX_CMD 0x1c
+#define IWX_LONG_GROUP 1
 #define BUS_DMASYNC_POSTREAD 1
 #define nitems(x) (sizeof(x) / sizeof((x)[0]))
 #define IWX_AGG_TX_STATE_STATUS_MSK 0x0fff
@@ -218,6 +234,11 @@ struct iwx_tx_ring {
 struct iwx_rx_data { void *map; };
 struct iwx_softc {
     iwx_tx_ring txq[4];
+    struct {
+        struct {
+            IwxGroup2TxTrace group2_tx;
+        } ic_tahoe_auth_trace;
+    } sc_ic;
     int sc_tx_timer;
     void *sc_dmat;
     int sc_generation;
@@ -229,6 +250,10 @@ struct iwx_softc {
 struct ItlIwx {
     void iwx_rx_tx_cmd(iwx_softc *, iwx_rx_packet *, iwx_rx_data *);
 };
+static uint32_t iwx_lookup_cmd_ver(iwx_softc *, uint8_t, uint8_t) { return 7; }
+static void txCompletionScanLiveTxCommands(
+    iwx_tx_completion_event_input *, iwx_softc *, iwx_tx_ring *, uint32_t,
+    uint32_t, uint32_t, uint32_t, const iwx_tx_resp *, uint32_t) {}
 
 namespace IwxTxWatchdog {
 static void clear(int *) { gBusinessCalls.push_back(2); }

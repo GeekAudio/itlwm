@@ -23,11 +23,11 @@ static iwx_tx_completion_event_input txRsp(
 
 static void testFixedBoundsFullWidthAndValidZero()
 {
-    static_assert(sizeof(iwx_tx_completion_event_record) <= 160,
+    static_assert(sizeof(iwx_tx_completion_event_record) <= 192,
                   "event must have a fixed scalar bound");
-    static_assert(sizeof(iwx_tx_completion_observation_state) <= 768,
+    static_assert(sizeof(iwx_tx_completion_observation_state) <= 1024,
                   "embedded observer exceeds its bound");
-    static_assert(sizeof(iwx_tx_completion_observation_snapshot) <= 768,
+    static_assert(sizeof(iwx_tx_completion_observation_snapshot) <= 1024,
                   "snapshot exceeds its copy bound");
 
     iwx_tx_completion_observation_state state{};
@@ -132,6 +132,60 @@ static void testBAFieldsAndReasonStage()
     assert(IwxTxCompletionObservation::snapshot(&state, &snapshot));
     assert(snapshot.complete == 0 && snapshot.dropped_count == 1);
     assert(snapshot.last[IWX_TX_COMPLETION_BA].event_count == 1);
+}
+
+static void testTXCMDIdentityFieldsRequireCompleteUniqueInterval()
+{
+    iwx_tx_completion_observation_state state{};
+    auto event = txRsp();
+    event.presence_flags = IWX_TX_COMPLETION_HAS_OUTPUT_EPOCH |
+        IWX_TX_COMPLETION_HAS_RESPONSE_FRAME_CONTROL |
+        IWX_TX_COMPLETION_HAS_RESPONSE_SEQUENCE_CONTROL |
+        IWX_TX_COMPLETION_HAS_TXCMD_SCAN |
+        IWX_TX_COMPLETION_HAS_TXCMD_UNIQUE_CANDIDATE |
+        IWX_TX_COMPLETION_HAS_RING_COUNT | IWX_TX_COMPLETION_HAS_QUEUED;
+    event.ring_count = 16;
+    event.queued = 4;
+    event.response_frame_control = 0x4108;
+    event.response_sequence_control = 0x0580;
+    event.txcmd_scan_status = 1;
+    event.txcmd_expected_count = 3;
+    event.txcmd_scanned_count = 3;
+    event.txcmd_candidate_count = 1;
+    event.txcmd_candidate_index = 12;
+    event.txcmd_api_generation = 2;
+    event.txcmd_command_version = 7;
+    event.txcmd_flags = 5;
+    event.txcmd_offload_assist = 0x0c00;
+    assert(record(&state, &event));
+
+    iwx_tx_completion_observation_snapshot snapshot{};
+    assert(IwxTxCompletionObservation::snapshot(&state, &snapshot));
+    const auto &last = snapshot.last[IWX_TX_COMPLETION_TX_RSP];
+    assert(last.response_frame_control == 0x4108);
+    assert(last.response_sequence_control == 0x0580);
+    assert(last.txcmd_candidate_index == 12);
+    assert(last.txcmd_api_generation == 2);
+    assert(last.txcmd_command_version == 7);
+    assert(last.txcmd_flags == 5 && last.txcmd_offload_assist == 0x0c00);
+
+    auto incomplete = event;
+    incomplete.presence_flags &= ~IWX_TX_COMPLETION_HAS_TXCMD_UNIQUE_CANDIDATE;
+    incomplete.txcmd_candidate_index = 0;
+    incomplete.txcmd_api_generation = 0;
+    incomplete.txcmd_command_version = 0;
+    incomplete.txcmd_flags = 0;
+    incomplete.txcmd_offload_assist = 0;
+    incomplete.txcmd_scan_status = 2;
+    incomplete.txcmd_scanned_count = 2;
+    incomplete.txcmd_candidate_count = 1;
+    assert(record(&state, &incomplete));
+
+    auto invalidUnique = event;
+    invalidUnique.txcmd_scan_status = 2;
+    assert(!record(&state, &invalidUnique));
+    assert(IwxTxCompletionObservation::snapshot(&state, &snapshot));
+    assert(snapshot.complete == 0 && snapshot.dropped_count == 1);
 }
 
 static void testStrictPresenceAndRXParseStops()
@@ -350,6 +404,7 @@ int main()
 {
     testFixedBoundsFullWidthAndValidZero();
     testBAFieldsAndReasonStage();
+    testTXCMDIdentityFieldsRequireCompleteUniqueInterval();
     testStrictPresenceAndRXParseStops();
     testOverflowAndTryOnlyContentionAreExplicitDrops();
     testRAIIFallbackReasonsAreAvailable();

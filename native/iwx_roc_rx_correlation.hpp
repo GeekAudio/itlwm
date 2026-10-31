@@ -14,10 +14,10 @@ namespace NativeIwxRocRxCorrelation {
 
 static const uint32_t kCapacity = 64;
 static const uint32_t kNotificationsPerSlot = 4;
-static const size_t kHeaderBytes = 128;
+static const size_t kHeaderBytes = 192;
 static const size_t kRecordBytes = 192;
 static const size_t kWireBytes = kHeaderBytes + kCapacity * kRecordBytes;
-static const uint32_t kSchemaVersion = 1;
+static const uint32_t kSchemaVersion = 2;
 static const uint32_t kNotificationOverflowFlag = 1u << 2;
 static const uint32_t kMpduPresentFlag = 1u << 3;
 
@@ -48,6 +48,43 @@ enum class NotificationOutcome : uint8_t {
     kAddbufFailed = 7,
     kCopyFailed = 8,
     kNoPacket = 9
+};
+
+// These stages describe the host receive service path inside one successful
+// ROC START/END window. RX_MPDU notification validation occurs before the
+// frame descriptor, owner filters, or ifnet delivery are established.
+enum class RxWindowStage : uint32_t {
+    kUnknown = 0,
+    kNoHostRxInterrupt = 1,
+    kRxInterruptWithoutDrain = 2,
+    kDrainWithoutRingSlot = 3,
+    kRingSlotsWithoutNotification = 4,
+    kRejectedNotificationsOnly = 5,
+    kValidatedNonMpduOnly = 6,
+    kRxMpduNotificationValidated = 7,
+    kInvalidCountersOrTimeline = 8,
+    kNotificationSeenWithoutValidation = 9,
+    kMixedNotificationResults = 10,
+    // START/END controls were consumed inside the RX service batch whose
+    // outer IRQ/drain/slot hooks are bounded by those same boundaries. Raw
+    // notification counters remain valid, but service-stage attribution is
+    // intentionally partial.
+    kBoundarySpanningPartialService = 11
+};
+
+enum class RxNotificationStage : uint32_t {
+    kSeen,
+    kRejected,
+    kValidatedNonMpdu,
+    kRxMpduNotificationValidated
+};
+
+enum RxWindowFlag : uint32_t {
+    kRxWindowStarted = 1u << 0,
+    kRxWindowEnded = 1u << 1,
+    kRxWindowCounterOverflow = 1u << 2,
+    kRxWindowTimelineInvalid = 1u << 3,
+    kRxWindowBoundaryServicePartial = 1u << 4
 };
 
 enum SlotParseFlag : uint8_t {
@@ -152,7 +189,14 @@ public:
         nextSequence_(0), fullSlots_(0), retained_(0), overflow_(0),
         copySkips_(0), invalid_(0), unfinished_(0), cookie_(1),
         coverageComplete_(false), everStarted_(false), hasLastCopyTime_(false),
-        lastCopyTimeUs_(0)
+        lastCopyTimeUs_(0), rxEvidenceFlags_(0),
+        rxStage_(RxWindowStage::kUnknown), rxLastEvidenceUs_(0),
+        rxInterruptHandlerCalls_(0), rxLegacyCauseCalls_(0),
+        rxMsixQueueCauseCalls_(0), rxDrainCalls_(0), rxRingSlots_(0),
+        rxNotificationSeen_(0), rxNotificationValidated_(0),
+        rxNotificationRejected_(0), rxValidatedNonMpdu_(0),
+        rxMpduNotificationValidated_(0), rxFirstSlot_(0), rxLastSlot_(0),
+        rxFirstHead_(0), rxLastHead_(0), rxHasSlot_(false)
     {
         cookie_ = static_cast<uint64_t>(
             reinterpret_cast<uintptr_t>(this));
@@ -183,7 +227,8 @@ public:
     }
 
     bool beginRoc(const RocEpoch &epoch, uint64_t startUs,
-                  uint64_t deadlineUs)
+                  uint64_t deadlineUs,
+                  bool sharesRxServiceBatchBoundary = false)
     {
         if (state_ != State::kArmed)
             return rejectMutation();
@@ -196,6 +241,12 @@ public:
         startUs_ = startUs;
         deadlineUs_ = deadlineUs;
         everStarted_ = true;
+        rxEvidenceFlags_ = kRxWindowStarted |
+            (sharesRxServiceBatchBoundary ?
+                kRxWindowBoundaryServicePartial : 0u);
+        rxStage_ = RxWindowStage::kUnknown;
+        rxLastEvidenceUs_ = startUs;
+        clearRxEvidenceCounters();
         state_ = State::kActive;
         coverageComplete_ = true;
         return true;
@@ -338,7 +389,8 @@ public:
         return true;
     }
 
-    bool endRoc(const RocEpoch &epoch, uint64_t endUs)
+    bool endRoc(const RocEpoch &epoch, uint64_t endUs,
+                bool sharesRxServiceBatchBoundary = false)
     {
         if (state_ != State::kActive && state_ != State::kArmed)
             return rejectMutation();
@@ -346,13 +398,76 @@ public:
             invalidate(endUs, CloseReason::kGenerationChanged);
             return false;
         }
-        if (endUs < startUs_ || endUs < armUs_ || endUs < lastCopyTimeUs_ ||
-            endUs > deadlineUs_) {
+        if (state_ != State::kActive || endUs < startUs_ ||
+            endUs < armUs_ || endUs < lastCopyTimeUs_ ||
+            endUs < rxLastEvidenceUs_ || endUs > deadlineUs_) {
             invalidate(endUs, CloseReason::kInvalidBoundary);
             return false;
         }
+        if (sharesRxServiceBatchBoundary)
+            rxEvidenceFlags_ |= kRxWindowBoundaryServicePartial;
         closeAt(CloseReason::kEnd, endUs);
+        if (state_ == State::kClosed && closeReason_ == CloseReason::kEnd) {
+            rxEvidenceFlags_ |= kRxWindowEnded;
+            rxStage_ = deriveRxWindowStage();
+        }
         return true;
+    }
+
+    // Called from the serialized main workloop RX path. These hooks copy only
+    // scalar values; they acquire no lock and never publish on the IRQ path.
+    void observeRxInterrupt(uint64_t nowUs, bool msixQueueCause)
+    {
+        if (!acceptRxEvidenceTime(nowUs))
+            return;
+        incrementRxCounter(rxInterruptHandlerCalls_);
+        incrementRxCounter(msixQueueCause ? rxMsixQueueCauseCalls_ :
+                                             rxLegacyCauseCalls_);
+    }
+
+    void observeRxDrain(uint64_t nowUs)
+    {
+        if (acceptRxEvidenceTime(nowUs))
+            incrementRxCounter(rxDrainCalls_);
+    }
+
+    void observeRxRingSlot(uint64_t nowUs, uint32_t slot, uint32_t head)
+    {
+        if (!acceptRxEvidenceTime(nowUs))
+            return;
+        incrementRxCounter(rxRingSlots_);
+        if (!rxHasSlot_) {
+            rxFirstSlot_ = slot;
+            rxFirstHead_ = head;
+            rxHasSlot_ = true;
+        }
+        rxLastSlot_ = slot;
+        rxLastHead_ = head;
+    }
+
+    void observeRxNotification(uint64_t nowUs, RxNotificationStage stage)
+    {
+        if (!acceptRxEvidenceTime(nowUs))
+            return;
+        switch (stage) {
+        case RxNotificationStage::kSeen:
+            incrementRxCounter(rxNotificationSeen_);
+            break;
+        case RxNotificationStage::kRejected:
+            incrementRxCounter(rxNotificationRejected_);
+            break;
+        case RxNotificationStage::kValidatedNonMpdu:
+            incrementRxCounter(rxNotificationValidated_);
+            incrementRxCounter(rxValidatedNonMpdu_);
+            break;
+        case RxNotificationStage::kRxMpduNotificationValidated:
+            incrementRxCounter(rxNotificationValidated_);
+            incrementRxCounter(rxMpduNotificationValidated_);
+            break;
+        default:
+            rxEvidenceFlags_ |= kRxWindowTimelineInvalid;
+            break;
+        }
     }
 
     bool closeNoStart(uint64_t nowUs)
@@ -430,6 +545,22 @@ public:
         put32(output, 116, unfinished_);
         put32(output, 120, coverageComplete() ? 1u : 0u);
         put32(output, 124, retained_);
+        put32(output, 128, rxEvidenceFlags_);
+        put32(output, 132, static_cast<uint32_t>(rxStage_));
+        put32(output, 136, rxInterruptHandlerCalls_);
+        put32(output, 140, rxLegacyCauseCalls_);
+        put32(output, 144, rxMsixQueueCauseCalls_);
+        put32(output, 148, rxDrainCalls_);
+        put32(output, 152, rxRingSlots_);
+        put32(output, 156, rxNotificationSeen_);
+        put32(output, 160, rxNotificationValidated_);
+        put32(output, 164, rxNotificationRejected_);
+        put32(output, 168, rxValidatedNonMpdu_);
+        put32(output, 172, rxMpduNotificationValidated_);
+        put32(output, 176, rxHasSlot_ ? rxFirstSlot_ : 0);
+        put32(output, 180, rxHasSlot_ ? rxLastSlot_ : 0);
+        put32(output, 184, rxHasSlot_ ? rxFirstHead_ : 0);
+        put32(output, 188, rxHasSlot_ ? rxLastHead_ : 0);
 
         for (uint32_t i = 0; i < retained_; ++i)
             encodeRecord(records_[i], output + kHeaderBytes + i * kRecordBytes);
@@ -450,12 +581,133 @@ public:
             closeReason_ == CloseReason::kEnd && unfinished_ == 0;
     }
     bool hasStarted() const { return everStarted_; }
+    RxWindowStage rxWindowStage() const { return rxStage_; }
+    uint32_t rxWindowFlags() const { return rxEvidenceFlags_; }
     bool readyToEncode() const
     {
         return state_ == State::kClosed && unfinished_ == 0;
     }
 
 private:
+    bool acceptRxEvidenceTime(uint64_t nowUs)
+    {
+        if (state_ != State::kActive || nowUs < startUs_ ||
+            nowUs >= deadlineUs_)
+            return false;
+        if (nowUs < rxLastEvidenceUs_) {
+            rxEvidenceFlags_ |= kRxWindowTimelineInvalid;
+            return false;
+        }
+        rxLastEvidenceUs_ = nowUs;
+        return true;
+    }
+
+    void incrementRxCounter(uint32_t &counter)
+    {
+        if (counter == UINT32_MAX) {
+            rxEvidenceFlags_ |= kRxWindowCounterOverflow;
+            return;
+        }
+        ++counter;
+    }
+
+    void clearRxEvidenceCounters()
+    {
+        rxInterruptHandlerCalls_ = 0;
+        rxLegacyCauseCalls_ = 0;
+        rxMsixQueueCauseCalls_ = 0;
+        rxDrainCalls_ = 0;
+        rxRingSlots_ = 0;
+        rxNotificationSeen_ = 0;
+        rxNotificationValidated_ = 0;
+        rxNotificationRejected_ = 0;
+        rxValidatedNonMpdu_ = 0;
+        rxMpduNotificationValidated_ = 0;
+        rxFirstSlot_ = 0;
+        rxLastSlot_ = 0;
+        rxFirstHead_ = 0;
+        rxLastHead_ = 0;
+        rxHasSlot_ = false;
+    }
+
+    RxWindowStage deriveRxWindowStage() const
+    {
+        if (!(rxEvidenceFlags_ & kRxWindowStarted) ||
+            !(rxEvidenceFlags_ & kRxWindowEnded))
+            return RxWindowStage::kUnknown;
+        if (rxEvidenceFlags_ & (kRxWindowCounterOverflow |
+                                kRxWindowTimelineInvalid))
+            return RxWindowStage::kInvalidCountersOrTimeline;
+        const uint64_t classifiedNotifications =
+            uint64_t(rxNotificationValidated_) + rxNotificationRejected_;
+        const uint64_t validatedNotifications =
+            uint64_t(rxValidatedNonMpdu_) + rxMpduNotificationValidated_;
+        if (rxLegacyCauseCalls_ + uint64_t(rxMsixQueueCauseCalls_) !=
+                rxInterruptHandlerCalls_ ||
+            rxDrainCalls_ > rxInterruptHandlerCalls_ ||
+            rxNotificationSeen_ < classifiedNotifications ||
+            rxNotificationValidated_ != validatedNotifications ||
+            (rxRingSlots_ == 0) != !rxHasSlot_)
+            return RxWindowStage::kInvalidCountersOrTimeline;
+        const bool boundaryPartial = (rxEvidenceFlags_ &
+            kRxWindowBoundaryServicePartial) != 0;
+        const bool serviceCoverageGap =
+            (rxInterruptHandlerCalls_ == 0 &&
+                (rxDrainCalls_ || rxRingSlots_ || rxNotificationSeen_)) ||
+            (rxDrainCalls_ == 0 &&
+                (rxRingSlots_ || rxNotificationSeen_)) ||
+            (rxRingSlots_ == 0 && rxNotificationSeen_ != 0);
+        // The IRQ/drain/first ring-slot may precede START in this same RX
+        // batch while later notification records are consumed after START.
+        // Do not infer a broken counter timeline from those intentionally
+        // clipped outer stages; retain and classify all notification counts.
+        if (serviceCoverageGap && !boundaryPartial)
+            return RxWindowStage::kInvalidCountersOrTimeline;
+        // Notification-stage facts remain reportable even when their batch's
+        // outer service hooks fell outside the half-open ROC interval.
+        if (rxMpduNotificationValidated_ != 0)
+            return RxWindowStage::kRxMpduNotificationValidated;
+        if (boundaryPartial && serviceCoverageGap &&
+            rxNotificationSeen_ == 0)
+            return RxWindowStage::kBoundarySpanningPartialService;
+        if (boundaryPartial && serviceCoverageGap) {
+            if (rxNotificationValidated_ == 0 && rxNotificationRejected_ != 0 &&
+                rxNotificationSeen_ == rxNotificationRejected_)
+                return RxWindowStage::kRejectedNotificationsOnly;
+            if (rxNotificationSeen_ > classifiedNotifications ||
+                rxNotificationValidated_ == 0)
+                return RxWindowStage::kNotificationSeenWithoutValidation;
+            if (rxNotificationRejected_ != 0)
+                return RxWindowStage::kMixedNotificationResults;
+            if (rxValidatedNonMpdu_ != 0 &&
+                rxValidatedNonMpdu_ == rxNotificationValidated_ &&
+                rxNotificationSeen_ == rxNotificationValidated_)
+                return RxWindowStage::kValidatedNonMpduOnly;
+            return RxWindowStage::kNotificationSeenWithoutValidation;
+        }
+        if (rxInterruptHandlerCalls_ == 0)
+            return RxWindowStage::kNoHostRxInterrupt;
+        if (rxDrainCalls_ == 0)
+            return RxWindowStage::kRxInterruptWithoutDrain;
+        if (rxRingSlots_ == 0)
+            return RxWindowStage::kDrainWithoutRingSlot;
+        if (rxNotificationSeen_ == 0)
+            return RxWindowStage::kRingSlotsWithoutNotification;
+        if (rxNotificationValidated_ == 0 && rxNotificationRejected_ != 0 &&
+            rxNotificationSeen_ == rxNotificationRejected_)
+            return RxWindowStage::kRejectedNotificationsOnly;
+        if (rxNotificationSeen_ > classifiedNotifications ||
+            rxNotificationValidated_ == 0)
+            return RxWindowStage::kNotificationSeenWithoutValidation;
+        if (rxNotificationRejected_ != 0)
+            return RxWindowStage::kMixedNotificationResults;
+        if (rxValidatedNonMpdu_ != 0 &&
+            rxValidatedNonMpdu_ == rxNotificationValidated_ &&
+            rxNotificationSeen_ == rxNotificationValidated_)
+            return RxWindowStage::kValidatedNonMpduOnly;
+        return RxWindowStage::kNotificationSeenWithoutValidation;
+    }
+
     struct Record {
         uint64_t sequence;
         uint64_t copyTimeUs;
@@ -689,6 +941,24 @@ private:
     bool everStarted_;
     bool hasLastCopyTime_;
     uint64_t lastCopyTimeUs_;
+    uint32_t rxEvidenceFlags_;
+    RxWindowStage rxStage_;
+    uint64_t rxLastEvidenceUs_;
+    uint32_t rxInterruptHandlerCalls_;
+    uint32_t rxLegacyCauseCalls_;
+    uint32_t rxMsixQueueCauseCalls_;
+    uint32_t rxDrainCalls_;
+    uint32_t rxRingSlots_;
+    uint32_t rxNotificationSeen_;
+    uint32_t rxNotificationValidated_;
+    uint32_t rxNotificationRejected_;
+    uint32_t rxValidatedNonMpdu_;
+    uint32_t rxMpduNotificationValidated_;
+    uint32_t rxFirstSlot_;
+    uint32_t rxLastSlot_;
+    uint32_t rxFirstHead_;
+    uint32_t rxLastHead_;
+    bool rxHasSlot_;
     Record records_[kCapacity];
 };
 
