@@ -158,7 +158,9 @@
 #include "../../native/p2p_hal_probe.hpp"
 #include "../../native/intel_roc_event_state.hpp"
 #include "../../native/iwx_reset_trace.hpp"
+#include "../../native/iwx_init_dispatch.hpp"
 #include "../../native/iwx_link_state_trace.hpp"
+#include "../../native/iwx_completion_observer_kernel.hpp"
 #include "../../native/iwx_mcc_refresh_policy.hpp"
 #include "../../native/iwx_fw_diagnostics.hpp"
 #include "ItlIwxP2PTx.hpp"
@@ -342,6 +344,9 @@ public:
     IOReturn enable(IONetworkInterface *netif) override;
     IOReturn disable(IONetworkInterface *netif) override;
     virtual struct ieee80211com *get80211Controller() override;
+#ifdef AIRPORT_TAHOE
+    void setNativePowerRequestState(uint32_t, bool) override;
+#endif
     
     static bool intrFilter(OSObject *object, IOFilterInterruptEventSource *src);
     static IOReturn _iwx_start_task(OSObject *target, void *arg0, void *arg1, void *arg2, void *arg3);
@@ -382,6 +387,9 @@ public:
     virtual IOReturn setMulticastList(IOEthernetAddress *addr, int count) override;
     
     void releaseAll();
+    void quiesceRxInterruptSource();
+    IOWorkLoop *rxInterruptWorkloop_ {nullptr};
+    bool rxInterruptSourceRegistered_ {false};
 #ifdef AIRPORT_TAHOE
     /* Serializes synchronous per-device firmware work against power stop. */
     IORecursiveLock *nativeLifecycleLock_ {nullptr};
@@ -389,6 +397,9 @@ public:
     uint32_t nativeLifecycleDeferredTasks_ {0};
     uint32_t nativeLifecycleTearingDown_ {0};
     uint64_t nativeLifecycleStopRejectFingerprint_ {0};
+    uint64_t nativeInitDispatchSequence_ {0};
+    uint32_t nativeInitTaskFaultSerial_ {0};
+    uint64_t nativePowerRequestState_ {0};
     IwxResetTrace::Trace nativeResetTrace_ {};
     IwxLinkStateTrace::Trace nativeLinkTransitionTrace_ {};
     IwxFirmwareDiagnostics::TraceRing nativeFwDiagnosticTrace_ {};
@@ -444,12 +455,19 @@ public:
     uint32_t nativeStaAuthTracePublishedFirstState_ {0};
     uint32_t nativeStaAuthTracePublishedFirstCount_ {0};
     bool nativeStaAuthTracePublishedOnce_ {false};
+    uint64_t nativeGroup2TxPublishedRevision_ {0};
+    uint32_t nativeGroup2TxPublishedDropped_ {0};
+    bool nativeGroup2TxPublishedOnce_ {false};
+    // Reuse one fixed object buffer; do not place two 3 KB snapshots on the
+    // command-gate/watchdog stack.
+    IwxGroup2TxTraceSnapshot nativeGroup2TxSnapshot_ {};
     void tahoeRecordLinkTransition(struct iwx_softc *,
         IwxLinkStateTrace::Event, uint32_t, uint32_t, int, int,
         uint32_t resetSequence = UINT32_MAX,
         bool resetSequenceValid = false);
     bool tahoePublishLinkTransitionTrace(IOEthernetController *);
     bool tahoePublishStaAuthTrace(IOEthernetController *, struct iwx_softc *);
+    bool tahoePublishGroup2TxTrace(IOEthernetController *, struct iwx_softc *);
     void tahoeRecordFirmwareMetadata(
         struct iwx_softc *, IwxFirmwareDiagnostics::Entry);
     void tahoeFreezeFirmwareMetadata(
@@ -471,7 +489,8 @@ public:
     void tahoeDeferLifecycleTasks(uint32_t);
     void tahoeFlushLifecycleTasks();
     void tahoeClearStopBlockState();
-    void tahoeRecordInitTaskTrigger(IwxResetTrace::InitTaskTrigger);
+    uint32_t tahoeRecordInitTaskTrigger(IwxResetTrace::InitTaskTrigger);
+    int tahoeQueueInitTask(struct iwx_softc *, uint32_t faultSerial = 0);
     void tahoeRecordTxWatchdogSnapshot(struct iwx_softc *, uint32_t);
     void tahoePublishTxProgressSnapshot(IOEthernetController *, struct iwx_softc *);
     bool tahoePublishStaTxSnapshot(IOEthernetController *, struct iwx_softc *);
@@ -526,6 +545,11 @@ public:
     void tahoeRxPreOwnerIrq(uint32_t cause, bool msix);
     void tahoeRxPreOwnerStop();
     void tahoeRxPreOwnerPublish(IOEthernetController *);
+#if defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+    void tahoeRxCompletionPublish(IOEthernetController *);
+    static IOReturn tahoeRxCompletionPublishAction(OSObject *, void *,
+        void *, void *, void *);
+#endif
     void tahoeP2pSyncRxDiagnosticOwner(bool closeOnly);
     void tahoeP2pPublishRxStageCounters(IOEthernetController *);
     void tahoeP2pPublishRxEntryTelemetry(IOEthernetController *);
@@ -614,6 +638,14 @@ public:
     uint32_t nativeRxPreOwnerArmed_ {0};
     uint64_t nativeRxPreOwnerStopSerial_ {0};
     uint32_t nativeRxPreOwnerStopDepth_ {0};
+#if defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+    // One owner-scoped registry and its lock span RX ring allocation, every
+    // completion reader, partial cleanup, and event-source removal.
+    NativeIwxCompletionObserver::KernelRegistry nativeRxCompletionObserver_{};
+    NativeIwxCompletionObserver::Handle nativeRxCompletionHandle_{};
+    NativeIwxCompletionObserver::Telemetry nativeRxCompletionTelemetry_{};
+    bool nativeRxCompletionPublishAttempted_ {false};
+#endif
     bool nativeRxPreOwnerPublished_ {false};
     NativeRxPreOwner::Snapshot nativeRxPreOwnerPublishSnapshot_{};
     uint64_t nativeRxPreOwnerPublishWords_[1024] {};
@@ -856,7 +888,8 @@ public:
     void    iwx_tx_update_byte_tbl(struct iwx_softc *, struct iwx_tx_ring *, int, uint16_t, uint16_t);
     int    iwx_tx(struct iwx_softc *, mbuf_t, struct ieee80211_node *, int
 #ifdef AIRPORT_TAHOE
-                  , uint64_t * = nullptr
+                  , uint64_t * = nullptr,
+                  const IwxGroup2TxTag * = nullptr
 #endif
                   );
     int    iwx_flush_sta_tids(struct iwx_softc *, int, uint16_t);
@@ -993,6 +1026,12 @@ public:
     void    iwx_attach_hook(struct device *);
     bool    iwx_attach(struct iwx_softc *, struct pci_attach_args *);
     static void    iwx_init_task(void *);
+    static void    iwx_init_task_execute(void *,
+        const task_dispatch_context *, const struct task *);
+#ifdef AIRPORT_TAHOE
+    static void    iwx_init_task_tagged(void *,
+        const task_dispatch_context *, const struct task *);
+#endif
     int    iwx_activate(struct iwx_softc *, int);
     int    iwx_resume(struct iwx_softc *);
     

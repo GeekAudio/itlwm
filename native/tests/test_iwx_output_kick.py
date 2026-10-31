@@ -121,14 +121,14 @@ assert "sc_tx_output_kick_tag" in SOFTC
 # unavailable in the watchdog snapshot and publication happens from the
 # existing serialized publisher.
 observed_tx = drain.index(
-    "that->iwx_tx(sc, m, ni, ac, &observedSubmitSerial)"
+    "const int txResult = that->iwx_tx(sc, m, ni, ac,"
 )
 tx_watchdog_arm = drain.index("IwxTxWatchdog::arm(&sc->sc_tx_timer)")
 tx_timer_observation = drain.index(
     "recordTxTimerArm(sc, epoch, observedSubmitSerial)"
 )
 assert observed_tx < tx_watchdog_arm < tx_timer_observation
-assert drain.index("if (that->iwx_tx(sc, m, ni, ac, &observedSubmitSerial) != 0)") < tx_watchdog_arm
+assert drain.index("if (txResult != 0)") < tx_watchdog_arm
 assert drain.index("continue;", observed_tx) < tx_watchdog_arm
 assert "recordTxTimerClear(sc" in DRIVER
 assert "kTxTimerClearFirmwareResponse = 1" in DRIVER

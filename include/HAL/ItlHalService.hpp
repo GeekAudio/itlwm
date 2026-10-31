@@ -15,6 +15,8 @@
 #ifndef ItlHalService_hpp
 #define ItlHalService_hpp
 
+#include <stdint.h>
+
 #include <libkern/c++/OSObject.h>
 #include <IOKit/IOLib.h>
 #include <IOKit/IOService.h>
@@ -47,6 +49,9 @@ public:
     virtual ItlDriverInfo *getDriverInfo() = 0;
     
     virtual ItlDriverController *getDriverController() = 0;
+
+    /* Optional Tahoe radio-request epoch, consumed by HAL lifecycle work. */
+    virtual void setNativePowerRequestState(uint32_t, bool) {}
 
     /* Optional Tahoe native P2P probe hooks; other HALs remain inert. */
     virtual void nativeP2pTick() {}

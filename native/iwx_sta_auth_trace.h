@@ -4,6 +4,7 @@
 /* Tahoe-only fixed-capacity STA key-handshake diagnostics. */
 #include <stdint.h>
 #include <stddef.h>
+#include "group2_tx_trace_helpers.h"
 
 #define IWX_STA_AUTH_TRACE_MAGIC 0x41535449u /* LE bytes: ITSA */
 #define IWX_STA_AUTH_TRACE_SCHEMA 1u
@@ -150,6 +151,7 @@ struct IwxStaAuthTrace {
     uint32_t live_cursor;
     uint32_t first_state; /* 0=unclaimed, 1=claimed, 2=frozen, 3=lost */
     uint32_t first_count;
+    struct IwxGroup2TxTrace group2_tx;
     struct IwxStaAuthTraceEvent live[IWX_STA_AUTH_TRACE_LIVE_CAPACITY];
     struct IwxStaAuthTraceEvent first[IWX_STA_AUTH_TRACE_FIRST_CAPACITY];
 };
@@ -194,6 +196,7 @@ static inline void iwx_sta_auth_trace_init(struct IwxStaAuthTrace *trace, uint32
         return;
     __builtin_memset(trace, 0, sizeof(*trace));
     __atomic_store_n(&trace->diagnostic_instance, instance, __ATOMIC_RELEASE);
+    iwx_group2_tx_trace_init(&trace->group2_tx);
 }
 
 static inline int iwx_sta_auth_trace_try_lock(struct IwxStaAuthTrace *trace)

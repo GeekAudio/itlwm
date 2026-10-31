@@ -83,6 +83,7 @@ taskq_next_work(struct taskq *tq, struct task *work)
     CLR(next->t_flags, TASK_ONQUEUE);
 
     *work = *next; /* copy to caller to avoid races */
+    work->t_dispatch_source = next;
     /* Count active before releasing the same lock used by try_pause(). */
     tq->tq_active++;
 
@@ -107,6 +108,16 @@ taskq_work_done(struct taskq *tq)
     IORecursiveLockUnlock(tq->tq_mtx);
 }
 
+static void
+taskq_run_work(const struct task *work)
+{
+    if (work->t_dispatch_func != NULL)
+        (*work->t_dispatch_func)(work->t_arg, &work->t_dispatch_context,
+                                 work->t_dispatch_source);
+    else
+        (*work->t_func)(work->t_arg);
+}
+
 void
 taskq_thread(void *xtq)
 {
@@ -124,7 +135,8 @@ taskq_thread(void *xtq)
     while (taskq_next_work(tq, &work)) {
 //        WITNESS_LOCK(&tq->tq_lock_object, 0);
 //        IOLog("itlwm: taskq worker thread=%lld work=%s\n", thread_tid(current_thread()), work.name);
-        (*work.t_func)(work.t_arg);
+        taskq_run_work(&work);
+        taskq_complete_work(tq, &work);
         taskq_work_done(tq);
 //        IOLog("itlwm: taskq worker thread=%lld work=%s done", thread_tid(current_thread()), work.name);
 //        WITNESS_UNLOCK(&tq->tq_lock_object, 0);
@@ -292,6 +304,13 @@ task_set(struct task *t, void (*fn)(void *), void *arg, const char *name)
     t->t_arg = arg;
     t->t_flags = 0;
     memcpy(t->name, name, sizeof(t->name));
+    t->t_dispatch_func = NULL;
+    memset(&t->t_dispatch_context, 0, sizeof(t->t_dispatch_context));
+    __atomic_store_n(&t->t_dispatch_state, TASK_DISPATCH_RETIRED,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&t->t_dispatch_id, UINT64_C(0), __ATOMIC_RELEASE);
+    t->t_dispatch_deferred = 0;
+    t->t_dispatch_source = NULL;
 }
 
 int
@@ -321,6 +340,14 @@ task_add(struct taskq *tq, struct task *w)
     if (!ISSET(w->t_flags, TASK_ONQUEUE)) {
 //        IOLog("itlwm: taskq task_add %s add to queue thread: %lld\n", w->name, thread_tid(current_thread()));
         rv = 1;
+        /* A plain task_add remains an untagged, one-argument callback. */
+        w->t_dispatch_func = NULL;
+        memset(&w->t_dispatch_context, 0, sizeof(w->t_dispatch_context));
+        __atomic_store_n(&w->t_dispatch_state, TASK_DISPATCH_RETIRED,
+                         __ATOMIC_RELEASE);
+        __atomic_store_n(&w->t_dispatch_id, UINT64_C(0), __ATOMIC_RELEASE);
+        w->t_dispatch_deferred = 0;
+        w->t_dispatch_source = NULL;
         SET(w->t_flags, TASK_ONQUEUE);
         TAILQ_INSERT_TAIL(&tq->tq_worklist, w, t_entry);
     }
@@ -330,6 +357,180 @@ task_add(struct taskq *tq, struct task *w)
         IORecursiveLockWakeup(tq->tq_mtx, tq, true);
 
     return (rv);
+}
+
+int
+task_add_tagged(struct taskq *tq, struct task *w,
+                task_dispatch_func fn,
+                const struct task_dispatch_context *context)
+{
+    if (tq == NULL || w == NULL || fn == NULL || context == NULL)
+        return (-1);
+    if (context->dispatch_id == 0)
+        return (-1);
+
+    IORecursiveLockLock(tq->tq_mtx);
+    if (tq->tq_state == TQ_S_DESTROYED || tq->tq_paused) {
+        IORecursiveLockUnlock(tq->tq_mtx);
+        return (-1);
+    }
+
+    const uint64_t currentId = __atomic_load_n(&w->t_dispatch_id,
+                                               __ATOMIC_ACQUIRE);
+    const uint32_t currentState = __atomic_load_n(&w->t_dispatch_state,
+                                                 __ATOMIC_ACQUIRE);
+    if (currentId != 0 && context->dispatch_id != currentId) {
+        const uint64_t distance = context->dispatch_id - currentId;
+        if (distance >= (UINT64_C(1) << 63)) {
+            IORecursiveLockUnlock(tq->tq_mtx);
+            return (0); /* A late producer cannot replace a newer dispatch. */
+        }
+    } else if (context->dispatch_id == currentId &&
+               (currentState & TASK_DISPATCH_RETIRED)) {
+        IORecursiveLockUnlock(tq->tq_mtx);
+        return (0); /* Completion/cancellation retires this exact identity. */
+    } else if (context->dispatch_id == currentId) {
+        /* Context is immutable for one identity. A same-id add cannot revive
+         * or rewrite a popped/deferred dispatch. */
+        IORecursiveLockUnlock(tq->tq_mtx);
+        return (0);
+    }
+
+    w->t_dispatch_func = fn;
+    w->t_dispatch_context = *context;
+    w->t_dispatch_deferred = 0;
+    w->t_dispatch_source = NULL;
+    __atomic_store_n(&w->t_dispatch_state, 0U, __ATOMIC_RELEASE);
+    __atomic_store_n(&w->t_dispatch_id, context->dispatch_id,
+                     __ATOMIC_RELEASE);
+    if (ISSET(w->t_flags, TASK_ONQUEUE)) {
+        /* This is still the same pending dispatch: replace its not-yet-popped
+         * payload while holding the mutex that protects the queue snapshot. */
+        IORecursiveLockUnlock(tq->tq_mtx);
+        return (0);
+    }
+
+    SET(w->t_flags, TASK_ONQUEUE);
+    TAILQ_INSERT_TAIL(&tq->tq_worklist, w, t_entry);
+    IORecursiveLockUnlock(tq->tq_mtx);
+    IORecursiveLockWakeup(tq->tq_mtx, tq, true);
+    return (1);
+}
+
+int
+task_defer_tagged(struct taskq *tq, const struct task *source,
+                  task_dispatch_func fn,
+                  const struct task_dispatch_context *context)
+{
+    if (tq == NULL || source == NULL || fn == NULL || context == NULL ||
+        context->dispatch_id == 0)
+        return (-1);
+
+    struct task *w = const_cast<struct task *>(source);
+    IORecursiveLockLock(tq->tq_mtx);
+    if (tq->tq_state == TQ_S_DESTROYED || tq->tq_paused) {
+        IORecursiveLockUnlock(tq->tq_mtx);
+        return (-1);
+    }
+
+    const uint64_t currentId = __atomic_load_n(&w->t_dispatch_id,
+                                               __ATOMIC_ACQUIRE);
+    const uint32_t currentState = __atomic_load_n(&w->t_dispatch_state,
+                                                 __ATOMIC_ACQUIRE);
+    const struct task_dispatch_context *current = &w->t_dispatch_context;
+    const bool sameContext = current->dispatch_id == context->dispatch_id &&
+        current->driver_generation == context->driver_generation &&
+        current->fault_serial == context->fault_serial &&
+        current->power_epoch == context->power_epoch &&
+        current->power_flags == context->power_flags &&
+        current->dispatch_flags == context->dispatch_flags;
+    if (currentId != context->dispatch_id ||
+        (currentState & TASK_DISPATCH_RETIRED) ||
+        w->t_dispatch_func != fn || !sameContext) {
+        IORecursiveLockUnlock(tq->tq_mtx);
+        return (0); /* Superseded work cannot be resurrected. */
+    }
+    if (ISSET(w->t_flags, TASK_ONQUEUE) || w->t_dispatch_deferred) {
+        IORecursiveLockUnlock(tq->tq_mtx);
+        return (0);
+    }
+
+    /* The source task remains the canonical immutable context slot. It is
+     * parked until its lifecycle owner releases the fence and flushes it. */
+    w->t_dispatch_deferred = 1;
+    IORecursiveLockUnlock(tq->tq_mtx);
+    return (1);
+}
+
+int
+taskq_flush_deferred_tagged(struct taskq *tq, struct task *w)
+{
+    if (tq == NULL || w == NULL)
+        return (-1);
+
+    IORecursiveLockLock(tq->tq_mtx);
+    if (!w->t_dispatch_deferred) {
+        IORecursiveLockUnlock(tq->tq_mtx);
+        return (0);
+    }
+    if (tq->tq_state == TQ_S_DESTROYED || tq->tq_paused) {
+        IORecursiveLockUnlock(tq->tq_mtx);
+        return (-1);
+    }
+    const uint32_t state = __atomic_load_n(&w->t_dispatch_state,
+                                          __ATOMIC_ACQUIRE);
+    if ((state & TASK_DISPATCH_RETIRED) || w->t_dispatch_func == NULL) {
+        w->t_dispatch_deferred = 0;
+        IORecursiveLockUnlock(tq->tq_mtx);
+        return (0);
+    }
+    if (ISSET(w->t_flags, TASK_ONQUEUE)) {
+        w->t_dispatch_deferred = 0;
+        IORecursiveLockUnlock(tq->tq_mtx);
+        return (0);
+    }
+
+    w->t_dispatch_deferred = 0;
+    SET(w->t_flags, TASK_ONQUEUE);
+    TAILQ_INSERT_TAIL(&tq->tq_worklist, w, t_entry);
+    IORecursiveLockUnlock(tq->tq_mtx);
+    IORecursiveLockWakeup(tq->tq_mtx, tq, true);
+    return (1);
+}
+
+void
+taskq_complete_work(struct taskq *tq, const struct task *work)
+{
+    if (tq == NULL || work == NULL || work->t_dispatch_func == NULL ||
+        work->t_dispatch_source == NULL || work->t_dispatch_context.dispatch_id == 0)
+        return;
+
+    struct task *source = work->t_dispatch_source;
+    IORecursiveLockLock(tq->tq_mtx);
+    const uint64_t currentId = __atomic_load_n(&source->t_dispatch_id,
+                                               __ATOMIC_ACQUIRE);
+    const uint32_t state = __atomic_load_n(&source->t_dispatch_state,
+                                          __ATOMIC_ACQUIRE);
+    if (currentId == work->t_dispatch_context.dispatch_id &&
+        !(state & TASK_DISPATCH_RETIRED) &&
+        !ISSET(source->t_flags, TASK_ONQUEUE) &&
+        !source->t_dispatch_deferred)
+        __atomic_store_n(&source->t_dispatch_state, TASK_DISPATCH_RETIRED,
+                         __ATOMIC_RELEASE);
+    IORecursiveLockUnlock(tq->tq_mtx);
+}
+
+int
+task_dispatch_is_current(const struct task *source, uint64_t dispatch_id)
+{
+    if (source == NULL || dispatch_id == 0)
+        return (0);
+    const uint64_t currentId = __atomic_load_n(&source->t_dispatch_id,
+                                              __ATOMIC_ACQUIRE);
+    const uint32_t state = __atomic_load_n(&source->t_dispatch_state,
+                                           __ATOMIC_ACQUIRE);
+    return (currentId == dispatch_id &&
+            !(state & TASK_DISPATCH_RETIRED));
 }
 
 int
@@ -427,8 +628,8 @@ task_del(struct taskq *tq, struct task *w)
 {
     int rv = 0;
 //    IOLog("itlwm: taskq task_del %s thread: %lld\n", w->name, thread_tid(current_thread()));
-    
-    if (!ISSET(w->t_flags, TASK_ONQUEUE))
+
+    if (tq == NULL || w == NULL)
         return (0);
 
     IORecursiveLockLock(tq->tq_mtx);
@@ -436,6 +637,12 @@ task_del(struct taskq *tq, struct task *w)
         rv = 1;
         CLR(w->t_flags, TASK_ONQUEUE);
         TAILQ_REMOVE(&tq->tq_worklist, w, t_entry);
+    }
+    if (w->t_dispatch_func != NULL ||
+        __atomic_load_n(&w->t_dispatch_id, __ATOMIC_ACQUIRE) != 0) {
+        __atomic_store_n(&w->t_dispatch_state, TASK_DISPATCH_RETIRED,
+                         __ATOMIC_RELEASE);
+        w->t_dispatch_deferred = 0;
     }
     IORecursiveLockUnlock(tq->tq_mtx);
 

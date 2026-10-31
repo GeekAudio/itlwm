@@ -116,6 +116,7 @@ typedef uint16_t u_int16_t;
 #define LINK_STATE_UP 1
 #define IEEE80211_S_SCAN 1
 #define IEEE80211_S_RUN 4
+#define IEEE80211_PROTO_WPA (1u << 1)
 
 static const uint8_t iwx_test_oui[3] = {0x00, 0x0f, 0xac};
 #define IEEE80211_OUI iwx_test_oui
@@ -168,6 +169,7 @@ struct ieee80211_eapol_key {
 
 struct ieee80211_node {
     int ni_rsn_supp_state;
+    unsigned ni_rsnprotos;
     uint64_t ni_replaycnt;
     struct { uint8_t kck[16]; uint8_t kek[16]; } ni_ptk;
     enum ieee80211_cipher ni_rsngroupcipher;
@@ -317,7 +319,7 @@ static int ieee80211_cipher_keylen(enum ieee80211_cipher cipher)
 { return cipher == IEEE80211_CIPHER_CCMP_VALUE ? 16 : 0; }
 
 static int ieee80211_send_group_msg2(struct ieee80211com *ic,
-    struct ieee80211_node *ni, struct ieee80211_key *key)
+    struct ieee80211_node *ni, const struct ieee80211_key *key)
 {
     (void)ni; (void)key;
 #ifdef AIRPORT_TAHOE
@@ -331,6 +333,18 @@ static int ieee80211_send_group_msg2(struct ieee80211com *ic,
     ++g_m2_calls;
     return g_m2_result;
 }
+
+#ifdef AIRPORT_TAHOE
+/* Exercise the extracted production Tahoe wrapper; the traced output mock
+ * delegates to the same send behavior and counters as the legacy mock. */
+static int ieee80211_send_group_msg2_traced(struct ieee80211com *ic,
+    struct ieee80211_node *ni, const struct ieee80211_key *key,
+    const struct IwxGroup2TxTag *tag)
+{
+    assert(iwx_group2_tx_tag_valid(tag));
+    return ieee80211_send_group_msg2(ic, ni, key);
+}
+#endif
 
 #ifdef AIRPORT_TAHOE
 static uint32_t scan_state_callback(struct ieee80211com *ic)
@@ -422,6 +436,7 @@ static struct ieee80211_eapol_key *init_rsn_group1(struct fixture *fixture,
 static struct ieee80211_eapol_key *init_wpa_group1(struct fixture *fixture,
     uint64_t replay)
 {
+    fixture->ni.ni_rsnprotos = IEEE80211_PROTO_WPA;
     struct ieee80211_eapol_key *key =
         (struct ieee80211_eapol_key *)(void *)fixture->key_storage;
     memset(fixture->key_storage, 0, sizeof(fixture->key_storage));
@@ -710,6 +725,7 @@ def main() -> None:
         extract_function(source, marker)
         for marker in (
             "static uint64_t ieee80211_tahoe_trace_time_us(void)",
+            "static int ieee80211_tahoe_send_group_msg2(",
             "static void ieee80211_tahoe_trace_group(struct ieee80211com *ic",
             "static void ieee80211_tahoe_trace_group2_callsite_gate(",
             "static int ieee80211_tahoe_install_group_key(struct ieee80211com *ic",

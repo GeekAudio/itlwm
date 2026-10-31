@@ -51,4 +51,14 @@ mbuf_t ifq_dequeue(struct _ifqueue *ifq);
 
 int ifq_enqueue(struct _ifqueue *ifq, mbuf_t m);
 
+#ifdef AIRPORT_TAHOE
+struct IwxGroup2TxTag;
+struct IwxGroup2TxTrace;
+int ifq_group2_tag_attach(mbuf_t m, const struct IwxGroup2TxTag *tag);
+int ifq_group2_tag_copy(mbuf_t m, struct IwxGroup2TxTag *tag);
+int ifq_enqueue_group2(struct _ifqueue *ifq, mbuf_t m,
+    struct IwxGroup2TxTrace *trace, const struct IwxGroup2TxTag *tag,
+    uint64_t monotonic_us);
+#endif
+
 #endif /* _ifq_h */

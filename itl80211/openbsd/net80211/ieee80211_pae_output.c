@@ -56,6 +56,28 @@
 #include <net80211/ieee80211_var.h>
 #include <net80211/ieee80211_priv.h>
 
+#ifdef AIRPORT_TAHOE
+static uint64_t ieee80211_tahoe_group2_time_us(void)
+{
+    struct timeval tv;
+    microuptime(&tv);
+    return (uint64_t)tv.tv_sec * 1000000ULL + (uint64_t)tv.tv_usec;
+}
+
+static void ieee80211_tahoe_group2_record(
+    struct IwxGroup2TxTrace *trace, const struct IwxGroup2TxTag *tag,
+    uint16_t stage, int32_t result)
+{
+    if (!iwx_group2_tx_tag_valid(tag))
+        return;
+    struct IwxGroup2TxEvent event = {};
+    iwx_group2_tx_event_from_tag(&event, tag,
+        ieee80211_tahoe_group2_time_us(), stage);
+    event.result = result;
+    (void)iwx_group2_tx_trace_record(trace, &event);
+}
+#endif
+
 int		ieee80211_send_eapol_key(struct ieee80211com *ic, mbuf_t m,
                                  struct ieee80211_node *ni, const struct ieee80211_ptk *ptk);
 #ifndef IEEE80211_STA_ONLY
@@ -71,9 +93,13 @@ mbuf_t 	ieee80211_get_eapol_key(int, int, u_int);
  * Send an EAPOL-Key frame to node `ni'.  If MIC or encryption is required,
  * the PTK must be passed (otherwise it can be set to NULL.)
  */
-int
-ieee80211_send_eapol_key(struct ieee80211com *ic, mbuf_t m,
-                         struct ieee80211_node *ni, const struct ieee80211_ptk *ptk)
+static int
+ieee80211_send_eapol_key_internal(struct ieee80211com *ic, mbuf_t m,
+    struct ieee80211_node *ni, const struct ieee80211_ptk *ptk
+#ifdef AIRPORT_TAHOE
+    , const struct IwxGroup2TxTag *group2Tag
+#endif
+    )
 {
     XYLog("%s\n", __FUNCTION__);
     struct _ifnet *ifp = &ic->ic_if;
@@ -83,8 +109,14 @@ ieee80211_send_eapol_key(struct ieee80211com *ic, mbuf_t m,
     int len, error = 0;
     
     mbuf_prepend(&m, sizeof(struct ether_header), MBUF_DONTWAIT);
-    if (m == NULL)
+    if (m == NULL) {
+#ifdef AIRPORT_TAHOE
+        ieee80211_tahoe_group2_record(
+            &ic->ic_tahoe_auth_trace.group2_tx, group2Tag,
+            IWX_GROUP2_TX_STAGE_PREPEND_FAILED, ENOMEM);
+#endif
         return ENOMEM;
+    }
     /* no need to m_pullup here (ok by construction) */
     eh = mtod(m, struct ether_header *);
     eh->ether_type = htons(ETHERTYPE_PAE);
@@ -139,13 +171,38 @@ ieee80211_send_eapol_key(struct ieee80211com *ic, mbuf_t m,
         timeout_add_msec(&ni->ni_eapol_to, 100);
 #endif
     
-    error = ifq_enqueue(&ifp->if_snd, m);
+#ifdef AIRPORT_TAHOE
+    if (iwx_group2_tx_tag_valid(group2Tag)) {
+        const int tagError = ifq_group2_tag_attach(m, group2Tag);
+        if (tagError != 0)
+            ieee80211_tahoe_group2_record(
+                &ic->ic_tahoe_auth_trace.group2_tx, group2Tag,
+                IWX_GROUP2_TX_STAGE_TAG_ATTACH_FAILED, tagError);
+        // This call records only the queue operation's drop count; it does
+        // not claim that the tagged packet survived a full-queue drop.
+        error = ifq_enqueue_group2(&ifp->if_snd, m,
+            &ic->ic_tahoe_auth_trace.group2_tx, group2Tag,
+            ieee80211_tahoe_group2_time_us());
+    } else
+#endif
+        error = ifq_enqueue(&ifp->if_snd, m);
     if (error) {
         XYLog("%s enqueue fail!!\n", __FUNCTION__);
         return (error);
     }
     (*ifp->if_start)(ifp);
     return 0;
+}
+
+int
+ieee80211_send_eapol_key(struct ieee80211com *ic, mbuf_t m,
+                         struct ieee80211_node *ni, const struct ieee80211_ptk *ptk)
+{
+#ifdef AIRPORT_TAHOE
+    return ieee80211_send_eapol_key_internal(ic, m, ni, ptk, NULL);
+#else
+    return ieee80211_send_eapol_key_internal(ic, m, ni, ptk);
+#endif
 }
 
 #ifndef IEEE80211_STA_ONLY
@@ -596,9 +653,13 @@ ieee80211_send_group_msg1(struct ieee80211com *ic, struct ieee80211_node *ni)
 /*
  * Send Group Key Handshake Message 2 to the authenticator.
  */
-int
-ieee80211_send_group_msg2(struct ieee80211com *ic, struct ieee80211_node *ni,
-                          const struct ieee80211_key *k)
+static int
+ieee80211_send_group_msg2_internal(struct ieee80211com *ic,
+    struct ieee80211_node *ni, const struct ieee80211_key *k
+#ifdef AIRPORT_TAHOE
+    , const struct IwxGroup2TxTag *group2Tag
+#endif
+    )
 {
     XYLog("%s\n", __FUNCTION__);
     struct ieee80211_eapol_key *key;
@@ -606,8 +667,14 @@ ieee80211_send_group_msg2(struct ieee80211com *ic, struct ieee80211_node *ni,
     mbuf_t m;
     
     m = ieee80211_get_eapol_key(MBUF_DONTWAIT, MT_DATA, 0);
-    if (m == NULL)
+    if (m == NULL) {
+#ifdef AIRPORT_TAHOE
+        ieee80211_tahoe_group2_record(
+            &ic->ic_tahoe_auth_trace.group2_tx, group2Tag,
+            IWX_GROUP2_TX_STAGE_MBUF_ALLOC_FAILED, ENOMEM);
+#endif
         return ENOMEM;
+    }
     key = mtod(m, struct ieee80211_eapol_key *);
     memset(key, 0, sizeof(*key));
     
@@ -634,8 +701,34 @@ ieee80211_send_group_msg2(struct ieee80211com *ic, struct ieee80211_node *ni,
                ic->ic_if.if_xname, 2, 2, "group key",
                ether_sprintf(ni->ni_macaddr));
     
-    return ieee80211_send_eapol_key(ic, m, ni, &ni->ni_ptk);
+#ifdef AIRPORT_TAHOE
+    return ieee80211_send_eapol_key_internal(
+        ic, m, ni, &ni->ni_ptk, group2Tag);
+#else
+    return ieee80211_send_eapol_key_internal(ic, m, ni, &ni->ni_ptk);
+#endif
 }
+
+int
+ieee80211_send_group_msg2(struct ieee80211com *ic, struct ieee80211_node *ni,
+                          const struct ieee80211_key *k)
+{
+#ifdef AIRPORT_TAHOE
+    return ieee80211_send_group_msg2_internal(ic, ni, k, NULL);
+#else
+    return ieee80211_send_group_msg2_internal(ic, ni, k);
+#endif
+}
+
+#ifdef AIRPORT_TAHOE
+int
+ieee80211_send_group_msg2_traced(struct ieee80211com *ic,
+    struct ieee80211_node *ni, const struct ieee80211_key *k,
+    const struct IwxGroup2TxTag *group2Tag)
+{
+    return ieee80211_send_group_msg2_internal(ic, ni, k, group2Tag);
+}
+#endif
 
 /*
  * EAPOL-Key Request frames are sent by the supplicant to request that the

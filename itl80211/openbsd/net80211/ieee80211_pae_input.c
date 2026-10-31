@@ -115,6 +115,28 @@ static void ieee80211_tahoe_trace_group2_callsite_gate(
         IWX_STA_SOURCE_LOCAL_GROUP1, ic->ic_state, flags, scanPhase, 0);
 }
 
+/* The unique numeric tag is created per Group2 attempt and passed directly to
+ * the Group2 output builder. Failure to allocate diagnostic identity falls
+ * back to the unchanged untraced send path. */
+static int ieee80211_tahoe_send_group_msg2(
+    struct ieee80211com *ic, struct ieee80211_node *ni,
+    const struct ieee80211_key *key, uint32_t attempt)
+{
+    struct IwxStaAuthTrace *auth = &ic->ic_tahoe_auth_trace;
+    const uint32_t source = ni->ni_rsnprotos == IEEE80211_PROTO_WPA ?
+        IWX_GROUP2_TX_SOURCE_WPA : IWX_GROUP2_TX_SOURCE_RSN;
+    const uint32_t generation = __atomic_load_n(
+        &auth->driver_generation, __ATOMIC_RELAXED);
+    const uint32_t association = __atomic_load_n(
+        &auth->association_id, __ATOMIC_RELAXED);
+    struct IwxGroup2TxTag tag = {};
+    if (!iwx_group2_tx_trace_begin(&auth->group2_tx,
+            ieee80211_tahoe_trace_time_us(), attempt, source, generation,
+            association, &tag))
+        return ieee80211_send_group_msg2(ic, ni, key);
+    return ieee80211_send_group_msg2_traced(ic, ni, key, &tag);
+}
+
 static int ieee80211_tahoe_install_group_key(struct ieee80211com *ic,
     struct ieee80211_node *ni, struct ieee80211_key *key, uint32_t attempt,
     uint16_t component)
@@ -1209,8 +1231,11 @@ ieee80211_recv_rsn_group_msg1(struct ieee80211com *ic,
     /* send message 2 to authenticator */
 #ifdef AIRPORT_TAHOE
     ieee80211_tahoe_trace_group2_callsite_gate(ic, traceAttempt);
-#endif
+    group2Result = ieee80211_tahoe_send_group_msg2(ic, ni, NULL,
+        traceAttempt);
+#else
     group2Result = ieee80211_send_group_msg2(ic, ni, NULL);
+#endif
 #ifdef AIRPORT_TAHOE
     ieee80211_tahoe_trace_group(ic, traceAttempt,
         IWX_STA_TRACE_GROUP2_RESULT, IWX_STA_STAGE_GROUP2_OUTPUT,
@@ -1442,8 +1467,11 @@ ieee80211_recv_wpa_group_msg1(struct ieee80211com *ic,
     /* send message 2 to authenticator */
 #ifdef AIRPORT_TAHOE
     ieee80211_tahoe_trace_group2_callsite_gate(ic, traceAttempt);
-#endif
+    int group2Result = ieee80211_tahoe_send_group_msg2(ic, ni, k,
+        traceAttempt);
+#else
     int group2Result = ieee80211_send_group_msg2(ic, ni, k);
+#endif
 #ifdef AIRPORT_TAHOE
     ieee80211_tahoe_trace_group(ic, traceAttempt,
         IWX_STA_TRACE_GROUP2_RESULT, IWX_STA_STAGE_GROUP2_OUTPUT,

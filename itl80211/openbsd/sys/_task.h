@@ -28,13 +28,36 @@
 
 #include <IOKit/IOLocks.h>
 
+/* Optional immutable metadata copied with one queue dispatch. Ordinary tasks
+ * continue to use t_func/t_arg and task_add() without observing these fields. */
+struct task_dispatch_context {
+    uint64_t dispatch_id;
+    uint32_t driver_generation;
+    uint32_t fault_serial;
+    uint32_t power_epoch;
+    uint32_t power_flags;
+    uint32_t dispatch_flags;
+};
+
+struct task;
+typedef void (*task_dispatch_func)(void *,
+    const struct task_dispatch_context *, const struct task *);
+
 struct task {
     TAILQ_ENTRY(task) t_entry;
     void        (*t_func)(void *);
     void        *t_arg;
     unsigned int    t_flags;
     char name[256];
+    task_dispatch_func t_dispatch_func;
+    struct task_dispatch_context t_dispatch_context;
+    uint64_t    t_dispatch_id;
+    uint32_t    t_dispatch_state;
+    uint32_t    t_dispatch_deferred;
+    struct task *t_dispatch_source;
 };
+
+#define TASK_DISPATCH_RETIRED 1U
 
 #define TASK_ONQUEUE        1
 #define TASK_BARRIER        2
@@ -82,6 +105,16 @@ void         taskq_leave(struct taskq *);
 
 void         task_set(struct task *, void (*)(void *), void *, const char *);
 int         task_add(struct taskq *, struct task *);
+/* Tagged add is used by selected Tahoe init dispatches. Repeated queued calls
+ * coalesce into one pending task and replace its context under the queue lock. */
+int         task_add_tagged(struct taskq *, struct task *, task_dispatch_func,
+                            const struct task_dispatch_context *);
+int         task_defer_tagged(struct taskq *, const struct task *,
+                              task_dispatch_func,
+                              const struct task_dispatch_context *);
+int         taskq_flush_deferred_tagged(struct taskq *, struct task *);
+void        taskq_complete_work(struct taskq *, const struct task *);
+int         task_dispatch_is_current(const struct task *, uint64_t);
 int         task_del(struct taskq *, struct task *);
 
 #endif /* _task_h */

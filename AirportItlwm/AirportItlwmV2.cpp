@@ -1381,6 +1381,19 @@ uint32_t AirportItlwm::updateNativePowerFlags(uint32_t clearMask,
     return flags;
 }
 
+uint32_t AirportItlwm::advanceNativePowerEpoch(bool requestedOn)
+{
+    // nativePowerAction runs on the serialized controller command gate. Tell
+    // the HAL first so a popped init callback cannot pass the old epoch while
+    // the public request epoch is being published.
+    const uint32_t epoch =
+        __atomic_load_n(&nativePowerEpoch, __ATOMIC_RELAXED) + 1U;
+    if (fHalService)
+        fHalService->setNativePowerRequestState(epoch, requestedOn);
+    __atomic_store_n(&nativePowerEpoch, epoch, __ATOMIC_RELEASE);
+    return epoch;
+}
+
 bool AirportItlwm::nativePowerStateSnapshot(uint32_t *powerFlags,
                                             uint64_t *revision) const
 {
@@ -1575,8 +1588,7 @@ IOReturn AirportItlwm::nativePowerAction(OSObject *owner, void *argument,
             // READY event if the interface is still activating.
             __atomic_store_n(&self->nativePowerOffPending, false, __ATOMIC_RELEASE);
             const uint32_t previous = self->updateNativePowerFlags(0, 1U);
-            const uint32_t epoch = __atomic_add_fetch(
-                &self->nativePowerEpoch, 1U, __ATOMIC_ACQ_REL);
+            const uint32_t epoch = self->advanceNativePowerEpoch(true);
             self->wakeNativePowerWaiters();
             if (flags == (IFF_UP | IFF_RUNNING) && (previous & 2U))
                 return kIOReturnSuccess;
@@ -1593,7 +1605,7 @@ IOReturn AirportItlwm::nativePowerAction(OSObject *owner, void *argument,
                 // outside this gate. Advance the serialized epoch and wake it
                 // so it cannot stop a radio that the caller just re-enabled.
                 if (!(previous & 1U)) {
-                    __atomic_add_fetch(&self->nativePowerEpoch, 1U, __ATOMIC_ACQ_REL);
+                    (void)self->advanceNativePowerEpoch(true);
                     self->wakeNativePowerWaiters();
                 }
                 return kIOReturnSuccess;
@@ -1607,14 +1619,14 @@ IOReturn AirportItlwm::nativePowerAction(OSObject *owner, void *argument,
         }
         self->updateNativePowerFlags(2U, 1U);
         __atomic_store_n(&self->nativePowerOffPending, false, __ATOMIC_RELEASE);
-        const uint32_t epoch = __atomic_add_fetch(
-            &self->nativePowerEpoch, 1U, __ATOMIC_ACQ_REL);
+        const uint32_t epoch = self->advanceNativePowerEpoch(true);
         self->recordNativeControlTrace(traceCallId,
             NativePowerTrace::Operation::kPowerSet,
             NativePowerTrace::Phase::kEnableBegin, epoch, 0);
         const IOReturn result = self->enableAdapter(self->bsdInterface);
         if (result != kIOReturnSuccess) {
             self->updateNativePowerFlags(3U, 0);
+            self->fHalService->setNativePowerRequestState(epoch, false);
         }
         self->recordNativeControlTrace(traceCallId,
             NativePowerTrace::Operation::kPowerSet,
@@ -1624,8 +1636,7 @@ IOReturn AirportItlwm::nativePowerAction(OSObject *owner, void *argument,
             ? self->waitForNativePower(epoch, traceCallId) : result;
     }
     const uint32_t previousPolicy = self->updateNativePowerFlags(1U, 0);
-    const uint32_t epoch = __atomic_add_fetch(
-        &self->nativePowerEpoch, 1U, __ATOMIC_ACQ_REL);
+    const uint32_t epoch = self->advanceNativePowerEpoch(false);
     __atomic_store_n(&self->nativePowerOffPending, true, __ATOMIC_RELEASE);
     __atomic_store_n(&self->nativePowerOffAttempts, 0U, __ATOMIC_RELAXED);
     __atomic_store_n(&self->nativePowerOffRetries, 0U, __ATOMIC_RELAXED);
@@ -1638,8 +1649,10 @@ IOReturn AirportItlwm::nativePowerAction(OSObject *owner, void *argument,
         &self->nativePowerEpoch, __ATOMIC_ACQUIRE);
     if (currentEpoch) {
         if (stopResult != kIOReturnSuccess && (previousPolicy & 1U) && finalIfFlags &&
-            !(__atomic_load_n(&self->nativePowerFlags, __ATOMIC_ACQUIRE) & 1U))
+            !(__atomic_load_n(&self->nativePowerFlags, __ATOMIC_ACQUIRE) & 1U)) {
             self->updateNativePowerFlags(0, 1U);
+            self->fHalService->setNativePowerRequestState(epoch, true);
+        }
         __atomic_store_n(&self->nativePowerOffPending, false, __ATOMIC_RELEASE);
         __atomic_store_n(&self->nativePowerOffResult, uint32_t(stopResult), __ATOMIC_RELEASE);
     }

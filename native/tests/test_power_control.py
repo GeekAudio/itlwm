@@ -15,6 +15,7 @@ methods=[function(s) for s in [
     'bool AirportItlwm::init(OSDictionary *properties)',
     'IOReturn AirportItlwm::\ngetPOWER(',
     'uint32_t AirportItlwm::updateNativePowerFlags(',
+    'uint32_t AirportItlwm::advanceNativePowerEpoch(',
     'bool AirportItlwm::nativePowerStateSnapshot(',
     'uint32_t AirportItlwm::observeNativePowerEvent(',
     'uint32_t AirportItlwm::beginNativeControlTrace(',
@@ -40,6 +41,7 @@ shim=r'''
 #include <cstdio>
 #include <functional>
 #include <mutex>
+#include <utility>
 #include <vector>
 #include "native/native_power_trace.hpp"
 #define AIRPORT_TAHOE 1
@@ -94,6 +96,11 @@ struct NativePowerActionContext {apple80211_power_data request;uint32_t traceCal
 struct IONetworkInterface:OSObject {};
 struct FakeIC {struct {uint32_t if_flags=0;} ic_if;uint32_t ic_tahoe_init_stage=0;int32_t ic_tahoe_init_error=0; uint32_t(*ic_tahoe_scan_state)(FakeIC*)=nullptr;};
 struct HAL {FakeIC ic;IOReturn result=0,disableResult=0;unsigned enabled=0,disabled=0,disableBusyCount=0;bool stuck=false;
+ uint32_t requestEpoch=0,observedPublicEpoch=0;bool requestOn=false;unsigned requestUpdates=0;
+ uint32_t*publicEpoch=nullptr;std::vector<std::pair<uint32_t,bool>> requestHistory;
+ void setNativePowerRequestState(uint32_t epoch,bool on){requestEpoch=epoch;requestOn=on;
+ ++requestUpdates;requestHistory.emplace_back(epoch,on);
+ if(publicEpoch)observedPublicEpoch=__atomic_load_n(publicEpoch,__ATOMIC_ACQUIRE);}
  FakeIC*get80211Controller(){return &ic;}
  IOReturn enable(IONetworkInterface*){++enabled;if(result)return result;ic.ic_if.if_flags|=IFF_UP;return 0;}
  IOReturn disable(IONetworkInterface*){++disabled;if(disableBusyCount){--disableBusyCount;return kIOReturnBusy;}
@@ -153,6 +160,7 @@ struct AirportItlwm:IO80211Controller {
  uint32_t observeNativePowerEvent(int);
  uint32_t beginNativeControlTrace(NativePowerTrace::Operation,NativePowerTrace::Phase,uint32_t,int32_t);
  void recordNativeControlTrace(uint32_t,NativePowerTrace::Operation,NativePowerTrace::Phase,uint32_t,int32_t);
+ uint32_t advanceNativePowerEpoch(bool);
  void publishNativePowerTrace();bool postNativePowerChangedIfNeeded();void publishNativePowerState();
  IOReturn waitForNativePower(uint32_t,uint32_t);void wakeNativePowerWaiters();
  IOReturn disableAdapterWithRetry(uint32_t,uint32_t);
@@ -162,6 +170,7 @@ struct AirportItlwm:IO80211Controller {
 };
 struct Fixture {AirportItlwm a;HAL hal;Queue q;Gate gate;NativeIF net;IONetworkInterface bsd;Timer timer;
  Fixture():gate{&a,&q},net{&q}{_fWorkloop=&q;_fCommandGate=&gate;a.fHalService=&hal;
+ hal.publicEpoch=&a.nativePowerEpoch;
  assert(a.init(nullptr));
  a.fNetIf=&net;a.bsdInterface=&bsd;a.watchdogTimer=&timer;
  gate.onSleep=[this]{assert(!q.gated);ready();q.gated=true;a.wakeNativePowerWaiters();q.gated=false;};}
@@ -188,12 +197,25 @@ int main(){unsigned scenarios=0;
  assert(!failed.initializeNativePowerLocks()&&!failed.nativePowerStateLock&&
   !failed.nativePowerTraceLock);lockAllocationFailAt=-1;++scenarios;}
  {Fixture f;assert(f.state()==0&&f.a.nativePowerGetCount==1);++scenarios;}
+ {Fixture f;const uint32_t onEpoch=f.a.advanceNativePowerEpoch(true);
+ assert(onEpoch==1&&f.hal.requestUpdates==1&&f.hal.requestEpoch==onEpoch&&f.hal.requestOn);
+ assert(f.hal.observedPublicEpoch==0);
+ const uint32_t offEpoch=f.a.advanceNativePowerEpoch(false);
+ assert(offEpoch==2&&f.hal.requestUpdates==2&&f.hal.requestEpoch==offEpoch&&!f.hal.requestOn);
+ assert(f.hal.observedPublicEpoch==onEpoch&&f.a.nativePowerEpoch==offEpoch);
+ assert(f.hal.requestHistory.size()==2&&f.hal.requestHistory[0]==std::make_pair(1U,true)&&
+  f.hal.requestHistory[1]==std::make_pair(2U,false));++scenarios;}
  {Fixture f;auto p=f.request(1),copy=p;f.hal.result=kIOReturnError;
  assert(f.a.setPOWER(nullptr,&p)==kIOReturnError&&!memcmp(&p,&copy,sizeof p));
- assert(!f.state()&&f.hal.enabled==1&&!f.gate.sleeps);++scenarios;}
+ assert(!f.state()&&f.hal.enabled==1&&!f.gate.sleeps);
+ assert(f.hal.requestUpdates==2&&f.hal.requestEpoch==f.a.nativePowerEpoch&&!f.hal.requestOn);
+ assert(f.hal.requestHistory[0]==std::make_pair(1U,true)&&
+  f.hal.requestHistory[1]==std::make_pair(1U,false));++scenarios;}
  {Fixture f;auto p=f.request(1);bool sawOff=false;
  f.gate.onSleep=[&]{assert(!f.q.gated);sawOff=f.state()==0;f.ready();};
- assert(f.a.setPOWER(nullptr,&p)==0&&sawOff&&f.state()==1&&f.gate.sleeps==1);++scenarios;}
+ assert(f.a.setPOWER(nullptr,&p)==0&&sawOff&&f.state()==1&&f.gate.sleeps==1);
+ assert(f.hal.requestOn&&f.hal.requestEpoch==f.a.nativePowerEpoch&&f.hal.requestUpdates==1);
+ assert(f.hal.observedPublicEpoch+1==f.hal.requestEpoch);++scenarios;}
  {Fixture f;auto p=f.request(1);f.a.nativePowerFlags=1;f.hal.ic.ic_if.if_flags=IFF_UP;
  assert(f.a.setPOWER(nullptr,&p)==0&&f.hal.enabled==0&&f.gate.sleeps==1&&f.state()==1);++scenarios;}
  {Fixture f;auto p=f.request(1);assert(f.a.setPOWER(nullptr,&p)==0);
@@ -224,7 +246,9 @@ int main(){unsigned scenarios=0;
  {Fixture f;auto p=f.request(1);f.gate.sleepResult=2;f.gate.onSleep=[]{};
  assert(f.a.setPOWER(nullptr,&p)==kIOReturnAborted&&f.state()==0);++scenarios;}
  {Fixture f;auto on=f.request(1),off=f.request(0);assert(f.a.setPOWER(nullptr,&on)==0);
- assert(f.a.setPOWER(nullptr,&off)==0&&f.state()==0&&f.hal.disabled==1&&f.gate.wakes>=1);++scenarios;}
+ assert(f.a.setPOWER(nullptr,&off)==0&&f.state()==0&&f.hal.disabled==1&&f.gate.wakes>=1);
+ assert(!f.hal.requestOn&&f.hal.requestEpoch==f.a.nativePowerEpoch&&f.hal.requestUpdates==2);
+ assert(f.hal.requestHistory[0].second&&!f.hal.requestHistory[1].second);++scenarios;}
  {Fixture f;auto on=f.request(1),off=f.request(0);assert(f.a.setPOWER(nullptr,&on)==0);
  f.hal.disableBusyCount=3;f.gate.onSleep=[]{ };
  const uint64_t offStart=g_uptimeNanoseconds;
@@ -288,6 +312,7 @@ int main(){unsigned scenarios=0;
  f.hal.disableResult=kIOReturnError;
  assert(f.a.setPOWER(nullptr,&off)==kIOReturnError&&f.state()==1);
  assert(f.a.nativePowerFlags==3&&!f.a.offPending()&&f.hal.disabled==1);
+ assert(f.hal.requestOn&&f.hal.requestEpoch==f.a.nativePowerEpoch);
  assert(f.a.metadata["NativePowerOffResult"]==uint32_t(kIOReturnError));
  assert(f.timer.stopped==0);++scenarios;}
  {Fixture f;auto on=f.request(1),off=f.request(0);assert(f.a.setPOWER(nullptr,&on)==0);

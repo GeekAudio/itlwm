@@ -141,6 +141,8 @@ static_assert(__atomic_always_lock_free(sizeof(uint64_t), nullptr),
               "Tahoe deferred output token must use a lock-free 64-bit access");
 static_assert(__atomic_always_lock_free(sizeof(uint64_t), nullptr),
               "Tahoe firmware metadata timestamp must be lock-free");
+static_assert(__atomic_always_lock_free(sizeof(uint64_t), nullptr),
+              "RX completion telemetry must use lock-free 64-bit access");
 static_assert(IwxTxRate::kFormatMask == IWX_RATE_MCS_MOD_TYPE_MSK,
               "TX rate helper format mask must match Intel firmware flags");
 static_assert(IwxTxRate::kV1HtMask == IWX_RATE_MCS_HT_MSK_V1 &&
@@ -190,6 +192,71 @@ static uint64_t tahoeMonotonicNs()
     absolutetime_to_nanoseconds(absolute, &nanoseconds);
     return nanoseconds;
 }
+
+#ifdef AIRPORT_TAHOE
+static void tahoeRecordGroup2TagEvent(struct iwx_softc *sc,
+    const IwxGroup2TxTag *tag, uint16_t stage, int32_t result)
+{
+    if (!sc || !iwx_group2_tx_tag_valid(tag))
+        return;
+    IwxGroup2TxEvent event{};
+    iwx_group2_tx_event_from_tag(&event, tag, tahoeMonotonicNs() / 1000ULL,
+                                 stage);
+    event.result = result;
+    (void)iwx_group2_tx_trace_record(
+        &sc->sc_ic.ic_tahoe_auth_trace.group2_tx, &event);
+}
+#endif
+
+#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+IOReturn ItlIwx::tahoeRxCompletionPublishAction(OSObject *, void *arg0,
+    void *arg1, void *, void *)
+{
+    auto *owner = static_cast<ItlIwx *>(arg0);
+    auto *controller = static_cast<IOEthernetController *>(arg1);
+    if (!owner || !controller || !owner->tahoeP2pOnMainGate())
+        return kIOReturnNotReady;
+    owner->tahoeRxCompletionPublish(controller);
+    return kIOReturnSuccess;
+}
+
+void ItlIwx::tahoeRxCompletionPublish(IOEthernetController *controller)
+{
+    if (controller == nullptr)
+        return;
+    // The watchdog runs on another workloop. Serialize the final snapshot
+    // with RX actions so a reader that passed enabled() before window close
+    // cannot append after this one-shot publication. Never wait for the gate.
+    if (!tahoeP2pOnMainGate()) {
+        IOCommandGate *gate = getMainCommandGate();
+        if (gate)
+            (void)gate->attemptAction(tahoeRxCompletionPublishAction,
+                this, controller);
+        return;
+    }
+    if (nativeRxCompletionPublishAttempted_ ||
+        nativeRxPreOwner_.enabled())
+        return;
+
+    NativeIwxCompletionObserver::TelemetrySnapshot snapshot;
+    if (!NativeIwxCompletionObserver::snapshotTelemetry(
+            &nativeRxCompletionTelemetry_, &snapshot) ||
+        snapshot.attempts == 0)
+        return;
+
+    // At most one fixed-size allocation/property update follows the closed
+    // diagnostic window. The receive path itself performs no publication.
+    nativeRxCompletionPublishAttempted_ = true;
+    uint8_t wire[NativeIwxCompletionObserver::kTelemetryWireBytes] = {};
+    NativeIwxCompletionObserver::encodeTelemetry(snapshot, wire);
+    OSData *payload = OSData::withBytes(
+        wire, static_cast<unsigned>(sizeof(wire)));
+    if (payload == nullptr)
+        return;
+    (void)controller->setProperty("NativeRXCompletionObservation", payload);
+    payload->release();
+}
+#endif
 
 #ifdef AIRPORT_TAHOE
 static int tahoeRecordStaAuthAtGeneration(struct iwx_softc *sc,
@@ -1061,7 +1128,8 @@ enum : uint32_t {
     kTahoeLifecycleMacTask = 1u << 2,
     kTahoeLifecycleChanTask = 1u << 3,
     kTahoeLifecycleScanAbortTask = 1u << 4,
-    kTahoeLifecycleMccTask = 1u << 5
+    kTahoeLifecycleMccTask = 1u << 5,
+    kTahoeLifecycleInitDispatchDeferred = 1u << 6
 };
 
 /* A CHUB notice belongs to the firmware generation that delivered it. Stop
@@ -1208,7 +1276,9 @@ void ItlIwx::tahoeFlushLifecycleTasks()
      * harmless no-op.  task_add coalesces work that is already queued.
      */
     if (pending & kTahoeLifecycleInitTask)
-        task_add(systq, &com.init_task);
+        (void)tahoeQueueInitTask(&com);
+    if (pending & kTahoeLifecycleInitDispatchDeferred)
+        (void)taskq_flush_deferred_tagged(systq, &com.init_task);
     if (pending & kTahoeLifecycleBaTask)
         task_add(systq, &com.ba_task);
     if (pending & kTahoeLifecycleMacTask)
@@ -1483,10 +1553,55 @@ void ItlIwx::tahoeDriverEvent(int code)
         (*ic->ic_event_handler)(ic, code, NULL);
 }
 
-void ItlIwx::tahoeRecordInitTaskTrigger(
+void ItlIwx::setNativePowerRequestState(uint32_t epoch, bool requestedOn)
+{
+    const uint64_t state = (uint64_t(epoch) << 2) |
+        IwxInitDispatch::kPowerStateKnown |
+        (requestedOn ? IwxInitDispatch::kPowerRequestedOn : 0U);
+    __atomic_store_n(&nativePowerRequestState_, state, __ATOMIC_RELEASE);
+}
+
+uint32_t ItlIwx::tahoeRecordInitTaskTrigger(
     IwxResetTrace::InitTaskTrigger trigger)
 {
-    nativeResetTrace_.recordInitTaskTrigger(trigger);
+    (void)nativeResetTrace_.recordInitTaskTrigger(trigger);
+    uint32_t previous = __atomic_load_n(&nativeInitTaskFaultSerial_,
+                                        __ATOMIC_ACQUIRE);
+    uint32_t serial;
+    do {
+        serial = IwxInitDispatch::nextFaultSerial(previous);
+    } while (!__atomic_compare_exchange_n(&nativeInitTaskFaultSerial_,
+        &previous, serial, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
+    return serial;
+}
+
+int ItlIwx::tahoeQueueInitTask(struct iwx_softc *sc, uint32_t faultSerial)
+{
+    if (!sc)
+        return (-1);
+
+    uint64_t previous = __atomic_load_n(&nativeInitDispatchSequence_,
+                                        __ATOMIC_ACQUIRE);
+    uint64_t dispatchId;
+    do {
+        dispatchId = IwxInitDispatch::nextDispatchId(previous);
+    } while (!__atomic_compare_exchange_n(&nativeInitDispatchSequence_,
+        &previous, dispatchId, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
+
+    const uint64_t powerState = __atomic_load_n(&nativePowerRequestState_,
+                                               __ATOMIC_ACQUIRE);
+    task_dispatch_context context {};
+    context.dispatch_id = dispatchId;
+    context.driver_generation = static_cast<uint32_t>(
+        __atomic_load_n(&sc->sc_generation, __ATOMIC_ACQUIRE));
+    context.fault_serial = __atomic_load_n(&nativeInitTaskFaultSerial_,
+                                          __ATOMIC_ACQUIRE);
+    context.power_epoch = static_cast<uint32_t>(powerState >> 2);
+    context.power_flags = static_cast<uint32_t>(powerState & 3U);
+    context.dispatch_flags = faultSerial != 0
+        ? IwxInitDispatch::kFaultRecovery : 0U;
+    return task_add_tagged(systq, &sc->init_task, iwx_init_task_tagged,
+                           &context);
 }
 
 void ItlIwx::tahoeRecordFirmwareMetadata(
@@ -1813,6 +1928,35 @@ bool ItlIwx::tahoePublishStaAuthTrace(IOEthernetController *controller,
     nativeStaAuthTracePublishedOnce_ = true;
     return true;
 }
+
+bool ItlIwx::tahoePublishGroup2TxTrace(IOEthernetController *controller,
+                                      struct iwx_softc *sc)
+{
+    if (!controller || !sc || !tahoeP2pOnMainGate())
+        return false;
+    auto *snapshot = &nativeGroup2TxSnapshot_;
+    if (!iwx_group2_tx_trace_snapshot(
+            &sc->sc_ic.ic_tahoe_auth_trace.group2_tx, snapshot))
+        return false;
+    const uint64_t revision = snapshot->revision_end;
+    const uint32_t dropped = snapshot->dropped_count;
+    if (nativeGroup2TxPublishedOnce_ &&
+        revision == nativeGroup2TxPublishedRevision_ &&
+        dropped == nativeGroup2TxPublishedDropped_)
+        return true;
+    iwx_group2_tx_snapshot_to_le_in_place(snapshot);
+    OSData *payload = OSData::withBytes(snapshot, sizeof(*snapshot));
+    if (!payload)
+        return false;
+    const bool okay = controller->setProperty("NativeGroup2TxTrace", payload);
+    payload->release();
+    if (!okay)
+        return false;
+    nativeGroup2TxPublishedRevision_ = revision;
+    nativeGroup2TxPublishedDropped_ = dropped;
+    nativeGroup2TxPublishedOnce_ = true;
+    return true;
+}
 #endif
 
 bool ItlIwx::attach(IOPCIDevice *device)
@@ -1836,6 +1980,10 @@ bool ItlIwx::attach(IOPCIDevice *device)
         return false;
     }
     nativeP2pTxQueue_.stateLock = nativeP2pTxLock_;
+#endif
+#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+    // Diagnostic allocation failure must not fail the driver's attach.
+    (void)nativeRxCompletionObserver_.initialize();
 #endif
     pci.pa_tag = device;
     pci.workloop = getMainWorkLoop();
@@ -1995,7 +2143,7 @@ detach(IOPCIDevice *device)
 {
     struct _ifnet *ifp = &com.sc_ic.ic_ac.ac_if;
     struct iwx_softc *sc = &com;
-    
+
 #ifdef AIRPORT_TAHOE
     __atomic_store_n(&nativeLifecycleTearingDown_, 1u, __ATOMIC_RELEASE);
 #if defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
@@ -2029,6 +2177,9 @@ detach(IOPCIDevice *device)
         }
     }
 #endif
+    // Preserve the established stop path above. Once stop has succeeded,
+    // synchronously remove the actual event source before freeing any ring.
+    quiesceRxInterruptSource();
     for (int txq_i = 0; txq_i < nitems(sc->txq); txq_i++)
         iwx_free_tx_ring(sc, &sc->txq[txq_i]);
     iwx_free_rx_ring(sc, &sc->rxq);
@@ -2044,10 +2195,12 @@ void ItlIwx::
 releaseAll()
 {
     pci_intr_handle *intrHandler = com.ih;
+
+    quiesceRxInterruptSource();
     
     if (intrHandler) {
         if (intrHandler->intr && intrHandler->workloop) {
-//            intrHandler->intr->disable();
+            intrHandler->intr->disable();
             intrHandler->workloop->removeEventSource(intrHandler->intr);
             intrHandler->intr->release();
         }
@@ -2063,9 +2216,47 @@ releaseAll()
     pci.workloop = NULL;
 }
 
+void ItlIwx::quiesceRxInterruptSource()
+{
+    IOInterruptEventSource *source = com.sc_ih;
+    if (source == nullptr)
+        return;
+
+    pci_intr_handle *intrHandler = com.ih;
+    IOWorkLoop *workloop = rxInterruptWorkloop_;
+    KASSERT(!rxInterruptSourceRegistered_ || workloop != nullptr,
+            "registered RX interrupt source must retain its owner workloop");
+    if (rxInterruptSourceRegistered_ && workloop != nullptr) {
+        source->disable();
+        const IOReturn removed = workloop->removeEventSource(source);
+        // This bit is set only after addEventSource succeeds, and this is the
+        // sole removal path for sc_ih; the synchronous remove must find it.
+        KASSERT(removed == kIOReturnSuccess,
+                "registered RX interrupt source must remove successfully");
+    }
+
+    // On successful add, removeEventSource drops the workloop's retain before
+    // it returns. On partial add failure no workloop retain exists. Drop the
+    // creator's reference once in either case.
+    if (intrHandler != nullptr && intrHandler->intr == source)
+        intrHandler->intr = nullptr;
+    source->release();
+    com.sc_ih = nullptr;
+    rxInterruptSourceRegistered_ = false;
+    rxInterruptWorkloop_ = nullptr;
+}
+
 void ItlIwx::free()
 {
     XYLog("%s\n", __FUNCTION__);
+#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+    // The actual sc_ih event source is synchronously removed before RX ring
+    // cleanup; free is reached only after the HAL owner reference is released.
+    KASSERT(com.sc_ih == nullptr && !rxInterruptSourceRegistered_ &&
+            rxInterruptWorkloop_ == nullptr,
+            "RX interrupt source must be quiesced before HAL free");
+    nativeRxCompletionObserver_.shutdown();
+#endif
 #ifdef AIRPORT_TAHOE
     if (nativeLifecycleLock_) {
         IORecursiveLockFree(nativeLifecycleLock_);
@@ -4404,6 +4595,23 @@ iwx_alloc_rx_ring(struct iwx_softc *sc, struct iwx_rx_ring *ring)
     int i, err;
     int rb_stts_size = sc->sc_device_family >= IWX_DEVICE_FAMILY_AX210 ? sizeof(uint16_t) : sizeof(iwx_rb_status);
     int rb_stts_align = sc->sc_device_family >= IWX_DEVICE_FAMILY_AX210 ? 0 : 16;
+
+#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+    NativeIwxCompletionObserver::Handle completionAllocationHandle;
+    bool completionReservationCreated = false;
+    if (ring == &sc->rxq &&
+        sc->sc_device_family == IWX_DEVICE_FAMILY_AX210) {
+        // Reserve before any allocation failure can reach iwx_free_rx_ring.
+        const NativeIwxCompletionObserver::ReserveResult reserved =
+            nativeRxCompletionObserver_.reserve(&ring->used_desc_dma);
+        if (reserved.status ==
+            NativeIwxCompletionObserver::ReserveStatus::kReserved) {
+            completionAllocationHandle = reserved.handle;
+            nativeRxCompletionHandle_ = reserved.handle;
+            completionReservationCreated = true;
+        }
+    }
+#endif
     
     ring->cur = 0;
     
@@ -4435,6 +4643,19 @@ iwx_alloc_rx_ring(struct iwx_softc *sc, struct iwx_rx_ring *ring)
               DEVNAME(sc));
         goto fail;
     }
+
+#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+    if (ring == &sc->rxq &&
+        sc->sc_device_family == IWX_DEVICE_FAMILY_AX210 &&
+        completionReservationCreated &&
+        completionAllocationHandle.valid()) {
+        (void)nativeRxCompletionObserver_.publish(
+            completionAllocationHandle,
+            static_cast<uint32_t>(sc->sc_device_family),
+            static_cast<const uint8_t *>(ring->used_desc_dma.vaddr),
+            ring->used_desc_dma.size);
+    }
+#endif
     
     for (i = 0; i < IWX_RX_MQ_RING_COUNT; i++) {
         struct iwx_rx_data *data = &ring->data[i];
@@ -4505,6 +4726,15 @@ void ItlIwx::
 iwx_free_rx_ring(struct iwx_softc *sc, struct iwx_rx_ring *ring)
 {
     int i;
+
+#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+    if (ring == &sc->rxq && nativeRxCompletionHandle_.valid()) {
+        // Retire before the legacy DMA free. Repeated partial cleanup is safe.
+        (void)nativeRxCompletionObserver_.unpublish(
+            nativeRxCompletionHandle_);
+        nativeRxCompletionHandle_ = NativeIwxCompletionObserver::Handle();
+    }
+#endif
     
     iwx_dma_contig_free(&ring->free_desc_dma);
     iwx_dma_contig_free(&ring->stat_dma);
@@ -9234,11 +9464,38 @@ iwx_rx_tx_cmd(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
                                                __ATOMIC_ACQUIRE),
                            kTxTimerClearFirmwareResponse);
 #endif
+#ifdef AIRPORT_TAHOE
+        const uint32_t group2OldTail = static_cast<uint32_t>(ring->tail);
+        const uint32_t group2OldQueued = static_cast<uint32_t>(ring->queued);
+        auto *group2Trace = &sc->sc_ic.ic_tahoe_auth_trace.group2_tx;
+        IwxGroup2TxSlot group2MatchedSlot{};
+        const uint32_t group2CompletionMatch =
+            iwx_group2_tx_trace_match_completion(
+                group2Trace, tahoeMonotonicNs() / 1000ULL,
+                group2OldTail, group2OldQueued,
+                static_cast<uint32_t>(checkedIndex), queueId,
+                ring->ring_count, static_cast<uint32_t>(sc->sc_generation),
+                __atomic_load_n(&sc->sc_tx_output_epoch, __ATOMIC_ACQUIRE),
+                le16toh(tx_resp->frame_ctrl), le16toh(tx_resp->seq_ctl),
+                0, // The outer requiredLength check validated status.status.
+                static_cast<int32_t>(le16toh(tx_resp->status.status)),
+                &group2MatchedSlot);
+#endif
         txd = &ring->data[idx];
         iwx_rx_tx_cmd_single(sc, pkt, txd);
         DPRINTFN(3, ("%s tid=%d ssn=%d idx=%d\n", __FUNCTION__, tid, ssn, idx));
         iwx_ampdu_txq_advance(sc, ring, idx);
 #ifdef AIRPORT_TAHOE
+        const uint32_t retirementStatus =
+            group2CompletionMatch == IWX_GROUP2_TX_MATCH_UNIQUE ?
+                IWX_GROUP2_TX_MATCH_NONE : group2CompletionMatch;
+        (void)iwx_group2_tx_trace_retire_reclaimed_interval(
+            group2Trace, tahoeMonotonicNs() / 1000ULL,
+            group2OldTail, group2OldQueued,
+            static_cast<uint32_t>(checkedIndex), queueId, ring->ring_count,
+            retirementStatus,
+            group2CompletionMatch == IWX_GROUP2_TX_MATCH_UNIQUE ?
+                group2MatchedSlot.slot_generation : 0);
         recordStaTxReclaim(sc, ring, queueId, static_cast<uint32_t>(idx),
             staResponseSerial, le16toh(tx_resp->frame_ctrl),
             le16toh(tx_resp->seq_ctl));
@@ -10503,7 +10760,8 @@ iwx_tx_update_byte_tbl(struct iwx_softc *sc, struct iwx_tx_ring *txq, int idx, u
 int ItlIwx::
 iwx_tx(struct iwx_softc *sc, mbuf_t m, struct ieee80211_node *ni, int ac
 #ifdef AIRPORT_TAHOE
-       , uint64_t *observedSubmitSerial
+       , uint64_t *observedSubmitSerial,
+       const IwxGroup2TxTag *group2Tag
 #endif
        )
 {
@@ -10745,10 +11003,45 @@ iwx_tx(struct iwx_softc *sc, mbuf_t m, struct ieee80211_node *ni, int ac
     //        sizeof (*desc), BUS_DMASYNC_PREWRITE);
     
     iwx_tx_update_byte_tbl(sc, ring, idx, totlen, num_tbs);
+#ifdef AIRPORT_TAHOE
+    IwxGroup2TxSlot group2Slot{};
+    bool group2SlotCommitted = false;
+    if (iwx_group2_tx_tag_valid(group2Tag)) {
+        const uint32_t generation = static_cast<uint32_t>(sc->sc_generation);
+        const uint32_t outputEpoch = __atomic_load_n(
+            &sc->sc_tx_output_epoch, __ATOMIC_ACQUIRE);
+        group2SlotCommitted = iwx_group2_tx_trace_prepare_slot(
+            &ic->ic_tahoe_auth_trace.group2_tx, group2Tag, generation,
+            outputEpoch, static_cast<uint32_t>(qid), static_cast<uint32_t>(idx),
+            ring->ring_count, observedPacket.frame_control,
+            observedPacket.sequence_control, static_cast<uint32_t>(tid),
+            &group2Slot);
+        if (group2SlotCommitted) {
+            IwxGroup2TxEvent event{};
+            iwx_group2_tx_event_from_slot(&event, &group2Slot,
+                tahoeMonotonicNs() / 1000ULL,
+                IWX_GROUP2_TX_STAGE_SLOT_COMMITTED);
+            (void)iwx_group2_tx_trace_record(
+                &ic->ic_tahoe_auth_trace.group2_tx, &event);
+        } else {
+            tahoeRecordGroup2TagEvent(sc, group2Tag,
+                IWX_GROUP2_TX_STAGE_TRACE_LOST, ENOSPC);
+        }
+    }
+#endif
     
     /* Kick TX ring. */
     ring->cur = (ring->cur + 1) % getTxQueueSize();
     IWX_WRITE(sc, IWX_HBUS_TARG_WRPTR, ring->qid << 16 | ring->cur);
+#ifdef AIRPORT_TAHOE
+    if (group2SlotCommitted) {
+        IwxGroup2TxEvent event{};
+        iwx_group2_tx_event_from_slot(&event, &group2Slot,
+            tahoeMonotonicNs() / 1000ULL, IWX_GROUP2_TX_STAGE_DOORBELL);
+        (void)iwx_group2_tx_trace_record(
+            &ic->ic_tahoe_auth_trace.group2_tx, &event);
+    }
+#endif
     
     /* Mark TX ring as full if we reach a certain threshold. */
     if (++ring->queued > ring->hi_mark) {
@@ -10902,8 +11195,23 @@ iwx_flush_sta_tids(struct iwx_softc *sc, int sta_id, uint16_t tids)
                 txq->ring_count, txq->queued, txq->cur, txq->tail,
                 reclaimIndex))
             continue;
+#ifdef AIRPORT_TAHOE
+        const bool group2ManagementFlush = managementQueue &&
+            tid == IWX_MGMT_TID && qid == sc->first_data_qid;
+        const uint32_t group2FlushOldTail = static_cast<uint32_t>(txq->tail);
+        const uint32_t group2FlushOldQueued = static_cast<uint32_t>(txq->queued);
+        const uint32_t group2FlushRingCount =
+            static_cast<uint32_t>(txq->ring_count);
+#endif
         iwx_ampdu_txq_advance(sc, txq, reclaimIndex);
 #ifdef AIRPORT_TAHOE
+        if (group2ManagementFlush) {
+            (void)iwx_group2_tx_trace_retire_flushed_interval(
+                &sc->sc_ic.ic_tahoe_auth_trace.group2_tx,
+                tahoeMonotonicNs() / 1000ULL, group2FlushOldTail,
+                group2FlushOldQueued, static_cast<uint32_t>(reclaimIndex),
+                static_cast<uint32_t>(qid), group2FlushRingCount);
+        }
         recordTxProgressEvent(sc, IWX_TX_PROGRESS_FLUSH_RECLAIM, 0,
             IWX_TX_PROGRESS_HAS_QID | IWX_TX_PROGRESS_HAS_INDEX |
                 IWX_TX_PROGRESS_HAS_RING_COUNT | IWX_TX_PROGRESS_HAS_QUEUED |
@@ -15055,9 +15363,9 @@ out:
                 generation, ic->ic_state, nstate, err,
                 tahoeScanState(ic), sc->sc_flags);
             if (err != EBUSY || tahoeScanState(ic) == ITL_TAHOE_SCAN_IDLE) {
-                that->tahoeRecordInitTaskTrigger(
+                const uint32_t faultSerial = that->tahoeRecordInitTaskTrigger(
                     IwxResetTrace::InitTaskTrigger::kNewStateError);
-                task_add(systq, &sc->init_task);
+                (void)that->tahoeQueueInitTask(sc, faultSerial);
             }
 #else
             task_add(systq, &sc->init_task);
@@ -16006,6 +16314,8 @@ IwxOutputKick::DrainResult ItlIwx::iwx_start_drain(struct _ifnet *ifp,
 
     IwxOutputKick::DrainResult drainResult = IwxOutputKick::DrainResult::kDrained;
     while (dequeued < kTahoeOutputDrainBatch) {
+        IwxGroup2TxTag group2Tag{};
+        bool hasGroup2Tag = false;
         /* why isn't this done per-queue? */
         if (sc->qfullmsk != 0) {
             ifq_set_oactive(&ifp->if_snd);
@@ -16036,8 +16346,15 @@ IwxOutputKick::DrainResult ItlIwx::iwx_start_drain(struct _ifnet *ifp,
         if (!m)
             break;
         ++dequeued;
+        hasGroup2Tag = ifq_group2_tag_copy(m, &group2Tag) != 0;
+        if (hasGroup2Tag)
+            tahoeRecordGroup2TagEvent(sc, &group2Tag,
+                IWX_GROUP2_TX_STAGE_DEQUEUED, 0);
         if (mbuf_len(m) < sizeof (*eh) &&
             mbuf_pullup(&m, sizeof (*eh)) != 0) {
+            if (hasGroup2Tag)
+                tahoeRecordGroup2TagEvent(sc, &group2Tag,
+                    IWX_GROUP2_TX_STAGE_PULLUP_FAILED, ENOMEM);
             ifp->netStat->outputErrors++;
             continue;
         }
@@ -16046,6 +16363,9 @@ IwxOutputKick::DrainResult ItlIwx::iwx_start_drain(struct _ifnet *ifp,
             bpf_mtap(ifp->if_bpf, m, BPF_DIRECTION_OUT);
 #endif
         if ((m = ieee80211_encap(ifp, m, &ni)) == NULL) {
+            if (hasGroup2Tag)
+                tahoeRecordGroup2TagEvent(sc, &group2Tag,
+                    IWX_GROUP2_TX_STAGE_ENCAP_FAILED, 0);
             ifp->netStat->outputErrors++;
             continue;
         }
@@ -16056,7 +16376,12 @@ IwxOutputKick::DrainResult ItlIwx::iwx_start_drain(struct _ifnet *ifp,
             bpf_mtap(ic->ic_rawbpf, m, BPF_DIRECTION_OUT);
 #endif
         uint64_t observedSubmitSerial = 0;
-        if (that->iwx_tx(sc, m, ni, ac, &observedSubmitSerial) != 0) {
+        const int txResult = that->iwx_tx(sc, m, ni, ac,
+            &observedSubmitSerial, hasGroup2Tag ? &group2Tag : nullptr);
+        if (txResult != 0) {
+            if (hasGroup2Tag)
+                tahoeRecordGroup2TagEvent(sc, &group2Tag,
+                    IWX_GROUP2_TX_STAGE_IWX_TX_REJECTED, txResult);
             ieee80211_release_node(ic, ni);
             ifp->netStat->outputErrors++;
             continue;
@@ -16313,6 +16638,9 @@ iwx_stop(struct _ifnet *ifp, IwxResetTrace::ResetReason reason)
     /* Fence running state tasks before the firmware and rings are reset. */
     sc->sc_generation++;
 #ifdef AIRPORT_TAHOE
+    iwx_group2_tx_trace_invalidate_slots(
+        &ic->ic_tahoe_auth_trace.group2_tx, tahoeMonotonicNs() / 1000ULL,
+        static_cast<uint32_t>(sc->sc_generation));
     __atomic_store_n(&sc->sc_tx_output_epoch,
                      static_cast<uint32_t>(sc->sc_generation),
                      __ATOMIC_RELEASE);
@@ -16494,14 +16822,14 @@ IOReturn ItlIwx::_iwx_watchdog_task(OSObject *, void *arg0, void *arg1,
             const bool shutdown =
                 (sc->sc_flags & IWX_FLAG_SHUTDOWN) != 0;
             if (IwxTxWatchdog::shouldEnqueueRecovery(tick, shutdown)) {
-                that->tahoeRecordInitTaskTrigger(
+                const uint32_t faultSerial = that->tahoeRecordInitTaskTrigger(
                     IwxResetTrace::InitTaskTrigger::kTxWatchdogTimeout);
                 // Keep the reset request inside the same main-gate and
                 // lifecycle-fence epoch as the expiry decision. A concurrent
                 // stop can only advance generation and task_del after this
                 // enqueue. taskq callbacks run without tq_mtx held, so they
                 // cannot invert this gate->taskq lock order.
-                task_add(systq, &sc->init_task);
+                (void)that->tahoeQueueInitTask(sc, faultSerial);
             }
             ifp->netStat->outputErrors++;
             result->timedOut = true;
@@ -16546,6 +16874,7 @@ IOReturn ItlIwx::_iwx_watchdog_task(OSObject *, void *arg0, void *arg1,
     // An early recovery return does not clear the frozen pending snapshot.
     if (!result->timedOut) {
         (void)that->tahoePublishStaAuthTrace(that->getController(), sc);
+        (void)that->tahoePublishGroup2TxTrace(that->getController(), sc);
         (void)that->tahoePublishFirmwareDiagnostics(
             that->getController(), sc, false);
     }
@@ -18235,10 +18564,12 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
                 sc->sc_flags |= IWX_FLAG_HW_ERR;
 #ifdef AIRPORT_TAHOE
                 ItlIwx *that = container_of(sc, ItlIwx, com);
-                that->tahoeRecordInitTaskTrigger(
+                const uint32_t faultSerial = that->tahoeRecordInitTaskTrigger(
                     IwxResetTrace::InitTaskTrigger::kCriticalTemperature);
-#endif
+                (void)that->tahoeQueueInitTask(sc, faultSerial);
+#else
                 task_add(systq, &sc->init_task);
+#endif
                 break;
             }
                 
@@ -18617,6 +18948,23 @@ iwx_notif_intr(struct iwx_softc *sc)
         const uint32_t ringSlot = static_cast<uint32_t>(sc->rxq.cur);
 #if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
         tahoeRxPreOwnerEvent(NativeRxPreOwner::EventKind::Slot, ringSlot);
+        if (sc->sc_device_family == IWX_DEVICE_FAMILY_AX210 &&
+            nativeRxPreOwner_.enabled()) {
+            const uint32_t driverGeneration = static_cast<uint32_t>(
+                __atomic_load_n(&sc->sc_generation, __ATOMIC_ACQUIRE));
+            const uint32_t observationSerial = static_cast<uint32_t>(
+                NativeRxPreOwner::kCaptureSerial);
+            const uint64_t hostUptimeUs = tahoeMonotonicNs() / 1000ULL;
+            const NativeIwxCompletionObserver::CopyResult observation =
+                nativeRxCompletionObserver_.tryCopyForIdentity(
+                    &sc->rxq.used_desc_dma,
+                    static_cast<uint32_t>(sc->sc_device_family), ringSlot);
+            NativeIwxCompletionObserver::recordAttempt(
+                &nativeRxCompletionTelemetry_,
+                static_cast<uint32_t>(sc->sc_device_family),
+                driverGeneration, observationSerial, hostUptimeUs,
+                hw, ringSlot, observation);
+        }
 #endif
         struct iwx_rx_data *data = &sc->rxq.data[ringSlot];
         iwx_rx_pkt(sc, data, &ml, ringSlot);
@@ -18698,10 +19046,12 @@ iwx_intr(OSObject *object, IOInterruptEventSource* sender, int count)
         XYLog("%s RF_KILL has been toggled\n", __FUNCTION__);
         that->iwx_check_rfkill(sc);
 #ifdef AIRPORT_TAHOE
-        that->tahoeRecordInitTaskTrigger(
+        const uint32_t faultSerial = that->tahoeRecordInitTaskTrigger(
             IwxResetTrace::InitTaskTrigger::kLegacyRfKill);
-#endif
+        (void)that->tahoeQueueInitTask(sc, faultSerial);
+#else
         task_add(systq, &sc->init_task);
+#endif
         rv = 1;
         goto out_ena;
     }
@@ -18737,10 +19087,12 @@ iwx_intr(OSObject *object, IOInterruptEventSource* sender, int count)
         XYLog("%s: fatal firmware error\n", DEVNAME(sc));
         if ((sc->sc_flags & IWX_FLAG_SHUTDOWN) == 0) {
 #ifdef AIRPORT_TAHOE
-            that->tahoeRecordInitTaskTrigger(
+            const uint32_t faultSerial = that->tahoeRecordInitTaskTrigger(
                 IwxResetTrace::InitTaskTrigger::kLegacyFirmwareSwError);
-#endif
+            (void)that->tahoeQueueInitTask(sc, faultSerial);
+#else
             task_add(systq, &sc->init_task);
+#endif
         }
         rv = 1;
         goto out;
@@ -18756,10 +19108,12 @@ iwx_intr(OSObject *object, IOInterruptEventSource* sender, int count)
 #endif
             sc->sc_flags |= IWX_FLAG_HW_ERR;
 #ifdef AIRPORT_TAHOE
-            that->tahoeRecordInitTaskTrigger(
+            const uint32_t faultSerial = that->tahoeRecordInitTaskTrigger(
                 IwxResetTrace::InitTaskTrigger::kLegacyHardwareError);
-#endif
+            (void)that->tahoeQueueInitTask(sc, faultSerial);
+#else
             task_add(systq, &sc->init_task);
+#endif
         }
         rv = 1;
         goto out;
@@ -18876,10 +19230,12 @@ iwx_intr_msix(OSObject *object, IOInterruptEventSource* sender, int count)
         XYLog("%s: fatal firmware error\n", DEVNAME(sc));
         if ((sc->sc_flags & IWX_FLAG_SHUTDOWN) == 0) {
 #ifdef AIRPORT_TAHOE
-            that->tahoeRecordInitTaskTrigger(
+            const uint32_t faultSerial = that->tahoeRecordInitTaskTrigger(
                 IwxResetTrace::InitTaskTrigger::kMsixFirmwareSwError);
-#endif
+            (void)that->tahoeQueueInitTask(sc, faultSerial);
+#else
             task_add(systq, &sc->init_task);
+#endif
         }
         return 1;
     }
@@ -18887,10 +19243,12 @@ iwx_intr_msix(OSObject *object, IOInterruptEventSource* sender, int count)
     if (inta_hw & IWX_MSIX_HW_INT_CAUSES_REG_RF_KILL) {
         that->iwx_check_rfkill(sc);
 #ifdef AIRPORT_TAHOE
-        that->tahoeRecordInitTaskTrigger(
+        const uint32_t faultSerial = that->tahoeRecordInitTaskTrigger(
             IwxResetTrace::InitTaskTrigger::kMsixRfKill);
-#endif
+        (void)that->tahoeQueueInitTask(sc, faultSerial);
+#else
         task_add(systq, &sc->init_task);
+#endif
     }
     
     if (inta_hw & IWX_MSIX_HW_INT_CAUSES_REG_HW_ERR) {
@@ -18901,10 +19259,12 @@ iwx_intr_msix(OSObject *object, IOInterruptEventSource* sender, int count)
 #endif
             sc->sc_flags |= IWX_FLAG_HW_ERR;
 #ifdef AIRPORT_TAHOE
-            that->tahoeRecordInitTaskTrigger(
+            const uint32_t faultSerial = that->tahoeRecordInitTaskTrigger(
                 IwxResetTrace::InitTaskTrigger::kMsixHardwareError);
-#endif
+            (void)that->tahoeQueueInitTask(sc, faultSerial);
+#else
             task_add(systq, &sc->init_task);
+#endif
         }
         return 1;
     }
@@ -20306,10 +20666,17 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
         sc->sc_ih = IOFilterInterruptEventSource::filterInterruptEventSource(this,
                                                                              (IOInterruptEventSource::Action)&ItlIwx::iwx_intr, &ItlIwx::intrFilter
                                                                              ,pa->pa_tag, msiIntrIndex);
-    if (sc->sc_ih == NULL || pa->workloop->addEventSource(sc->sc_ih) != kIOReturnSuccess) {
+    if (sc->sc_ih == NULL) {
         XYLog("%s: can't establish interrupt\n", DEVNAME(sc));
         return false;
     }
+    rxInterruptWorkloop_ = pa->workloop;
+    if (rxInterruptWorkloop_ == nullptr ||
+        rxInterruptWorkloop_->addEventSource(sc->sc_ih) != kIOReturnSuccess) {
+        XYLog("%s: can't establish interrupt\n", DEVNAME(sc));
+        return false;
+    }
+    rxInterruptSourceRegistered_ = true;
     sc->sc_ih->enable();
     
     /* Clear pending interrupts. */
@@ -20605,13 +20972,74 @@ iwx_radiotap_attach(struct iwx_softc *sc)
 void ItlIwx::
 iwx_init_task(void *arg1)
 {
+    iwx_init_task_execute(arg1, nullptr, nullptr);
+}
+
+#ifdef AIRPORT_TAHOE
+void ItlIwx::
+iwx_init_task_tagged(void *arg1,
+    const task_dispatch_context *context, const struct task *source)
+{
+    iwx_init_task_execute(arg1, context, source);
+}
+#endif
+
+void ItlIwx::
+iwx_init_task_execute(void *arg1,
+    const task_dispatch_context *dispatch, const struct task *source)
+{
     struct iwx_softc *sc = (struct iwx_softc *)arg1;
     struct _ifnet *ifp = &sc->sc_ic.ic_if;
     ItlIwx *that = container_of(sc, ItlIwx, com);
 #ifdef AIRPORT_TAHOE
-    TahoeLifecycleGuard lifecycle(that, kTahoeLifecycleInitTask);
-    if (!lifecycle)
+    TahoeLifecycleGuard lifecycle(that,
+        dispatch != nullptr ? 0U : kTahoeLifecycleInitTask);
+    if (!lifecycle) {
+        if (dispatch != nullptr && source != nullptr) {
+            const int deferred = task_defer_tagged(systq, source,
+                iwx_init_task_tagged, dispatch);
+            if (deferred > 0) {
+                that->tahoeDeferLifecycleTasks(
+                    kTahoeLifecycleInitDispatchDeferred);
+                // Reuse the guard's publish-then-retry sequence to close the
+                // unlock-before-publish window. This instance only flushes;
+                // it never runs the lifecycle callback body.
+                TahoeLifecycleGuard flushDeferred(that,
+                    kTahoeLifecycleInitDispatchDeferred);
+            }
+        }
         return;
+    }
+    if (dispatch != nullptr) {
+        const uint64_t powerState = __atomic_load_n(
+            &that->nativePowerRequestState_, __ATOMIC_ACQUIRE);
+        const IwxInitDispatch::Token token {
+            dispatch->dispatch_id,
+            dispatch->driver_generation,
+            dispatch->fault_serial,
+            dispatch->power_epoch,
+            dispatch->power_flags,
+            dispatch->dispatch_flags
+        };
+        const IwxInitDispatch::CurrentState current {
+            static_cast<uint32_t>(sc->sc_generation),
+            __atomic_load_n(&that->nativeInitTaskFaultSerial_, __ATOMIC_ACQUIRE),
+            static_cast<uint32_t>(powerState >> 2),
+            static_cast<uint32_t>(powerState & 3U)
+        };
+        const IwxInitDispatch::Decision decision = IwxInitDispatch::validate(
+            token, current,
+            task_dispatch_is_current(source, dispatch->dispatch_id) != 0);
+        if (decision != IwxInitDispatch::Decision::Run) {
+            IOLog("AirportItlwm[Tahoe] stale init dispatch id=%llu reason=%u queued-gen=%u current-gen=%u queued-power=%u current-power=%u queued-fault=%u current-fault=%u\n",
+                static_cast<unsigned long long>(dispatch->dispatch_id),
+                static_cast<uint32_t>(decision),
+                dispatch->driver_generation, current.driverGeneration,
+                dispatch->power_epoch, current.powerEpoch,
+                dispatch->fault_serial, current.faultSerial);
+            return;
+        }
+    }
 #endif
     XYLog("%s\n", __FUNCTION__);
     int s = splnet();

@@ -120,6 +120,12 @@ extern	int ieee80211_send_group_msg1(struct ieee80211com *,
 		struct ieee80211_node *);
 extern	int ieee80211_send_group_msg2(struct ieee80211com *,
 		struct ieee80211_node *, const struct ieee80211_key *);
+#ifdef AIRPORT_TAHOE
+struct IwxGroup2TxTag;
+extern	int ieee80211_send_group_msg2_traced(struct ieee80211com *,
+		struct ieee80211_node *, const struct ieee80211_key *,
+		const struct IwxGroup2TxTag *);
+#endif
 extern	int ieee80211_send_eapol_key_req(struct ieee80211com *,
 		struct ieee80211_node *, u_int16_t, u_int64_t);
 extern	int ieee80211_pwrsave(struct ieee80211com *, mbuf_t,

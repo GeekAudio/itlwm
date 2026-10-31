@@ -8068,6 +8068,9 @@ void ItlIwx::nativeP2pTick()
 
     IOEthernetController *controller = getController();
     tahoeRxPreOwnerPublish(controller);
+#if defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+    tahoeRxCompletionPublish(controller);
+#endif
     tahoePublishMccSnapshot(controller);
     publishRx149ProfileAvailabilityOnce(this, controller);
     if (rx149ObservationOnlyRequested(controller))

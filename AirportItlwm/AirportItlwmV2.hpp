@@ -309,6 +309,7 @@ public:
     bool nativePowerStateSnapshot(uint32_t *powerFlags, uint64_t *revision) const;
     uint32_t updateNativePowerFlags(uint32_t clearMask, uint32_t setMask,
                                     bool readyRequiresRequested = false);
+    uint32_t advanceNativePowerEpoch(bool requestedOn);
     uint32_t beginNativeControlTrace(NativePowerTrace::Operation,
         NativePowerTrace::Phase, uint32_t detail, int32_t result);
     void recordNativeControlTrace(uint32_t callId,
