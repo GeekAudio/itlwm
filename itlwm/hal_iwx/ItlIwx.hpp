@@ -495,6 +495,7 @@ public:
     void tahoeDeferLifecycleTasks(uint32_t);
     void tahoeFlushLifecycleTasks();
     void tahoeClearStopBlockState();
+    uint32_t tahoeAdvanceNativePowerFaultSerial();
     uint32_t tahoeRecordInitTaskTrigger(IwxResetTrace::InitTaskTrigger);
     int tahoeQueueInitTask(struct iwx_softc *, uint32_t faultSerial = 0);
     void tahoeRecordTxWatchdogSnapshot(struct iwx_softc *, uint32_t);

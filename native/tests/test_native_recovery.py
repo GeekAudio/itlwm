@@ -71,6 +71,7 @@ radio = r'''
 #include "native/iwx_link_state_trace.hpp"
 #include "native/iwx_output_kick.hpp"
 #include "native/iwx_reset_trace.hpp"
+#include "native/native_power_trace.hpp"
 #include <cassert>
 #include <cstdint>
 #include <cstddef>
@@ -142,6 +143,7 @@ struct ItlIwx {
  uint64_t nativePowerRequestState_=0;
  bool tahoeTryLifecycleFence();bool tahoeReleaseLifecycleFence(bool flushDeferredTasks=true);
  void tahoeDeferLifecycleTasks(uint32_t);void tahoeFlushLifecycleTasks();
+ uint32_t tahoeAdvanceNativePowerFaultSerial();
  struct task tahoe_scan_abort_task_;
  ItlIwx(){com.sc_ic.ic_if.if_softc=&com;}
  bool nativeP2pResourcesRetained(){return p2pRetained;}
@@ -189,12 +191,15 @@ int main() {
   assert(!f.ready && !f.stopped);}
  {ItlIwx f;auto &ifp=f.com.sc_ic.ic_if;ifp.if_flags=IFF_UP;f.hwError=EIO;
   assert(f.iwx_init(&ifp)==EIO && ifp.if_flags==0 && f.stopped==1 && !f.ready);
+  assert(f.nativePowerFaultSerial_==1&&f.nativeInitTaskFaultSerial_==0);
   f.hwError=0;ifp.if_flags|=IFF_UP;sleepOwner=&f.com;
-  assert(f.iwx_init(&ifp)==0 && ifp.if_flags==(IFF_UP|IFF_RUNNING) && f.ready==1);}
+  assert(f.iwx_init(&ifp)==0 && ifp.if_flags==(IFF_UP|IFF_RUNNING) && f.ready==1);
+  assert(f.nativePowerFaultSerial_==1);}
  {ItlIwx f;auto &ifp=f.com.sc_ic.ic_if;ifp.if_flags=IFF_UP;f.hwError=EIO;f.cancelHardware=true;
   assert(f.iwx_init(&ifp)==EIO && ifp.if_flags==IFF_UP && !f.stopped && !f.stops);}
  {ItlIwx f;auto &ifp=f.com.sc_ic.ic_if;ifp.if_flags=IFF_UP;sleepResult=ETIMEDOUT;sleepOwner=&f.com;
   assert(f.iwx_init(&ifp)==ETIMEDOUT && ifp.if_flags==0 && f.stopped==1 && !f.ready);
+  assert(f.nativePowerFaultSerial_==1&&f.nativeInitTaskFaultSerial_==0);
   sleepResult=0;}
  {ItlIwx f;auto &ifp=f.com.sc_ic.ic_if;ifp.if_flags=IFF_UP;cancelSleep=true;sleepOwner=&f.com;
   assert(f.iwx_init(&ifp)==ENXIO && ifp.if_flags==(IFF_UP|IFF_RUNNING) && !f.stops && !f.stopped);
@@ -223,6 +228,22 @@ int main() {
   while(!held.load())std::this_thread::yield();
   assert(f.iwx_init(&ifp)==EBUSY && f.hwStarts==0 && f.com.sc_generation==0);
   release.store(true);owner.join();}
+ {ItlIwx f;auto &ifp=f.com.sc_ic.ic_if;ifp.if_flags=IFF_UP;f.hwError=EIO;
+  NativePowerTrace::AddressRestartNotification notification;
+  const uint64_t id=notification.begin(3,0,0,true,3,0);
+  assert(id&&notification.commit(id,3,0,true,true,true));
+  assert(f.iwx_init(&ifp)==EIO&&f.nativePowerFaultSerial_==1&&
+   f.nativeInitTaskFaultSerial_==0);
+  NativePowerTrace::PowerIngressContext queuedReady{};
+  queuedReady.transitionRevision=0;queuedReady.addressRestartId=id;
+  queuedReady.addressRestartStartRevision=0;queuedReady.powerEpoch=3;
+  queuedReady.faultSerial=0;queuedReady.powerFlags=3;queuedReady.faultSerialValid=1;
+  const auto decision=notification.observe(
+   NativePowerTrace::AddressRestartEvent::kDriverReady,queuedReady,
+   3,1,1,f.nativePowerFaultSerial_,true,0);
+  assert(decision==NativePowerTrace::AddressRestartDecision::kStale);
+  assert(!notification.active()&&notification.lastOutcome()==
+   NativePowerTrace::AddressRestartOutcome::kCancelledFaultSerial);}
 }
 '''
 
@@ -236,6 +257,7 @@ lifecycle_methods = '\n'.join(extract('itlwm/hal_iwx/ItlIwx.cpp', marker)
         'bool ItlIwx::tahoeReleaseLifecycleFence(bool flushDeferredTasks)',
         'void ItlIwx::tahoeDeferLifecycleTasks(uint32_t taskBits)',
         'void ItlIwx::tahoeFlushLifecycleTasks()',
+        'uint32_t ItlIwx::tahoeAdvanceNativePowerFaultSerial()',
         'uint32_t ItlIwx::tahoeRecordInitTaskTrigger('))
 radio_stop_guard = r'''
 int ItlIwx::iwx_stop(_ifnet *ifp,IwxResetTrace::ResetReason) {

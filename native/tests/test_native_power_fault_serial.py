@@ -7,15 +7,18 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 source = (ROOT / "itlwm/hal_iwx/ItlIwx.cpp").read_text()
-marker = "uint32_t ItlIwx::tahoeRecordInitTaskTrigger("
-start = source.index(marker)
-opening = source.index("{", start)
-depth = 1
-end = opening + 1
-while depth:
-    depth += (source[end] == "{") - (source[end] == "}")
-    end += 1
-method = source[start:end]
+def extract(marker):
+    start = source.index(marker)
+    opening = source.index("{", start)
+    depth = 1
+    end = opening + 1
+    while depth:
+        depth += (source[end] == "{") - (source[end] == "}")
+        end += 1
+    return source[start:end]
+
+advance_method = extract("uint32_t ItlIwx::tahoeAdvanceNativePowerFaultSerial(")
+record_method = extract("uint32_t ItlIwx::tahoeRecordInitTaskTrigger(")
 
 program = r'''
 #include <cassert>
@@ -29,9 +32,10 @@ public:
     IwxResetTrace::Trace nativeResetTrace_;
     uint32_t nativePowerFaultSerial_ {0};
     uint32_t nativeInitTaskFaultSerial_ {0};
+    uint32_t tahoeAdvanceNativePowerFaultSerial();
     uint32_t tahoeRecordInitTaskTrigger(IwxResetTrace::InitTaskTrigger);
 };
-''' + method + r'''
+''' + advance_method + record_method + r'''
 
 int main() {
     ItlIwx driver;

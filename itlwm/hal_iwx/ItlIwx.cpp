@@ -1561,6 +1561,18 @@ void ItlIwx::setNativePowerRequestState(uint32_t epoch, bool requestedOn)
     __atomic_store_n(&nativePowerRequestState_, state, __ATOMIC_RELEASE);
 }
 
+uint32_t ItlIwx::tahoeAdvanceNativePowerFaultSerial()
+{
+    uint32_t previous = __atomic_load_n(&nativePowerFaultSerial_,
+                                        __ATOMIC_ACQUIRE);
+    uint32_t fault;
+    do {
+        fault = IwxInitDispatch::nextFaultSerial(previous);
+    } while (!__atomic_compare_exchange_n(&nativePowerFaultSerial_,
+        &previous, fault, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
+    return fault;
+}
+
 uint32_t ItlIwx::tahoeRecordInitTaskTrigger(
     IwxResetTrace::InitTaskTrigger trigger)
 {
@@ -1569,15 +1581,8 @@ uint32_t ItlIwx::tahoeRecordInitTaskTrigger(
     // lifecycle-fence retries. Keep a separate fault serial for consumers that
     // need to distinguish recovery from those ordinary scheduling paths.
     if (trigger != IwxResetTrace::InitTaskTrigger::kWakeupDeferred &&
-        trigger != IwxResetTrace::InitTaskTrigger::kLifecycleFenceRetry) {
-        uint32_t previousFault = __atomic_load_n(&nativePowerFaultSerial_,
-                                                  __ATOMIC_ACQUIRE);
-        uint32_t fault;
-        do {
-            fault = IwxInitDispatch::nextFaultSerial(previousFault);
-        } while (!__atomic_compare_exchange_n(&nativePowerFaultSerial_,
-            &previousFault, fault, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
-    }
+        trigger != IwxResetTrace::InitTaskTrigger::kLifecycleFenceRetry)
+        (void)tahoeAdvanceNativePowerFaultSerial();
     uint32_t previous = __atomic_load_n(&nativeInitTaskFaultSerial_,
                                         __ATOMIC_ACQUIRE);
     uint32_t serial;
@@ -16188,6 +16193,9 @@ iwx_init(struct _ifnet *ifp)
             ic->ic_tahoe_init_error = err;
             IOLog("AirportItlwm[Tahoe] hardware init failed stage=%u error=%d\n",
                 ic->ic_tahoe_init_stage, err);
+            // This init failure is a new power fault even when the asynchronous
+            // wakeup's ordinary scheduling trigger was not a fault source.
+            (void)tahoeAdvanceNativePowerFaultSerial();
             int stop_error = iwx_stop(ifp,
                 IwxResetTrace::ResetReason::kInitHardwareFailureCleanup);
             if (stop_error)
@@ -16247,6 +16255,7 @@ iwx_init(struct _ifnet *ifp)
         ic->ic_tahoe_init_error = err;
         IOLog("AirportItlwm[Tahoe] initial scan failed generation=%d error=%d state=%d flags=0x%x phase=%u\n",
             generation, err, ic->ic_state, sc->sc_flags, tahoeScanState(ic));
+        (void)tahoeAdvanceNativePowerFaultSerial();
         int stop_error = iwx_stop(ifp,
             IwxResetTrace::ResetReason::kInitialScanFailureCleanup);
         if (stop_error)
