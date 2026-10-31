@@ -5,32 +5,32 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "38276cf10b5e8539721e2bc321d5f6093fd7e30997791cb5a2d0f71ec966057f"
+      "sha256": "62bcce4fe422392174158d5e7249f6c2155c57cd77387df3f45bc9cb592245c7"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "3b2418cf29f41ed74f01bd4821fec59971733ca6a018ad0e93622a1fd169aa9a"
+      "sha256": "ca538fb05b980f1d85f27e6672646f9515df087231c591fbc4552b6fce1e71c2"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "00ac0ffbcfb91301330800891e44b068121b83896b25b5810308fc0106443545"
+      "sha256": "46042ae8f18067c615a875abd2af37e34e3d575657494dad998b0e12e4b6eedd"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
       "snapshot_path": "dist/assets/site.js",
-      "sha256": "5a525f91e05d53005716542ba5ccd66242b15f16c1d64a9b5523a79f30135dfd"
+      "sha256": "8aaaf3b34333e50bd11326fb3fa68d35aac2ada2ac602925b5edd85bfd6995dc"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.css",
       "snapshot_path": "dist/assets/site.css",
-      "sha256": "4348ea93c013b95d6d00aa729ddb230a630830b4220c9e6bfa1db19c59de6a99"
+      "sha256": "615c33ae7e9ffc93a3b4b1d29ff1186f839c04b4af579916942ceec6ebb983d0"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "e05db1212a15103d9d088c7b3503c2e6908cb29f3fac14433e0aa657671d4ba5"
+      "sha256": "1a323c6561566e1fd6d5e7066395bc4184d8996ab95a2141c440b7651cbdb227"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-31T10:32:27+08:00",
-  "runtime_scope": "Test093 runtime acceptance remains6 passed,2 partial,31 uncovered,1 regressed. Offline observer prototype passed10 host-model test groups and4 noncopy/nonmove compile-time assertions after independent review found copied registry aliasing. Experimental source is versioned separately from the kext. Kernel mapping/lock/module-lifetime integration remains unvalidated; no new driver deployment or runtime AirDrop/data-return acceptance."
+  "updated_at": "2026-10-31T11:55:56+08:00",
+  "runtime_scope": "Test093 runtime remains 6 passed, 2 partial, 31 uncovered and 1 regressed. Test094 safe RX observer, immutable init dispatch and Group2 trace passed offline merged validation and were backed up and deployed; next-boot Wi-Fi and native AWDL/AirDrop remain unverified. Interactive principle map distinguishes the RX/TX data path from BLE discovery and diagnostic tools."
 }
