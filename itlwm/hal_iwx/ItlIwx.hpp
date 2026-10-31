@@ -346,6 +346,11 @@ public:
     virtual struct ieee80211com *get80211Controller() override;
 #ifdef AIRPORT_TAHOE
     void setNativePowerRequestState(uint32_t, bool) override;
+    bool readNativePowerFaultSerial(uint32_t *out) const override {
+        if (!out) return false;
+        *out = __atomic_load_n(&nativePowerFaultSerial_, __ATOMIC_ACQUIRE);
+        return true;
+    }
 #endif
     
     static bool intrFilter(OSObject *object, IOFilterInterruptEventSource *src);
@@ -399,6 +404,7 @@ public:
     uint64_t nativeLifecycleStopRejectFingerprint_ {0};
     uint64_t nativeInitDispatchSequence_ {0};
     uint32_t nativeInitTaskFaultSerial_ {0};
+    uint32_t nativePowerFaultSerial_ {0};
     uint64_t nativePowerRequestState_ {0};
     IwxResetTrace::Trace nativeResetTrace_ {};
     IwxLinkStateTrace::Trace nativeLinkTransitionTrace_ {};

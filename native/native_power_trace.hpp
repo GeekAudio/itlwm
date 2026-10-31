@@ -164,6 +164,222 @@ private:
     uint64_t lastPostedRevision_ {0};
 };
 
+// Immutable producer-time metadata for a power lifecycle event crossing the
+// native ingress ring. The address transaction id is never filled in by the
+// consumer; an event captured before a transaction therefore remains id zero.
+struct PowerIngressContext {
+    uint64_t transitionRevision {0};
+    uint64_t addressRestartId {0};
+    uint64_t addressRestartStartRevision {0};
+    uint32_t powerEpoch {0};
+    uint32_t faultSerial {0};
+    uint32_t powerFlags {0};
+    uint8_t faultSerialValid {0};
+    uint8_t reserved[3] {};
+};
+
+enum class AddressRestartEvent : uint8_t {
+    kResetBegin,
+    kDriverStopped,
+    kDriverReady,
+};
+
+enum class AddressRestartDecision : uint8_t {
+    kPass,
+    kSuppress,
+    kComplete,
+    kStale,
+};
+
+enum class AddressRestartOutcome : uint32_t {
+    kNone = 0,
+    kStarted = 1,
+    kSuppressedResetBegin = 2,
+    kSuppressedDriverStopped = 3,
+    kCompletedReady = 4,
+    kCancelledFaultSerial = 5,
+    kCancelledEpochOrOff = 6,
+    kCancelledCommitOrEnable = 7,
+    kCancelledIdentity = 8,
+    kExpired = 9,
+    kStaleEvent = 10,
+    kUnsupportedHal = 11,
+    kCancelledManual = 12,
+};
+
+// Coalesce only the short READY dip caused by one committed, successful native
+// address restart. Power state itself remains the real HAL READY bit. The
+// caller serializes this object with the driver's existing command gate.
+class AddressRestartNotification {
+public:
+    static constexpr uint32_t kDeadlineMilliseconds = 900;
+
+    uint64_t begin(uint32_t powerEpoch, uint64_t transitionRevision,
+                   uint32_t faultSerial, bool faultSerialValid,
+                   uint32_t powerFlags, uint64_t nowNanoseconds) {
+        if (active_ || !faultSerialValid || (powerFlags & 3U) != 3U)
+            return 0;
+        uint64_t id = nextId_++;
+        if (!id) id = nextId_++;
+        if (!id) return 0;
+        id_ = id;
+        powerEpoch_ = powerEpoch;
+        startRevision_ = transitionRevision;
+        faultSerial_ = faultSerial;
+        constexpr uint64_t kDeadlineNanoseconds =
+            uint64_t(kDeadlineMilliseconds) * 1000000ULL;
+        deadlineNanoseconds_ = nowNanoseconds > UINT64_MAX - kDeadlineNanoseconds
+            ? UINT64_MAX : nowNanoseconds + kDeadlineNanoseconds;
+        committed_ = false;
+        active_ = true;
+        lastOutcome_ = AddressRestartOutcome::kStarted;
+        return id_;
+    }
+
+    bool commit(uint64_t id, uint32_t powerEpoch, uint32_t faultSerial,
+                bool faultSerialValid, bool commitSucceeded,
+                bool enableSucceeded) {
+        if (!matches(id, powerEpoch, faultSerial, faultSerialValid))
+            return false;
+        if (!commitSucceeded || !enableSucceeded) {
+            retire(AddressRestartOutcome::kCancelledCommitOrEnable);
+            return false;
+        }
+        committed_ = true;
+        return true;
+    }
+
+    AddressRestartDecision observe(
+        AddressRestartEvent event, const PowerIngressContext &entry,
+        uint32_t currentEpoch, uint32_t currentPowerFlags,
+        uint64_t currentRevision, uint32_t currentFaultSerial,
+        bool currentFaultSerialValid, uint64_t nowNanoseconds) {
+        if (!active_) return AddressRestartDecision::kPass;
+        const bool oldEntry = entry.addressRestartId != id_ &&
+            entry.transitionRevision <= startRevision_;
+
+        // Current transaction state takes precedence over stale queued events.
+        // A real fault, explicit OFF, or elapsed deadline must end suppression
+        // even when the next item in the ring belongs to an older lifecycle.
+        if (!currentFaultSerialValid || currentFaultSerial != faultSerial_) {
+            retire(AddressRestartOutcome::kCancelledFaultSerial);
+            return oldEntry ? AddressRestartDecision::kStale
+                            : AddressRestartDecision::kPass;
+        }
+        if (currentEpoch != powerEpoch_ || !(currentPowerFlags & 1U)) {
+            retire(AddressRestartOutcome::kCancelledEpochOrOff);
+            return oldEntry ? AddressRestartDecision::kStale
+                            : AddressRestartDecision::kPass;
+        }
+        if (nowNanoseconds >= deadlineNanoseconds_) {
+            retire(AddressRestartOutcome::kExpired);
+            return oldEntry ? AddressRestartDecision::kStale
+                            : AddressRestartDecision::kPass;
+        }
+
+        // Old READY/STOPPED entries can sit in the ring until after a newer
+        // address transaction starts. They do not belong to that transaction.
+        if (oldEntry) {
+            lastOutcome_ = AddressRestartOutcome::kStaleEvent;
+            return AddressRestartDecision::kStale;
+        }
+
+        if (entry.addressRestartId != id_ ||
+            entry.addressRestartStartRevision != startRevision_) {
+            retire(AddressRestartOutcome::kCancelledIdentity);
+            return AddressRestartDecision::kPass;
+        }
+        if (entry.powerEpoch != powerEpoch_ || !entry.faultSerialValid ||
+            entry.faultSerial != faultSerial_) {
+            retire(AddressRestartOutcome::kCancelledFaultSerial);
+            return AddressRestartDecision::kPass;
+        }
+
+        if (event == AddressRestartEvent::kDriverReady) {
+            if (entry.transitionRevision != currentRevision ||
+                !(entry.powerFlags & 2U) || !(currentPowerFlags & 2U))
+            {
+                lastOutcome_ = AddressRestartOutcome::kStaleEvent;
+                return AddressRestartDecision::kStale;
+            }
+            if (!committed_) {
+                retire(AddressRestartOutcome::kCancelledIdentity);
+                return AddressRestartDecision::kPass;
+            }
+            retire(AddressRestartOutcome::kCompletedReady);
+            return AddressRestartDecision::kComplete;
+        }
+        lastOutcome_ = event == AddressRestartEvent::kResetBegin
+            ? AddressRestartOutcome::kSuppressedResetBegin
+            : AddressRestartOutcome::kSuppressedDriverStopped;
+        return AddressRestartDecision::kSuppress;
+    }
+
+    // The watchdog tick is only a sampling opportunity; use its absolute
+    // monotonic timestamp so a tick just after begin cannot expire early.
+    bool tick(uint64_t nowNanoseconds, uint32_t currentEpoch,
+              uint32_t currentPowerFlags, uint32_t currentFaultSerial,
+              bool currentFaultSerialValid) {
+        if (!active_) return false;
+        if (!currentFaultSerialValid || currentFaultSerial != faultSerial_) {
+            retire(AddressRestartOutcome::kCancelledFaultSerial);
+            return true;
+        }
+        if (currentEpoch != powerEpoch_ || !(currentPowerFlags & 1U)) {
+            retire(AddressRestartOutcome::kCancelledEpochOrOff);
+            return true;
+        }
+        if (nowNanoseconds >= deadlineNanoseconds_) {
+            retire(AddressRestartOutcome::kExpired);
+            return true;
+        }
+        return false;
+    }
+
+    bool cancelForEpoch(uint32_t currentEpoch) {
+        if (!active_ || currentEpoch == powerEpoch_) return false;
+        retire(AddressRestartOutcome::kCancelledEpochOrOff);
+        return true;
+    }
+    void cancel(AddressRestartOutcome outcome =
+                    AddressRestartOutcome::kCancelledManual) {
+        if (active_) retire(outcome);
+        else lastOutcome_ = outcome;
+    }
+    bool active() const { return active_; }
+    bool committed() const { return committed_; }
+    uint64_t id() const { return id_; }
+    uint32_t powerEpoch() const { return powerEpoch_; }
+    uint64_t startRevision() const { return startRevision_; }
+    uint32_t faultSerial() const { return faultSerial_; }
+    uint64_t deadlineNanoseconds() const { return deadlineNanoseconds_; }
+    AddressRestartOutcome lastOutcome() const { return lastOutcome_; }
+
+private:
+    bool matches(uint64_t id, uint32_t powerEpoch, uint32_t faultSerial,
+                 bool faultSerialValid) const {
+        return active_ && id != 0 && id == id_ &&
+            powerEpoch == powerEpoch_ && faultSerialValid &&
+            faultSerial == faultSerial_;
+    }
+    void retire(AddressRestartOutcome outcome) {
+        active_ = false;
+        committed_ = false;
+        deadlineNanoseconds_ = 0;
+        lastOutcome_ = outcome;
+    }
+
+    uint64_t nextId_ {1};
+    uint64_t id_ {0};
+    uint64_t startRevision_ {0};
+    uint32_t powerEpoch_ {0};
+    uint32_t faultSerial_ {0};
+    uint64_t deadlineNanoseconds_ {0};
+    bool active_ {false};
+    bool committed_ {false};
+    AddressRestartOutcome lastOutcome_ {AddressRestartOutcome::kNone};
+};
+
 } // namespace NativePowerTrace
 
 #endif

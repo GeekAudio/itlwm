@@ -1565,6 +1565,19 @@ uint32_t ItlIwx::tahoeRecordInitTaskTrigger(
     IwxResetTrace::InitTaskTrigger trigger)
 {
     (void)nativeResetTrace_.recordInitTaskTrigger(trigger);
+    // The init-dispatch serial also advances for normal deferred wakeups and
+    // lifecycle-fence retries. Keep a separate fault serial for consumers that
+    // need to distinguish recovery from those ordinary scheduling paths.
+    if (trigger != IwxResetTrace::InitTaskTrigger::kWakeupDeferred &&
+        trigger != IwxResetTrace::InitTaskTrigger::kLifecycleFenceRetry) {
+        uint32_t previousFault = __atomic_load_n(&nativePowerFaultSerial_,
+                                                  __ATOMIC_ACQUIRE);
+        uint32_t fault;
+        do {
+            fault = IwxInitDispatch::nextFaultSerial(previousFault);
+        } while (!__atomic_compare_exchange_n(&nativePowerFaultSerial_,
+            &previousFault, fault, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE));
+    }
     uint32_t previous = __atomic_load_n(&nativeInitTaskFaultSerial_,
                                         __ATOMIC_ACQUIRE);
     uint32_t serial;

@@ -196,8 +196,10 @@ eventHandler(struct ieee80211com *ic, int msgCode, void *data)
     if (!interface)
         return;
 #ifdef AIRPORT_TAHOE
-    that->observeNativePowerEvent(msgCode);
-    static_cast<AirportItlwmSkywalkInterface *>(interface)->captureNativeEvent(msgCode, data);
+    NativePowerTrace::PowerIngressContext powerContext {};
+    that->observeNativePowerEvent(msgCode, &powerContext);
+    static_cast<AirportItlwmSkywalkInterface *>(interface)->captureNativeEvent(
+        msgCode, data, &powerContext);
     return;
 #else
     switch (msgCode) {
@@ -1348,8 +1350,10 @@ getPOWER(OSObject *object,
 #ifdef AIRPORT_TAHOE
 uint32_t AirportItlwm::updateNativePowerFlags(uint32_t clearMask,
                                                uint32_t setMask,
-                                               bool readyRequiresRequested)
+                                               bool readyRequiresRequested,
+    NativePowerTrace::PowerIngressContext *context)
 {
+    if (context) *context = NativePowerTrace::PowerIngressContext {};
     IOSimpleLock *lock = nativePowerStateLock;
     if (!lock) {
         // Defensive fallback during partial teardown or a broken lifecycle.
@@ -1366,6 +1370,15 @@ uint32_t AirportItlwm::updateNativePowerFlags(uint32_t clearMask,
         }
         if ((flags & 2U) != (updated & 2U))
             __atomic_fetch_add(&nativePowerTransitionRevision, uint64_t(1), __ATOMIC_ACQ_REL);
+        if (context) {
+            // Missing the state lock is a fail-open ingress snapshot. It may
+            // still describe current flags, but cannot carry a coalescing id.
+            context->powerFlags = updated;
+            context->transitionRevision = __atomic_load_n(
+                &nativePowerTransitionRevision, __ATOMIC_ACQUIRE);
+            context->powerEpoch = __atomic_load_n(&nativePowerEpoch,
+                                                   __ATOMIC_ACQUIRE);
+        }
         return flags;
     }
 
@@ -1377,6 +1390,22 @@ uint32_t AirportItlwm::updateNativePowerFlags(uint32_t clearMask,
     if ((flags & 2U) != (updated & 2U))
         __atomic_fetch_add(&nativePowerTransitionRevision, uint64_t(1), __ATOMIC_RELAXED);
     __atomic_store_n(&nativePowerFlags, updated, __ATOMIC_RELEASE);
+    if (context) {
+        context->powerFlags = updated;
+        context->transitionRevision = __atomic_load_n(
+            &nativePowerTransitionRevision, __ATOMIC_RELAXED);
+        context->powerEpoch = __atomic_load_n(&nativePowerEpoch, __ATOMIC_RELAXED);
+        if (nativeAddressRestartPublishedId &&
+            nativeAddressRestartPublishedEpoch == context->powerEpoch) {
+            context->addressRestartId = nativeAddressRestartPublishedId;
+            context->addressRestartStartRevision =
+                nativeAddressRestartStartRevision;
+        }
+        uint32_t faultSerial = 0;
+        context->faultSerialValid = fHalService &&
+            fHalService->readNativePowerFaultSerial(&faultSerial);
+        context->faultSerial = context->faultSerialValid ? faultSerial : 0;
+    }
     IOSimpleLockUnlockEnableInterrupt(lock, irq);
     return flags;
 }
@@ -1390,7 +1419,34 @@ uint32_t AirportItlwm::advanceNativePowerEpoch(bool requestedOn)
         __atomic_load_n(&nativePowerEpoch, __ATOMIC_RELAXED) + 1U;
     if (fHalService)
         fHalService->setNativePowerRequestState(epoch, requestedOn);
-    __atomic_store_n(&nativePowerEpoch, epoch, __ATOMIC_RELEASE);
+    IOSimpleLock *lock = nativePowerStateLock;
+    if (lock) {
+        const IOInterruptState irq = IOSimpleLockLockDisableInterrupt(lock);
+        __atomic_store_n(&nativePowerEpoch, epoch, __ATOMIC_RELEASE);
+        const bool canceled =
+            nativeAddressRestartNotification.cancelForEpoch(epoch);
+        if (canceled || (nativeAddressRestartPublishedId &&
+                nativeAddressRestartPublishedEpoch != epoch)) {
+            nativeAddressRestartPublishedId = 0;
+            nativeAddressRestartPublishedEpoch = 0;
+            nativeAddressRestartStartRevision = 0;
+        }
+        IOSimpleLockUnlockEnableInterrupt(lock, irq);
+        if (canceled) {
+            noteNativeAddressRestartOutcome(
+                NativePowerTrace::AddressRestartOutcome::kCancelledEpochOrOff);
+            publishNativeAddressRestartMetrics();
+        }
+    } else {
+        __atomic_store_n(&nativePowerEpoch, epoch, __ATOMIC_RELEASE);
+        const bool wasActive = nativeAddressRestartNotification.active();
+        nativeAddressRestartNotification.cancel();
+        if (wasActive) {
+            noteNativeAddressRestartOutcome(
+                NativePowerTrace::AddressRestartOutcome::kCancelledEpochOrOff);
+            publishNativeAddressRestartMetrics();
+        }
+    }
     return epoch;
 }
 
@@ -1406,20 +1462,280 @@ bool AirportItlwm::nativePowerStateSnapshot(uint32_t *powerFlags,
     return true;
 }
 
-uint32_t AirportItlwm::observeNativePowerEvent(int event)
+IOReturn AirportItlwm::beginNativeAddressRestartNotification(uint64_t *idOut)
 {
+    if (!idOut) return kIOReturnBadArgument;
+    *idOut = 0;
+    IOSimpleLock *lock = nativePowerStateLock;
+    if (!lock || !fHalService) return kIOReturnNotReady;
+    const IOInterruptState irq = IOSimpleLockLockDisableInterrupt(lock);
+    const uint64_t nowNanoseconds = nativePowerUptimeNanoseconds();
+    uint32_t powerFlags = __atomic_load_n(&nativePowerFlags, __ATOMIC_RELAXED);
+    const uint64_t revision = __atomic_load_n(
+        &nativePowerTransitionRevision, __ATOMIC_RELAXED);
+    const uint32_t epoch = __atomic_load_n(&nativePowerEpoch, __ATOMIC_RELAXED);
+    uint32_t faultSerial = 0;
+    const bool faultSerialValid =
+        fHalService->readNativePowerFaultSerial(&faultSerial);
+    IOReturn result = kIOReturnNotReady;
+    if ((powerFlags & 3U) != 3U) {
+        result = kIOReturnNotReady;
+    } else if (nativeAddressRestartPublishedId ||
+               nativeAddressRestartNotification.active()) {
+        result = kIOReturnBusy;
+    } else if (!faultSerialValid) {
+        // The address change itself remains supported; only event coalescing
+        // is unavailable when the HAL cannot provide a fault serial.
+        result = kIOReturnUnsupported;
+    } else {
+        const uint64_t id = nativeAddressRestartNotification.begin(epoch,
+            revision, faultSerial, true, powerFlags, nowNanoseconds);
+        if (id) {
+            nativeAddressRestartPublishedId = id;
+            nativeAddressRestartPublishedEpoch = epoch;
+            nativeAddressRestartStartRevision = revision;
+            *idOut = id;
+            result = kIOReturnSuccess;
+        }
+    }
+    IOSimpleLockUnlockEnableInterrupt(lock, irq);
+    if (*idOut) {
+        noteNativeAddressRestartOutcome(
+            NativePowerTrace::AddressRestartOutcome::kStarted);
+        publishNativeAddressRestartMetrics();
+    } else if (result == kIOReturnUnsupported) {
+        noteNativeAddressRestartOutcome(
+            NativePowerTrace::AddressRestartOutcome::kUnsupportedHal);
+        publishNativeAddressRestartMetrics();
+    }
+    return result;
+}
+
+bool AirportItlwm::commitNativeAddressRestartNotification(
+    uint64_t id, bool commitSucceeded, bool enableSucceeded)
+{
+    if (!id) return false;
+    IOSimpleLock *lock = nativePowerStateLock;
+    if (!lock || !fHalService) {
+        nativeAddressRestartNotification.cancel();
+        return false;
+    }
+    const IOInterruptState irq = IOSimpleLockLockDisableInterrupt(lock);
+    uint32_t faultSerial = 0;
+    const bool faultSerialValid =
+        fHalService->readNativePowerFaultSerial(&faultSerial);
+    const uint32_t epoch = __atomic_load_n(&nativePowerEpoch, __ATOMIC_RELAXED);
+    const bool committed = nativeAddressRestartNotification.commit(
+        id, epoch, faultSerial, faultSerialValid,
+        commitSucceeded, enableSucceeded);
+    if (!committed && nativeAddressRestartNotification.active() &&
+        nativeAddressRestartNotification.id() == id)
+        nativeAddressRestartNotification.cancel(
+            NativePowerTrace::AddressRestartOutcome::kCancelledCommitOrEnable);
+    if (!committed && nativeAddressRestartPublishedId == id) {
+        nativeAddressRestartPublishedId = 0;
+        nativeAddressRestartPublishedEpoch = 0;
+        nativeAddressRestartStartRevision = 0;
+    }
+    IOSimpleLockUnlockEnableInterrupt(lock, irq);
+    if (!committed) {
+        noteNativeAddressRestartOutcome(nativeAddressRestartNotification.lastOutcome());
+        publishNativeAddressRestartMetrics();
+    }
+    return committed;
+}
+
+void AirportItlwm::cancelNativeAddressRestartNotification(uint64_t id)
+{
+    IOSimpleLock *lock = nativePowerStateLock;
+    if (!lock) {
+        const bool wasActive = nativeAddressRestartNotification.active();
+        nativeAddressRestartNotification.cancel();
+        if (wasActive) {
+            noteNativeAddressRestartOutcome(
+                NativePowerTrace::AddressRestartOutcome::kCancelledManual);
+            publishNativeAddressRestartMetrics();
+        }
+        return;
+    }
+    const IOInterruptState irq = IOSimpleLockLockDisableInterrupt(lock);
+    const bool wasActive = nativeAddressRestartNotification.active() &&
+        (!id || nativeAddressRestartNotification.id() == id);
+    if (!id || nativeAddressRestartPublishedId == id) {
+        nativeAddressRestartNotification.cancel(
+            NativePowerTrace::AddressRestartOutcome::kCancelledManual);
+        nativeAddressRestartPublishedId = 0;
+        nativeAddressRestartPublishedEpoch = 0;
+        nativeAddressRestartStartRevision = 0;
+    }
+    IOSimpleLockUnlockEnableInterrupt(lock, irq);
+    if (wasActive) {
+        noteNativeAddressRestartOutcome(
+            NativePowerTrace::AddressRestartOutcome::kCancelledManual);
+        publishNativeAddressRestartMetrics();
+    }
+}
+
+NativePowerTrace::AddressRestartDecision
+AirportItlwm::observeNativeAddressRestartEvent(
+    NativePowerTrace::AddressRestartEvent event,
+    const NativePowerTrace::PowerIngressContext &entry)
+{
+    const uint64_t nowNanoseconds = nativePowerUptimeNanoseconds();
+    IOSimpleLock *lock = nativePowerStateLock;
+    if (!lock || !fHalService) {
+        nativeAddressRestartNotification.cancel();
+        return NativePowerTrace::AddressRestartDecision::kPass;
+    }
+    const IOInterruptState irq = IOSimpleLockLockDisableInterrupt(lock);
+    const bool wasActive = nativeAddressRestartNotification.active();
+    const uint32_t powerFlags = __atomic_load_n(&nativePowerFlags, __ATOMIC_RELAXED);
+    const uint64_t revision = __atomic_load_n(
+        &nativePowerTransitionRevision, __ATOMIC_RELAXED);
+    const uint32_t epoch = __atomic_load_n(&nativePowerEpoch, __ATOMIC_RELAXED);
+    uint32_t faultSerial = 0;
+    const bool faultSerialValid =
+        fHalService->readNativePowerFaultSerial(&faultSerial);
+    if (!wasActive) {
+        const bool eventReady =
+            event == NativePowerTrace::AddressRestartEvent::kDriverReady;
+        const bool stale = entry.powerEpoch != epoch ||
+            entry.transitionRevision != revision ||
+            ((entry.powerFlags & 2U) != (powerFlags & 2U)) ||
+            (eventReady && (!(entry.powerFlags & 2U) || !(powerFlags & 2U))) ||
+            (!eventReady && ((entry.powerFlags & 2U) || (powerFlags & 2U))) ||
+            (entry.faultSerialValid && (!faultSerialValid ||
+                entry.faultSerial != faultSerial));
+        IOSimpleLockUnlockEnableInterrupt(lock, irq);
+        if (stale) {
+            noteNativeAddressRestartOutcome(
+                NativePowerTrace::AddressRestartOutcome::kStaleEvent);
+            publishNativeAddressRestartMetrics();
+            return NativePowerTrace::AddressRestartDecision::kStale;
+        }
+        return NativePowerTrace::AddressRestartDecision::kPass;
+    }
+    const uint64_t activeId = nativeAddressRestartNotification.id();
+    const auto decision = nativeAddressRestartNotification.observe(
+        event, entry, epoch, powerFlags, revision, faultSerial,
+        faultSerialValid, nowNanoseconds);
+    if (!nativeAddressRestartNotification.active() &&
+        nativeAddressRestartPublishedId == activeId) {
+        nativeAddressRestartPublishedId = 0;
+        nativeAddressRestartPublishedEpoch = 0;
+        nativeAddressRestartStartRevision = 0;
+    }
+    IOSimpleLockUnlockEnableInterrupt(lock, irq);
+    if (decision == NativePowerTrace::AddressRestartDecision::kSuppress) {
+        noteNativeAddressRestartOutcome(nativeAddressRestartNotification.lastOutcome());
+        publishNativeAddressRestartMetrics();
+    } else if (decision == NativePowerTrace::AddressRestartDecision::kComplete) {
+        noteNativeAddressRestartOutcome(
+            NativePowerTrace::AddressRestartOutcome::kCompletedReady);
+        publishNativeAddressRestartMetrics();
+    } else if (wasActive && !nativeAddressRestartNotification.active()) {
+        // A stale queued event can reveal that the current transaction expired
+        // or was invalidated by OFF/fault. Count and publish that real terminal
+        // reason while the event consumer independently discards its payload.
+        noteNativeAddressRestartOutcome(nativeAddressRestartNotification.lastOutcome());
+        publishNativeAddressRestartMetrics();
+    } else if (decision == NativePowerTrace::AddressRestartDecision::kStale) {
+        noteNativeAddressRestartOutcome(
+            NativePowerTrace::AddressRestartOutcome::kStaleEvent);
+        publishNativeAddressRestartMetrics();
+    }
+    return decision;
+}
+
+bool AirportItlwm::tickNativeAddressRestartNotification()
+{
+    const uint64_t nowNanoseconds = nativePowerUptimeNanoseconds();
+    IOSimpleLock *lock = nativePowerStateLock;
+    if (!lock || !fHalService) {
+        nativeAddressRestartNotification.cancel();
+        return false;
+    }
+    const IOInterruptState irq = IOSimpleLockLockDisableInterrupt(lock);
+    const bool wasActive = nativeAddressRestartNotification.active();
+    const uint32_t powerFlags = __atomic_load_n(&nativePowerFlags, __ATOMIC_RELAXED);
+    const uint32_t epoch = __atomic_load_n(&nativePowerEpoch, __ATOMIC_RELAXED);
+    uint32_t faultSerial = 0;
+    const bool faultSerialValid =
+        fHalService->readNativePowerFaultSerial(&faultSerial);
+    const uint64_t activeId = nativeAddressRestartNotification.id();
+    (void)nativeAddressRestartNotification.tick(nowNanoseconds, epoch,
+        powerFlags, faultSerial, faultSerialValid);
+    const bool suppress = nativeAddressRestartNotification.active();
+    if (!suppress && nativeAddressRestartPublishedId == activeId) {
+        nativeAddressRestartPublishedId = 0;
+        nativeAddressRestartPublishedEpoch = 0;
+        nativeAddressRestartStartRevision = 0;
+    }
+    IOSimpleLockUnlockEnableInterrupt(lock, irq);
+    if (wasActive && !suppress) {
+        noteNativeAddressRestartOutcome(nativeAddressRestartNotification.lastOutcome());
+        publishNativeAddressRestartMetrics();
+    }
+    return suppress;
+}
+
+void AirportItlwm::noteNativeAddressRestartOutcome(
+    NativePowerTrace::AddressRestartOutcome outcome)
+{
+    nativeAddressRestartLastOutcome = static_cast<uint32_t>(outcome);
+    switch (outcome) {
+        case NativePowerTrace::AddressRestartOutcome::kStarted:
+            ++nativeAddressRestartStartedCount; break;
+        case NativePowerTrace::AddressRestartOutcome::kSuppressedResetBegin:
+        case NativePowerTrace::AddressRestartOutcome::kSuppressedDriverStopped:
+            ++nativeAddressRestartSuppressedCount; break;
+        case NativePowerTrace::AddressRestartOutcome::kCompletedReady:
+            ++nativeAddressRestartCompletedCount; break;
+        case NativePowerTrace::AddressRestartOutcome::kExpired:
+            ++nativeAddressRestartExpiredCount; break;
+        case NativePowerTrace::AddressRestartOutcome::kCancelledFaultSerial:
+        case NativePowerTrace::AddressRestartOutcome::kCancelledEpochOrOff:
+        case NativePowerTrace::AddressRestartOutcome::kCancelledCommitOrEnable:
+        case NativePowerTrace::AddressRestartOutcome::kCancelledIdentity:
+        case NativePowerTrace::AddressRestartOutcome::kCancelledManual:
+            ++nativeAddressRestartCancelledCount; break;
+        default: break;
+    }
+}
+
+void AirportItlwm::publishNativeAddressRestartMetrics()
+{
+    if (ml_at_interrupt_context()) return;
+    setProperty("NativeAddressRestartStartedCount",
+        nativeAddressRestartStartedCount, 32);
+    setProperty("NativeAddressRestartSuppressedCount",
+        nativeAddressRestartSuppressedCount, 32);
+    setProperty("NativeAddressRestartCompletedCount",
+        nativeAddressRestartCompletedCount, 32);
+    setProperty("NativeAddressRestartCancelledCount",
+        nativeAddressRestartCancelledCount, 32);
+    setProperty("NativeAddressRestartExpiredCount",
+        nativeAddressRestartExpiredCount, 32);
+    setProperty("NativeAddressRestartLastOutcome",
+        nativeAddressRestartLastOutcome, 32);
+}
+
+uint32_t AirportItlwm::observeNativePowerEvent(
+    int event, NativePowerTrace::PowerIngressContext *context)
+{
+    if (context) *context = NativePowerTrace::PowerIngressContext {};
     // HAL ingress may run at interrupt level. Keep this path to counters,
     // bounded lock-protected metadata, and atomic state; never publish IOKit
     // properties or allocate here.
     if (event == ITL_TAHOE_EVT_DRIVER_READY) {
         __atomic_fetch_add(&nativePowerReadyCount, 1U, __ATOMIC_RELAXED);
-        updateNativePowerFlags(0, 2U, true);
+        updateNativePowerFlags(0, 2U, true, context);
     } else if (event == ITL_TAHOE_EVT_DRIVER_STOPPED) {
         __atomic_fetch_add(&nativePowerStoppedCount, 1U, __ATOMIC_RELAXED);
-        updateNativePowerFlags(2U, 0, false);
+        updateNativePowerFlags(2U, 0, false, context);
     } else if (event == ITL_TAHOE_EVT_RESET_BEGIN) {
         __atomic_fetch_add(&nativePowerResetCount, 1U, __ATOMIC_RELAXED);
-        updateNativePowerFlags(2U, 0, false);
+        updateNativePowerFlags(2U, 0, false, context);
     } else {
         return __atomic_load_n(&nativePowerFlags, __ATOMIC_ACQUIRE);
     }

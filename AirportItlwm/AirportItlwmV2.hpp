@@ -284,6 +284,18 @@ public:
     uint64_t nativePowerTransitionRevision {0}; // Atomic accesses, serialized with nativePowerStateLock when available.
     uint32_t nativePowerTracePublishedSequence {0};
     NativePowerTrace::NotificationState nativePowerNotificationState {};
+    NativePowerTrace::AddressRestartNotification nativeAddressRestartNotification {};
+    // The following producer-visible tuple is copied under nativePowerStateLock
+    // into each ingress entry. Never reconstruct an old entry from current id.
+    uint64_t nativeAddressRestartPublishedId {0};
+    uint64_t nativeAddressRestartStartRevision {0};
+    uint32_t nativeAddressRestartPublishedEpoch {0};
+    uint32_t nativeAddressRestartStartedCount {0};
+    uint32_t nativeAddressRestartSuppressedCount {0};
+    uint32_t nativeAddressRestartCompletedCount {0};
+    uint32_t nativeAddressRestartCancelledCount {0};
+    uint32_t nativeAddressRestartExpiredCount {0};
+    uint32_t nativeAddressRestartLastOutcome {0};
     IOSimpleLock *nativePowerStateLock {nullptr};
     IOSimpleLock *nativePowerTraceLock {nullptr};
     NativePowerTrace::Ledger nativePowerTrace {};
@@ -301,14 +313,28 @@ public:
     void wakeNativePowerWaiters();
     static IOReturn nativePowerAction(OSObject *, void *, void *, void *, void *);
     void publishNativePowerState();
-    uint32_t observeNativePowerEvent(int);
+    uint32_t observeNativePowerEvent(int,
+        NativePowerTrace::PowerIngressContext *context = nullptr);
     // Call only from the serialized native event/tick consumer, never HAL IRQ
     // ingress. The cache belongs to that consumer and stores the pair sampled
     // before the postMessage call, not an assumed OS acknowledgement.
     bool postNativePowerChangedIfNeeded();
     bool nativePowerStateSnapshot(uint32_t *powerFlags, uint64_t *revision) const;
+    IOReturn beginNativeAddressRestartNotification(uint64_t *id);
+    bool commitNativeAddressRestartNotification(uint64_t id,
+                                                bool commitSucceeded,
+                                                bool enableSucceeded);
+    void cancelNativeAddressRestartNotification(uint64_t id = 0);
+    NativePowerTrace::AddressRestartDecision observeNativeAddressRestartEvent(
+        NativePowerTrace::AddressRestartEvent,
+        const NativePowerTrace::PowerIngressContext &);
+    bool tickNativeAddressRestartNotification();
+    void noteNativeAddressRestartOutcome(
+        NativePowerTrace::AddressRestartOutcome outcome);
+    void publishNativeAddressRestartMetrics();
     uint32_t updateNativePowerFlags(uint32_t clearMask, uint32_t setMask,
-                                    bool readyRequiresRequested = false);
+                                    bool readyRequiresRequested = false,
+        NativePowerTrace::PowerIngressContext *context = nullptr);
     uint32_t advanceNativePowerEpoch(bool requestedOn);
     uint32_t beginNativeControlTrace(NativePowerTrace::Operation,
         NativePowerTrace::Phase, uint32_t detail, int32_t result);

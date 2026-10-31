@@ -392,7 +392,8 @@ public:
     virtual IOReturn getROAM_PROFILE(apple80211_roam_profile_all_bands *) override { return kIOReturnUnsupported; }
     virtual IOReturn setROAM_PROFILE(apple80211_roam_profile_all_bands *) override { return kIOReturnUnsupported; }
     virtual IOReturn setMacAddress(mloAddrArray &) override;
-    void captureNativeEvent(int, void *);
+    void captureNativeEvent(int, void *,
+        const NativePowerTrace::PowerIngressContext * = nullptr);
     void captureNativeAuthorization(bool);
     void captureNativeTick(uint32_t);
     bool stopNative();

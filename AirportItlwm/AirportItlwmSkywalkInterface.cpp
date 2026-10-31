@@ -1587,6 +1587,16 @@ IOReturn AirportItlwmSkywalkInterface::applyNativeAddressGated(const void *data,
     auto ic = fHalService->get80211Controller();
     const bool unchanged = memcmp(address, ic->ic_myaddr, 6) == 0;
     const bool restart = (ic->ic_if.if_flags & (IFF_UP | IFF_RUNNING)) != 0;
+    uint64_t addressRestartNotificationId = 0;
+    auto finishAddressError = [&](IOReturn error) {
+        if (addressRestartNotificationId) {
+            instance->cancelNativeAddressRestartNotification(
+                addressRestartNotificationId);
+            addressRestartNotificationId = 0;
+            if (nativeIngress) (void)nativeIngress->signal(9, 0);
+        }
+        return trace.finish(error);
+    };
     if (!unchanged) {
         // The power action may have yielded this same workloop gate to a
         // bounded Busy retry. Do not let a MAC change re-enable the radio after
@@ -1597,6 +1607,17 @@ IOReturn AirportItlwmSkywalkInterface::applyNativeAddressGated(const void *data,
         if (((ic->ic_if.if_flags & IFF_UP) && !(ic->ic_if.if_flags & IFF_RUNNING)) ||
             nativeBackend->joining() || nativeBackend->changingAddress()) return trace.finish(kIOReturnBusy);
         if (!ic->ic_tahoe_scan_state) return trace.finish(kIOReturnUnsupported);
+        if (restart) {
+            // Unsupported HALs fail open: they still perform the real address
+            // restart, but cannot opt into notification coalescing without a
+            // reliable fault serial.
+            const IOReturn beginResult =
+                instance->beginNativeAddressRestartNotification(
+                    &addressRestartNotificationId);
+            if (beginResult != kIOReturnSuccess &&
+                beginResult != kIOReturnUnsupported)
+                return trace.finish(beginResult);
+        }
         addressQuarantined = true;
         setProperty("NativeAddressQuarantined", kOSBooleanTrue);
         nativeBackend->beginAddressChange();
@@ -1614,13 +1635,13 @@ IOReturn AirportItlwmSkywalkInterface::applyNativeAddressGated(const void *data,
                 nativeBackend->cancelAddressChange();
                 addressQuarantined = false;
                 setProperty("NativeAddressQuarantined", kOSBooleanFalse);
-                return trace.finish(result);
+                return finishAddressError(result);
             }
-            if (result != kIOReturnSuccess) return trace.finish(result);
+            if (result != kIOReturnSuccess) return finishAddressError(result);
         }
         if ((ic->ic_if.if_flags & (IFF_UP | IFF_RUNNING)) ||
             ic->ic_tahoe_scan_state(ic) != ITL_TAHOE_SCAN_STOPPED)
-            return trace.finish(kIOReturnNotReady);
+            return finishAddressError(kIOReturnNotReady);
         nativeBackend->addressHardwareStopped();
     } else {
         addressQuarantined = true;
@@ -1630,11 +1651,14 @@ IOReturn AirportItlwmSkywalkInterface::applyNativeAddressGated(const void *data,
     // remains quarantined, with no fallback to the permanent address.
     setProperty("NativeAddressStage", 3U, 32);
     if (ifnet_set_lladdr(instance->bsdInterface->getIfnet(), address, 6))
-        return trace.finish(kIOReturnError);
+        return addressRestartNotificationId
+            ? finishAddressError(kIOReturnError) : trace.finish(kIOReturnError);
     if (!instance->bsdInterface->setProperty(kIOMACAddress, address, 6))
-        return trace.finish(kIOReturnNoMemory);
+        return addressRestartNotificationId
+            ? finishAddressError(kIOReturnNoMemory) : trace.finish(kIOReturnNoMemory);
     if (!NativeWifi::updateRegistrationAddress(this, registrationState, address))
-        return trace.finish(kIOReturnError);
+        return addressRestartNotificationId
+            ? finishAddressError(kIOReturnError) : trace.finish(kIOReturnError);
     memcpy(requestedAddress, address, 6);
     addressWasRequested = true;
     trace.record(NativePowerTrace::Phase::kAddressCommit,
@@ -1646,7 +1670,21 @@ IOReturn AirportItlwmSkywalkInterface::applyNativeAddressGated(const void *data,
             trace.record(NativePowerTrace::Phase::kEnableBegin);
             const IOReturn result = fHalService->enable(instance->bsdInterface);
             trace.record(NativePowerTrace::Phase::kEnableEnd, 0, int32_t(result));
-            if (result != kIOReturnSuccess) return trace.finish(result);
+            if (result != kIOReturnSuccess)
+                return addressRestartNotificationId
+                    ? finishAddressError(result) : trace.finish(result);
+            if (addressRestartNotificationId) {
+                const bool notificationArmed =
+                    instance->commitNativeAddressRestartNotification(
+                        addressRestartNotificationId, true, true);
+                addressRestartNotificationId = 0;
+                if (!notificationArmed && nativeIngress)
+                    (void)nativeIngress->signal(9, 0);
+                // The MAC layers and HAL enable have succeeded. If a fault,
+                // epoch change, or lock failure invalidated only the optional
+                // notification token, preserve that real address success and
+                // let the existing tick publish the truthful READY state.
+            }
         }
     }
     addressQuarantined = false;
@@ -1858,7 +1896,9 @@ void AirportItlwmSkywalkInterface::radioLeave(void *context) {
     ic->ic_des_esslen = 0;
     bzero(ic->ic_des_essid, sizeof(ic->ic_des_essid));
 }
-void AirportItlwmSkywalkInterface::captureNativeEvent(int code, void *data) {
+void AirportItlwmSkywalkInterface::captureNativeEvent(
+    int code, void *data,
+    const NativePowerTrace::PowerIngressContext *powerContext) {
     if (!nativeIngress) return;
     auto ic = fHalService->get80211Controller();
     if (code == ITL_TAHOE_EVT_BEACON) {
@@ -1880,6 +1920,12 @@ void AirportItlwmSkywalkInterface::captureNativeEvent(int code, void *data) {
         const auto event = static_cast<const itl_tahoe_scan_event *>(data);
         nativeIngress->signal(code, event ? event->generation : 0, nullptr,
             event ? event->firmware_status : 0);
+    } else if (code == ITL_TAHOE_EVT_DRIVER_READY ||
+               code == ITL_TAHOE_EVT_DRIVER_STOPPED ||
+               code == ITL_TAHOE_EVT_RESET_BEGIN) {
+        // This immutable tuple was captured with the READY/revision update in
+        // eventHandler. Never fill a queued event from the later active txn.
+        nativeIngress->signal(unsigned(code), 0, nullptr, 0, powerContext);
     } else nativeIngress->signal(unsigned(code));
 }
 void AirportItlwmSkywalkInterface::captureNativeAuthorization(bool up) {
@@ -1930,23 +1976,52 @@ void AirportItlwmSkywalkInterface::consumeNative(void *context, const NativeWifi
             backend->observeBeacon(beacon); break;
         }
         case ITL_TAHOE_EVT_DRIVER_READY:
-        case ITL_TAHOE_EVT_DRIVER_STOPPED:
-            backend->driverState(entry.kind == ITL_TAHOE_EVT_DRIVER_READY);
+        case ITL_TAHOE_EVT_DRIVER_STOPPED: {
+            const bool ready = entry.kind == ITL_TAHOE_EVT_DRIVER_READY;
+            const auto decision = self->instance->observeNativeAddressRestartEvent(
+                ready ? NativePowerTrace::AddressRestartEvent::kDriverReady
+                      : NativePowerTrace::AddressRestartEvent::kDriverStopped,
+                entry.powerContext);
+            const bool staleRetiredTransaction =
+                decision == NativePowerTrace::AddressRestartDecision::kStale &&
+                !self->instance->nativeAddressRestartNotification.active();
+            // A READY captured before the current address transaction must not
+            // update Backend when it reaches the gate, even if a fault/OFF/
+            // deadline has since retired that transaction.
+            if (decision != NativePowerTrace::AddressRestartDecision::kStale)
+                backend->driverState(ready);
             // IRQ/task ingress only changed atomics. Publish and notify from
             // this owned, serialized consumer after a real HAL state event.
             self->instance->publishNativePowerState();
             self->instance->wakeNativePowerWaiters();
-            self->instance->postNativePowerChangedIfNeeded();
+            if (decision != NativePowerTrace::AddressRestartDecision::kSuppress &&
+                (decision != NativePowerTrace::AddressRestartDecision::kStale ||
+                 staleRetiredTransaction))
+                self->instance->postNativePowerChangedIfNeeded();
             break;
+        }
         case ITL_TAHOE_EVT_RESET_BEGIN:
-            if (!backend->changingAddress()) backend->driverState(false);
-            self->instance->postNativePowerChangedIfNeeded();
+        {
+            const auto decision = self->instance->observeNativeAddressRestartEvent(
+                NativePowerTrace::AddressRestartEvent::kResetBegin,
+                entry.powerContext);
+            const bool staleRetiredTransaction =
+                decision == NativePowerTrace::AddressRestartDecision::kStale &&
+                !self->instance->nativeAddressRestartNotification.active();
+            if (decision != NativePowerTrace::AddressRestartDecision::kStale &&
+                !backend->changingAddress()) backend->driverState(false);
+            if (decision != NativePowerTrace::AddressRestartDecision::kSuppress &&
+                (decision != NativePowerTrace::AddressRestartDecision::kStale ||
+                 staleRetiredTransaction))
+                self->instance->postNativePowerChangedIfNeeded();
             break;
+        }
         case 9:
             backend->tick(entry.value);
             // A transition remains pending even if its original signal was
             // dropped; this bounded existing tick rechecks the current pair.
-            self->instance->postNativePowerChangedIfNeeded();
+            if (!self->instance->tickNativeAddressRestartNotification())
+                self->instance->postNativePowerChangedIfNeeded();
             break;
         case 10: backend->observeAuthorization(entry.value != 0); break;
         case IEEE80211_EVT_COUNTRY_CODE_UPDATE:

@@ -67,6 +67,9 @@ int main() {
 '''
 
 radio = r'''
+#include "native/iwx_init_dispatch.hpp"
+#include "native/iwx_link_state_trace.hpp"
+#include "native/iwx_output_kick.hpp"
 #include "native/iwx_reset_trace.hpp"
 #include <cassert>
 #include <cstdint>
@@ -83,6 +86,7 @@ radio = r'''
 #define ARRAY_SIZE(a) (sizeof(a)/sizeof((a)[0]))
 #define container_of(p,T,m) reinterpret_cast<T*>(reinterpret_cast<char*>(p)-offsetof(T,m))
 #define SEC_TO_NSEC(n) (n)
+#define recordTxProgressEvent(...) do {} while(0)
 enum { IFF_UP=1,IFF_RUNNING=64,IWX_INVALID_QUEUE=255,
  IEEE80211_M_MONITOR=1,IEEE80211_S_INIT=0,IEEE80211_S_SCAN=1,IEEE80211_S_RUN=2,
  ITL_TAHOE_EVT_DRIVER_READY=6,ITL_TAHOE_EVT_DRIVER_STOPPED=7,ITL_TAHOE_EVT_RESET_BEGIN=8,
@@ -95,16 +99,25 @@ static void IORecursiveLockUnlock(IORecursiveLock *lock) {
  assert(lock); lock->mutex.unlock();
 }
 struct task { unsigned adds=0; };
+struct task_dispatch_context {uint64_t dispatch_id=0;uint32_t driver_generation=0,
+ fault_serial=0,power_epoch=0,power_flags=0,dispatch_flags=0;};
+using TaggedTask=void(*)(void*,const task_dispatch_context*,const task*);
 struct taskq {};
 static taskq testTaskq;
 static taskq *systq=&testTaskq;
 static int task_add(taskq *,task *t) { ++t->adds; return 1; }
+static int task_defer_tagged(taskq*,const task*,TaggedTask,const task_dispatch_context*){return 0;}
+static int task_dispatch_is_current(const task*,uint64_t){return 1;}
+static int taskq_enter_unpaused(taskq *) { return 0; }
+static void taskq_leave(taskq *) {}
+static int taskq_flush_deferred_tagged(taskq *,task *) { return 0; }
 struct _ifnet {void *if_softc=nullptr; unsigned if_flags=0;int if_snd=0;};
 struct Node {void *ni_chan=nullptr;};
 struct ieee80211com {_ifnet ic_if;int ic_opmode=0,ic_state=0;Node *ic_bss=nullptr;void *ic_ibss_chan=nullptr;
  uint32_t ic_tahoe_init_stage=0;int32_t ic_tahoe_init_error=0;};
 struct iwx_softc {ieee80211com sc_ic;struct {int qid=0;} sc_tid_data[4];int sc_generation=0,sc_flags=0;
- struct task init_task,ba_task,mac_ctxt_task,chan_ctxt_task;
+ uint32_t sc_tx_output_epoch=0;uint64_t sc_tx_output_kick_tag=0;
+ taskq*sc_nswq=nullptr;struct task init_task,ba_task,mac_ctxt_task,chan_ctxt_task,sc_native_mcc_task;
  struct {bool sku_cap_11n_enable=false,sku_cap_11ac_enable=false,sku_cap_11ax_enable=false;} sc_nvm;};
 static bool beginScanInstant=false,sleepSetsScan=false;static unsigned sleeps=0;
 static int sleepResult=0;static bool cancelSleep=false;static iwx_softc *sleepOwner=nullptr;
@@ -123,13 +136,24 @@ struct ItlIwx {
  unsigned hwStarts=0,stops=0,stopCalls=0,ready=0,stopped=0;
  IORecursiveLock lifecycleLock;IORecursiveLock *nativeLifecycleLock_=&lifecycleLock;
  uint32_t nativeLifecycleDepth_=0,nativeLifecycleDeferredTasks_=0,nativeLifecycleTearingDown_=0;
- bool tahoeTryLifecycleFence();void tahoeReleaseLifecycleFence();
+ uint32_t nativeFwDiagnosticAliveGeneration_=0,nativeFwDiagnosticTlvGeneration_=0;
+ uint32_t nativePowerFaultSerial_=0,nativeInitTaskFaultSerial_=0;
+ IwxResetTrace::Trace nativeResetTrace_;
+ uint64_t nativePowerRequestState_=0;
+ bool tahoeTryLifecycleFence();bool tahoeReleaseLifecycleFence(bool flushDeferredTasks=true);
  void tahoeDeferLifecycleTasks(uint32_t);void tahoeFlushLifecycleTasks();
  struct task tahoe_scan_abort_task_;
  ItlIwx(){com.sc_ic.ic_if.if_softc=&com;}
  bool nativeP2pResourcesRetained(){return p2pRetained;}
- void tahoeRecordInitTaskTrigger(IwxResetTrace::InitTaskTrigger) {}
- void tahoeRecordReset(IwxResetTrace::ResetReason,iwx_softc*) {}
+ uint32_t tahoeRecordInitTaskTrigger(IwxResetTrace::InitTaskTrigger);
+ int tahoeQueueInitTask(iwx_softc*sc){return task_add(systq,&sc->init_task);}
+ uint32_t tahoeRecordReset(IwxResetTrace::ResetReason,iwx_softc*) {return 1;}
+ void tahoeCapturePreResetFirmwareErrorSnapshot(iwx_softc*,IwxResetTrace::ResetReason,uint32_t){}
+ void tahoeRecordLinkTransition(iwx_softc*,IwxLinkStateTrace::Event,uint32_t,uint32_t,
+  int,int,uint32_t=UINT32_MAX,bool=false){}
+ bool tahoePublishFirmwareDiagnostics(void*,iwx_softc*,bool=false){return true;}
+ void tahoeMccScheduleIfReady(iwx_softc*){}
+ void *getController(){return nullptr;}
  int iwx_init_hw(iwx_softc *sc){++hwStarts;if(cancelHardware)++sc->sc_generation;return hwError;}
  void iwx_stop_device(iwx_softc*){++stops;}
  void iwx_setup_ht_rates(iwx_softc*){}void iwx_setup_vht_rates(iwx_softc*){}
@@ -146,7 +170,10 @@ struct ItlIwx {
  }
  static uint32_t tahoeScanState(ieee80211com*){return 0;}
  int iwx_init(_ifnet*);static void iwx_init_task(void*);
+ static void iwx_init_task_tagged(void*,const task_dispatch_context*,const task*);
+ static void iwx_init_task_execute(void*,const task_dispatch_context*,const task*);
 };
+void ItlIwx::iwx_init_task_tagged(void*,const task_dispatch_context*,const task*){}
 '''
 radio_main = r'''
 int main() {
@@ -206,9 +233,10 @@ lifecycle_guard = extract_block(driver_source, 'class TahoeLifecycleGuard')
 lifecycle_methods = '\n'.join(extract('itlwm/hal_iwx/ItlIwx.cpp', marker)
     for marker in (
         'bool ItlIwx::tahoeTryLifecycleFence()',
-        'void ItlIwx::tahoeReleaseLifecycleFence()',
+        'bool ItlIwx::tahoeReleaseLifecycleFence(bool flushDeferredTasks)',
         'void ItlIwx::tahoeDeferLifecycleTasks(uint32_t taskBits)',
-        'void ItlIwx::tahoeFlushLifecycleTasks()'))
+        'void ItlIwx::tahoeFlushLifecycleTasks()',
+        'uint32_t ItlIwx::tahoeRecordInitTaskTrigger('))
 radio_stop_guard = r'''
 int ItlIwx::iwx_stop(_ifnet *ifp,IwxResetTrace::ResetReason) {
  TahoeLifecycleGuard lifecycle(this);
@@ -274,6 +302,7 @@ cases = [
         lifecycle_methods + '\n' + radio_stop_guard +
         extract('itlwm/hal_iwx/ItlIwx.cpp', 'int ItlIwx::\niwx_init(') +
         extract('itlwm/hal_iwx/ItlIwx.cpp', 'void ItlIwx::\niwx_init_task(') +
+        extract('itlwm/hal_iwx/ItlIwx.cpp', 'void ItlIwx::\niwx_init_task_execute(') +
         radio_main),
 ]
 with tempfile.TemporaryDirectory(prefix='intel-native-recovery-') as directory:

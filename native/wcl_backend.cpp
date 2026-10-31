@@ -733,8 +733,10 @@ bool Ingress::initialize(IOCommandGate *gate, Dispatch fn, void *context) {
     gate_ = gate; gate_->retain(); dispatch_ = fn; context_ = context;
     return true;
 }
-bool Ingress::signal(unsigned kind, uint32_t status, const uint8_t *address, uint32_t detail) {
-    return append(kind, status, address, nullptr, detail);
+bool Ingress::signal(unsigned kind, uint32_t status, const uint8_t *address,
+                     uint32_t detail,
+                     const NativePowerTrace::PowerIngressContext *powerContext) {
+    return append(kind, status, address, nullptr, detail, powerContext);
 }
 bool Ingress::receive(const Beacon &beacon) {
     if (!beacon.frame || beacon.frameLength < 36 || beacon.frameLength > 2048 ||
@@ -743,7 +745,9 @@ bool Ingress::receive(const Beacon &beacon) {
         !validateIEs(beacon.ies, beacon.ieLength)) return false;
     return append(5, 0, beacon.bssid, &beacon);
 }
-bool Ingress::append(unsigned kind, uint32_t status, const uint8_t *address, const Beacon *b, uint32_t detail) {
+bool Ingress::append(unsigned kind, uint32_t status, const uint8_t *address,
+                     const Beacon *b, uint32_t detail,
+                     const NativePowerTrace::PowerIngressContext *powerContext) {
     if (!lock_) return false;
     const IOInterruptState irq = IOSimpleLockLockDisableInterrupt(lock_);
     // RX bursts cannot consume the eight slots reserved for control events.
@@ -753,6 +757,8 @@ bool Ingress::append(unsigned kind, uint32_t status, const uint8_t *address, con
     }
     IngressEntry &entry = entries_[(first_ + count_) % Capacity];
     entry.kind = kind; entry.value = status; entry.detail = detail; entry.frameLength = 0;
+    entry.powerContext = powerContext ? *powerContext
+        : NativePowerTrace::PowerIngressContext {};
     for (unsigned i = 0; i < 6; ++i) entry.bssid[i] = address ? address[i] : 0;
     if (b) {
         entry.ssidLength = uint8_t(b->ssidLength); entry.channel = b->channel;

@@ -4,6 +4,7 @@
 
 #if defined(KERNEL) && defined(AIRPORT_TAHOE)
 #include "wcl_backend.hpp"
+#include "native_power_trace.hpp"
 #include <IOKit/IOCommandGate.h>
 #include <IOKit/IOWorkLoop.h>
 #include <IOKit/IOLocks.h>
@@ -15,6 +16,7 @@ namespace NativeWifi {
 struct IngressEntry {
     unsigned kind;
     uint32_t value, detail;
+    NativePowerTrace::PowerIngressContext powerContext {};
     uint8_t bssid[6];
     uint8_t ssid[32], ssidLength, channel;
     uint16_t channelSpec, interval, capability, frameLength;
@@ -26,7 +28,9 @@ class Ingress {
 public:
     using Dispatch = void (*)(void *, const IngressEntry &);
     bool initialize(IOCommandGate *, Dispatch, void *);
-    bool signal(unsigned, uint32_t = 0, const uint8_t * = nullptr, uint32_t = 0);
+    bool signal(unsigned, uint32_t = 0, const uint8_t * = nullptr,
+                uint32_t = 0,
+                const NativePowerTrace::PowerIngressContext * = nullptr);
     bool receive(const Beacon &);
     // Never call while holding the driver gate. A false return leaves the
     // allocation resident and closing; it must not be freed or rebound.
@@ -36,7 +40,9 @@ public:
 private:
     static void run(thread_call_param_t, thread_call_param_t);
     static IOReturn dispatchGated(OSObject *, void *, void *, void *, void *);
-    bool append(unsigned, uint32_t, const uint8_t *, const Beacon *, uint32_t = 0);
+    bool append(unsigned, uint32_t, const uint8_t *, const Beacon *,
+                uint32_t = 0,
+                const NativePowerTrace::PowerIngressContext * = nullptr);
     IOSimpleLock *lock_ {};
     IOCommandGate *gate_ {};
     thread_call_t call_ {};

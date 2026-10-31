@@ -17,13 +17,17 @@ shim=r'''
 #include <map>
 #include <string>
 #include <vector>
+#include "native/native_power_trace.hpp"
 using IOReturn=int32_t;using UInt32=uint32_t;
 constexpr IOReturn kIOReturnSuccess=0,kIOReturnNotReady=-1,kIOReturnNotPermitted=-2,
  kIOReturnBadArgument=-3,kIOReturnBusy=-4,kIOReturnUnsupported=-5,
- kIOReturnError=-6,kIOReturnNoMemory=-7;
+ kIOReturnError=-6,kIOReturnNoMemory=-7,kIOReturnAborted=-8;
 constexpr unsigned IFF_UP=1,IFF_RUNNING=64,ITL_TAHOE_SCAN_STOPPED=4;
 constexpr bool kOSBooleanTrue=true,kOSBooleanFalse=false;
 static const char*kIOMACAddress="IOMACAddress";
+struct NativeControlTraceScope{NativeControlTraceScope(void*,NativePowerTrace::Operation){}
+ void record(NativePowerTrace::Phase,uint32_t=0,int32_t=0){}
+ IOReturn finish(IOReturn result){return result;}};
 struct Queue{bool inside=true;bool inGate(){return inside;}};
 struct Gate{Queue*q;Queue*getWorkLoop(){return q;}};static Gate*_fCommandGate;
 struct IC;
@@ -44,7 +48,20 @@ static int ifnet_set_lladdr(void*ptr,const void*p,unsigned n){auto b=static_cast
  if(memcmp(p,b->ic->ic_myaddr,6))assert(!b->ic->ic_if.if_flags);
  if(b->lladdrFail)return b->lladdrFail;memcpy(b->address,p,6);return 0;}
 static void if_setlladdr(Ifnet*ifp,const void*p){assert(!ifp->if_flags);memcpy(ifp->owner->ic_myaddr,p,6);}
-struct Controller{BSD*bsdInterface;bool requested=true;bool nativePowerRequested()const{return requested;}};
+struct Controller{BSD*bsdInterface;bool requested=true,powerReady=true,
+ serialSupported=true,commitFail=false;unsigned begins=0,commits=0,cancels=0;
+ uint64_t nextToken=0,activeToken=0;
+ bool nativePowerRequested()const{return requested;}
+ IOReturn beginNativeAddressRestartNotification(uint64_t*out){++begins;*out=0;
+  if(!serialSupported)return kIOReturnUnsupported;
+  if(!requested||!powerReady)return kIOReturnNotReady;
+  if(activeToken)return kIOReturnBusy;*out=++nextToken;activeToken=*out;return 0;}
+ bool commitNativeAddressRestartNotification(uint64_t id,bool committed,bool enabled){
+  ++commits;if(id!=activeToken)return false;activeToken=0;
+  return !commitFail&&committed&&enabled;}
+ void cancelNativeAddressRestartNotification(uint64_t id){++cancels;
+  if(!id||activeToken==id)activeToken=0;}
+};
 struct HAL{IC ic;unsigned disables=0,enables=0;IOReturn disableResult=0,enableResult=0;
  bool stopIncomplete=false;std::function<void()> onEnable;
  IC*get80211Controller(){return &ic;}
@@ -55,8 +72,10 @@ struct HAL{IC ic;unsigned disables=0,enables=0;IOReturn disableResult=0,enableRe
 struct Registration{uint8_t address[6]{};bool fail=false;};
 namespace NativeWifi{static bool updateRegistrationAddress(void*,Registration&r,const uint8_t*p){
  if(r.fail)return false;memcpy(r.address,p,6);return true;}}
+struct FakeIngress{unsigned signals=0;bool signal(unsigned,uint32_t=0){++signals;return true;}};
 struct AirportItlwmSkywalkInterface{
  Backend*nativeBackend;Controller*instance;HAL*fHalService;
+ FakeIngress*nativeIngress=nullptr;
  bool addressQuarantined=false,addressWasRequested=false;
  uint8_t requestedAddress[6]{},permanentAddress[6]{0,1,2,3,4,5};Registration registrationState;
  std::map<std::string,uint32_t>meta;
@@ -64,9 +83,9 @@ struct AirportItlwmSkywalkInterface{
  void setProperty(const char*k,bool v){meta[k]=v;}
  IOReturn applyNativeAddressGated(const void*,UInt32);
 };
-struct Fixture{Queue q;Gate gate{&q};Backend backend;HAL hal;BSD bsd;Controller controller;AirportItlwmSkywalkInterface a;
+struct Fixture{Queue q;Gate gate{&q};Backend backend;HAL hal;BSD bsd;Controller controller;FakeIngress ingress;AirportItlwmSkywalkInterface a;
  uint8_t privateMAC[6]{2,3,4,5,6,7};
- Fixture():bsd{&hal.ic},controller{&bsd},a{&backend,&controller,&hal}{_fCommandGate=&gate;
+ Fixture():bsd{&hal.ic},controller{&bsd},a{&backend,&controller,&hal}{_fCommandGate=&gate;a.nativeIngress=&ingress;
   uint8_t old[6]{2,1,1,1,1,1};memcpy(hal.ic.ic_myaddr,old,6);memcpy(bsd.address,old,6);
   memcpy(bsd.property,old,6);memcpy(a.registrationState.address,old,6);
   hal.ic.ic_if.if_flags=IFF_UP|IFF_RUNNING;hal.ic.phase=1;
@@ -79,6 +98,7 @@ main=r'''
 int main(){unsigned cases=0;
  {Fixture f;assert(f.a.applyNativeAddressGated(f.privateMAC,6)==0);
   assert(f.hal.disables==1&&f.hal.enables==1&&f.coherent(f.privateMAC));
+  assert(f.controller.begins==1&&f.controller.commits==1&&!f.controller.cancels);
   assert(!f.a.addressQuarantined&&f.a.addressWasRequested&&!f.backend.scanning);++cases;}
  {Fixture f;auto before=f.hal.disables;uint8_t old[6];memcpy(old,f.hal.ic.ic_myaddr,6);
   assert(f.a.applyNativeAddressGated(old,6)==0&&f.hal.disables==before&&!f.hal.enables);
@@ -107,6 +127,7 @@ int main(){unsigned cases=0;
   if(failure==4)f.a.registrationState.fail=true;
   if(failure==5)f.hal.enableResult=-21;
   assert(f.a.applyNativeAddressGated(f.privateMAC,6)!=0&&f.a.addressQuarantined);
+  assert(f.controller.begins==1&&f.controller.cancels==1&&!f.controller.activeToken);
   assert(f.a.applyNativeAddressGated(f.privateMAC,6)==kIOReturnNotPermitted);
   if(failure<5)assert(!f.hal.enables);++cases;}
  {Fixture f;f.hal.disableResult=kIOReturnBusy;
@@ -122,12 +143,19 @@ int main(){unsigned cases=0;
   assert(f.a.applyNativeAddressGated(f.privateMAC,5)==kIOReturnBadArgument&&!f.hal.disables);++cases;}
  {Fixture f;memcpy(f.privateMAC,f.a.permanentAddress,6);
   assert(f.a.applyNativeAddressGated(f.privateMAC,6)==0&&f.coherent(f.a.permanentAddress));++cases;}
- assert(cases==18);
+ {Fixture f;f.controller.serialSupported=false;
+  assert(f.a.applyNativeAddressGated(f.privateMAC,6)==0&&f.coherent(f.privateMAC));
+  assert(f.controller.begins==1&&!f.controller.commits&&!f.controller.cancels);++cases;}
+ {Fixture f;f.controller.commitFail=true;
+  assert(f.a.applyNativeAddressGated(f.privateMAC,6)==0&&f.coherent(f.privateMAC));
+  assert(!f.a.addressQuarantined&&f.controller.begins==1&&f.controller.commits==1&&
+   !f.controller.activeToken&&f.ingress.signals==1);++cases;}
+ assert(cases==20);
 }
 '''
 with tempfile.TemporaryDirectory(prefix='native-address-quiesce-') as directory:
     p=Path(directory);cpp=p/'case.cpp';cpp.write_text(shim+body+main);exe=p/'case'
     subprocess.run(['xcrun','clang++','-std=c++14','-O1','-fsanitize=address,undefined',
-        '-fno-omit-frame-pointer',str(cpp),'-o',str(exe)],check=True)
+        '-fno-omit-frame-pointer','-I',str(root),str(cpp),'-o',str(exe)],check=True)
     subprocess.run([str(exe)],check=True)
-print('PASS: 18 actual address-quiesce scenarios; requested-power guard, powered-off commit, all address layers and failures')
+print('PASS: 20 actual address-quiesce scenarios; requested-power guard, powered-off commit, notification fail-open and all address layers/failures')

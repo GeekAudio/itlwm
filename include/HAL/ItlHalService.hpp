@@ -53,6 +53,9 @@ public:
     /* Optional Tahoe radio-request epoch, consumed by HAL lifecycle work. */
     virtual void setNativePowerRequestState(uint32_t, bool) {}
 
+    /* Optional IRQ-safe serial used to bind an address restart to its epoch. */
+    virtual bool readNativePowerFaultSerial(uint32_t *) const { return false; }
+
     /* Optional Tahoe native P2P probe hooks; other HALs remain inert. */
     virtual void nativeP2pTick() {}
     virtual bool nativeP2pBusy() { return false; }
