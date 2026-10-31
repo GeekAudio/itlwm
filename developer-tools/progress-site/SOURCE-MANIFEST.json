@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "14c1f7adee5580190be300d6a347810c79932f20712ec973440433b0376f0af8"
+      "sha256": "482b3cafa1ee1c671bec03fa42b3b4f254804f0dcb5f68737a4f32c3bdad3a63"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "bc63d39dc102b6e2deab93dac892ace7622dbae14a73af5e9ae8546a35dea00a"
+      "sha256": "fa58c3c02476c5c252c6f157edad7f725d35ef1158b3b718e46e50fc6d192dab"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -30,7 +30,7 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "60709797c3d131cc4be92a08595396e9e8c0efd007f8a7011f4a0a606dc3012a"
+      "sha256": "1f838a0600e1a862e3d414058399bd49a8f84ff6ca6dc5f09f71d34e294c8539"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
@@ -50,8 +50,8 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-01T00:11:26.840056+08:00",
-  "runtime_scope": "Test098本轮：6项通过、4项部分、0项判定失败、15项受配置限制、15项未测试。联网基线通过；手动开关后恢复。独立密钥更新窗口随后出现约6秒链路中断并恢复，同期是否有用户操作待确认，稳定性不判通过。149接收快照及时发布，但仅收到Beacon管理帧，awdl0数据回包和AirDrop仍未通过。",
+  "updated_at": "2026-11-01T00:15:52.557929+08:00",
+  "runtime_scope": "Test098本轮：6项通过、3项部分、1项未通过、15项受配置限制、15项未测试。联网基线通过；手动开关后恢复。独立密钥更新窗口随后出现约6秒链路中断并恢复，用户确认期间没有操作，本轮密钥更新稳定性未通过。149接收快照及时发布，但仅收到Beacon管理帧，awdl0数据回包和AirDrop仍未通过。",
   "running_candidate": "25G332-Test098",
   "next_candidate": null
 }
