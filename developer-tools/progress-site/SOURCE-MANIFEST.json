@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "2568723f735b33d78c6b4ceb7a9cf9febf8062d70905f932f9d9c0e52b0739f4"
+      "sha256": "c7337f9405117f4d0fd85b0b08f09349f7e8c8bdec83e3351c415718b5765c48"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "b3b8d5b6e5c9d14b466f6a8b884a1e4abf4aa8d33cc86a8c267c91f944b686d3"
+      "sha256": "989ebf5f3227e03560e69a2bc9991cfdd7e5969b142254aed9b7d6d4a8841913"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-31T13:41:43.459400+08:00",
-  "runtime_scope": "Test095 boot: 6 passed, 3 partial, 30 uncovered, 1 failed. Confirmed unattended Wi-Fi disconnect; separate post-toggle and post-RX windows passed. Local ROC START/END and one channel-149 beacon observed; no AWDL data, native socket reply or AirDrop delivery. Late completion telemetry is not target-window packet proof. Group2 1024-slot observation fix committed with focused offline tests; no new kext build or EFI write."
+  "updated_at": "2026-10-31T14:28:34.719216+08:00",
+  "runtime_scope": "Test095 runtime retained: 6 passed, 3 partial, 30 uncovered, 1 failed. Two unattended reason16 disconnects occurred about one hour apart near GTK updates; Group2 transmit completion remains unknown. Test096 deployed with verified full EFI backup, awaiting reboot. New power stop serialization, bounded transition reporting, 1024-slot TX tracking, and same-ROC RX correlation passed offline review/build checks. No Test096 runtime or AirDrop delivery claim."
 }
