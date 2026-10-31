@@ -32,6 +32,7 @@ methods=[function(s) for s in [
     'void AirportItlwm::publishNativePowerState(',
     'void AirportItlwm::noteNativeAddressRestartOutcome(',
     'void AirportItlwm::publishNativeAddressRestartMetrics(',
+    'IOReturn AirportItlwm::nativePowerStopAction(',
     'IOReturn AirportItlwm::nativePowerAction(',
     'IOReturn AirportItlwm::waitForNativePower(',
     'IOReturn AirportItlwm::disableAdapterWithRetry(',
@@ -50,11 +51,26 @@ assert publish_power_source.index('hal->retain()') < \
        publish_power_source.index('IOSimpleLockUnlockEnableInterrupt(stateLock, irq)') < \
        publish_power_source.index('hal->release()')
 stop_source=function('void AirportItlwm::stop(IOService *provider)')
+stop_latch=stop_source.index('__atomic_store_n(&nativePowerStopping, true, __ATOMIC_RELEASE);')
 stop_barrier=stop_source.index('->stopNative()')
-stop_requested_off=stop_source.index('updateNativePowerFlags(1U, 0);')
-stop_epoch_off=stop_source.index('advanceNativePowerEpoch(false);')
+stop_gate=stop_source.index('nativePowerStopAction, nullptr')
 stop_disable=stop_source.index('disableAdapter(bsdInterface);')
-assert stop_barrier < stop_requested_off < stop_epoch_off < stop_disable
+assert stop_latch < stop_barrier < stop_gate < stop_disable
+assert 'advanceNativePowerEpoch(false);' not in stop_source
+assert stop_source.count('disableAdapter(bsdInterface);') == 1
+start_source=function('bool AirportItlwm::start(IOService *provider)')
+assert '__atomic_store_n(&nativePowerStopping, false, __ATOMIC_RELEASE);' in start_source
+stop_action_source=function('IOReturn AirportItlwm::nativePowerStopAction(')
+assert stop_action_source.index('updateNativePowerFlags(1U, 0);') < \
+       stop_action_source.index('advanceNativePowerEpoch(false);') < \
+       stop_action_source.index('wakeNativePowerWaiters();')
+assert 'disableAdapter(' not in stop_action_source
+power_action_source=function('IOReturn AirportItlwm::nativePowerAction(')
+assert power_action_source.index('nativePowerStopping') < \
+       power_action_source.index('kNativeActionBegin')
+wait_power_source=function('IOReturn AirportItlwm::waitForNativePower(')
+assert wait_power_source.index('nativePowerStopping') < \
+       wait_power_source.index('kIOReturnAborted')
 shim=r'''
 #include <cstdint>
 #include <cstring>
@@ -206,7 +222,7 @@ static Gate*_fCommandGate=nullptr;
 struct AirportItlwm:IO80211Controller {
  HAL*fHalService=nullptr;IONetworkInterface*bsdInterface=nullptr;NativeIF*fNetIf=nullptr;Timer*watchdogTimer=nullptr;
  uint8_t power_state=0;uint32_t pmPowerState=kPowerStateOn;
- bool nativeActivationAttempted=false,awdlSyncEnable=false;
+ bool nativeActivationAttempted=false,awdlSyncEnable=false,nativePowerStopping=false;
  uint8_t geo_location_cc[2] {};
  uint32_t nativePowerFlags=0,nativePowerGetCount=0,nativePowerSetCount=0,
  nativePowerLastResult=uint32_t(kIOReturnNotReady),nativePowerLastEvent=0,
@@ -253,6 +269,7 @@ struct AirportItlwm:IO80211Controller {
  void publishNativePowerTrace();bool postNativePowerChangedIfNeeded();void publishNativePowerState();
  IOReturn waitForNativePower(uint32_t,uint32_t);void wakeNativePowerWaiters();
  IOReturn disableAdapterWithRetry(uint32_t,uint32_t);
+ static IOReturn nativePowerStopAction(OSObject*,void*,void*,void*,void*);
  static IOReturn nativePowerAction(OSObject*,void*,void*,void*,void*);
  IOReturn enable(IO80211SkywalkInterface*);
  IOReturn enableAdapter(IONetworkInterface*);IOReturn disableAdapter(IONetworkInterface*);
@@ -389,6 +406,28 @@ int main(){unsigned scenarios=0;
  if(f.gate.sleeps==1){f.a.observeNativePowerEvent(7);assert(f.hal.ic.ic_if.if_flags==IFF_UP);}
  else f.ready();};
  assert(f.a.setPOWER(nullptr,&p)==0&&f.gate.sleeps==2&&f.hal.enabled==1);++scenarios;}
+ {Fixture f;auto on=f.request(1);bool stopStarted=false;
+ f.gate.onSleep=[&]{
+  assert(!f.q.gated);
+  if(stopStarted)return;
+  stopStarted=true;
+  // Model stop() publishing its admission latch while the original On is
+  // asleep with the command gate yielded, then run its real terminal action.
+  __atomic_store_n(&f.a.nativePowerStopping,true,__ATOMIC_RELEASE);
+  assert(f.a.setPOWER(nullptr,&on)==kIOReturnNotReady);
+  assert(f.gate.runAction(AirportItlwm::nativePowerStopAction,nullptr)==
+   kIOReturnSuccess);
+  assert(f.a.nativePowerEpoch==2&&f.a.nativePowerFlags==0&&
+   !f.a.nativePowerOffPending&&f.gate.wakes==1);
+ };
+ assert(f.a.setPOWER(nullptr,&on)==kIOReturnAborted);
+ assert(stopStarted&&f.a.nativePowerStopping&&f.a.nativePowerFlags==0&&
+  f.a.nativePowerEpoch==2&&f.state()==0&&f.hal.enabled==1&&f.hal.disabled==0);
+ // The gate action publishes policy only; the service stop owns one later
+ // hardware disable after ingress has drained.
+ assert(f.a.setPOWER(nullptr,&on)==kIOReturnNotReady&&f.hal.enabled==1);
+ assert(f.a.disableAdapter(&f.bsd)==kIOReturnSuccess&&f.hal.disabled==1);
+ ++scenarios;}
  {Fixture f;auto p=f.request(1);f.gate.onSleep=[&]{f.hal.ic.ic_if.if_flags=0;f.a.observeNativePowerEvent(7);};
  assert(f.a.setPOWER(nullptr,&p)==kIOReturnError&&f.state()==0);++scenarios;}
  {Fixture f;auto p=f.request(1);f.gate.sleepResult=THREAD_TIMED_OUT;f.gate.onSleep=[]{};

@@ -273,6 +273,10 @@ public:
     bool nativeActivationAttempted {false};
     // Atomic bit0=requested On, bit1=real READY; updated as one word.
     uint32_t nativePowerFlags {0};
+    // Set before stop drains native ingress. It rejects new SET_POWER actions;
+    // the terminal Off policy/epoch transition is still serialized by the
+    // controller command gate after that drain completes.
+    bool nativePowerStopping {false};
     uint32_t nativePowerGetCount {0};
     uint32_t nativePowerSetCount {0};
     uint32_t nativePowerLastResult {uint32_t(kIOReturnNotReady)};
@@ -312,6 +316,7 @@ public:
     IOReturn disableAdapterWithRetry(uint32_t, uint32_t traceCallId);
     void wakeNativePowerWaiters();
     static IOReturn nativePowerAction(OSObject *, void *, void *, void *, void *);
+    static IOReturn nativePowerStopAction(OSObject *, void *, void *, void *, void *);
     void publishNativePowerState();
     uint32_t observeNativePowerEvent(int,
         NativePowerTrace::PowerIngressContext *context = nullptr);

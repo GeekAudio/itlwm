@@ -514,6 +514,9 @@ bool AirportItlwm::start(IOService *provider)
 {
     XYLog("%s\n", __PRETTY_FUNCTION__);
 #ifdef AIRPORT_TAHOE
+    // A successfully stopped controller may be matched again by the service
+    // plane. Each new start owns a fresh power-stop lifecycle.
+    __atomic_store_n(&nativePowerStopping, false, __ATOMIC_RELEASE);
     nativeStartupResult(this, provider, "start-entry", true);
     if (!nativeStartupResult(this, provider, "runtime", NativeWifi::verifyTahoeRuntime())) return false;
 #endif
@@ -790,6 +793,11 @@ bool AirportItlwm::start(IOService *provider)
 
 void AirportItlwm::stop(IOService *provider)
 {
+#ifdef AIRPORT_TAHOE
+    // Close admission before any stop/drain work can yield. A request already
+    // inside the command gate is retired by the terminal action below.
+    __atomic_store_n(&nativePowerStopping, true, __ATOMIC_RELEASE);
+#endif
 #if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
     // The HAL uses this same command gate for the final address check and
     // Action-frame doorbell. Publish the close bit here before the off-gate
@@ -819,11 +827,20 @@ void AirportItlwm::stop(IOService *provider)
         XYLog("Native ingress closing; stop cannot wait in radio gate\n");
         return;
     }
-    // A true service stop is terminal for the current radio request. Clear the
-    // user's On intent and advance its epoch so an in-flight address restart
-    // cannot keep GET_POWER reporting On while teardown proceeds.
-    updateNativePowerFlags(1U, 0);
-    (void)advanceNativePowerEpoch(false);
+    // The terminal policy/epoch writer must share the SET_POWER command gate.
+    // Keep the ingress drain above outside the radio gate so it cannot wait
+    // while blocking the HAL producer it is trying to retire.
+    IOReturn terminalPowerResult = kIOReturnNotReady;
+    if (_fWorkloop && _fWorkloop->inGate())
+        terminalPowerResult = nativePowerStopAction(this, nullptr, nullptr,
+                                                     nullptr, nullptr);
+    else if (_fCommandGate)
+        terminalPowerResult = _fCommandGate->runAction(
+            nativePowerStopAction, nullptr);
+    if (terminalPowerResult != kIOReturnSuccess) {
+        XYLog("Native power stop gate unavailable; owner retained\n");
+        return;
+    }
 #endif
     super::stop(provider);
     disableAdapter(bsdInterface);
@@ -1982,6 +1999,24 @@ void AirportItlwm::publishNativePowerState()
     publishNativePowerTrace();
 }
 
+IOReturn AirportItlwm::nativePowerStopAction(OSObject *owner, void *,
+    void *, void *, void *)
+{
+    auto self = OSDynamicCast(AirportItlwm, owner);
+    if (!self || !_fWorkloop || !_fWorkloop->inGate() ||
+        !self->fHalService ||
+        !__atomic_load_n(&self->nativePowerStopping, __ATOMIC_ACQUIRE))
+        return kIOReturnNotReady;
+
+    // This action is the final requested-state/epoch writer for service stop.
+    // Hardware disable remains in stop() after the gate action, exactly once.
+    self->updateNativePowerFlags(1U, 0);
+    (void)self->advanceNativePowerEpoch(false);
+    __atomic_store_n(&self->nativePowerOffPending, false, __ATOMIC_RELEASE);
+    self->wakeNativePowerWaiters();
+    return kIOReturnSuccess;
+}
+
 IOReturn AirportItlwm::nativePowerAction(OSObject *owner, void *argument,
     void *, void *, void *)
 {
@@ -1992,6 +2027,8 @@ IOReturn AirportItlwm::nativePowerAction(OSObject *owner, void *argument,
         _fWorkloop->onThread() || !self->fHalService || !self->bsdInterface ||
         !self->fNetIf || self->fNetIf->getControllerWorkQueue() != _fWorkloop ||
         !self->watchdogTimer) return kIOReturnNotReady;
+    if (__atomic_load_n(&self->nativePowerStopping, __ATOMIC_ACQUIRE))
+        return kIOReturnNotReady;
     const uint32_t traceCallId = context->traceCallId;
     self->recordNativeControlTrace(traceCallId,
         NativePowerTrace::Operation::kPowerSet,
@@ -2201,7 +2238,8 @@ IOReturn AirportItlwm::waitForNativePower(uint32_t epoch, uint32_t traceCallId)
         NativePowerTrace::Phase::kWaitBegin, 12000, 0);
     for (;;) {
         const uint32_t policy = __atomic_load_n(&nativePowerFlags, __ATOMIC_ACQUIRE);
-        if (epoch != __atomic_load_n(&nativePowerEpoch, __ATOMIC_ACQUIRE) ||
+        if (__atomic_load_n(&nativePowerStopping, __ATOMIC_ACQUIRE) ||
+            epoch != __atomic_load_n(&nativePowerEpoch, __ATOMIC_ACQUIRE) ||
             !(policy & 1U)) {
             recordNativeControlTrace(traceCallId,
                 NativePowerTrace::Operation::kPowerSet,
