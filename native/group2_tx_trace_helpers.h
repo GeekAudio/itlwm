@@ -205,6 +205,18 @@ static inline void iwx_group2_tx_trace_unlock(struct IwxGroup2TxTrace *trace)
     __atomic_store_n(&trace->writer, 0u, __ATOMIC_RELEASE);
 }
 
+static inline void iwx_group2_tx_trace_note_drop(
+    struct IwxGroup2TxTrace *trace)
+{
+    if (trace == NULL)
+        return;
+    uint32_t value = __atomic_load_n(&trace->dropped_count, __ATOMIC_RELAXED);
+    while (value != UINT32_MAX &&
+           !__atomic_compare_exchange_n(&trace->dropped_count, &value,
+               value + 1u, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+    }
+}
+
 static inline void iwx_group2_tx_trace_note_lost(struct IwxGroup2TxTrace *trace)
 {
     if (trace == NULL)
@@ -215,11 +227,7 @@ static inline void iwx_group2_tx_trace_note_lost(struct IwxGroup2TxTrace *trace)
            !__atomic_compare_exchange_n(&trace->identity_epoch, &epoch,
                epoch + 1u, 0, __ATOMIC_RELEASE, __ATOMIC_RELAXED)) {
     }
-    uint32_t value = __atomic_load_n(&trace->dropped_count, __ATOMIC_RELAXED);
-    while (value != UINT32_MAX &&
-           !__atomic_compare_exchange_n(&trace->dropped_count, &value,
-               value + 1u, 0, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
-    }
+    iwx_group2_tx_trace_note_drop(trace);
 }
 
 static inline uint32_t iwx_group2_tx_trace_identity_epoch(
@@ -246,8 +254,10 @@ static inline int iwx_group2_tx_trace_append_locked(
         iwx_group2_tx_trace_note_lost(trace);
         return 0;
     }
+    // Ring eviction loses only old diagnostic history. It must not poison
+    // identity for slots that are still live and explicitly tracked.
     if (trace->event_count == IWX_GROUP2_TX_TRACE_CAPACITY)
-        iwx_group2_tx_trace_note_lost(trace);
+        iwx_group2_tx_trace_note_drop(trace);
     stored.sequence = ++trace->next_event_sequence;
     const uint32_t cursor = trace->event_cursor;
     trace->events[cursor] = stored;
@@ -255,6 +265,22 @@ static inline int iwx_group2_tx_trace_append_locked(
     if (trace->event_count < IWX_GROUP2_TX_TRACE_CAPACITY)
         ++trace->event_count;
     return 1;
+}
+
+/* Replace the newest event while retaining the sequence assigned at append.
+ * The identity epoch may change asynchronously through note_lost() while the
+ * writer lock is held. Callers then downgrade an appended identity to
+ * unknown; copying the pre-append event verbatim would erase its sequence. */
+static inline void iwx_group2_tx_trace_rewrite_last_locked(
+    struct IwxGroup2TxTrace *trace, const struct IwxGroup2TxEvent *event)
+{
+    if (trace == NULL || event == NULL || trace->event_count == 0)
+        return;
+    const uint32_t last = (trace->event_cursor +
+        IWX_GROUP2_TX_TRACE_CAPACITY - 1u) % IWX_GROUP2_TX_TRACE_CAPACITY;
+    struct IwxGroup2TxEvent replacement = *event;
+    replacement.sequence = trace->events[last].sequence;
+    trace->events[last] = replacement;
 }
 
 static inline int iwx_group2_tx_trace_record(
@@ -611,6 +637,32 @@ static inline uint32_t iwx_group2_tx_match_completion(
     return IWX_GROUP2_TX_MATCH_NONE;
 }
 
+static inline int iwx_group2_tx_interval_has_sidecar_sparse(
+    const struct IwxGroup2TxSlot *slots, uint32_t slot_capacity,
+    uint32_t ring_count, uint32_t old_tail, uint32_t old_queued,
+    uint32_t checked_index, uint32_t queue_id)
+{
+    if (slots == NULL || slot_capacity == 0 || slot_capacity > 256 ||
+        ring_count == 0 || ring_count > 256 || old_tail >= ring_count ||
+        checked_index >= ring_count || old_queued > ring_count)
+        return 0;
+    const uint32_t distance =
+        (checked_index + ring_count - old_tail) % ring_count;
+    if (distance == 0 || distance > old_queued)
+        return 0;
+    for (uint32_t i = 0; i < slot_capacity; ++i) {
+        const struct IwxGroup2TxSlot *slot = &slots[i];
+        if (!slot->valid || slot->queue_id != queue_id ||
+            slot->ring_count != ring_count || slot->index >= ring_count)
+            continue;
+        const uint32_t offset =
+            (slot->index + ring_count - old_tail) % ring_count;
+        if (offset < distance)
+            return 1;
+    }
+    return 0;
+}
+
 static inline uint32_t iwx_group2_tx_match_completion_sparse(
     const struct IwxGroup2TxSlot *slots, uint32_t slot_capacity,
     uint32_t ring_count, uint32_t old_tail, uint32_t old_queued,
@@ -696,6 +748,14 @@ static inline uint32_t iwx_group2_tx_trace_match_completion(
     uint32_t result = IWX_GROUP2_TX_MATCH_UNKNOWN;
     const uint32_t identityEpoch =
         iwx_group2_tx_trace_identity_epoch(trace);
+    const int hasRelevantSidecar = iwx_group2_tx_interval_has_sidecar_sparse(
+        trace->slots, IWX_GROUP2_TX_SLOT_CAPACITY, ring_count, old_tail,
+        old_queued, checked_index, queue_id);
+    if (!hasRelevantSidecar) {
+        iwx_group2_tx_trace_unlock(trace);
+        return reset_ambiguous ? IWX_GROUP2_TX_MATCH_RESET_AMBIGUOUS :
+            IWX_GROUP2_TX_MATCH_NONE;
+    }
     if (identityEpoch != UINT32_MAX)
         result = iwx_group2_tx_match_completion_sparse(
             trace->slots, IWX_GROUP2_TX_SLOT_CAPACITY, ring_count, old_tail,
@@ -750,10 +810,7 @@ static inline uint32_t iwx_group2_tx_trace_match_completion(
             event.stage = IWX_GROUP2_TX_STAGE_TX_RSP_UNKNOWN;
             event.status = IWX_GROUP2_TX_MATCH_UNKNOWN;
             iwx_group2_tx_event_clear_identity(&event);
-            const uint32_t last = (trace->event_cursor +
-                IWX_GROUP2_TX_TRACE_CAPACITY - 1u) %
-                IWX_GROUP2_TX_TRACE_CAPACITY;
-            trace->events[last] = event;
+            iwx_group2_tx_trace_rewrite_last_locked(trace, &event);
         }
     }
     if (result == IWX_GROUP2_TX_MATCH_UNIQUE && matched_out != NULL)
@@ -900,10 +957,7 @@ static inline uint32_t iwx_group2_tx_trace_retire_interval(
                 eventIdentityEpoch) {
             event.status = IWX_GROUP2_TX_MATCH_UNKNOWN;
             iwx_group2_tx_event_clear_identity(&event);
-            const uint32_t last = (trace->event_cursor +
-                IWX_GROUP2_TX_TRACE_CAPACITY - 1u) %
-                IWX_GROUP2_TX_TRACE_CAPACITY;
-            trace->events[last] = event;
+            iwx_group2_tx_trace_rewrite_last_locked(trace, &event);
         }
         iwx_group2_tx_slot_clear(slot);
         ++retired;

@@ -146,6 +146,50 @@ int main()
         3, 2, 5, 5, 8, match, integratedMatch.slot_generation) == 1);
     assert(!iwx_group2_tx_trace_has_live_slot_for_queue(&integrated, 5));
 
+    // Ordinary TX responses outside every Group2 sidecar interval must not
+    // consume the bounded Group2 evidence ring.
+    IwxGroup2TxTrace unrelatedResponses{};
+    iwx_group2_tx_trace_init(&unrelatedResponses);
+    for (uint32_t i = 0; i < 100; ++i) {
+        match = iwx_group2_tx_trace_match_completion(&unrelatedResponses,
+            510 + i, 1, 2, 3, 5, 8, 21, 22, 0x0008, 0x5000, 0,
+            1, &integratedMatch);
+        assert(match == IWX_GROUP2_TX_MATCH_NONE);
+    }
+    assert(unrelatedResponses.next_event_sequence == 0 &&
+           unrelatedResponses.event_count == 0 &&
+           unrelatedResponses.dropped_count == 0);
+    assert(iwx_group2_tx_trace_retire_reclaimed_interval(
+        &unrelatedResponses, 620, 1, 2, 3, 5, 8,
+        IWX_GROUP2_TX_MATCH_NONE, 0) == 0);
+
+    // A response inside a real Group2 sidecar interval remains observable
+    // when the numeric frame signature does not match; it cannot be promoted
+    // to a unique packet or successful send.
+    IwxGroup2TxTrace unmatchedResponse{};
+    iwx_group2_tx_trace_init(&unmatchedResponse);
+    IwxGroup2TxTag unmatchedTag{};
+    IwxGroup2TxSlot unmatchedSlot{};
+    assert(iwx_group2_tx_trace_begin(&unmatchedResponse, 621, 97,
+        IWX_GROUP2_TX_SOURCE_RSN, 21, 4, &unmatchedTag));
+    assert(iwx_group2_tx_trace_prepare_slot(&unmatchedResponse,
+        &unmatchedTag, 21, 22, 5, 2, 8, 0x0008, 0x5000, 15,
+        &unmatchedSlot));
+    match = iwx_group2_tx_trace_match_completion(&unmatchedResponse, 622,
+        1, 2, 3, 5, 8, 21, 22, 0x0008, 0x5010, 0,
+        1, &integratedMatch);
+    assert(match == IWX_GROUP2_TX_MATCH_NONE && !integratedMatch.valid);
+    const IwxGroup2TxEvent &unmatchedEvent = unmatchedResponse.events[
+        (unmatchedResponse.event_cursor + IWX_GROUP2_TX_TRACE_CAPACITY - 1) %
+        IWX_GROUP2_TX_TRACE_CAPACITY];
+    assert(unmatchedEvent.stage == IWX_GROUP2_TX_STAGE_TX_RSP_UNKNOWN &&
+           unmatchedEvent.status == IWX_GROUP2_TX_MATCH_NONE &&
+           !(unmatchedEvent.flags & IWX_GROUP2_TX_HAS_COOKIE) &&
+           (unmatchedEvent.flags & IWX_GROUP2_TX_HAS_FIRMWARE_STATUS));
+    assert(iwx_group2_tx_trace_retire_reclaimed_interval(
+        &unmatchedResponse, 623, 1, 2, 3, 5, 8,
+        IWX_GROUP2_TX_MATCH_NONE, 0) == 1);
+
     // A lock miss in the observer must not gate real reclaim. The subsequent
     // verified interval retires the old sidecar; poison keeps a later reused
     // hardware index from being mapped to that stale cookie.
@@ -272,6 +316,107 @@ int main()
         &finalLossSnapshot));
     assert(finalLossSnapshot.dropped_count == 40000);
     assert(concurrentLoss.identity_epoch == 40000);
+
+    // Wrapping a full event ring preserves nonzero wire sequence values and
+    // the contiguous oldest-to-newest order used by the offline decoder.
+    IwxGroup2TxTrace wrapped{};
+    iwx_group2_tx_trace_init(&wrapped);
+    for (uint32_t i = 0; i < 519; ++i) {
+        IwxGroup2TxEvent response{};
+        response.monotonic_us = 9000 + i;
+        response.stage = IWX_GROUP2_TX_STAGE_TX_RSP_UNKNOWN;
+        response.status = IWX_GROUP2_TX_MATCH_UNKNOWN;
+        response.flags = IWX_GROUP2_TX_HAS_MATCH_RESULT;
+        assert(iwx_group2_tx_trace_record(&wrapped, &response));
+    }
+    IwxGroup2TxTraceSnapshot wrappedSnapshot{};
+    assert(iwx_group2_tx_trace_snapshot(&wrapped, &wrappedSnapshot));
+    assert(wrappedSnapshot.event_count == IWX_GROUP2_TX_TRACE_CAPACITY &&
+           wrappedSnapshot.next_event_sequence == 519 &&
+           wrappedSnapshot.dropped_count == 487 &&
+           wrapped.identity_epoch == 0 &&
+           wrappedSnapshot.events[0].sequence == 488 &&
+           wrappedSnapshot.events[31].sequence == 519);
+    iwx_group2_tx_snapshot_to_le_in_place(&wrappedSnapshot);
+    assert(wrappedSnapshot.events[0].sequence == 488 &&
+           wrappedSnapshot.events[31].sequence == 519);
+
+    // Evicting history from a full trace ring must not invalidate a live slot.
+    // The result below is only a host-side slot correlation, not firmware or
+    // peer acceptance.
+    IwxGroup2TxTrace fullRingCompletion{};
+    iwx_group2_tx_trace_init(&fullRingCompletion);
+    for (uint32_t i = 0; i < IWX_GROUP2_TX_TRACE_CAPACITY; ++i) {
+        IwxGroup2TxEvent history{};
+        history.monotonic_us = 11000 + i;
+        history.stage = IWX_GROUP2_TX_STAGE_ORIGIN;
+        assert(iwx_group2_tx_trace_record(&fullRingCompletion, &history));
+    }
+    IwxGroup2TxTag fullRingTag{};
+    assert(iwx_group2_tx_trace_begin(&fullRingCompletion, 11032, 29,
+        IWX_GROUP2_TX_SOURCE_RSN, 20, 4, &fullRingTag));
+    IwxGroup2TxSlot fullRingSlot{};
+    assert(iwx_group2_tx_trace_prepare_slot(&fullRingCompletion,
+        &fullRingTag, 21, 22, 7, 4, 8, 0x0008, 0x4500, 15,
+        &fullRingSlot));
+    assert(fullRingSlot.valid && fullRingCompletion.identity_epoch == 0);
+    IwxGroup2TxSlot fullRingMatched{};
+    match = iwx_group2_tx_trace_match_completion(&fullRingCompletion,
+        11033, 3, 2, 5, 7, 8, 21, 22, 0x0008, 0x4500, 0,
+        -1, &fullRingMatched);
+    assert(match == IWX_GROUP2_TX_MATCH_UNIQUE && fullRingMatched.valid &&
+           fullRingMatched.cookie == fullRingTag.cookie &&
+           fullRingCompletion.identity_epoch == 0);
+    IwxGroup2TxTraceSnapshot fullRingSnapshot{};
+    assert(iwx_group2_tx_trace_snapshot(&fullRingCompletion,
+        &fullRingSnapshot));
+    const IwxGroup2TxEvent &fullRingResponse = fullRingSnapshot.events[
+        fullRingSnapshot.event_count - 1];
+    assert(fullRingSnapshot.next_event_sequence == 34 &&
+           fullRingSnapshot.dropped_count == 2 &&
+           fullRingResponse.sequence == 34 &&
+           fullRingResponse.stage == IWX_GROUP2_TX_STAGE_TX_RSP_MATCH &&
+           fullRingResponse.status == IWX_GROUP2_TX_MATCH_UNIQUE &&
+           !(fullRingResponse.flags & IWX_GROUP2_TX_HAS_FIRMWARE_STATUS));
+
+    // A writer-independent loss can poison identity after append and before
+    // the caller downgrades the event. Rewriting must retain the append-time
+    // sequence while removing packet identity.
+    IwxGroup2TxTrace poisonedWrites{};
+    iwx_group2_tx_trace_init(&poisonedWrites);
+    for (uint32_t i = 0; i < IWX_GROUP2_TX_TRACE_CAPACITY; ++i) {
+        IwxGroup2TxEvent event{};
+        event.monotonic_us = 12000 + i;
+        event.cookie = 900 + i;
+        event.attempt_id = 30 + i;
+        event.stage = IWX_GROUP2_TX_STAGE_TX_RSP_MATCH;
+        event.status = IWX_GROUP2_TX_MATCH_UNIQUE;
+        event.flags = IWX_GROUP2_TX_HAS_COOKIE |
+            IWX_GROUP2_TX_HAS_ATTEMPT | IWX_GROUP2_TX_HAS_MATCH_RESULT;
+        assert(iwx_group2_tx_trace_try_lock(&poisonedWrites));
+        assert(iwx_group2_tx_trace_append_locked(&poisonedWrites, &event));
+        // Models note_lost() racing after append; it is intentionally atomic
+        // and does not wait for the trace writer lock.
+        iwx_group2_tx_trace_note_lost(&poisonedWrites);
+        event.stage = IWX_GROUP2_TX_STAGE_TX_RSP_UNKNOWN;
+        event.status = IWX_GROUP2_TX_MATCH_UNKNOWN;
+        iwx_group2_tx_event_clear_identity(&event);
+        iwx_group2_tx_trace_rewrite_last_locked(&poisonedWrites, &event);
+        iwx_group2_tx_trace_unlock(&poisonedWrites);
+    }
+    IwxGroup2TxTraceSnapshot poisonedSnapshot{};
+    assert(iwx_group2_tx_trace_snapshot(&poisonedWrites, &poisonedSnapshot));
+    assert(poisonedSnapshot.next_event_sequence ==
+               IWX_GROUP2_TX_TRACE_CAPACITY &&
+           poisonedSnapshot.dropped_count == IWX_GROUP2_TX_TRACE_CAPACITY);
+    for (uint32_t i = 0; i < IWX_GROUP2_TX_TRACE_CAPACITY; ++i) {
+        const IwxGroup2TxEvent &event = poisonedSnapshot.events[i];
+        assert(event.sequence == i + 1 &&
+               event.stage == IWX_GROUP2_TX_STAGE_TX_RSP_UNKNOWN &&
+               event.status == IWX_GROUP2_TX_MATCH_UNKNOWN &&
+               !(event.flags & IWX_GROUP2_TX_HAS_COOKIE) &&
+               !(event.flags & IWX_GROUP2_TX_HAS_ATTEMPT));
+    }
 
     // A live TX slot crossing reset is explicitly invalidated and stays
     // unknown; a later response cannot claim its old cookie.

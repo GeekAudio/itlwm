@@ -108,30 +108,48 @@ int main(int argc, char **argv)
     if (resetMatch != IWX_GROUP2_TX_MATCH_RESET_AMBIGUOUS)
         return 10;
 
+    // A later ambiguous response is retained only when a Group2 sidecar is
+    // actually inside its reclaim interval. This keeps the event useful and
+    // avoids logging unrelated TX_RSP traffic into the bounded ring.
+    IwxGroup2TxTag ambiguousTag{};
+    IwxGroup2TxSlot ambiguousSlot{};
+    if (!iwx_group2_tx_trace_begin(&trace, 1012, 505,
+            IWX_GROUP2_TX_SOURCE_RSN, 44, 8, &ambiguousTag) ||
+        !iwx_group2_tx_trace_prepare_slot(&trace, &ambiguousTag,
+            55, 56, 3, 1, 8, 0x0008, 0x5040, 15, &ambiguousSlot))
+        return 11;
+    appendSlot(&trace, &ambiguousSlot, 1013,
+        IWX_GROUP2_TX_STAGE_DOORBELL);
+    const uint32_t ambiguousMatch = iwx_group2_tx_trace_match_completion(
+        &trace, 1014, 0, 2, 2, 3, 8, 55, 56, 0x0008, 0x5040, 1,
+        -1, &matched);
+    if (ambiguousMatch != IWX_GROUP2_TX_MATCH_RESET_AMBIGUOUS)
+        return 12;
+
     // This wire fixture exercises the same helper used by the station flush
     // path. Its separate stage and unknown status cannot be mistaken for ACK.
     IwxGroup2TxTag flushedTag{};
     IwxGroup2TxSlot flushedSlot{};
-    if (!iwx_group2_tx_trace_begin(&trace, 1012, 504,
+    if (!iwx_group2_tx_trace_begin(&trace, 1015, 506,
             IWX_GROUP2_TX_SOURCE_WPA, 44, 8, &flushedTag) ||
         !iwx_group2_tx_trace_prepare_slot(&trace, &flushedTag,
             55, 56, 4, 2, 8, 0x0008, 0x5030, 15, &flushedSlot))
-        return 11;
-    appendSlot(&trace, &flushedSlot, 1013,
+        return 13;
+    appendSlot(&trace, &flushedSlot, 1016,
         IWX_GROUP2_TX_STAGE_DOORBELL);
-    if (iwx_group2_tx_trace_retire_flushed_interval(&trace, 1014,
+    if (iwx_group2_tx_trace_retire_flushed_interval(&trace, 1017,
             1, 3, 4, 4, 8) != 1)
-        return 12;
+        return 14;
 
     IwxGroup2TxTraceSnapshot host{};
     IwxGroup2TxTraceSnapshot wire{};
     if (!iwx_group2_tx_trace_snapshot(&trace, &host))
-        return 13;
+        return 15;
     iwx_group2_tx_snapshot_to_le(&wire, &host);
     FILE *out = std::fopen(argv[1], "wb");
     if (!out)
-        return 14;
+        return 16;
     const size_t written = std::fwrite(&wire, 1, sizeof(wire), out);
     std::fclose(out);
-    return written == sizeof(wire) ? 0 : 15;
+    return written == sizeof(wire) ? 0 : 17;
 }
