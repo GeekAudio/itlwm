@@ -120,6 +120,7 @@ CPP_HANDLER_PREFIX = r"""
 #include "native/iwx_tx_completion_observation.hpp"
 #include "native/iwx_tx_progress_observation.hpp"
 #include "native/iwx_tx_ring_capacity.hpp"
+#include "native/iwx_tx_response_metadata.hpp"
 #include "native/iwx_sta_tx_observation.hpp"
 #include "native/group2_tx_trace_helpers.h"
 
@@ -222,7 +223,7 @@ static size_t iwx_rx_packet_payload_len(const iwx_rx_packet *pkt) {
     return pkt->payload_length;
 }
 
-struct iwx_tx_data {};
+struct iwx_tx_data { void *m = nullptr; };
 struct iwx_tx_ring {
     int qid;
     size_t ring_count;
