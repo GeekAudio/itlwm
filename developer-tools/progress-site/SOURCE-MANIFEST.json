@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "c7337f9405117f4d0fd85b0b08f09349f7e8c8bdec83e3351c415718b5765c48"
+      "sha256": "da7b0e386e3492d76a76b1aa3f2099712fda9b2d6dac9d3212c939ff6ab0014f"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "989ebf5f3227e03560e69a2bc9991cfdd7e5969b142254aed9b7d6d4a8841913"
+      "sha256": "0a833f31b9bb018d6438b37c37600681dd13aac2153bf1d83f32fbbffd451d5e"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -30,7 +30,7 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "e5199b755ee6940db8e3db87ac171d690510d3aba730cc7649ec8345f94b7557"
+      "sha256": "69c11a83a5e4e650b4179ab075775efd8467fe92666def32eb1b9148dbeb9641"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-31T14:28:34.719216+08:00",
+  "updated_at": "2026-10-31T14:30:45.944222+08:00",
   "runtime_scope": "Test095 runtime retained: 6 passed, 3 partial, 30 uncovered, 1 failed. Two unattended reason16 disconnects occurred about one hour apart near GTK updates; Group2 transmit completion remains unknown. Test096 deployed with verified full EFI backup, awaiting reboot. New power stop serialization, bounded transition reporting, 1024-slot TX tracking, and same-ROC RX correlation passed offline review/build checks. No Test096 runtime or AirDrop delivery claim."
 }
