@@ -73,6 +73,7 @@ static void absolutetime_to_nanoseconds(AbsoluteTime value,uint64_t*out){*out=va
 static uint64_t nativePowerUptimeNanoseconds(){AbsoluteTime t=0;uint64_t n=0;
  clock_get_uptime(&t);absolutetime_to_nanoseconds(t,&n);return n;}
 constexpr unsigned APPLE80211_VERSION=1,APPLE80211_MAX_RADIO=4,APPLE80211_POWER_ON=1;
+constexpr unsigned kPowerStateOff=0,kPowerStateOn=1;
 constexpr unsigned APPLE80211_M_POWER_CHANGED=1001;
 constexpr unsigned ITL_TAHOE_EVT_DRIVER_READY=6,ITL_TAHOE_EVT_DRIVER_STOPPED=7,ITL_TAHOE_EVT_RESET_BEGIN=8;
 constexpr unsigned IFF_UP=1,IFF_RUNNING=0x40,kWatchDogTimerPeriod=1000;
@@ -165,7 +166,8 @@ struct Gate {using Action=IOReturn(*)(OSObject*,void*,void*,void*,void*);
 static Gate*_fCommandGate=nullptr;
 struct AirportItlwm:IO80211Controller {
  HAL*fHalService=nullptr;IONetworkInterface*bsdInterface=nullptr;NativeIF*fNetIf=nullptr;Timer*watchdogTimer=nullptr;
- uint8_t power_state=0;bool nativeActivationAttempted=false,awdlSyncEnable=false;
+ uint8_t power_state=0;uint32_t pmPowerState=kPowerStateOn;
+ bool nativeActivationAttempted=false,awdlSyncEnable=false;
  uint8_t geo_location_cc[2] {};
  uint32_t nativePowerFlags=0,nativePowerGetCount=0,nativePowerSetCount=0,
  nativePowerLastResult=uint32_t(kIOReturnNotReady),nativePowerLastEvent=0,
@@ -259,6 +261,39 @@ int main(){unsigned scenarios=0;
  assert(!failed.initializeNativePowerLocks()&&!failed.nativePowerStateLock&&
   !failed.nativePowerTraceLock);lockAllocationFailAt=-1;++scenarios;}
  {Fixture f;assert(f.state()==0&&f.a.nativePowerGetCount==1);++scenarios;}
+ {Fixture f;f.a.updateNativePowerFlags(0,1U);
+  assert(f.a.nativePowerFlags==1U&&f.state()==0);++scenarios;}
+ {Fixture f;f.a.nativePowerFlags=3;f.a.nativePowerEpoch=5;f.hal.faultSerial=11;
+  uint64_t id=0;assert(f.a.beginNativeAddressRestartNotification(&id)==0&&id);
+  assert(f.a.commitNativeAddressRestartNotification(id,true,true));
+  f.a.updateNativePowerFlags(2U,0);
+  assert(f.a.nativePowerFlags==1U&&f.state()==1);++scenarios;}
+ {Fixture f;f.a.nativePowerFlags=3;f.a.nativePowerEpoch=5;f.hal.faultSerial=11;
+  uint64_t id=0;assert(f.a.beginNativeAddressRestartNotification(&id)==0&&id);
+  assert(f.a.commitNativeAddressRestartNotification(id,true,true));
+  f.a.updateNativePowerFlags(2U,0);++f.hal.faultSerial;
+  assert(f.state()==0);++scenarios;}
+ {Fixture f;f.a.nativePowerFlags=3;f.a.nativePowerEpoch=5;f.hal.faultSerial=11;
+  uint64_t id=0;assert(f.a.beginNativeAddressRestartNotification(&id)==0&&id);
+  assert(f.a.commitNativeAddressRestartNotification(id,true,true));
+  f.a.updateNativePowerFlags(2U,0);
+  g_uptimeNanoseconds=f.a.nativeAddressRestartNotification.deadlineNanoseconds();
+  assert(f.state()==0);++scenarios;}
+ {Fixture f;f.a.nativePowerFlags=3;f.a.nativePowerEpoch=5;f.hal.faultSerial=11;
+  uint64_t id=0;assert(f.a.beginNativeAddressRestartNotification(&id)==0&&id);
+  assert(f.a.commitNativeAddressRestartNotification(id,true,true));
+  f.a.updateNativePowerFlags(2U,0);
+  __atomic_store_n(&f.a.pmPowerState,kPowerStateOff,__ATOMIC_RELEASE);
+  assert(f.state()==0);++scenarios;}
+ {Fixture f;f.a.nativePowerFlags=3;f.a.updateNativePowerFlags(1U,0);
+  assert(f.a.nativePowerFlags==2U&&f.state()==0);++scenarios;}
+ {Fixture f;f.a.nativePowerFlags=3;f.a.observeNativePowerEvent(ITL_TAHOE_EVT_DRIVER_STOPPED);
+  assert(f.a.nativePowerFlags==1U&&f.state()==0);++scenarios;}
+ {Fixture f;f.a.nativePowerFlags=3;f.a.nativePowerEpoch=5;f.hal.faultSerial=11;
+  uint64_t id=0;assert(f.a.beginNativeAddressRestartNotification(&id)==0&&id);
+  assert(!f.a.commitNativeAddressRestartNotification(id,false,true));
+  f.a.updateNativePowerFlags(2U,0);
+  assert(f.state()==0);++scenarios;}
  {Fixture f;const uint32_t onEpoch=f.a.advanceNativePowerEpoch(true);
  assert(onEpoch==1&&f.hal.requestUpdates==1&&f.hal.requestEpoch==onEpoch&&f.hal.requestOn);
  assert(f.hal.observedPublicEpoch==0);
@@ -585,7 +620,7 @@ int main(){unsigned scenarios=0;
   assert(!f.a.nativeAddressRestartNotification.active()&&f.a.nativeAddressRestartCancelledCount==1&&
    f.a.nativeAddressRestartLastOutcome==uint32_t(
     NativePowerTrace::AddressRestartOutcome::kCancelledEpochOrOff));
-  assert(f.state()==1&&f.a.postNativePowerChangedIfNeeded()&&f.net.messages==1);++scenarios;}
+  assert(f.state()==0&&f.a.postNativePowerChangedIfNeeded()&&f.net.messages==1);++scenarios;}
  {g_uptimeNanoseconds=1500000000ULL;Fixture f;f.a.nativePowerFlags=1;f.a.nativePowerEpoch=5;
   NativePowerTrace::PowerIngressContext oldReady{};
   f.a.observeNativePowerEvent(ITL_TAHOE_EVT_DRIVER_READY,&oldReady);
@@ -639,7 +674,7 @@ int main(){unsigned scenarios=0;
   assert(!f.a.nativeAddressRestartNotification.active());
   assert(f.a.observeNativeAddressRestartEvent(NativePowerTrace::AddressRestartEvent::kDriverReady,
    oldReady)==NativePowerTrace::AddressRestartDecision::kStale);
-  assert(f.state()==1&&f.a.postNativePowerChangedIfNeeded()&&f.net.messages==1);++scenarios;}
+  assert(f.state()==0&&f.a.postNativePowerChangedIfNeeded()&&f.net.messages==1);++scenarios;}
  {Fixture f;f.a.nativePowerFlags=3;f.a.nativePowerEpoch=5;f.hal.faultSerial=7;
   uint64_t id=0;assert(f.a.beginNativeAddressRestartNotification(&id)==0&&id);
   assert(f.a.commitNativeAddressRestartNotification(id,true,true));

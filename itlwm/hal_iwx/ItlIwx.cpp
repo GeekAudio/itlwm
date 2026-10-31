@@ -258,6 +258,103 @@ void ItlIwx::tahoeRxCompletionPublish(IOEthernetController *controller)
     (void)controller->setProperty("NativeRXCompletionObservation", payload);
     payload->release();
 }
+
+void ItlIwx::tahoeRxRocCorrelationSync(uint64_t nowUs)
+{
+    using namespace NativeIwxRocRxCorrelation;
+    if (!tahoeP2pOnMainGate() ||
+        !__atomic_load_n(&nativeRxRocArmReady_, __ATOMIC_ACQUIRE))
+        return;
+    auto &recorder = nativeRxRocCorrelation_;
+    if (recorder.state() == State::kDisabled)
+        (void)recorder.arm(uint32_t(NativeRxPreOwner::kCaptureSerial),
+            __atomic_load_n(&nativeRxRocArmGeneration_, __ATOMIC_RELAXED),
+            __atomic_load_n(&nativeRxRocArmUs_, __ATOMIC_RELAXED));
+    if (recorder.state() == State::kClosed)
+        return;
+    if (uint32_t(com.sc_device_family) !=
+        NativeIwxCompletionObserver::kObservedFamily) {
+        // Unsupported completion layouts are unknown, never a complete
+        // zero-slot ROC window. The production RX family path is unchanged.
+        (void)recorder.close(CloseReason::kInvalidBoundary, nowUs);
+        return;
+    }
+    if (__atomic_load_n(&nativeRxPreOwnerStopSerial_, __ATOMIC_ACQUIRE) !=
+            __atomic_load_n(&nativeRxRocArmStopSerial_, __ATOMIC_RELAXED) ||
+        __atomic_load_n(&nativeRxPreOwnerStopDepth_, __ATOMIC_ACQUIRE)) {
+        (void)recorder.close(CloseReason::kStop, nowUs);
+        return;
+    }
+    if (uint32_t(__atomic_load_n(&com.sc_generation, __ATOMIC_ACQUIRE)) !=
+        __atomic_load_n(&nativeRxRocArmGeneration_, __ATOMIC_RELAXED)) {
+        (void)recorder.close(CloseReason::kGenerationChanged, nowUs);
+        return;
+    }
+    if (recorder.state() == State::kActive) {
+        const auto &lease = tahoe_p2p_rx_lease_;
+        const auto session = nativeP2pRocEvents_.snapshot();
+        // Epoch identity is diagnostic context, never an RX admission rule.
+        if (lease.contextGeneration != nativeRxRocEpoch_.contextGeneration ||
+            lease.powerGeneration != nativeRxRocEpoch_.powerGeneration ||
+            lease.stationGeneration != nativeRxRocEpoch_.stationGeneration ||
+            session.generation != nativeRxRocEpoch_.rocGeneration) {
+            (void)recorder.close(CloseReason::kGenerationChanged, nowUs);
+        } else if (session.outcomeUnknown ||
+                   (session.commandReturned && session.commandResult != 0)) {
+            (void)recorder.close(CloseReason::kInvalidBoundary, nowUs);
+        } else if (nowUs >= nativeRxRocDeadlineUs_) {
+            (void)recorder.close(CloseReason::kDeadline, nowUs);
+        } else if (!nativeRxPreOwner_.enabled()) {
+            (void)recorder.close(CloseReason::kInvalidBoundary, nowUs);
+        }
+    } else if (recorder.state() == State::kArmed &&
+               !nativeRxPreOwner_.enabled()) {
+        (void)recorder.closeNoStart(nowUs);
+    }
+}
+
+IOReturn ItlIwx::tahoeRxRocCorrelationPublishAction(OSObject *, void *arg0,
+    void *arg1, void *, void *)
+{
+    auto *owner = static_cast<ItlIwx *>(arg0);
+    auto *controller = static_cast<IOEthernetController *>(arg1);
+    if (!owner || !controller || !owner->tahoeP2pOnMainGate())
+        return kIOReturnNotReady;
+    owner->tahoeRxRocCorrelationPublish(controller);
+    return kIOReturnSuccess;
+}
+
+void ItlIwx::tahoeRxRocCorrelationPublish(IOEthernetController *controller)
+{
+    if (!controller)
+        return;
+    if (!tahoeP2pOnMainGate()) {
+        IOCommandGate *gate = getMainCommandGate();
+        if (gate)
+            (void)gate->attemptAction(tahoeRxRocCorrelationPublishAction,
+                this, controller);
+        return;
+    }
+    if (nativeRxRocPublished_ || nativeRxRocPublishAttempts_ >= 3u)
+        return;
+    tahoeRxRocCorrelationSync(tahoeMonotonicNs() / 1000ULL);
+    if (!nativeRxRocCorrelation_.readyToEncode() ||
+        !nativeRxRocCorrelation_.encode(nativeRxRocPublishWire_,
+                                      sizeof(nativeRxRocPublishWire_)))
+        return;
+    // One immutable OSData body avoids a multi-property partial commit. Failed
+    // allocations/writes have a finite retry budget; only success latches.
+    ++nativeRxRocPublishAttempts_;
+    OSData *payload = OSData::withBytes(nativeRxRocPublishWire_,
+        unsigned(sizeof(nativeRxRocPublishWire_)));
+    if (!payload)
+        return;
+    const bool published = controller->setProperty(
+        "NativeRXRocCopyCorrelation", payload);
+    payload->release();
+    if (published)
+        nativeRxRocPublished_ = true;
+}
 #endif
 
 #ifdef AIRPORT_TAHOE
@@ -8250,7 +8347,12 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
                uint32_t transportNotificationQid,
                uint32_t transportNotificationIndex,
                uint64_t hostRxMonotonicUs,
-               bool hostRxMonotonicUsPresent)
+               bool hostRxMonotonicUsPresent
+#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+               , NativeIwxRocRxCorrelation::Token rocCopyToken,
+               uint32_t rxPacketOffset
+#endif
+               )
 {
     struct ieee80211com *ic = &sc->sc_ic;
     struct ieee80211_rxinfo rxi;
@@ -8310,7 +8412,11 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
     uint32_t ownerReason = uint32_t(NativeRxPreOwner::OwnerReason::Unknown);
     const bool ownerQualified = tahoeP2pCurrentRxDiagnosticEpochs(
         sc, &rxEntryEpochs, preOwnerObserve ? &ownerReason : nullptr);
-    if (ownerQualified || preOwnerObserve) {
+    if (ownerQualified || preOwnerObserve
+#if defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+        || rocCopyToken.valid
+#endif
+        ) {
         if (ownerQualified)
             (void)nativeAwdlRxEntryTelemetry_.syncOwner(
                 false, rxEntryEpochs, true);
@@ -8362,6 +8468,53 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
         const auto inspection = NativeAwdlRxEntry::inspect(
             static_cast<const uint8_t *>(pktdata), actualPayloadLength,
             maxlen, layout);
+#if defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+        if (rocCopyToken.valid && tahoeP2pOnMainGate()) {
+            using namespace NativeIwxRocRxCorrelation;
+            Mpdu entry;
+            entry.presence = kDescriptorSizePresent | kPacketOffsetPresent;
+            entry.descriptorSize = uint16_t(desc_size);
+            entry.packetOffset = uint16_t(rxPacketOffset);
+            entry.qid = uint8_t(transportNotificationQid);
+            entry.index = uint8_t(transportNotificationIndex);
+            if (hostRxMonotonicUsPresent) {
+                entry.presence |= kHostTimePresent;
+                entry.hostRxMonotonicUs = hostRxMonotonicUs;
+            }
+            if (inspection.channelPresent) {
+                entry.presence |= kChannelPresent;
+                entry.channel = uint8_t(inspection.channel);
+            }
+            if (inspection.macPhyIndexPresent) {
+                entry.presence |= kRawMacPhyPresent;
+                entry.rawMacPhyIndex = uint8_t(inspection.macPhyIndex);
+            }
+            if (inspection.macPhyIndexDecodeModePresent) {
+                entry.presence |= kDecodeModePresent;
+                entry.decodeMode = uint8_t(inspection.macPhyIndexDecodeMode);
+            }
+            if (inspection.statusPresent) {
+                entry.presence |= kRawStatusPresent;
+                entry.rawStatus = inspection.status;
+            }
+            if (inspection.mpduLengthPresent) {
+                entry.presence |= kMpduLengthPresent;
+                entry.mpduLength = uint16_t(inspection.mpduLength);
+            }
+            if (inspection.frameControlPresent) {
+                entry.presence |= kFrameControlPresent;
+                entry.frameControl = uint16_t(inspection.frameControl);
+                if ((inspection.frameType == 0 || inspection.frameType == 2) &&
+                    inspection.mpduLength >= sizeof(struct ieee80211_frame)) {
+                    entry.presence |= kSequenceControlPresent;
+                    entry.sequenceControl = NativeAwdlRxEntry::readLe16(
+                        static_cast<const uint8_t *>(pktdata) + desc_size +
+                        offsetof(struct ieee80211_frame, i_seq));
+                }
+            }
+            (void)nativeRxRocCorrelation_.recordMpdu(rocCopyToken, entry);
+        }
+#endif
         const bool awdlBssidCandidate = inspection.frameControlPresent &&
             NativeAwdlData::isAwdlDataCandidate(
                 static_cast<const uint8_t *>(pktdata) + desc_size,
@@ -18224,7 +18377,11 @@ struct iwl_pnvm_init_complete_ntfy {
 
 void ItlIwx::
 iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
-           struct mbuf_list *ml, uint32_t rxRingSlot)
+           struct mbuf_list *ml, uint32_t rxRingSlot
+#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+           , NativeIwxRocRxCorrelation::Token rocCopyToken
+#endif
+           )
 {
     struct _ifnet *ifp = IC2IFP(&sc->sc_ic);
     struct iwx_rx_packet *pkt, *nextpkt;
@@ -18237,12 +18394,42 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
     //        BUS_DMASYNC_POSTREAD);
     
     m0 = data->m;
+#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+    if (!m0 && rocCopyToken.valid) {
+        NativeIwxRocRxCorrelation::Notification empty;
+        empty.outcome = uint8_t(
+            NativeIwxRocRxCorrelation::NotificationOutcome::kNoPacket);
+        (void)nativeRxRocCorrelation_.recordNotification(rocCopyToken, empty);
+    }
+#endif
     while (m0 && offset + minsz < IWX_RBUF_SIZE) {
         pkt = (struct iwx_rx_packet *)((uint8_t*)mbuf_data(m0) + offset);
         qid = pkt->hdr.qid;
         idx = pkt->hdr.idx;
         
         code = IWX_WIDE_ID(pkt->hdr.group_id, pkt->hdr.cmd);
+#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+        const auto recordRocNotification = [&](
+            NativeIwxRocRxCorrelation::NotificationOutcome outcome,
+            bool lengthValidated = false) {
+            if (!rocCopyToken.valid)
+                return;
+            NativeIwxRocRxCorrelation::Notification entry;
+            entry.code = uint32_t(code);
+            entry.packetOffset = uint16_t(offset);
+            entry.qid = uint8_t(qid);
+            entry.index = uint8_t(idx);
+            entry.outcome = uint8_t(outcome);
+            entry.flags = 1; // Header bytes present; lengths only after checks.
+            if (lengthValidated) {
+                entry.packetLength = uint16_t(iwx_rx_packet_len(pkt));
+                entry.payloadLength = uint16_t(iwx_rx_packet_payload_len(pkt));
+                entry.flags |= 2;
+            }
+            (void)nativeRxRocCorrelation_.recordNotification(rocCopyToken, entry);
+        };
+        recordRocNotification(NativeIwxRocRxCorrelation::NotificationOutcome::kSeen);
+#endif
         
         DPRINTFN(3, ("%s gid=%d cmd=%d code=0x%02x qid=%d idx=%d packet_len=%d payload_len=%d\n", __FUNCTION__, pkt->hdr.group_id, pkt->hdr.cmd, code, qid, idx, iwx_rx_packet_len(pkt), iwx_rx_packet_payload_len(pkt)));
 
@@ -18258,6 +18445,11 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
 #endif
         if (!iwx_rx_pkt_valid(pkt)) {
 #if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+            recordRocNotification(
+                NativeIwxRocRxCorrelation::NotificationOutcome::kHeaderRejected);
+            if (rocCopyToken.valid)
+                (void)nativeRxRocCorrelation_.setParseFlags(rocCopyToken,
+                    NativeIwxRocRxCorrelation::kParseHeaderRejected);
             tahoeRxPreOwnerEvent(NativeRxPreOwner::EventKind::HeaderRejected,
                 rxRingSlot, uint32_t(qid), uint32_t(idx), 0, uint32_t(code));
 #endif
@@ -18298,6 +18490,11 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
         len = sizeof(pkt->len_n_flags) + iwx_rx_packet_len(pkt);
         if (len < minsz || len > (IWX_RBUF_SIZE - offset)) {
 #if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+            recordRocNotification(
+                NativeIwxRocRxCorrelation::NotificationOutcome::kLengthRejected);
+            if (rocCopyToken.valid)
+                (void)nativeRxRocCorrelation_.setParseFlags(rocCopyToken,
+                    NativeIwxRocRxCorrelation::kParseLengthRejected);
             tahoeRxPreOwnerEvent(NativeRxPreOwner::EventKind::LengthRejected,
                 rxRingSlot, uint32_t(qid), uint32_t(idx), 0,
                 uint32_t(IWX_WIDE_ID(pkt->hdr.group_id, pkt->hdr.cmd)));
@@ -18350,6 +18547,17 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
 
 #ifdef AIRPORT_TAHOE
 #if defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+        recordRocNotification(
+            NativeIwxRocRxCorrelation::NotificationOutcome::kValidated, true);
+        if (rocCopyToken.valid)
+            (void)nativeRxRocCorrelation_.setParseFlags(rocCopyToken,
+                NativeIwxRocRxCorrelation::kParseValidated);
+        recordRocNotification(code == IWX_REPLY_RX_MPDU_CMD ?
+            NativeIwxRocRxCorrelation::NotificationOutcome::kMpduDispatch :
+            NativeIwxRocRxCorrelation::NotificationOutcome::kNonMpdu, true);
+        if (code != IWX_REPLY_RX_MPDU_CMD && rocCopyToken.valid)
+            (void)nativeRxRocCorrelation_.setParseFlags(rocCopyToken,
+                NativeIwxRocRxCorrelation::kParseNonMpdu);
         tahoeRxPreOwnerEvent(NativeRxPreOwner::EventKind::NotificationValidated,
             rxRingSlot, uint32_t(qid), uint32_t(idx),
             uint32_t(iwx_rx_packet_payload_len(pkt)),
@@ -18371,6 +18579,7 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
             ((tahoeP2pOnMainGate() && nativeAwdlRxEntryTelemetry_.active())
 #if defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
              || nativeRxPreOwner_.enabled()
+             || rocCopyToken.valid
 #endif
              )) {
             // Capture at first dispatch handling, before RX ring recycling
@@ -18387,6 +18596,8 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
             /* Take mbuf m0 off the RX ring. */
             if (iwx_rx_addbuf(sc, IWX_RBUF_SIZE, sc->rxq.cur)) {
 #if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+                recordRocNotification(
+                    NativeIwxRocRxCorrelation::NotificationOutcome::kAddbufFailed, true);
                 tahoeRxPreOwnerEvent(NativeRxPreOwner::EventKind::AddbufFailed,
                     rxRingSlot, uint32_t(qid), uint32_t(idx));
 #endif
@@ -18418,7 +18629,11 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
                         maxlen, ml, rxRingSlot,
                         static_cast<uint32_t>(pkt->hdr.qid),
                         static_cast<uint32_t>(pkt->hdr.idx),
-                        hostRxMonotonicUs, hostRxMonotonicUsPresent);
+                        hostRxMonotonicUs, hostRxMonotonicUsPresent
+#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+                        , rocCopyToken, offset
+#endif
+                        );
                     m0 = NULL; /* stack owns m0 now; abort loop */
                 } else {
                     /*
@@ -18429,6 +18644,8 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
                     mbuf_copym(m0, 0, MBUF_COPYALL, MBUF_DONTWAIT, &m);
                     if (m == NULL) {
 #if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+                        recordRocNotification(
+                            NativeIwxRocRxCorrelation::NotificationOutcome::kCopyFailed, true);
                         tahoeRxPreOwnerEvent(NativeRxPreOwner::EventKind::CopyFailed,
                             rxRingSlot, uint32_t(qid), uint32_t(idx));
 #endif
@@ -18444,7 +18661,11 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
                         maxlen, ml, rxRingSlot,
                         static_cast<uint32_t>(pkt->hdr.qid),
                         static_cast<uint32_t>(pkt->hdr.idx),
-                        hostRxMonotonicUs, hostRxMonotonicUsPresent);
+                        hostRxMonotonicUs, hostRxMonotonicUsPresent
+#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+                        , rocCopyToken, offset
+#endif
+                        );
                 }
                 break;
             }
@@ -18971,6 +19192,8 @@ iwx_notif_intr(struct iwx_softc *sc)
     while (sc->rxq.cur != hw) {
         const uint32_t ringSlot = static_cast<uint32_t>(sc->rxq.cur);
 #if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+        NativeIwxRocRxCorrelation::Token rocCopyToken;
+        tahoeRxRocCorrelationSync(tahoeMonotonicNs() / 1000ULL);
         tahoeRxPreOwnerEvent(NativeRxPreOwner::EventKind::Slot, ringSlot);
         if (sc->sc_device_family == IWX_DEVICE_FAMILY_AX210 &&
             nativeRxPreOwner_.enabled()) {
@@ -18988,10 +19211,31 @@ iwx_notif_intr(struct iwx_softc *sc)
                 static_cast<uint32_t>(sc->sc_device_family),
                 driverGeneration, observationSerial, hostUptimeUs,
                 hw, ringSlot, observation);
+            if (tahoeP2pOnMainGate() && nativeRxRocCorrelation_.state() ==
+                    NativeIwxRocRxCorrelation::State::kActive) {
+                NativeIwxRocRxCorrelation::SlotInput input;
+                input.captureSerial = observationSerial;
+                input.driverGeneration = driverGeneration;
+                input.ring = 0;
+                input.slot = ringSlot;
+                input.head = hw;
+                input.copyTimeUs = hostUptimeUs;
+                input.copySequence = __atomic_load_n(
+                    &nativeRxCompletionTelemetry_.nextSequence, __ATOMIC_RELAXED);
+                input.epoch = nativeRxRocEpoch_;
+                rocCopyToken = nativeRxRocCorrelation_.beginSlot(input, observation);
+            }
         }
 #endif
         struct iwx_rx_data *data = &sc->rxq.data[ringSlot];
+#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+        iwx_rx_pkt(sc, data, &ml, ringSlot, rocCopyToken);
+        if (rocCopyToken.valid)
+            (void)nativeRxRocCorrelation_.finishSlot(rocCopyToken);
+        tahoeRxRocCorrelationSync(tahoeMonotonicNs() / 1000ULL);
+#else
         iwx_rx_pkt(sc, data, &ml, ringSlot);
+#endif
         sc->rxq.cur = (ringSlot + 1) % IWX_RX_MQ_RING_COUNT;
     }
     if_input(&sc->sc_ic.ic_if, &ml);

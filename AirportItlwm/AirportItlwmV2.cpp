@@ -1328,9 +1328,46 @@ getPOWER(OSObject *object,
         return kIOReturnError;
 #ifdef AIRPORT_TAHOE
     __atomic_fetch_add(&nativePowerGetCount, 1U, __ATOMIC_RELAXED);
-    // HAL enable returns after accepting init_task, before the hardware is
-    // ready. Only a real READY event may make the reported radio state On.
-    const uint8_t state = (__atomic_load_n(&nativePowerFlags, __ATOMIC_ACQUIRE) & 2U) ? 1 : 0;
+    // Keep explicit Off and system sleep visible immediately. A missing READY
+    // bit is held On only for the bounded dip of one committed address restart;
+    // the HAL READY bit itself remains unchanged for diagnostics and waiters.
+    uint32_t powerFlags = 0;
+    uint64_t restartDeadline = 0;
+    bool committedRestartGrace = false;
+    const bool systemPowerOn = __atomic_load_n(&pmPowerState, __ATOMIC_ACQUIRE) !=
+        kPowerStateOff;
+    IOSimpleLock *lock = nativePowerStateLock;
+    if (lock) {
+        const IOInterruptState irq = IOSimpleLockLockDisableInterrupt(lock);
+        powerFlags = __atomic_load_n(&nativePowerFlags, __ATOMIC_RELAXED);
+        const uint32_t powerEpoch = __atomic_load_n(&nativePowerEpoch, __ATOMIC_RELAXED);
+        if ((powerFlags & 1U) && !(powerFlags & 2U) && systemPowerOn &&
+            fHalService && nativeAddressRestartNotification.active() &&
+            nativeAddressRestartNotification.committed()) {
+            const uint64_t restartId = nativeAddressRestartNotification.id();
+            uint32_t faultSerial = 0;
+            const bool faultSerialValid =
+                fHalService->readNativePowerFaultSerial(&faultSerial);
+            committedRestartGrace = restartId != 0 &&
+                restartId == nativeAddressRestartPublishedId &&
+                nativeAddressRestartNotification.powerEpoch() == powerEpoch &&
+                nativeAddressRestartPublishedEpoch == powerEpoch &&
+                nativeAddressRestartNotification.startRevision() ==
+                    nativeAddressRestartStartRevision &&
+                faultSerialValid && faultSerial ==
+                    nativeAddressRestartNotification.faultSerial();
+            restartDeadline = nativeAddressRestartNotification.deadlineNanoseconds();
+        }
+        IOSimpleLockUnlockEnableInterrupt(lock, irq);
+    } else {
+        // Missing the lifecycle lock fails closed: do not preserve transient
+        // On intent without a coherent restart/fault snapshot.
+        powerFlags = __atomic_load_n(&nativePowerFlags, __ATOMIC_ACQUIRE);
+    }
+    const bool restartStillInWindow = committedRestartGrace &&
+        nativePowerUptimeNanoseconds() < restartDeadline;
+    const uint8_t state = systemPowerOn && (powerFlags & 1U) &&
+        ((powerFlags & 2U) || restartStillInWindow) ? 1 : 0;
     pd->version = APPLE80211_VERSION;
     pd->num_radios = APPLE80211_MAX_RADIO;
     for (unsigned i = 0; i < APPLE80211_MAX_RADIO; ++i) pd->power_state[i] = state;
@@ -2339,7 +2376,7 @@ IOReturn AirportItlwm::setPowerState(unsigned long powerStateOrdinal, IOService 
 {
     IOReturn result = IOPMAckImplied;
     
-    if (pmPowerState == powerStateOrdinal)
+    if (__atomic_load_n(&pmPowerState, __ATOMIC_ACQUIRE) == powerStateOrdinal)
         return result;
     switch (powerStateOrdinal) {
         case kPowerStateOff:
@@ -2411,7 +2448,7 @@ IOReturn AirportItlwm::registerWithPolicyMaker(IOService *policyMaker)
 {
     IOReturn ret;
     
-    pmPowerState = kPowerStateOn;
+    __atomic_store_n(&pmPowerState, kPowerStateOn, __ATOMIC_RELEASE);
     pmPolicyMaker = policyMaker;
     
     powerOffThreadCall = thread_call_allocate(
@@ -2429,7 +2466,7 @@ IOReturn AirportItlwm::registerWithPolicyMaker(IOService *policyMaker)
 void AirportItlwm::setPowerStateOff()
 {
     XYLog("%s\n", __FUNCTION__);
-    pmPowerState = kPowerStateOff;
+    __atomic_store_n(&pmPowerState, kPowerStateOff, __ATOMIC_RELEASE);
     disableAdapter(bsdInterface);
     pmPolicyMaker->acknowledgeSetPowerState();
 }
@@ -2437,6 +2474,6 @@ void AirportItlwm::setPowerStateOff()
 void AirportItlwm::setPowerStateOn()
 {
     XYLog("%s\n", __FUNCTION__);
-    pmPowerState = kPowerStateOn;
+    __atomic_store_n(&pmPowerState, kPowerStateOn, __ATOMIC_RELEASE);
     pmPolicyMaker->acknowledgeSetPowerState();
 }

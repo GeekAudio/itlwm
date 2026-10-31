@@ -14,6 +14,7 @@ PROFILES = {
     'discovery': ('LIFECYCLE', 'RESIDENT', 'TX_EVIDENCE', 'DISCOVERY_EXPERIMENT'),
     'rx149_observation': ('LIFECYCLE', 'RESIDENT', 'TX_EVIDENCE', 'DISCOVERY_EXPERIMENT', 'RX149_OBSERVATION'),
     'rx149_data_input': ('LIFECYCLE', 'RESIDENT', 'TX_EVIDENCE', 'DISCOVERY_EXPERIMENT', 'RX149_OBSERVATION', 'RX149_DATA_INPUT'),
+    'rx149_preowner': ('LIFECYCLE', 'RESIDENT', 'TX_EVIDENCE', 'DISCOVERY_EXPERIMENT', 'RX149_OBSERVATION', 'RX149_DATA_INPUT'),
 }
 
 def expand_response_files(arguments):
@@ -67,12 +68,15 @@ def verify(project, log_path, output_path):
                 continue
             if argument in ('-c', '-MMD', '-MD', '-MP'):
                 continue
-            if argument.startswith('-DITL_NATIVE_AWDL_'):
+            if argument.startswith(('-DITL_NATIVE_AWDL_',
+                                    '-DITL_NATIVE_RX_PREOWNER_OBSERVATION_')):
                 continue
             cleaned.append(argument)
         for profile, defines in PROFILES.items():
             command = [*cleaned, '-fsyntax-only', *(
                 '-DITL_NATIVE_AWDL_' + name + '_25G332=1' for name in defines)]
+            if profile == 'rx149_preowner':
+                command.append('-DITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332=1')
             result = subprocess.run(command, cwd=project, capture_output=True, text=True)
             records.append({'unit':unit, 'profile':profile,
                             'exit_code':result.returncode,

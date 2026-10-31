@@ -161,6 +161,7 @@
 #include "../../native/iwx_init_dispatch.hpp"
 #include "../../native/iwx_link_state_trace.hpp"
 #include "../../native/iwx_completion_observer_kernel.hpp"
+#include "../../native/iwx_roc_rx_correlation.hpp"
 #include "../../native/iwx_mcc_refresh_policy.hpp"
 #include "../../native/iwx_fw_diagnostics.hpp"
 #include "ItlIwxP2PTx.hpp"
@@ -556,6 +557,10 @@ public:
     void tahoeRxCompletionPublish(IOEthernetController *);
     static IOReturn tahoeRxCompletionPublishAction(OSObject *, void *,
         void *, void *, void *);
+    void tahoeRxRocCorrelationSync(uint64_t nowUs);
+    void tahoeRxRocCorrelationPublish(IOEthernetController *);
+    static IOReturn tahoeRxRocCorrelationPublishAction(OSObject *, void *,
+        void *, void *, void *);
 #endif
     void tahoeP2pSyncRxDiagnosticOwner(bool closeOnly);
     void tahoeP2pPublishRxStageCounters(IOEthernetController *);
@@ -652,6 +657,18 @@ public:
     NativeIwxCompletionObserver::Handle nativeRxCompletionHandle_{};
     NativeIwxCompletionObserver::Telemetry nativeRxCompletionTelemetry_{};
     bool nativeRxCompletionPublishAttempted_ {false};
+    // Main-gate-only recorder. Arm metadata is released by the manual setter;
+    // no DMA view or receive-buffer pointer is retained by the correlation.
+    NativeIwxRocRxCorrelation::Recorder nativeRxRocCorrelation_{};
+    NativeIwxRocRxCorrelation::RocEpoch nativeRxRocEpoch_{};
+    uint64_t nativeRxRocDeadlineUs_ {0};
+    uint64_t nativeRxRocArmUs_ {0};
+    uint64_t nativeRxRocArmStopSerial_ {0};
+    uint32_t nativeRxRocArmGeneration_ {0};
+    uint32_t nativeRxRocArmReady_ {0};
+    uint32_t nativeRxRocPublishAttempts_ {0};
+    bool nativeRxRocPublished_ {false};
+    uint8_t nativeRxRocPublishWire_[NativeIwxRocRxCorrelation::kWireBytes] {};
 #endif
     bool nativeRxPreOwnerPublished_ {false};
     NativeRxPreOwner::Snapshot nativeRxPreOwnerPublishSnapshot_{};
@@ -859,7 +876,12 @@ public:
                         uint32_t transportNotificationQid,
                         uint32_t transportNotificationIndex,
                         uint64_t hostRxMonotonicUs,
-                        bool hostRxMonotonicUsPresent);
+                        bool hostRxMonotonicUsPresent
+#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+                        , NativeIwxRocRxCorrelation::Token rocCopyToken,
+                        uint32_t rxPacketOffset
+#endif
+                        );
     void    iwx_rx_tx_cmd_single(struct iwx_softc *, struct iwx_rx_packet *,
             struct iwx_tx_data *);
     void iwx_txd_done(struct iwx_softc *sc, struct iwx_tx_data *txd);
@@ -1024,7 +1046,11 @@ public:
             struct ieee80211_rxinfo *, struct mbuf_list *);
     int    iwx_rx_pkt_valid(struct iwx_rx_packet *);
     void    iwx_rx_pkt(struct iwx_softc *, struct iwx_rx_data *,
-            struct mbuf_list *, uint32_t rxRingSlot);
+            struct mbuf_list *, uint32_t rxRingSlot
+#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+            , NativeIwxRocRxCorrelation::Token rocCopyToken
+#endif
+            );
     void    iwx_notif_intr(struct iwx_softc *);
     static int    iwx_intr(OSObject *object, IOInterruptEventSource* sender, int count);
     static int    iwx_intr_msix(OSObject *object, IOInterruptEventSource* sender, int count);

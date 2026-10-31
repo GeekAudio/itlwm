@@ -7401,6 +7401,46 @@ void ItlIwx::tahoeP2pTapSessionEvent(struct iwx_softc *sc,
     const auto after = nativeP2pRocEvents_.snapshot();
     const bool canonicalStart = !before.startSeen && after.startSeen;
     const bool canonicalEnd = !before.endSeen && after.endSeen;
+#if defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+    // Observe actual reducer boundaries independently of per-MPDU owner, MAC,
+    // channel and frame classification. This adds no receive qualification.
+    tahoeRxRocCorrelationSync(hostUs);
+    using namespace NativeIwxRocRxCorrelation;
+    RocEpoch correlationEpoch;
+    correlationEpoch.contextGeneration = epochs.contextGeneration;
+    correlationEpoch.powerGeneration = epochs.powerGeneration;
+    correlationEpoch.stationGeneration = epochs.stationGeneration;
+    correlationEpoch.rocGeneration = generation;
+    correlationEpoch.sessionToken = generation;
+    if (canonicalStart && nativeRxRocCorrelation_.state() == State::kArmed) {
+        const uint64_t durationUs = uint64_t(__atomic_load_n(
+            &nativeP2pRocDurationMs_, __ATOMIC_ACQUIRE)) * 1000ULL;
+        if (reducerReturnedTrue && after.startStatus == 1 &&
+            after.configuration == IWX_SESSION_PROTECT_CONF_P2P_DEVICE_DISCOV &&
+            durationUs != 0 && after.startObservedMonotonicUs != 0 &&
+            after.startObservedMonotonicUs <= UINT64_MAX - durationUs) {
+            const uint64_t deadlineUs = after.startObservedMonotonicUs + durationUs;
+            if (nativeRxRocCorrelation_.beginRoc(correlationEpoch,
+                    after.startObservedMonotonicUs, deadlineUs)) {
+                nativeRxRocEpoch_ = correlationEpoch;
+                nativeRxRocDeadlineUs_ = deadlineUs;
+            }
+        } else {
+            (void)nativeRxRocCorrelation_.close(
+                CloseReason::kInvalidBoundary, hostUs);
+        }
+    }
+    if (canonicalEnd && (nativeRxRocCorrelation_.state() == State::kActive ||
+                         nativeRxRocCorrelation_.state() == State::kArmed)) {
+        if (reducerReturnedTrue && after.endStatus == 1 &&
+            nativeRxRocCorrelation_.state() == State::kActive)
+            (void)nativeRxRocCorrelation_.endRoc(correlationEpoch,
+                after.endObservedMonotonicUs);
+        else
+            (void)nativeRxRocCorrelation_.close(
+                CloseReason::kInvalidBoundary, hostUs);
+    }
+#endif
     const auto traceOwner = nativeAwdlRxEventTimeline_.snapshot();
     const bool traceOwnerMatches = nativeAwdlRxEventOwnerSerial_ != 0 &&
         traceOwner.ownerPresent &&
@@ -7927,11 +7967,23 @@ IOReturn ItlIwx::nativeP2pArmProbe()
                     (__atomic_load_n(&com.sc_flags, __ATOMIC_ACQUIRE) & IWX_FLAG_SHUTDOWN) != 0 ||
                     __atomic_load_n(&nativeLifecycleTearingDown_, __ATOMIC_ACQUIRE) != 0;
             };
+            const uint32_t observerArmGeneration = uint32_t(
+                __atomic_load_n(&com.sc_generation, __ATOMIC_ACQUIRE));
             const bool observed = !observerStopActive() &&
                 nativeRxPreOwner_.begin(nanos / 1000ULL,
-                uint32_t(__atomic_load_n(&com.sc_generation, __ATOMIC_ACQUIRE)));
-            if (observed)
+                observerArmGeneration);
+            if (observed) {
+                // Metadata only: the recorder itself is lazily armed and
+                // subsequently accessed exclusively under the main gate.
+                __atomic_store_n(&nativeRxRocArmUs_, nanos / 1000ULL,
+                                 __ATOMIC_RELAXED);
+                __atomic_store_n(&nativeRxRocArmStopSerial_, observerStopSerial,
+                                 __ATOMIC_RELAXED);
+                __atomic_store_n(&nativeRxRocArmGeneration_, observerArmGeneration,
+                    __ATOMIC_RELAXED);
+                __atomic_store_n(&nativeRxRocArmReady_, 1u, __ATOMIC_RELEASE);
                 __atomic_store_n(&nativeRxPreOwnerArmed_, 1u, __ATOMIC_RELEASE);
+            }
             if (observed &&
                 (observerStopSerial != __atomic_load_n(
                      &nativeRxPreOwnerStopSerial_, __ATOMIC_ACQUIRE) ||
@@ -8070,6 +8122,7 @@ void ItlIwx::nativeP2pTick()
     tahoeRxPreOwnerPublish(controller);
 #if defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
     tahoeRxCompletionPublish(controller);
+    tahoeRxRocCorrelationPublish(controller);
 #endif
     tahoePublishMccSnapshot(controller);
     publishRx149ProfileAvailabilityOnce(this, controller);
