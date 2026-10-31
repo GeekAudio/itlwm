@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "14e20961390f3ae428c31d80208f3bf43017d73131a44cc40fb5e20de5b76ee3"
+      "sha256": "9a13ee8d3eda09926ecc0a144bfeddc434ffbb91f5b8bde9bd97dc170b3b0eb3"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "cfb74780eed13e379879d179687dda250d1eb0497592163373e0ffd4d56601c4"
+      "sha256": "9f1b5b7ac09fdcebfccf6bf1bad403234b0c000e995592ad83f05b943d0b5f79"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-31T09:19:32+08:00",
-  "runtime_scope": "Test093 loaded UUID matches the verified archive. The five-minute baseline and scoped web requests passed; later manual power-on produced repeated lifecycle transitions and one real TX watchdog. An unattended link loss occurred separately without a new watchdog or reset; connectivity recovered. Group2 callsite and helper-return observations do not prove queue retention or transmission. Channel149 ROC START/END and cleanup passed with a 95.196ms dwell and one in-window management beacon, but no native AWDL data ingress, UDP return or AirDrop transfer was observed. Current matrix:6 passed,2 partial,31 uncovered,1 regressed. No new driver deployment or reboot is required; the Test093 full EFI backup is retained. Historical development timeline is preserved."
+  "updated_at": "2026-10-31T10:26:03+08:00",
+  "runtime_scope": "Test093 runtime acceptance remains unchanged:6 passed,2 partial,31 uncovered,1 regressed. Later Wi-Fi power cycling/watchdog and unattended link loss remain unresolved; no native AWDL data return or AirDrop transfer passed. One consolidated timeline entry records offline RX software-source/port-identity work and a reserve/publish/copy/unpublish prototype with10 passing host-model test groups. Kernel integration, device mapping semantics, module lifetime and actual receive acceptance remain unverified. No new driver or EFI deployment; no reboot required."
 }
