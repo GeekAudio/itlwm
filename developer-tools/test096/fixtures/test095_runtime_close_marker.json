@@ -1,0 +1,95 @@
+{
+  "binding": {
+    "armRunToken": "synthetic-test096-run-token",
+    "bootEpoch": 96,
+    "loadedUUID": "00000000-0000-4000-8000-000000000096",
+    "verified": true
+  },
+  "preownerCapture": {
+    "binding": {
+      "armRunToken": "synthetic-test096-run-token",
+      "bootEpoch": 96,
+      "loadedUUID": "00000000-0000-4000-8000-000000000096",
+      "verified": true
+    },
+    "commitMarkersValidForAllReads": true,
+    "decoded": {
+      "snapshot": {
+        "active": false,
+        "beginUs": 1479306056,
+        "captureSerial": 101,
+        "closeReason": "Explicit",
+        "closeReasonCode": 2,
+        "closed": true,
+        "deadlineUs": 1483306056,
+        "driverGeneration": 202,
+        "endUs": 1483306056
+      }
+    },
+    "stable": true,
+    "stableReadCount": 3
+  },
+  "provenance": {
+    "identityValues": "synthetic",
+    "kind": "synthetic_projection",
+    "protocolFlags": "schema contract literals",
+    "timingSource": "Test095 monotonic timing values only"
+  },
+  "traceSnapshot": {
+    "binding": {
+      "armRunToken": "synthetic-test096-run-token",
+      "bootEpoch": 96,
+      "loadedUUID": "00000000-0000-4000-8000-000000000096",
+      "verified": true
+    },
+    "rawSnapshot": {
+      "NativeP2PRocRequestedDurationMs": 100,
+      "NativeP2PRxTraceContextGeneration": 303,
+      "NativeP2PRxTraceOwnerPresent": 1,
+      "NativeP2PRxTraceOwnerSerial": 606,
+      "NativeP2PRxTracePowerGeneration": 202,
+      "NativeP2PRxTraceRocEndApi": 1,
+      "NativeP2PRxTraceRocEndCanonicalTransition": 1,
+      "NativeP2PRxTraceRocEndCanonicalTransitionPresent": 1,
+      "NativeP2PRxTraceRocEndConfiguration": 2,
+      "NativeP2PRxTraceRocEndContextGeneration": 303,
+      "NativeP2PRxTraceRocEndHostMonotonicPresent": 1,
+      "NativeP2PRxTraceRocEndHostMonotonicUs": 1480132549,
+      "NativeP2PRxTraceRocEndMacIdAndColor": 1,
+      "NativeP2PRxTraceRocEndOwnerSerial": 606,
+      "NativeP2PRxTraceRocEndOwnerSessionToken": 707,
+      "NativeP2PRxTraceRocEndPowerGeneration": 202,
+      "NativeP2PRxTraceRocEndPresent": 1,
+      "NativeP2PRxTraceRocEndRawLength": 16,
+      "NativeP2PRxTraceRocEndRawStartFlag": 0,
+      "NativeP2PRxTraceRocEndRawStatus": 1,
+      "NativeP2PRxTraceRocEndReducerResultPresent": 1,
+      "NativeP2PRxTraceRocEndReducerReturnedTrue": 1,
+      "NativeP2PRxTraceRocEndRocGeneration": 505,
+      "NativeP2PRxTraceRocEndStationGeneration": 404,
+      "NativeP2PRxTraceRocGeneration": 505,
+      "NativeP2PRxTraceRocStartApi": 1,
+      "NativeP2PRxTraceRocStartCanonicalTransition": 1,
+      "NativeP2PRxTraceRocStartCanonicalTransitionPresent": 1,
+      "NativeP2PRxTraceRocStartConfiguration": 2,
+      "NativeP2PRxTraceRocStartContextGeneration": 303,
+      "NativeP2PRxTraceRocStartHostMonotonicPresent": 1,
+      "NativeP2PRxTraceRocStartHostMonotonicUs": 1480037387,
+      "NativeP2PRxTraceRocStartMacIdAndColor": 1,
+      "NativeP2PRxTraceRocStartOwnerSerial": 606,
+      "NativeP2PRxTraceRocStartOwnerSessionToken": 707,
+      "NativeP2PRxTraceRocStartPowerGeneration": 202,
+      "NativeP2PRxTraceRocStartPresent": 1,
+      "NativeP2PRxTraceRocStartRawLength": 16,
+      "NativeP2PRxTraceRocStartRawStartFlag": 1,
+      "NativeP2PRxTraceRocStartRawStatus": 1,
+      "NativeP2PRxTraceRocStartReducerResultPresent": 1,
+      "NativeP2PRxTraceRocStartReducerReturnedTrue": 1,
+      "NativeP2PRxTraceRocStartRocGeneration": 505,
+      "NativeP2PRxTraceRocStartStationGeneration": 404,
+      "NativeP2PRxTraceSnapshotVersionBegin": 2,
+      "NativeP2PRxTraceSnapshotVersionEnd": 2,
+      "NativeP2PRxTraceStationGeneration": 404
+    }
+  }
+}

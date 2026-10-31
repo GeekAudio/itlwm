@@ -1977,7 +1977,7 @@ void AirportItlwm::publishNativePowerState()
         }
         hal->release();
     } else {
-        setProperty("NativePowerHALFlags", 0U, 32);
+        setProperty("NativePowerHALFlags", uint64_t(0), 32);
     }
     publishNativePowerTrace();
 }
