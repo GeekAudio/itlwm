@@ -55,6 +55,9 @@
     "native/rx_preowner_wire.hpp": "3aaeed745a7ef8887366cbdde2b209416a3d1545bbb9840e5dd9f980d0279594",
     "native/tests/test087_preowner_wire.cpp": "27cc0ab8b2842c9b2cdccdbf362162e0c2dc65450057a26919ce0141cabbe496"
   },
+  "offline_tests": {
+    "developer-tools/test087/test_rx_completion_capture.py": "8ee3f964faeeeb6343fa0aa43f6985335246f7606a7af7880bafe61b971ccd84"
+  },
   "runtime_sources": {
     "developer-tools/test087/README.md": "92d143ee7afda1e5e30e857af3416cb5e28671cc2f7d3faa319dea2b4691d16e",
     "developer-tools/test087/arm_p2p_rx149_test087.swift": "ab44649bee7e7ad0cae7a84af839881b431a705d08c119f0d04424c9cb174919",
@@ -62,20 +65,23 @@
     "developer-tools/test087/controlled_trace_report.py": "e330fbcb92788f928a0895bd34cf471552fa9151f31910eff751a85c8f58cd14",
     "developer-tools/test087/finalize_test087_runtime_binding.py": "fc04bcb08565c68a5a52872c96bfe05d5d105e6c839552283c260b525fbdbbea",
     "developer-tools/test087/host_clock_domain.py": "8abb0390d135c36eba87e95ea0cfdd6850f48258c7c6fbb5ab2fe98984fc7a1c",
-    "developer-tools/test087/native_controlled_capture.py": "789a1501e52b55222261b801486cdc3252d64e0b3f046c29582a64798c60ba30",
+    "developer-tools/test087/native_controlled_capture.py": "d5c54d0eb7daa5c5d6e29721fa67e6e0488192c42f6e4abbf6412d8ab8bd9abf",
     "developer-tools/test087/preowner_decode.py": "7e89f9683add17a0127da75d3e0c8ded2392b5d1ca01b257d8f44ca69620b8e3",
     "developer-tools/test087/run_controlled_probe_once.py": "3dac10d838093c8a7e83270dada59f9bd6c238fa4d070190a78a68c2a218b831",
     "developer-tools/test087/test087_controlled.py": "6cd4c0082a1da49cdaea002c953a79d952e1ee41bdde889a734b51a13d1e9feb",
     "developer-tools/test087/tests/test_preowner_wire.py": "3e6bedb9f91c043b63a157d20a4dfa6f9d3ca8324816b2aeac7bba1e8cdb44bc",
     "developer-tools/test087/tests/test_test087_runtime.py": "d59a4023f4dcde07e0f6b45092221f9be56f156d7dc78ab9e7879c0b63957493",
     "developer-tools/test087/tests/test_candidate_binding.py": "a2d4364c8caf87f1cd00af030197e9da3309a12cd43ccd3a55a436626b69aa46",
-    "developer-tools/test087/candidate_binding.py": "a72457955fd4c7c652f93f25d1463262fa6934928254d99ec84ec59b05c3820d"
+    "developer-tools/test087/candidate_binding.py": "a72457955fd4c7c652f93f25d1463262fa6934928254d99ec84ec59b05c3820d",
+    "developer-tools/test094/rx_completion_decode.py": "6c735580db346507004da467d9aca9828df4a59edcf0359cc1c4d4c4ee39e0fd"
   },
   "schema": 1,
-  "scope": "Receipt-bound native AWDL RX149 runtime tooling with Test087 compatibility, offline fixtures, and hash-pinned frozen Test086 dependencies.",
+  "scope": "Receipt-bound native AWDL RX149 runtime tooling with Test087 compatibility, Test095 numeric RX-completion capture using the Test094 strict decoder, offline fixtures, and hash-pinned frozen Test086 dependencies.",
+  "last_updated_for_tool_revision": "Test095",
   "validation_scope": {
     "candidate_binding": "Test091 candidate, UUID, archive SHA, profile, baseline receipt SHA, source map, and measurement contract are receipt-bound through finalizer, coordinator, native worker, and helper summary.",
-    "offline_runtime_and_wire_tests": "26 Test087 candidate-binding/runtime, Test088 adapter, and Test089 source-parity tests passed.",
+    "offline_runtime_and_wire_tests": "26 Test087 candidate-binding/runtime, Test088 adapter, and Test089 source-parity tests passed (prior validation record).",
+    "test095_rx_completion_capture": "10 capture tests, 4 strict decoder tests, 9 Test087 runtime regression tests, and 12 Test088 coordinator tests passed offline.",
     "swift_helper_typecheck": "passed with swiftc; helper not executed.",
     "hardware_rf_or_efi_operation": false
   }

@@ -1,6 +1,8 @@
 {
   "schema": 1,
   "tool_revision": "Test088",
+  "last_updated_for_tool_revision": "Test095",
+  "manifest_note": "The Test087 source-manifest pointer was refreshed for the shared RX-completion observer collector; Test088 source files and its offline-validation record are unchanged.",
   "driver_candidate": "receipt-bound (Test087 compatibility bundle retained)",
   "scope": "Sender timing and passive counter diagnostics only; no kext or EFI change. No new RF, native data ingress or AirDrop acceptance.",
   "source_files": {
@@ -18,7 +20,7 @@
     "developer-tools/test088/tests/test_netstat_counters.py": "d6266ea743550c67685df4cd4504cc44498f7c35b6078d674c86cd31a535c12a",
     "developer-tools/test088/tests/test_send_timing.py": "24777254cea821ade788dc2515f624ea25293ecc0968a5892ec98ebbf6ee54fa"
   },
-  "frozen_test087_source_manifest_sha256": "8f7cdc404900ca943ecfa86ef5ce8a5adf5e48eb80273e5f618768daa2a2152c",
+  "frozen_test087_source_manifest_sha256": "1c2027621023b31caf9b09d0f56db716cf845110fd65be224b513e0917e14d10",
   "sender_binary_sha256": "f134be242075e19f38b61ca105d89dfa148133fd3dafdf37480fcd3d7c0fd222",
   "offline_validation": {
     "python_tests": 31,

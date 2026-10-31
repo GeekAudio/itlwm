@@ -57,8 +57,26 @@ PREOWNER_PUBLISHED_KEY = "NativeRxPreOwnerPublished"
 PREOWNER_REVISION_KEY = "NativeRxPreOwnerRevision"
 PREOWNER_SCHEMA_KEY = "NativeRxPreOwnerSchema"
 PREOWNER_ARM_ACCEPTED_KEY = "NativeRxPreOwnerArmAccepted"
+RX_COMPLETION_OBSERVATION_KEY = "NativeRXCompletionObservation"
+RX_COMPLETION_DECODER = ROOT / "developer-tools/test094/rx_completion_decode.py"
+RX_COMPLETION_WIRE_BYTES = 760
+RX_COMPLETION_POLL_TIMEOUT_SECONDS = 3.0
+RX_COMPLETION_READ_INTERVAL_SECONDS = 0.03
 DATA_TX_COUNTER = "NativeAwdlDataTxSubmitted"
 DATA_TX_PENDING = "NativeAwdlDataTxPending"
+
+RX_COMPLETION_COPY_STATUS = {
+    1: "copied",
+    2: "busy",
+    3: "no_view",
+    4: "wrong_family",
+    5: "slot_out_of_range",
+    6: "mapping_too_short",
+    7: "slot_past_mapping",
+    8: "unavailable",
+    9: "closed",
+    10: "budget_exhausted",
+}
 
 
 class NativeCaptureError(RuntimeError):
@@ -645,7 +663,8 @@ def _read_preowner_registry() -> Dict[str, Any]:
         if not isinstance(node, dict):
             return
         if ("NativeTestBuild" in node or PREOWNER_PUBLISHED_KEY in node or
-                PREOWNER_SNAPSHOT_KEY in node):
+                PREOWNER_SNAPSHOT_KEY in node or
+                RX_COMPLETION_OBSERVATION_KEY in node):
             nodes.append(node)
         for child in node.get("IORegistryEntryChildren", []):
             visit(child)
@@ -662,6 +681,9 @@ def _read_preowner_registry() -> Dict[str, Any]:
         values[key] = value if type(value) in (int, bool) else None
     blob = node.get(PREOWNER_SNAPSHOT_KEY)
     values[PREOWNER_SNAPSHOT_KEY] = blob if isinstance(blob, bytes) else None
+    completion = node.get(RX_COMPLETION_OBSERVATION_KEY)
+    values[RX_COMPLETION_OBSERVATION_KEY] = (
+        completion if isinstance(completion, bytes) else None)
     return values
 
 
@@ -757,6 +779,168 @@ def _preowner_evidence_limits() -> Dict[str, Any]:
         "zero_count_requires_a_stable_published_closed_snapshot": True,
         "missing_publication_or_blob_is_unknown_not_zero": True,
         "peer_receipt_or_airdrop_proven": False,
+    }
+
+
+def _rx_completion_unknown(status: str, *, poll_reads: int = 0,
+                            raw_reads: Optional[List[Dict[str, Any]]] = None,
+                            error_type: Optional[str] = None) -> Dict[str, Any]:
+    result: Dict[str, Any] = {
+        "status": status,
+        "snapshot_complete": False,
+        "evidence_state": "unknown",
+        "poll_read_count": poll_reads,
+        "raw_reads": raw_reads or [],
+        "decoded": None,
+        "observer_attempts_observed": None,
+        "registry_view_copy_observed": None,
+        "copy_status": None,
+        "evidence_limits": {
+            "numeric_completion_ring_copy_is_not_mpdu_decode": True,
+            "dma_ownership_proven": False,
+            "raw_freshness_proven": False,
+            "eight_byte_coherence_proven": False,
+            "peer_or_socket_receipt_proven": False,
+            "preowner_witness_upgraded_to_data": False,
+        },
+    }
+    if error_type is not None:
+        result["error_type"] = error_type
+    return result
+
+
+def _rx_completion_read_record(index: int, blob: Optional[bytes]) -> Dict[str, Any]:
+    allowed_blob = (blob if isinstance(blob, bytes) and
+                    len(blob) == RX_COMPLETION_WIRE_BYTES else None)
+    return {
+        "index": index,
+        "raw_blob_base64": (base64.b64encode(allowed_blob).decode("ascii")
+                            if allowed_blob is not None else None),
+        "raw_blob_length": len(blob) if isinstance(blob, bytes) else None,
+        "raw_blob_sha256": hashlib.sha256(blob).hexdigest()
+            if isinstance(blob, bytes) else None,
+    }
+
+
+def _rx_completion_observation(decoder, *, reader=None,
+                               timeout: float = RX_COMPLETION_POLL_TIMEOUT_SECONDS,
+                               read_interval: float = RX_COMPLETION_READ_INTERVAL_SECONDS,
+                               sleep_fn=time.sleep) -> Dict[str, Any]:
+    """Capture and strictly decode the independent 760-byte RX-ring telemetry.
+
+    This collector is read-only and best-effort. Missing or malformed OSData
+    remains unknown and cannot change the RX-session or input result.
+    """
+    if reader is None:
+        reader = _read_preowner_registry
+    deadline = time.monotonic() + max(0.0, timeout)
+    poll_reads = 0
+    first_blob = None
+    try:
+        while True:
+            sample = reader()
+            poll_reads += 1
+            if not isinstance(sample, dict):
+                return _rx_completion_unknown(
+                    "collector_error", poll_reads=poll_reads,
+                    error_type="UnexpectedReaderResult")
+            candidate = sample.get(RX_COMPLETION_OBSERVATION_KEY)
+            if isinstance(candidate, bytes):
+                first_blob = candidate
+                break
+            if time.monotonic() >= deadline:
+                return _rx_completion_unknown(
+                    "not_published_or_no_attempts", poll_reads=poll_reads)
+            sleep_fn(min(read_interval, max(0.0, deadline - time.monotonic())))
+    except Exception as error:
+        return _rx_completion_unknown(
+            "collector_error", poll_reads=poll_reads,
+            error_type=type(error).__name__)
+
+    raw_reads = [_rx_completion_read_record(1, first_blob)]
+    blobs = [first_blob]
+    for index in range(2, 4):
+        try:
+            sample = reader()
+            poll_reads += 1
+            if not isinstance(sample, dict):
+                return _rx_completion_unknown(
+                    "collector_error", poll_reads=poll_reads,
+                    raw_reads=raw_reads,
+                    error_type="UnexpectedReaderResult")
+            candidate = sample.get(RX_COMPLETION_OBSERVATION_KEY)
+            blob = candidate if isinstance(candidate, bytes) else None
+        except Exception as error:
+            return _rx_completion_unknown(
+                "collector_error", poll_reads=poll_reads,
+                raw_reads=raw_reads,
+                error_type=type(error).__name__)
+        blobs.append(blob)
+        raw_reads.append(_rx_completion_read_record(index, blob))
+        if index != 3:
+            try:
+                sleep_fn(max(0.0, read_interval))
+            except Exception as error:
+                return _rx_completion_unknown(
+                    "collector_error", poll_reads=poll_reads,
+                    raw_reads=raw_reads,
+                    error_type=type(error).__name__)
+
+    if any(blob is None for blob in blobs):
+        return _rx_completion_unknown(
+            "read_missing_or_unstable", poll_reads=poll_reads,
+            raw_reads=raw_reads)
+    stable = all(blob == blobs[0] for blob in blobs[1:])
+    if not stable:
+        return _rx_completion_unknown(
+            "unstable_reads", poll_reads=poll_reads, raw_reads=raw_reads)
+    if decoder is None or not callable(getattr(decoder, "decode", None)):
+        return _rx_completion_unknown(
+            "decoder_unavailable", poll_reads=poll_reads,
+            raw_reads=raw_reads)
+    try:
+        decoded = decoder.decode(blobs[0])
+    except Exception as error:
+        return _rx_completion_unknown(
+            "decode_error", poll_reads=poll_reads, raw_reads=raw_reads,
+            error_type=type(error).__name__)
+
+    attempts = decoded.get("attempts") if isinstance(decoded, dict) else None
+    family = decoded.get("family") if isinstance(decoded, dict) else None
+    if type(attempts) is not int or attempts <= 0:
+        result = _rx_completion_unknown(
+            "decoded_without_attempts", poll_reads=poll_reads,
+            raw_reads=raw_reads)
+        result["decoded"] = decoded
+        return result
+    if type(family) is not int or family != 2:
+        result = _rx_completion_unknown(
+            "decoded_unexpected_family", poll_reads=poll_reads,
+            raw_reads=raw_reads)
+        result["decoded"] = decoded
+        return result
+
+    last_status = decoded.get("lastStatus")
+    status_label = (RX_COMPLETION_COPY_STATUS.get(last_status, "unknown")
+                    if type(last_status) is int else "unknown")
+    return {
+        "status": "decoded_stable",
+        "snapshot_complete": True,
+        "evidence_state": "numeric_telemetry_only",
+        "poll_read_count": poll_reads,
+        "raw_reads": raw_reads,
+        "decoded": decoded,
+        "observer_attempts_observed": attempts,
+        "registry_view_copy_observed": decoded.get("copies", 0) > 0,
+        "copy_status": status_label,
+        "evidence_limits": {
+            "numeric_completion_ring_copy_is_not_mpdu_decode": True,
+            "dma_ownership_proven": False,
+            "raw_freshness_proven": False,
+            "eight_byte_coherence_proven": False,
+            "peer_or_socket_receipt_proven": False,
+            "preowner_witness_upgraded_to_data": False,
+        },
     }
 
 
@@ -866,7 +1050,7 @@ def _worker(args) -> int:
         return 2
 
     report: Dict[str, Any] = {
-        "schema": "native-awdl-rx149-controlled-native-runtime-private/v2",
+        "schema": "native-awdl-rx149-controlled-native-runtime-private/v3",
         "source_ready_kind": SOURCE_KIND,
         "candidate": template["candidate"],
         "expected_loaded_uuid": template["expected_loaded_uuid"],
@@ -877,6 +1061,8 @@ def _worker(args) -> int:
         "preowner_observation_duration_ms": PREOWNER_DURATION_MS,
         "preowner_arm_accepted": False,
         "preowner_observation": None,
+        "rx_completion_observation": _rx_completion_unknown(
+            "not_collected"),
         "requires_phone_ready": False,
         "host_management_or_data_tx_allowed": False,
         "retry_allowed": False,
@@ -1092,6 +1278,24 @@ def _worker(args) -> int:
                 "radio_transmit_proven": False,
                 "peer_receipt_proven": False, "airdrop_proven": False,
             }
+        completion_decoder = None
+        decoder_error_type = None
+        try:
+            completion_decoder = _load_module(
+                "test094_rx_completion_decode", RX_COMPLETION_DECODER)
+        except Exception as error:
+            decoder_error_type = type(error).__name__
+        try:
+            completion_observation = _rx_completion_observation(
+                completion_decoder)
+            if decoder_error_type is not None:
+                completion_observation["decoder_error_type"] = decoder_error_type
+            report["rx_completion_observation"] = completion_observation
+        except Exception as error:
+            # This diagnostic is independent of RX-session cleanup and the
+            # data-input result. Decoder/collector failure remains unknown.
+            report["rx_completion_observation"] = _rx_completion_unknown(
+                "collector_error", error_type=type(error).__name__)
         report["peer_receipt_proven"] = False
         report["native_awdl_reply_proven"] = False
         report["airdrop_proven"] = False
