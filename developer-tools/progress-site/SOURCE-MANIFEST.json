@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "9a13ee8d3eda09926ecc0a144bfeddc434ffbb91f5b8bde9bd97dc170b3b0eb3"
+      "sha256": "3b2418cf29f41ed74f01bd4821fec59971733ca6a018ad0e93622a1fd169aa9a"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "9f1b5b7ac09fdcebfccf6bf1bad403234b0c000e995592ad83f05b943d0b5f79"
+      "sha256": "00ac0ffbcfb91301330800891e44b068121b83896b25b5810308fc0106443545"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-31T10:26:03+08:00",
-  "runtime_scope": "Test093 runtime acceptance remains unchanged:6 passed,2 partial,31 uncovered,1 regressed. Later Wi-Fi power cycling/watchdog and unattended link loss remain unresolved; no native AWDL data return or AirDrop transfer passed. One consolidated timeline entry records offline RX software-source/port-identity work and a reserve/publish/copy/unpublish prototype with10 passing host-model test groups. Kernel integration, device mapping semantics, module lifetime and actual receive acceptance remain unverified. No new driver or EFI deployment; no reboot required."
+  "updated_at": "2026-10-31T10:32:27+08:00",
+  "runtime_scope": "Test093 runtime acceptance remains6 passed,2 partial,31 uncovered,1 regressed. Offline observer prototype passed10 host-model test groups and4 noncopy/nonmove compile-time assertions after independent review found copied registry aliasing. Experimental source is versioned separately from the kext. Kernel mapping/lock/module-lifetime integration remains unvalidated; no new driver deployment or runtime AirDrop/data-return acceptance."
 }

@@ -1,0 +1,29 @@
+{
+  "schema": 1,
+  "scope": "offline experiment; not linked into the kext",
+  "fixed_driver_source": "d332dbb9a75a9c7eb18aaea6bec4424e4b4685b8",
+  "files": [
+    {
+      "path": "completion_copy_fence.hpp",
+      "sha256": "569e50af68f52aecfe13a7fe802f3e56673dc58b015e1058d7f6d2284a05cd06"
+    },
+    {
+      "path": "completion_copy_fence_test.cpp",
+      "sha256": "5e6a4536394981dda31056f8db0d111091070dd7fa0dce5448f5fe84a68828f9"
+    },
+    {
+      "path": "core_header_check.cpp",
+      "sha256": "41be310753f55d3b51922002b15ab9e8bc598b8a5c9e9158e8a26dea2d471003"
+    },
+    {
+      "path": "run.sh",
+      "sha256": "a0ab9919386d15f299dd1de9f09c750e8134f2a889aaf32b65c4bee823aa6376"
+    }
+  ],
+  "validation": {
+    "host_runtime_test_groups": 10,
+    "noncopy_nonmove_compile_assertions": 4,
+    "freestanding_no_undefined_runtime_references": true,
+    "kernel_or_hardware_validated": false
+  }
+}
