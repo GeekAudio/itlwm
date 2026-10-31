@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "8808c712a450cec6f2d6f3d727c20c06e6fa0a39b75b6580053bb2a6bf6b89d1"
+      "sha256": "810a4c00a90dfdfcd19f5d0514b83c451e08700594cd9d1fb1a135f0db09de5a"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "2a9525acb92abcc2ba9544661f4ea58bd57771086aae91b751a8f4472ab34d9b"
+      "sha256": "a70e91065be5c39ba36e8e676b9c2258f5c29d43efcf42c19738d27fe01e093a"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -30,7 +30,7 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "654c81385fecdb73ff96c8a7cfa317320500552116ef3520d2034b0a7c9d82be"
+      "sha256": "aabf2772515486d86516776db270d6f72eaccd55cd0988571d6fa22ed6dbe3d6"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-31T07:41:33.237406+08:00",
-  "runtime_scope": "Test092 is loaded and its UUID matches the deployed build. A 300.085-second/60-sample passive Wi-Fi observation and en1-bound gateway HTTP plus two Apple HTTPS requests passed without counter growth; DNS and long-term stability were not tested. The user still reports delayed power-off UI, brief off/on appearance during enable and slow network-list scans. One off operation took 14.035 seconds before/including a 0.029895-second driver power call; its preceding disassociation wait remains unlocalized. Private-address restarts can emit power changes but exact UI causation is unproven. Current matrix: 4 passed, 2 partial, 34 uncovered, 0 regressed. RX149 input profile is enabled, but fault recovery, peer reception, native inbound delivery and AirDrop were not tested. No new candidate or EFI modification in this runtime investigation."
+  "updated_at": "2026-10-31T08:25:56.778672+08:00",
+  "runtime_scope": "Test092 remains the running driver. Its five-minute pre-test baseline passed, but a later unattended link loss followed a locally enqueued Group2 response and received deauthentication reason16; reset and watchdog counters did not increase. The bounded controlled receiver run completed:16 local synthetic sender writes and one qualified channel149 MAC1 beacon, with no native UDP marker, per-packet data ingress or AirDrop success. Current matrix:4 passed,1 partial,34 uncovered,1 regressed. Test093 source d332dbb was built, reviewed and deployed with a full EFI backup and verified readback; its power-event deduplication and numeric power/scan/Group2 callsite traces await reboot validation. Historical timeline is preserved; no Test093 runtime results are claimed."
 }
