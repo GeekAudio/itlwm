@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "cd9576f24124febbcd52f8e72a1ab2df14b7a066151335eb211de653d02a48bc"
+      "sha256": "14c1f7adee5580190be300d6a347810c79932f20712ec973440433b0376f0af8"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "752a1395252b3fadb73bfd6145f0add136327fa076e5b1516e1b855451b902df"
+      "sha256": "bc63d39dc102b6e2deab93dac892ace7622dbae14a73af5e9ae8546a35dea00a"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -30,7 +30,7 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "551475ede8040fe600a491a9365fd2f4e396856411012566f6f610c7b81add95"
+      "sha256": "60709797c3d131cc4be92a08595396e9e8c0efd007f8a7011f4a0a606dc3012a"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
@@ -50,8 +50,8 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-31T23:27:54.205408+08:00",
-  "runtime_scope": "Test096 runtime: 6 passed, 6 partial, 27 uncovered, 1 failed. Five-minute baseline and bound Wi-Fi connectivity passed; rekey-associated association loss and a separate sleep/wake failure remain unresolved. Controlled OFF/ON restored ordinary Wi-Fi; Instant Hotspot join failed. Same-ROC correlation retained only a firmware Session Protection END notification, not a data MPDU. Local awdl0/IPv6/routes confirmed across three snapshots; native peer data and AirDrop remain unproven. EFI and WAN/LAN unchanged in this runtime round.",
-  "running_candidate": "25G332-Test097",
-  "next_candidate": "25G332-Test098"
+  "updated_at": "2026-11-01T00:11:26.840056+08:00",
+  "runtime_scope": "Test098本轮：6项通过、4项部分、0项判定失败、15项受配置限制、15项未测试。联网基线通过；手动开关后恢复。独立密钥更新窗口随后出现约6秒链路中断并恢复，同期是否有用户操作待确认，稳定性不判通过。149接收快照及时发布，但仅收到Beacon管理帧，awdl0数据回包和AirDrop仍未通过。",
+  "running_candidate": "25G332-Test098",
+  "next_candidate": null
 }
