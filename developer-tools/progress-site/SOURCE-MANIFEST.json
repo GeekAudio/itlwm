@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "810a4c00a90dfdfcd19f5d0514b83c451e08700594cd9d1fb1a135f0db09de5a"
+      "sha256": "14e20961390f3ae428c31d80208f3bf43017d73131a44cc40fb5e20de5b76ee3"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "a70e91065be5c39ba36e8e676b9c2258f5c29d43efcf42c19738d27fe01e093a"
+      "sha256": "cfb74780eed13e379879d179687dda250d1eb0497592163373e0ffd4d56601c4"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -30,7 +30,7 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "aabf2772515486d86516776db270d6f72eaccd55cd0988571d6fa22ed6dbe3d6"
+      "sha256": "e05db1212a15103d9d088c7b3503c2e6908cb29f3fac14433e0aa657671d4ba5"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-31T08:25:56.778672+08:00",
-  "runtime_scope": "Test092 remains the running driver. Its five-minute pre-test baseline passed, but a later unattended link loss followed a locally enqueued Group2 response and received deauthentication reason16; reset and watchdog counters did not increase. The bounded controlled receiver run completed:16 local synthetic sender writes and one qualified channel149 MAC1 beacon, with no native UDP marker, per-packet data ingress or AirDrop success. Current matrix:4 passed,1 partial,34 uncovered,1 regressed. Test093 source d332dbb was built, reviewed and deployed with a full EFI backup and verified readback; its power-event deduplication and numeric power/scan/Group2 callsite traces await reboot validation. Historical timeline is preserved; no Test093 runtime results are claimed."
+  "updated_at": "2026-10-31T09:19:32+08:00",
+  "runtime_scope": "Test093 loaded UUID matches the verified archive. The five-minute baseline and scoped web requests passed; later manual power-on produced repeated lifecycle transitions and one real TX watchdog. An unattended link loss occurred separately without a new watchdog or reset; connectivity recovered. Group2 callsite and helper-return observations do not prove queue retention or transmission. Channel149 ROC START/END and cleanup passed with a 95.196ms dwell and one in-window management beacon, but no native AWDL data ingress, UDP return or AirDrop transfer was observed. Current matrix:6 passed,2 partial,31 uncovered,1 regressed. No new driver deployment or reboot is required; the Test093 full EFI backup is retained. Historical development timeline is preserved."
 }
