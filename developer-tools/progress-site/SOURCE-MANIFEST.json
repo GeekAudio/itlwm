@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "d6a0dda1ae79f371b7a9474743910e9fa249902e6aefc0363d7b7bef609cc459"
+      "sha256": "f8943c6544d275127a71583fabf22bf39f1554b42efb3d78bfcc42701ef99593"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "ef84f269c4eda4d559b044959a2598c22b77f32770003852d50b95397ec0f432"
+      "sha256": "6a8598200900553fa62d6c17d50c61804791617b2d2e4607bcb506303b999a5c"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -50,6 +50,6 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-31T12:25:08+08:00",
-  "runtime_scope": "Test094 current-boot verification: 4 passed, 3 partial, 33 uncovered. A controlled power cycle reproduced private-address restart power notifications; Wi-Fi gateway and interface-bound HTTPS passed. Test095 diagnostic and bounded power-notification fixes remain in development and are not deployed. No new AWDL data ingress or AirDrop result."
+  "updated_at": "2026-10-31T12:55:11.395805+08:00",
+  "runtime_scope": "Test094 current boot: 4 passed, 3 partial, 33 uncovered. Two separate five-minute Wi-Fi observations and interface-bound HTTPS passed; power notification bounce remains to be revalidated. Test095 source, full build and independent review passed, internal EFI backed up and deployed; reboot/runtime validation pending. No new AWDL data ingress or AirDrop claim."
 }
