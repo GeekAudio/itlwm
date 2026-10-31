@@ -133,7 +133,9 @@ class Test098CompletionPublication(unittest.TestCase):
                     snapshot, 0, 9, IwxTxCompletionPublish::kOrdinaryCompletion,
                     2);
                 assert(ok && version == 2);
-                assert(controller.calls == 184);
+                assert(controller.calls == 187);
+                assert(controller.values["NativeStaCompletionSchema"] == 3);
+                assert(controller.values["NativeStaCompletionEvent0SingleSlotTxCommandHeader"] == 0);
                 assert(controller.values["NativeStaCompletionSnapshotVersionBegin"] == 2);
                 assert(controller.values["NativeStaCompletionSnapshotVersionEnd"] == 2);
                 assert(controller.values["NativeStaCompletionPublicationSequence"] == 2);
@@ -260,6 +262,33 @@ class Test098CompletionPublication(unittest.TestCase):
             values.pop(key)
         decoded = decoder.decode_scalars(values)
         self.assertIsNone(decoded["publication"])
+
+    def test_schema_two_and_three_are_both_retained_in_publisher_decoder_contract(self):
+        legacy = self.publication_fixture()
+        self.assertEqual(decoder.decode_scalars(legacy)["schema"], 2)
+
+        current = self.publication_fixture()
+        current["Schema"] = 3
+        current["Event0PresenceFlags"] |= (1 << 28) | (1 << 30)
+        current.update({
+            "Event0TxCommandScanStatus": 1,
+            "Event0TxCommandExpectedCount": 1,
+            "Event0TxCommandScannedCount": 1,
+            "Event0TxCommandCandidateCount": 0,
+            "Event0TxCommandCandidateIndex": 10,
+            "Event0TxCommandApiGeneration": 2,
+            "Event0TxCommandVersion": 7,
+            "Event0TxCommandFlags": 5,
+            "Event0TxCommandOffloadAssist": 0,
+            "Event0SingleSlotTxCommandHeader": (0x4108 << 16) | 0x0580,
+            "Event0RingCount": 1024,
+            "Event0Queued": 1,
+            "Event0QueueIndex": 11,
+        })
+        decoded = decoder.decode_scalars(current)
+        self.assertEqual(decoded["schema"], 3)
+        self.assertEqual(decoded["txcmd_identity"]["single_slot_host_command"][
+            "descriptor_index"], 10)
 
     def test_live_loss_counters_do_not_mutate_versioned_snapshot_fields(self):
         source = PRODUCTION_CPP.read_text(encoding="utf-8")

@@ -37,6 +37,8 @@ python3 developer-tools/test097/capture_native_sta_completion.py \
 
 采集器每秒读取一次 AirportItlwm 的数字型 `NativeStaCompletion*` 属性，文件以独占方式新建并设为仅当前用户可读写。它保留每次采样的完整性字段；撕裂快照、记录丢失或版本不匹配都不会解码成有效结果。`txcmd_identity.status` 可能是 `unique_host_command_candidate`、`complete_no_match`、`complete_ambiguous`、`incomplete_scan` 或 `not_observed`；它们只描述主机侧证据。旧 schema 1 记录继续可读，身份扫描显示 `unavailable_in_schema_1`。
 
+Schema 3 另外保留完整单槽扫描的原始 host TX_CMD FC/SC，即使它与 TX_RSP 不匹配；这不等于响应身份、ACK 或对端收件。Schema 1、2 仍可解码，且 schema 2 不接受 schema 3 的新字段。
+
 TX_CMD 的 API 版本仍按 `IWX_LONG_GROUP` 查询；写入设备命令头时，普通 STA 和 P2P 发送路径使用窄命令组 0，8 位 `idx` 按描述符位置低 8 位写入。可以用下面的离线测试把实际 producer 代码与 TX_RSP 扫描器串起来，覆盖 Gen2、Gen3 布局和 1024 项队列中的 257、1023 号位置：
 
 ```sh

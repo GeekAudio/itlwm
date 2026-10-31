@@ -11,6 +11,7 @@
 #include "../../native/awdl_mif_pacing.hpp"
 #include "../../native/awdl_psf_tx_gate.hpp"
 #include "../../native/p2p_rx149_observation.hpp"
+#include "../../native/rx149_live_start_snapshot.hpp"
 #include "../../native/rx_preowner_wire.hpp"
 #if defined(ITL_NATIVE_AWDL_LIFECYCLE_25G332)
 #include "../../native/awdl_native_lifecycle_25G332.hpp"
@@ -44,6 +45,7 @@
 #include <libkern/c++/OSData.h>
 #include <libkern/c++/OSNumber.h>
 #include <libkern/c++/OSSymbol.h>
+#include <libkern/c++/OSString.h>
 
 namespace {
 
@@ -6192,6 +6194,180 @@ static NativeP2PRx149Observation::RocEvidence rx149RocEvidence(
     return evidence;
 }
 
+static int rx149LiveTokenNibble(char value)
+{
+    if (value >= '0' && value <= '9')
+        return value - '0';
+    if (value >= 'a' && value <= 'f')
+        return value - 'a' + 10;
+    return -1;
+}
+
+static bool readRx149LiveRunToken(IOEthernetController *controller,
+                                  uint8_t token[NativeRx149LiveStart::kRunTokenBytes])
+{
+    if (!controller || !token)
+        return false;
+    auto tokenObject = OSDynamicCast(OSString,
+        controller->getProperty("NativeP2PRx149RunToken"));
+    if (!tokenObject || tokenObject->getLength() != 32)
+        return false;
+    const char *text = tokenObject->getCStringNoCopy();
+    if (!text)
+        return false;
+    uint8_t parsed[NativeRx149LiveStart::kRunTokenBytes]{};
+    for (size_t index = 0; index < sizeof(parsed); ++index) {
+        const int high = rx149LiveTokenNibble(text[index * 2]);
+        const int low = rx149LiveTokenNibble(text[index * 2 + 1]);
+        if (high < 0 || low < 0)
+            return false;
+        parsed[index] = static_cast<uint8_t>((high << 4) | low);
+    }
+    memcpy(token, parsed, sizeof(parsed));
+    return true;
+}
+
+static bool publishRx149LiveStartSnapshot(
+    ItlIwx *owner, P2PProbeRun *probe,
+    const IntelROCEvent::SessionSnapshot &session, bool forceInvalid)
+{
+    using namespace NativeRx149LiveStart;
+    if (!owner || (!forceInvalid && !probe) ||
+        (probe && (!probe->rx149ObservationOnly || probe->owner != owner)) ||
+        !owner->tahoeP2pOnMainGate())
+        return false;
+    IOEthernetController *controller = owner->tahoeP2pController();
+    if (!controller)
+        return false;
+
+    const uint32_t previousRevision =
+        owner->nativeP2pRx149LiveSnapshotRevision_;
+    if (previousRevision > UINT32_MAX - 2u) {
+        controller->removeProperty("NativeP2PRx149LiveStartSnapshot");
+        owner->nativeP2pRx149LiveSnapshotValid_ = 0;
+        return false;
+    }
+
+    Snapshot value{};
+    value.magic = kMagic;
+    value.schemaVersion = kSchemaVersion;
+    value.revision = previousRevision + 2u;
+    value.profileMode = kRx149ArmMode;
+    value.channel = kChannel;
+    value.durationMs = kDurationMs;
+    value.configuration = session.configuration;
+    value.commandResult = session.commandReturned ? session.commandResult : -1;
+    value.startSeen = session.startSeen ? 1u : 0u;
+    value.startStatus = session.startStatus;
+    value.endSeen = session.endSeen ? 1u : 0u;
+    value.outcomeUnknown = session.outcomeUnknown ? 1u : 0u;
+    value.ownerSerial = owner->nativeP2pRx149LiveSnapshotOwnerSerial_;
+    value.contextGeneration = probe ? probe->contextGeneration :
+        owner->nativeP2pProbeGeneration_;
+    value.powerGeneration = probe ? probe->powerGeneration :
+        uint32_t(__atomic_load_n(&owner->com.sc_generation, __ATOMIC_ACQUIRE));
+    value.stationGeneration = probe ? probe->stationGeneration :
+        __atomic_load_n(&owner->com.sc_tx_rate_generation, __ATOMIC_ACQUIRE);
+    value.rocGeneration = session.generation;
+    value.startObservedUs = session.startObservedMonotonicUs;
+    value.publishedUs = p2pProbeMonotonicNanoseconds() / 1000ULL;
+    if (session.startSeen && session.startObservedMonotonicUs != 0 &&
+        session.startObservedMonotonicUs <= UINT64_MAX - kDurationUs)
+        value.hardDeadlineUs = session.startObservedMonotonicUs + kDurationUs;
+    memcpy(value.runToken, owner->nativeP2pRx149RunToken_,
+           sizeof(value.runToken));
+
+    const NativeAwdlRxTrace::Snapshot trace =
+        owner->nativeAwdlRxEventTimeline_.snapshot();
+    const NativeAwdlRxTrace::Epochs expectedEpochs{
+        value.contextGeneration, value.powerGeneration,
+        value.stationGeneration, value.rocGeneration
+    };
+    const bool traceOwnerCurrent = trace.ownerPresent && trace.active &&
+        !trace.producerClosed && trace.ownerSerial == value.ownerSerial &&
+        value.ownerSerial != 0 &&
+        NativeAwdlRxTrace::sameEpochs(trace.epochs, expectedEpochs);
+    NativeP2PRx149Observation::RocEvidence evidence{};
+    if (probe)
+        evidence = rx149RocEvidence(probe, session);
+    const bool liveStart = !forceInvalid && probe && traceOwnerCurrent &&
+        NativeP2PRx149Observation::validStartedOwner(evidence) &&
+        !evidence.endSeen && !evidence.outcomeUnknown &&
+        value.startObservedUs != 0 && value.hardDeadlineUs != 0 &&
+        value.publishedUs >= value.startObservedUs &&
+        value.publishedUs < value.hardDeadlineUs && tokenPresent(value);
+    value.valid = liveStart ? 1u : 0u;
+    if (liveStart &&
+        owner->nativeP2pRx149LiveSnapshotValid_ != 0 &&
+        owner->nativeP2pRx149LiveSnapshotOwnerSerial_ == value.ownerSerial)
+        return true; // Publish the immutable START record only once.
+
+    uint8_t wire[kWireBytes]{};
+    if (!encode(value, wire, sizeof(wire))) {
+        controller->removeProperty("NativeP2PRx149LiveStartSnapshot");
+        owner->nativeP2pRx149LiveSnapshotValid_ = 0;
+        return false;
+    }
+    OSData *payload = OSData::withBytes(wire, sizeof(wire));
+    if (!payload) {
+        controller->removeProperty("NativeP2PRx149LiveStartSnapshot");
+        owner->nativeP2pRx149LiveSnapshotValid_ = 0;
+        return false;
+    }
+    const bool published = controller->setProperty(
+        "NativeP2PRx149LiveStartSnapshot", payload);
+    payload->release();
+    if (!published) {
+        controller->removeProperty("NativeP2PRx149LiveStartSnapshot");
+        owner->nativeP2pRx149LiveSnapshotValid_ = 0;
+        return false;
+    }
+    owner->nativeP2pRx149LiveSnapshotRevision_ = value.revision;
+    owner->nativeP2pRx149LiveSnapshotOwnerSerial_ = value.ownerSerial;
+    owner->nativeP2pRx149LiveSnapshotValid_ = value.valid;
+    return true;
+}
+
+static void removeRx149LiveStartPublication(ItlIwx *owner)
+{
+    if (!owner)
+        return;
+    if (auto *controller = owner->tahoeP2pController()) {
+        controller->removeProperty("NativeP2PRx149LiveStartSnapshot");
+        controller->removeProperty("NativeP2PRx149RunToken");
+    }
+    memset(owner->nativeP2pRx149RunToken_, 0,
+           sizeof(owner->nativeP2pRx149RunToken_));
+    owner->nativeP2pRx149LiveSnapshotOwnerSerial_ = 0;
+    owner->nativeP2pRx149LiveSnapshotValid_ = 0;
+}
+
+static IOReturn invalidateRx149LiveStartAction(OSObject *, void *contextArg,
+                                               void *, void *, void *)
+{
+    auto owner = static_cast<ItlIwx *>(contextArg);
+    if (!owner)
+        return kIOReturnBadArgument;
+    removeRx149LiveStartPublication(owner);
+    return kIOReturnSuccess;
+}
+
+static int invalidateRx149LiveStartOnMainGate(ItlIwx *owner)
+{
+    if (!owner)
+        return EINVAL;
+    IOWorkLoop *workLoop = owner->getMainWorkLoop();
+    if (workLoop && workLoop->inGate())
+        return invalidateRx149LiveStartAction(
+            owner, owner, nullptr, nullptr, nullptr) == kIOReturnSuccess ?
+            0 : EIO;
+    IOCommandGate *gate = owner->getMainCommandGate();
+    if (!gate)
+        return EIO;
+    return gate->runAction(invalidateRx149LiveStartAction, owner) ==
+        kIOReturnSuccess ? 0 : EIO;
+}
+
 static int reserveP2PStation(ItlIwx *owner, uint32_t generation,
                              uint8_t *stationId)
 {
@@ -7216,14 +7392,24 @@ IOReturn ItlIwx::tahoeP2pRocEventAction(OSObject *, void *opaque,
     auto action = static_cast<RocEventRun *>(opaque);
     auto probe = action ? action->probe : nullptr;
     auto owner = probe ? probe->owner : nullptr;
-    if (!owner || !owner->nativeP2pBusy() ||
-        __atomic_load_n(&owner->nativeP2pProbeOwner_, __ATOMIC_ACQUIRE) !=
-            reinterpret_cast<void *>(probe->workerThread) ||
-        owner->nativeP2pProbeGeneration_ != probe->contextGeneration ||
-        uint32_t(owner->com.sc_generation) != probe->powerGeneration ||
-        __atomic_load_n(&owner->com.sc_tx_rate_generation, __ATOMIC_ACQUIRE) !=
-            probe->stationGeneration)
+    if (!owner)
         return kIOReturnNotReady;
+    const bool currentOwner = owner->nativeP2pBusy() &&
+        __atomic_load_n(&owner->nativeP2pProbeOwner_, __ATOMIC_ACQUIRE) ==
+            reinterpret_cast<void *>(probe->workerThread) &&
+        owner->nativeP2pProbeGeneration_ == probe->contextGeneration &&
+        uint32_t(owner->com.sc_generation) == probe->powerGeneration &&
+        __atomic_load_n(&owner->com.sc_tx_rate_generation, __ATOMIC_ACQUIRE) ==
+            probe->stationGeneration;
+    if (!currentOwner) {
+        if (probe->rx149ObservationOnly && owner->tahoeP2pOnMainGate()) {
+            auto stale = owner->nativeP2pRocEvents_.snapshot();
+            stale.outcomeUnknown = true;
+            if (!publishRx149LiveStartSnapshot(owner, probe, stale, true))
+                removeRx149LiveStartPublication(owner);
+        }
+        return kIOReturnNotReady;
+    }
     auto &tracker = owner->nativeP2pRocEvents_;
     if (action->operation == kRocArm) {
         if (action->firmwareGeneration != probe->powerGeneration ||
@@ -7237,6 +7423,7 @@ IOReturn ItlIwx::tahoeP2pRocEventAction(OSObject *, void *opaque,
             __atomic_store_n(&owner->nativeP2pRocGeneration_,
                              probe->contextGeneration, __ATOMIC_RELEASE);
             owner->nativeAwdlRxEventOwnerSerial_ = 0;
+            owner->nativeP2pRx149LiveSnapshotOwnerSerial_ = 0;
             if (owner->nativeAwdlRxEventNextOwnerSerial_ != UINT64_MAX) {
                 const uint64_t ownerSerial =
                     ++owner->nativeAwdlRxEventNextOwnerSerial_;
@@ -7245,8 +7432,12 @@ IOReturn ItlIwx::tahoeP2pRocEventAction(OSObject *, void *opaque,
                     probe->stationGeneration, probe->contextGeneration
                 };
                 if (owner->nativeAwdlRxEventTimeline_.beginOwner(
-                        ownerSerial, epochs))
+                        ownerSerial, epochs)) {
                     owner->nativeAwdlRxEventOwnerSerial_ = ownerSerial;
+                    if (probe->rx149ObservationOnly)
+                        owner->nativeP2pRx149LiveSnapshotOwnerSerial_ =
+                            ownerSerial;
+                }
             }
         }
     } else if (action->operation == kRocCommandReturned) {
@@ -7260,6 +7451,35 @@ IOReturn ItlIwx::tahoeP2pRocEventAction(OSObject *, void *opaque,
     }
     action->snapshot = tracker.snapshot();
     storeRocSnapshot(owner, action->snapshot);
+    if (action->operation == kRocArm && probe->rx149ObservationOnly) {
+        // Clear any prior publication before this unique owner can start.
+        // The immutable record is invalid until command success and START
+        // have both been observed for this owner.
+        (void)publishRx149LiveStartSnapshot(owner, probe, action->snapshot,
+                                            true);
+    } else if (probe->rx149ObservationOnly) {
+        const bool terminal = action->snapshot.endSeen ||
+            action->snapshot.outcomeUnknown ||
+            action->operation == kRocExpire ||
+            action->operation == kRocCloseRx149 ||
+            (action->operation == kRocCommandReturned &&
+             action->snapshot.commandReturned &&
+             action->snapshot.commandResult != 0);
+        if (terminal) {
+            (void)publishRx149LiveStartSnapshot(owner, probe,
+                                                action->snapshot, true);
+        } else if ((action->operation == kRocCommandReturned ||
+                    action->operation == kRocRead) &&
+                   action->snapshot.commandReturned &&
+                   action->snapshot.commandResult == 0 &&
+                   action->snapshot.startSeen &&
+                   action->snapshot.startStatus == 1) {
+            // START may predate the command ACK. Publish READY only now, once
+            // both facts pass the same owner/epoch/lease gate.
+            (void)publishRx149LiveStartSnapshot(owner, probe,
+                                                action->snapshot, false);
+        }
+    }
     if (action->operation == kRocCloseRx149) {
         const auto evidence = rx149RocEvidence(probe, action->snapshot);
         if (!probe->rx149ObservationOnly ||
@@ -7387,8 +7607,16 @@ void ItlIwx::tahoeP2pTapSessionEvent(struct iwx_softc *sc,
     if (!generation || !lease.active || lease.contextGeneration != generation ||
         lease.currentContextGeneration != generation ||
         lease.powerGeneration != uint32_t(sc->sc_generation) ||
-        lease.stationGeneration != __atomic_load_n(&sc->sc_tx_rate_generation, __ATOMIC_ACQUIRE))
+        lease.stationGeneration != __atomic_load_n(&sc->sc_tx_rate_generation, __ATOMIC_ACQUIRE)) {
+        if (rx149ArmModeSelected(this) &&
+            nativeP2pRx149LiveSnapshotOwnerSerial_ != 0) {
+            auto stale = nativeP2pRocEvents_.snapshot();
+            stale.outcomeUnknown = true;
+            if (!publishRx149LiveStartSnapshot(this, nullptr, stale, true))
+                removeRx149LiveStartPublication(this);
+        }
         return;
+    }
     const uint64_t hostUs = p2pProbeMonotonicNanoseconds() / 1000ULL;
     const NativeAwdlRxTrace::Epochs epochs {
         static_cast<uint32_t>(lease.contextGeneration),
@@ -7522,6 +7750,14 @@ void ItlIwx::tahoeP2pTapSessionEvent(struct iwx_softc *sc,
             // Close only an existing matching owner. An END must never create
             // an empty-window owner or retrospectively claim RX coverage.
             tahoeP2pSyncRxDiagnosticOwner(true);
+        }
+        if ((canonicalStart || canonicalEnd) && rx149ArmModeSelected(this)) {
+            // This notification path is already on the main workloop gate.
+            // Publish an invalid transition immediately; the worker's next
+            // read may publish READY only if command success and the same live
+            // owner are still current. No RX observer lock is held here.
+            (void)publishRx149LiveStartSnapshot(
+                this, nullptr, after, true);
         }
     }
 }
@@ -7946,6 +8182,9 @@ IOReturn ItlIwx::nativeP2pArmProbe()
         return kIOReturnNoMemory;
     IOEthernetController *controller = getController();
     if (rx149ObservationOnlyRequested(controller)) {
+        uint8_t runToken[NativeRx149LiveStart::kRunTokenBytes]{};
+        if (!controller || !readRx149LiveRunToken(controller, runToken))
+            return kIOReturnBadArgument;
 #if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
         if (NativeAwdlBSD::rx149DataInputBlocked())
             return kIOReturnNotReady;
@@ -7961,6 +8200,9 @@ IOReturn ItlIwx::nativeP2pArmProbe()
                                          false,
                                          __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
             return kIOReturnBusy;
+        memcpy(nativeP2pRx149RunToken_, runToken, sizeof(runToken));
+        nativeP2pRx149LiveSnapshotOwnerSerial_ = 0;
+        nativeP2pRx149LiveSnapshotValid_ = 0;
 #if defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
         if (controller->getProperty("NativeRxPreOwnerObservation") == kOSBooleanTrue) {
             uint64_t absolute = 0, nanos = 0;
@@ -8418,6 +8660,7 @@ IOReturn ItlIwx::tahoeP2pCancelAction(OSObject *, void *contextArg,
         __atomic_load_n(&owner->nativeP2pProbeOwner_, __ATOMIC_ACQUIRE) != nullptr ||
         __atomic_load_n(&owner->nativeP2pNswqPaused_, __ATOMIC_ACQUIRE))
         return kIOReturnBusy;
+    removeRx149LiveStartPublication(owner);
 #if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
     NativeAwdlBSD::revokeRx149DataInput();
 #endif
@@ -8541,6 +8784,15 @@ IOReturn ItlIwx::tahoeP2pFinishAction(OSObject *, void *contextArg,
     run->currentAwTrace.rxDrainComplete = rxDrainComplete;
     publishDiscoveryExperiment(run, true);
 #endif
+    if (run->rx149ObservationOnly && owner->tahoeP2pOnMainGate()) {
+        (void)publishRx149LiveStartSnapshot(
+            owner, run, owner->nativeP2pRocEvents_.snapshot(), true);
+        if (auto *controller = owner->tahoeP2pController())
+            controller->removeProperty("NativeP2PRx149RunToken");
+        memset(owner->nativeP2pRx149RunToken_, 0,
+               sizeof(owner->nativeP2pRx149RunToken_));
+        owner->nativeP2pRx149LiveSnapshotValid_ = 0;
+    }
     if (run->canceled)
         owner->nativeP2pProbe_.cancelQueued();
     __atomic_store_n(&owner->nativeP2pProbeOwner_, nullptr, __ATOMIC_RELEASE);
@@ -8876,6 +9128,12 @@ int ItlIwx::tahoeP2pStopBeforeReset(struct iwx_softc *sc)
 {
     if (sc != &com)
         return EINVAL;
+    // A reset/stop attempt invalidates any live GO permit before the other
+    // resource gates decide whether firmware cleanup can proceed. Serialize
+    // the property and token retirement with ROC publication on the same gate.
+    int invalidateError = invalidateRx149LiveStartOnMainGate(this);
+    if (invalidateError)
+        return invalidateError;
 #if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
     NativeAwdlBSD::revokeRx149DataInput();
 #endif

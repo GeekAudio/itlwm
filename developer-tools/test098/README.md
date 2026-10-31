@@ -1,7 +1,7 @@
 # Test098 TX completion publication harness
 
 This offline harness exercises the bounded ordinary-completion publication
-policy, the TX-completion observer, and the schema-2 decoder's publication
+policy, the TX-completion observer, and the schema-3 decoder's publication
 seqlock fields. It does not load a kext or access hardware.
 
 Run:
@@ -18,7 +18,10 @@ when dirty, it claims and publishes that exact cut, then acknowledges it only
 after the scalar batch succeeds. A successful batch carries a publication
 sequence equal to its even snapshot version and a source marker:
 `1` for ordinary completion, `2` for a frozen watchdog snapshot. The decoder
-continues to accept older schema-2 snapshots without those additive fields.
+continues to accept older schema-2 snapshots and preserves the schema-3
+single-readable-slot TX_CMD header as host metadata, separate from an exact
+response match. This field does not prove firmware identity, ACK, or peer
+receipt.
 The changing `LiveRelatedCutLostCount` and
 `LiveRelatedRecordDroppedCount` properties are standalone live counters; they
 are deliberately distinct from the similarly named counters inside the

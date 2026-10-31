@@ -113,6 +113,7 @@
 #include "../../native/iwx_stop_retirement.hpp"
 #include "../../native/iwx_dma_info_lifecycle.hpp"
 #include "../../native/iwx_tx_ring_capacity.hpp"
+#include "../../native/iwx_tx_response_metadata.hpp"
 #include "../../native/iwx_txcmd_identity_observation.hpp"
 #ifdef AIRPORT_TAHOE
 #include "IwxTxRate.hpp"
@@ -1151,7 +1152,7 @@ static bool publishCompletionSnapshot(IOEthernetController *controller,
     };
     if (!scalar("SnapshotVersionBegin", finish - 1U))
         return false;
-    bool okay = scalar("Schema", 2) && scalar("SnapshotComplete", 0) &&
+    bool okay = scalar("Schema", 3) && scalar("SnapshotComplete", 0) &&
         scalar("SnapshotAvailable", snapshot.available) &&
         scalar("DroppedCount", snapshot.dropped_count) &&
         scalar("NextSerial", snapshot.next_serial) &&
@@ -1230,6 +1231,8 @@ static bool publishCompletionSnapshot(IOEthernetController *controller,
         PUBLISH_COMPLETION_FIELD("TxCommandVersion", txcmd_command_version);
         PUBLISH_COMPLETION_FIELD("TxCommandFlags", txcmd_flags);
         PUBLISH_COMPLETION_FIELD("TxCommandOffloadAssist", txcmd_offload_assist);
+        PUBLISH_COMPLETION_FIELD("SingleSlotTxCommandHeader",
+                                 single_slot_txcmd_header);
 #undef PUBLISH_COMPLETION_FIELD
     }
     return okay && scalar("SnapshotComplete", snapshot.available && snapshot.complete ? 1U : 0U) &&
@@ -9222,9 +9225,10 @@ iwx_rx_tx_cmd_single(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
 #endif
     
     if (txfail) {
-        XYLog("%s %d OUTPUT_ERROR type=%d status=%d\n", __FUNCTION__, __LINE__, txd->type, status);
+        const int txType = txd != nullptr ? txd->type : -1;
+        XYLog("%s %d OUTPUT_ERROR type=%d status=%d\n", __FUNCTION__, __LINE__, txType, status);
         ifp->netStat->outputErrors++;
-        if (txd->type == IEEE80211_FC0_TYPE_MGT)
+        if (txd != nullptr && txd->type == IEEE80211_FC0_TYPE_MGT)
             iwx_toggle_tx_ant(sc, &sc->sc_mgmt_last_antenna_idx);
     }
 }
@@ -9895,6 +9899,20 @@ static void txCompletionScanLiveTxCommands(
     event->txcmd_expected_count = scan.expected_count;
     event->txcmd_scanned_count = scan.scanned_count;
     event->txcmd_candidate_count = scan.candidate_count;
+    if (iwx_txcmd_identity_scan_has_single_observed_slot_header(&scan)) {
+        const iwx_txcmd_identity_candidate &observed =
+            scan.first_observed_candidate;
+        event->presence_flags |=
+            IWX_TX_COMPLETION_HAS_SINGLE_SLOT_TXCMD_HEADER;
+        event->txcmd_candidate_index = observed.index;
+        event->txcmd_api_generation = observed.api_generation;
+        event->txcmd_command_version = observed.command_version;
+        event->txcmd_flags = observed.command_flags;
+        event->txcmd_offload_assist = observed.offload_assist;
+        event->single_slot_txcmd_header =
+            ((observed.frame_control & UINT16_MAX) << 16) |
+            (observed.sequence_control & UINT16_MAX);
+    }
     if (iwx_txcmd_identity_scan_has_unique_candidate(&scan)) {
         event->presence_flags |=
             IWX_TX_COMPLETION_HAS_TXCMD_UNIQUE_CANDIDATE;
@@ -10049,8 +10067,6 @@ iwx_rx_tx_cmd(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
 #ifdef AIRPORT_TAHOE
     txCompletionSetRingFacts(&txRspCompletion.event(), ring);
 #endif
-    struct iwx_tx_data *txd;
-
     bus_dmamap_sync(sc->sc_dmat, data->map, 0, IWX_RBUF_SIZE,
                     BUS_DMASYNC_POSTREAD);
 
@@ -10112,6 +10128,8 @@ iwx_rx_tx_cmd(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
             return;
         }
         idx = checkedIndex;
+        const uint32_t responseOldTail = static_cast<uint32_t>(ring->tail);
+        const uint32_t responseOldQueued = static_cast<uint32_t>(ring->queued);
 #ifdef AIRPORT_TAHOE
         txRspCompletion.event().presence_flags |=
             IWX_TX_COMPLETION_HAS_QUEUE_INDEX;
@@ -10127,8 +10145,6 @@ iwx_rx_tx_cmd(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
                            kTxTimerClearFirmwareResponse);
 #endif
 #ifdef AIRPORT_TAHOE
-        const uint32_t responseOldTail = static_cast<uint32_t>(ring->tail);
-        const uint32_t responseOldQueued = static_cast<uint32_t>(ring->queued);
         txCompletionScanLiveTxCommands(&txRspCompletion.event(), sc, ring,
             queueId, responseOldTail, responseOldQueued,
             static_cast<uint32_t>(checkedIndex), tx_resp,
@@ -10150,8 +10166,25 @@ iwx_rx_tx_cmd(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
         if (group2RelatedSidecar)
             txRspCompletion.markPublicationRelevant();
 #endif
-        txd = &ring->data[idx];
-        iwx_rx_tx_cmd_single(sc, pkt, txd);
+        /*
+         * SSN's checkedIndex is an exclusive reclaim boundary. Resolve the
+         * consumer metadata independently: only a complete one-slot interval
+         * can identify oldTail without guessing boundary-1. An empty or
+         * multi-slot/ambiguous interval keeps response-derived status and
+         * outputErrors accounting, but skips node/type/rate attribution.
+         */
+        uint32_t metadataIndex = UINT32_MAX;
+        struct iwx_tx_data *completionTxd = nullptr;
+        if (iwx_tx_response_single_reclaim_metadata_index(
+                static_cast<uint32_t>(ring->ring_count), responseOldTail,
+                responseOldQueued, static_cast<uint32_t>(checkedIndex),
+                static_cast<uint32_t>(frameCount), &metadataIndex) &&
+            metadataIndex < nitems(ring->data)) {
+            struct iwx_tx_data *candidate = &ring->data[metadataIndex];
+            if (candidate->m != nullptr)
+                completionTxd = candidate;
+        }
+        iwx_rx_tx_cmd_single(sc, pkt, completionTxd);
         DPRINTFN(3, ("%s tid=%d ssn=%d idx=%d\n", __FUNCTION__, tid, ssn, idx));
         iwx_ampdu_txq_advance(sc, ring, idx);
 #ifdef AIRPORT_TAHOE

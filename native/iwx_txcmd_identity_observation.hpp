@@ -39,6 +39,8 @@ typedef struct iwx_txcmd_identity_scan {
     uint32_t response_sequence_control;
     uint32_t status;
     iwx_txcmd_identity_candidate first_candidate;
+    uint32_t observed_candidate_count;
+    iwx_txcmd_identity_candidate first_observed_candidate;
 } iwx_txcmd_identity_scan;
 
 static inline int iwx_txcmd_identity_scan_begin(
@@ -100,6 +102,10 @@ static inline int iwx_txcmd_identity_scan_record(
             scan->status = IWX_TXCMD_IDENTITY_SCAN_COMPLETE;
         return 1;
     }
+    if (scan->observed_candidate_count != UINT32_MAX)
+        ++scan->observed_candidate_count;
+    if (scan->observed_candidate_count == 1)
+        scan->first_observed_candidate = *candidate;
     if (candidate->frame_control == scan->response_frame_control &&
         candidate->sequence_control == scan->response_sequence_control) {
         if (scan->candidate_count != UINT32_MAX)
@@ -122,6 +128,25 @@ static inline int iwx_txcmd_identity_scan_has_unique_candidate(
         scan->scanned_count == scan->expected_count &&
         scan->candidate_count == 1 &&
         scan->first_candidate.qid == scan->qid;
+}
+
+/*
+ * This reports only that a complete, one-entry reclaim interval contained one
+ * readable TX_CMD header. It does not associate the firmware response with
+ * that command, establish ACK, or identify a Group2 cookie.
+ */
+static inline int iwx_txcmd_identity_scan_has_single_observed_slot_header(
+    const iwx_txcmd_identity_scan *scan)
+{
+    return scan != 0 &&
+        scan->status == IWX_TXCMD_IDENTITY_SCAN_COMPLETE &&
+        scan->expected_count == 1 &&
+        scan->scanned_count == 1 &&
+        scan->invalid_count == 0 &&
+        scan->observed_candidate_count == 1 &&
+        scan->first_observed_candidate.qid == scan->qid &&
+        scan->first_observed_candidate.index <
+            scan->ring_count;
 }
 
 #endif

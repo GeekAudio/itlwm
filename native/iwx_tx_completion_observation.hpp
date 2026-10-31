@@ -8,9 +8,10 @@
  * Fixed-size numeric observations for RX dispatch and TX-completion handler
  * exits. These are latest-by-kind records plus terminal-reason counters, not
  * an ordered packet ledger. They contain no packet bytes, addresses, nodes,
- * or pointers. Schema 2 may additionally record a bounded read-only scan of
- * live host TX_CMD headers in the response's reclaim interval; it does not
- * change ring ownership or claim firmware acceptance or peer receipt.
+ * or pointers. Schema 2 records a bounded read-only scan of live host TX_CMD
+ * headers in the response's reclaim interval. Schema 3 may additionally
+ * retain one raw TX_CMD header from a complete one-entry interval. Neither
+ * changes ring ownership or claims firmware acceptance or peer receipt.
  *
  * Producers make one CAS attempt only. Invalid input, a saturated counter,
  * or contention increments dropped_count where possible; any such loss makes
@@ -110,11 +111,12 @@ enum iwx_tx_completion_presence_flag {
     IWX_TX_COMPLETION_HAS_RESPONSE_FRAME_CONTROL = 1u << 26,
     IWX_TX_COMPLETION_HAS_RESPONSE_SEQUENCE_CONTROL = 1u << 27,
     IWX_TX_COMPLETION_HAS_TXCMD_SCAN = 1u << 28,
-    IWX_TX_COMPLETION_HAS_TXCMD_UNIQUE_CANDIDATE = 1u << 29
+    IWX_TX_COMPLETION_HAS_TXCMD_UNIQUE_CANDIDATE = 1u << 29,
+    IWX_TX_COMPLETION_HAS_SINGLE_SLOT_TXCMD_HEADER = 1u << 30
 };
 
 enum {
-    IWX_TX_COMPLETION_CALLER_PRESENCE_MASK = (1u << 30) - 1u,
+    IWX_TX_COMPLETION_CALLER_PRESENCE_MASK = (1u << 31) - 1u,
     IWX_TX_COMPLETION_OBSERVER_HAS_SERIAL = 1u << 31
 };
 
@@ -163,6 +165,8 @@ typedef struct iwx_tx_completion_event_record {
     uint32_t txcmd_command_version;
     uint32_t txcmd_flags;
     uint32_t txcmd_offload_assist;
+    /* FC in bits 31..16 and SC in bits 15..0 for a single readable slot. */
+    uint32_t single_slot_txcmd_header;
 } iwx_tx_completion_event_record;
 
 typedef struct iwx_tx_completion_event_input {
@@ -208,6 +212,7 @@ typedef struct iwx_tx_completion_event_input {
     uint32_t txcmd_command_version;
     uint32_t txcmd_flags;
     uint32_t txcmd_offload_assist;
+    uint32_t single_slot_txcmd_header;
 } iwx_tx_completion_event_input;
 
 typedef struct iwx_tx_completion_observation_state {
@@ -383,7 +388,8 @@ static inline uint32_t allowedPresence(uint32_t kind)
             IWX_TX_COMPLETION_HAS_RESPONSE_FRAME_CONTROL |
             IWX_TX_COMPLETION_HAS_RESPONSE_SEQUENCE_CONTROL |
             IWX_TX_COMPLETION_HAS_TXCMD_SCAN |
-            IWX_TX_COMPLETION_HAS_TXCMD_UNIQUE_CANDIDATE;
+            IWX_TX_COMPLETION_HAS_TXCMD_UNIQUE_CANDIDATE |
+            IWX_TX_COMPLETION_HAS_SINGLE_SLOT_TXCMD_HEADER;
     case IWX_TX_COMPLETION_BA:
         return rxBase | ring | IWX_TX_COMPLETION_HAS_BA_STA_ID |
             IWX_TX_COMPLETION_HAS_BA_FLAGS |
@@ -466,19 +472,28 @@ static inline bool absentValuesAreZero(
         IWX_TX_COMPLETION_ABSENT_ZERO(
             IWX_TX_COMPLETION_HAS_TXCMD_SCAN, txcmd_candidate_count) &&
         IWX_TX_COMPLETION_ABSENT_ZERO(
-            IWX_TX_COMPLETION_HAS_TXCMD_UNIQUE_CANDIDATE,
+            IWX_TX_COMPLETION_HAS_TXCMD_UNIQUE_CANDIDATE |
+                IWX_TX_COMPLETION_HAS_SINGLE_SLOT_TXCMD_HEADER,
             txcmd_candidate_index) &&
         IWX_TX_COMPLETION_ABSENT_ZERO(
-            IWX_TX_COMPLETION_HAS_TXCMD_UNIQUE_CANDIDATE,
+            IWX_TX_COMPLETION_HAS_TXCMD_UNIQUE_CANDIDATE |
+                IWX_TX_COMPLETION_HAS_SINGLE_SLOT_TXCMD_HEADER,
             txcmd_api_generation) &&
         IWX_TX_COMPLETION_ABSENT_ZERO(
-            IWX_TX_COMPLETION_HAS_TXCMD_UNIQUE_CANDIDATE,
+            IWX_TX_COMPLETION_HAS_TXCMD_UNIQUE_CANDIDATE |
+                IWX_TX_COMPLETION_HAS_SINGLE_SLOT_TXCMD_HEADER,
             txcmd_command_version) &&
         IWX_TX_COMPLETION_ABSENT_ZERO(
-            IWX_TX_COMPLETION_HAS_TXCMD_UNIQUE_CANDIDATE, txcmd_flags) &&
+            IWX_TX_COMPLETION_HAS_TXCMD_UNIQUE_CANDIDATE |
+                IWX_TX_COMPLETION_HAS_SINGLE_SLOT_TXCMD_HEADER,
+            txcmd_flags) &&
         IWX_TX_COMPLETION_ABSENT_ZERO(
-            IWX_TX_COMPLETION_HAS_TXCMD_UNIQUE_CANDIDATE,
-            txcmd_offload_assist);
+            IWX_TX_COMPLETION_HAS_TXCMD_UNIQUE_CANDIDATE |
+                IWX_TX_COMPLETION_HAS_SINGLE_SLOT_TXCMD_HEADER,
+            txcmd_offload_assist) &&
+        IWX_TX_COMPLETION_ABSENT_ZERO(
+            IWX_TX_COMPLETION_HAS_SINGLE_SLOT_TXCMD_HEADER,
+            single_slot_txcmd_header);
 #undef IWX_TX_COMPLETION_ABSENT_ZERO
 }
 
@@ -569,6 +584,36 @@ static inline bool validWidths(const iwx_tx_completion_event_input *in)
                IWX_TX_COMPLETION_HAS_TXCMD_UNIQUE_CANDIDATE) {
         return false;
     }
+    if (in->presence_flags &
+        IWX_TX_COMPLETION_HAS_SINGLE_SLOT_TXCMD_HEADER) {
+        const uint32_t requiredPresence =
+            IWX_TX_COMPLETION_HAS_TXCMD_SCAN |
+            IWX_TX_COMPLETION_HAS_QUEUE_INDEX |
+            IWX_TX_COMPLETION_HAS_RING_COUNT;
+        const uint32_t precedingIndex = in->queue_index == 0 ?
+            (in->ring_count == 0 ? 0 : in->ring_count - 1U) :
+            in->queue_index - 1U;
+        if ((in->presence_flags & requiredPresence) != requiredPresence ||
+            in->ring_count == 0 ||
+            in->txcmd_scan_status != 1 ||
+            in->txcmd_expected_count != 1 ||
+            in->txcmd_scanned_count != 1 ||
+            in->txcmd_api_generation < 2 ||
+            in->txcmd_api_generation > 3 ||
+            in->txcmd_command_version > UINT8_MAX ||
+            in->txcmd_candidate_index >= in->ring_count ||
+            in->queue_index >= in->ring_count ||
+            in->txcmd_candidate_index != precedingIndex)
+            return false;
+        if (in->presence_flags &
+            IWX_TX_COMPLETION_HAS_TXCMD_UNIQUE_CANDIDATE) {
+            const uint32_t packedResponse =
+                (in->response_frame_control << 16) |
+                in->response_sequence_control;
+            if (in->single_slot_txcmd_header != packedResponse)
+                return false;
+        }
+    }
     return true;
 }
 
@@ -633,6 +678,7 @@ static inline void copyInput(const iwx_tx_completion_event_input *in,
     out->txcmd_command_version = in->txcmd_command_version;
     out->txcmd_flags = in->txcmd_flags;
     out->txcmd_offload_assist = in->txcmd_offload_assist;
+    out->single_slot_txcmd_header = in->single_slot_txcmd_header;
 }
 
 static inline void copySnapshotLocked(

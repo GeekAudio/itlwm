@@ -622,6 +622,13 @@ public:
     uint32_t nativeP2pRocCleanupAllowed_ {0};
     uint32_t nativeP2pRocUnknown_ {0};
     uint32_t nativeP2pRocPublishedStage_ {0xffffffff};
+    // Test099's short-lived ROC START publication is one immutable OSData
+    // record. It is written only from the main command gate, never under the
+    // RX observer lock or in the interrupt notification reducer.
+    uint8_t nativeP2pRx149RunToken_[16] {};
+    uint32_t nativeP2pRx149LiveSnapshotRevision_ {0};
+    uint64_t nativeP2pRx149LiveSnapshotOwnerSerial_ {0};
+    uint32_t nativeP2pRx149LiveSnapshotValid_ {0};
 
     NativeP2PProbe::Controller nativeP2pProbe_;
     struct task tahoe_p2p_probe_task_;

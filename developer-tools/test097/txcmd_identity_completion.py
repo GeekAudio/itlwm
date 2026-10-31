@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Decode bounded numeric NativeStaCompletion snapshots, schemas 1 and 2."""
+"""Decode bounded numeric NativeStaCompletion snapshots, schemas 1 through 3."""
 from __future__ import annotations
 
 import argparse
@@ -13,6 +13,7 @@ HAS_RESPONSE_FC = 1 << 26
 HAS_RESPONSE_SEQ = 1 << 27
 HAS_TXCMD_SCAN = 1 << 28
 HAS_TXCMD_UNIQUE = 1 << 29
+HAS_SINGLE_SLOT_TXCMD_HEADER = 1 << 30
 HAS_OBSERVER_SERIAL = 1 << 31
 
 
@@ -32,7 +33,7 @@ def decode_scalars(values: dict[str, int]) -> dict:
     if not isinstance(values, dict):
         raise ValueError("completion scalar map must be a dictionary")
     schema = values.get("Schema")
-    if schema not in (1, 2):
+    if schema not in (1, 2, 3):
         raise ValueError("unsupported NativeStaCompletion schema")
     begin = values.get("SnapshotVersionBegin")
     end = values.get("SnapshotVersionEnd")
@@ -139,15 +140,18 @@ def decode_scalars(values: dict[str, int]) -> dict:
         raise ValueError("schema 2 TX_RSP row lacks response FC/SC presence")
     scan_present = (flags & HAS_TXCMD_SCAN) != 0
     unique_present = (flags & HAS_TXCMD_UNIQUE) != 0
+    single_slot_present = (flags & HAS_SINGLE_SLOT_TXCMD_HEADER) != 0
+    if single_slot_present and schema != 3:
+        raise ValueError("single-slot TX_CMD header requires schema 3")
     if not scan_present:
-        if unique_present:
+        if unique_present or single_slot_present:
             raise ValueError("unique TX_CMD row is marked without a scan")
         return result
 
     names = ("TxCommandScanStatus", "TxCommandExpectedCount",
              "TxCommandScannedCount", "TxCommandCandidateCount")
     if any(event_prefix + name not in values for name in names):
-        raise ValueError("schema 2 scan is missing bounded interval fields")
+        raise ValueError("TX_CMD scan is missing bounded interval fields")
     status = values[event_prefix + "TxCommandScanStatus"]
     expected = values[event_prefix + "TxCommandExpectedCount"]
     scanned = values[event_prefix + "TxCommandScannedCount"]
@@ -157,7 +161,7 @@ def decode_scalars(values: dict[str, int]) -> dict:
     if (status not in (1, 2) or expected <= 0 or expected > ring_count or
             expected > queued or scanned < 0 or scanned > expected or count < 0 or
             count > scanned):
-        raise ValueError("schema 2 scan interval fields are inconsistent")
+        raise ValueError("TX_CMD scan interval fields are inconsistent")
     if status == 1 and scanned != expected:
         raise ValueError("complete scan did not visit its whole interval")
     if status == 1 and count == 1 and not unique_present:
@@ -176,6 +180,49 @@ def decode_scalars(values: dict[str, int]) -> dict:
         "candidate_count": count,
         "observation_scope": result["txcmd_identity"]["observation_scope"],
     }
+    if single_slot_present:
+        field_names = ("TxCommandCandidateIndex", "TxCommandApiGeneration",
+                       "TxCommandVersion", "TxCommandFlags",
+                       "TxCommandOffloadAssist", "SingleSlotTxCommandHeader")
+        if any(event_prefix + name not in values for name in field_names):
+            raise ValueError("single-slot raw header lacks host command fields")
+        index = values[event_prefix + "TxCommandCandidateIndex"]
+        api = values[event_prefix + "TxCommandApiGeneration"]
+        version = values[event_prefix + "TxCommandVersion"]
+        packed_header = values[event_prefix + "SingleSlotTxCommandHeader"]
+        exclusive_boundary = values.get(event_prefix + "QueueIndex")
+        preceding_index = ((exclusive_boundary + ring_count - 1) % ring_count
+                           if isinstance(exclusive_boundary, int) and
+                           0 <= exclusive_boundary < ring_count else None)
+        if (status != 1 or expected != 1 or scanned != 1 or count > 1 or
+                not 0 <= index < ring_count or api not in (2, 3) or
+                not 0 <= version <= 255 or not 0 <= packed_header <= 0xffffffff or
+                preceding_index is None or index != preceding_index):
+            raise ValueError("single-slot raw header is inconsistent with scan")
+        raw_fc = (packed_header >> 16) & 0xffff
+        raw_sc = packed_header & 0xffff
+        if unique_present and packed_header != (
+                (values[event_prefix + "ResponseFrameControl"] << 16) |
+                values[event_prefix + "ResponseSequenceControl"]):
+            raise ValueError("exact candidate conflicts with single-slot raw tuple")
+        summary["single_slot_host_command"] = {
+            "descriptor_index": index,
+            "api_generation": api,
+            "command_version": version,
+            "command_flags": values[event_prefix + "TxCommandFlags"],
+            "offload_assist": values[event_prefix + "TxCommandOffloadAssist"],
+            "frame_control": raw_fc,
+            "sequence_control": raw_sc,
+            "observation_scope": (
+                "one readable host TX_CMD in a complete one-entry reclaim interval; "
+                "not firmware response identity, ACK, or peer receipt"
+            ),
+        }
+        if not unique_present:
+            summary["status"] = (
+                "single_slot_raw_header_no_exact_response_match"
+                if count == 0 else "single_slot_raw_header_exact_match_flag_absent"
+            )
     if unique_present:
         field_names = ("TxCommandCandidateIndex", "TxCommandApiGeneration",
                        "TxCommandVersion", "TxCommandFlags",

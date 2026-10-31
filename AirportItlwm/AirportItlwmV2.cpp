@@ -46,6 +46,55 @@ static IOReturn publishNativeAwdlClosingAction(
 
 #ifdef AIRPORT_TAHOE
 namespace {
+bool validRx149RunToken(OSObject *object)
+{
+    auto token = OSDynamicCast(OSString, object);
+    if (!token || token->getLength() != 32)
+        return false;
+    const char *text = token->getCStringNoCopy();
+    if (!text)
+        return false;
+    for (size_t index = 0; index < 32; ++index) {
+        const char value = text[index];
+        if (!((value >= '0' && value <= '9') ||
+              (value >= 'a' && value <= 'f')))
+            return false;
+    }
+    return true;
+}
+
+struct NativeRx149ArmContext {
+    OSString *runToken;
+};
+
+IOReturn armNativeRx149OnMainGate(OSObject *target, void *argument,
+                                  void *, void *, void *)
+{
+    auto controller = OSDynamicCast(AirportItlwm, target);
+    auto context = static_cast<NativeRx149ArmContext *>(argument);
+    auto hal = controller ? OSDynamicCast(ItlIwx, controller->fHalService) : nullptr;
+    if (!controller || !context || !validRx149RunToken(context->runToken) ||
+        !hal || !controller->fHalService ||
+        hal->tahoeP2pCommandGate() != _fCommandGate ||
+        controller->getProperty("NativeP2PRx149ObservationOnly") !=
+            kOSBooleanTrue)
+        return kIOReturnNotReady;
+
+    // Publish the controller identity before HAL's release-arm CAS. The HAL
+    // copies its local token before returning; the worker's first admission
+    // action must acquire this same gate, so it cannot observe the interval
+    // between the arm latch and that copy.
+    if (!controller->setProperty("NativeP2PRx149RunToken", context->runToken) ||
+        controller->getProperty("NativeP2PRx149RunToken") != context->runToken) {
+        controller->removeProperty("NativeP2PRx149RunToken");
+        return kIOReturnNotReady;
+    }
+    const IOReturn result = controller->fHalService->nativeP2pArmProbe();
+    if (result != kIOReturnSuccess)
+        controller->removeProperty("NativeP2PRx149RunToken");
+    return result;
+}
+
 struct NativePowerActionContext {
     apple80211_power_data request;
     uint32_t traceCallId;
@@ -338,6 +387,7 @@ IOReturn AirportItlwm::setProperties(OSObject *properties)
                     request->getObject("NativeP2PRx149ProfileEnabled") ||
                     request->getObject("NativeP2PRx149Selected") ||
                     request->getObject("NativeP2PRx149HostTxBlocked") ||
+                    request->getObject("NativeP2PRx149LiveStartSnapshot") ||
                     request->getObject("NativeP2PTxProbeEverDoorbelled") ||
                     request->getObject("NativeP2PAwdlActionFramesSubmitted") ||
                     request->getObject("NativeP2PAwdlPsfFrameSubmitted") ||
@@ -356,10 +406,17 @@ IOReturn AirportItlwm::setProperties(OSObject *properties)
         return kIOReturnUnsupported;
     OSObject *arm = request ? request->getObject("NativeP2PArmOnce") : nullptr;
     OSObject *rxArm = request ? request->getObject("NativeP2PRx149ArmOnce") : nullptr;
+    OSObject *rxToken = request ? request->getObject("NativeP2PRx149RunToken") : nullptr;
+    if (!arm && !rxArm)
+        if (rxToken)
+            return kIOReturnUnsupported;
     if (!arm && !rxArm)
         return super::setProperties(properties);
-    if (request->getCount() != 1 ||
-        (rxArm ? rxArm : arm) != kOSBooleanTrue)
+    if (!request || (rxArm && (arm || request->getCount() != 2 ||
+                               rxArm != kOSBooleanTrue ||
+                               !validRx149RunToken(rxToken))) ||
+        (!rxArm && (request->getCount() != 1 ||
+                    arm != kOSBooleanTrue)))
         return kIOReturnBadArgument;
     IOReturn privilege = IOUserClient::clientHasPrivilege(
         current_task(), kIOClientPrivilegeAdministrator);
@@ -378,6 +435,19 @@ IOReturn AirportItlwm::setProperties(OSObject *properties)
 #endif
     } else if (receive149Profile) {
         return kIOReturnUnsupported; // A legacy helper cannot arm this profile.
+    }
+    if (rxArm) {
+        auto token = OSDynamicCast(OSString, rxToken);
+        if (!token || !_fCommandGate || !_fWorkloop) {
+            removeProperty("NativeP2PRx149RunToken");
+            return kIOReturnNotReady;
+        }
+        NativeRx149ArmContext context {token};
+        if (_fWorkloop->inGate())
+            return armNativeRx149OnMainGate(
+                this, &context, nullptr, nullptr, nullptr);
+        return _fCommandGate->runAction(
+            armNativeRx149OnMainGate, &context);
     }
     // Arm only: the existing watchdog and admission gates submit the probe.
     // The HAL latches legacy vs RX149 mode before the worker is queued.

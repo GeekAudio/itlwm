@@ -52,7 +52,7 @@ def fixture(schema: int = 2) -> dict:
         "Event0RaTid": 0,
         "Event0Status": 1,
     }
-    if schema == 2:
+    if schema in (2, 3):
         values["Event0PresenceFlags"] |= (
             decoder.HAS_RESPONSE_FC | decoder.HAS_RESPONSE_SEQ |
             decoder.HAS_TXCMD_SCAN | decoder.HAS_TXCMD_UNIQUE)
@@ -108,6 +108,69 @@ class CompletionDecodeTest(unittest.TestCase):
             ambiguous.pop(key)
         self.assertEqual(decoder.decode_scalars(ambiguous)["txcmd_identity"]["status"],
                          "complete_ambiguous")
+
+    def test_schema_three_single_raw_header_is_not_exact_response_identity(self):
+        values = fixture(schema=3)
+        values["Event0PresenceFlags"] &= ~decoder.HAS_TXCMD_UNIQUE
+        values["Event0TxCommandCandidateCount"] = 0
+        values["Event0TxCommandExpectedCount"] = 1
+        values["Event0TxCommandScannedCount"] = 1
+        values["Event0QueueIndex"] = 89
+        values.update({
+            "Event0TxCommandCandidateIndex": 88,
+            "Event0TxCommandApiGeneration": 2,
+            "Event0TxCommandVersion": 7,
+            "Event0TxCommandFlags": 5,
+            "Event0TxCommandOffloadAssist": 0x0c00,
+            "Event0SingleSlotTxCommandHeader": (0x4908 << 16) | 0x08A0,
+        })
+        values["Event0PresenceFlags"] |= decoder.HAS_SINGLE_SLOT_TXCMD_HEADER
+        decoded = decoder.decode_scalars(values)
+        identity = decoded["txcmd_identity"]
+        self.assertEqual(identity["status"],
+                         "single_slot_raw_header_no_exact_response_match")
+        self.assertEqual(identity["single_slot_host_command"]["frame_control"],
+                         0x4908)
+        self.assertEqual(identity["single_slot_host_command"]["sequence_control"],
+                         0x08A0)
+        self.assertFalse(decoded["firmware_response_identity_proven"])
+        self.assertFalse(decoded["peer_receipt_proven"])
+
+    def test_schema_three_rejects_raw_header_without_single_complete_scan(self):
+        values = fixture(schema=3)
+        values["Event0PresenceFlags"] |= decoder.HAS_SINGLE_SLOT_TXCMD_HEADER
+        values["Event0TxCommandExpectedCount"] = 2
+        values["Event0TxCommandScannedCount"] = 2
+        values["Event0TxCommandCandidateIndex"] = 88
+        values["Event0TxCommandApiGeneration"] = 2
+        values["Event0TxCommandVersion"] = 7
+        values["Event0TxCommandFlags"] = 5
+        values["Event0TxCommandOffloadAssist"] = 0x0c00
+        values["Event0SingleSlotTxCommandHeader"] = (0x4108 << 16) | 0x0580
+        with self.assertRaises(ValueError):
+            decoder.decode_scalars(values)
+
+        old_schema = fixture(schema=2)
+        old_schema["Event0PresenceFlags"] |= decoder.HAS_SINGLE_SLOT_TXCMD_HEADER
+        with self.assertRaises(ValueError):
+            decoder.decode_scalars(old_schema)
+
+    def test_schema_three_rejects_in_ring_but_wrong_single_slot_index(self):
+        values = fixture(schema=3)
+        values["Event0PresenceFlags"] &= ~decoder.HAS_TXCMD_UNIQUE
+        values["Event0TxCommandCandidateCount"] = 0
+        values["Event0TxCommandExpectedCount"] = 1
+        values["Event0TxCommandScannedCount"] = 1
+        values["Event0QueueIndex"] = 89
+        values["Event0TxCommandCandidateIndex"] = 87  # In range, wrong slot.
+        values["Event0TxCommandApiGeneration"] = 2
+        values["Event0TxCommandVersion"] = 7
+        values["Event0TxCommandFlags"] = 5
+        values["Event0TxCommandOffloadAssist"] = 0x0c00
+        values["Event0SingleSlotTxCommandHeader"] = (0x4908 << 16) | 0x08A0
+        values["Event0PresenceFlags"] |= decoder.HAS_SINGLE_SLOT_TXCMD_HEADER
+        with self.assertRaises(ValueError):
+            decoder.decode_scalars(values)
 
     def test_torn_or_inconsistent_snapshots_are_rejected(self):
         values = fixture()
