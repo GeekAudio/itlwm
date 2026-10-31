@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "6121be654b7acb031fe401396745abf9e0eb4d58c1a894aeff2fcada5dc88cf3"
+      "sha256": "c0a2746369ba5cca687e25137bdf52a5e5b2107eef0ec8b3ab285c44fc0b0538"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "1ce087fd62e41a874e8dc84897a01277a63cb312b9297ef080cc479518ecf1fc"
+      "sha256": "1f444c0720b33f810be45ecb8fa518cdc71bbc4a292a40da71977233321e1b52"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -50,8 +50,8 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-10-31T20:29:57.608183+08:00",
+  "updated_at": "2026-10-31T23:18:43.699111+08:00",
   "runtime_scope": "Test096 runtime: 6 passed, 6 partial, 27 uncovered, 1 failed. Five-minute baseline and bound Wi-Fi connectivity passed; rekey-associated association loss and a separate sleep/wake failure remain unresolved. Controlled OFF/ON restored ordinary Wi-Fi; Instant Hotspot join failed. Same-ROC correlation retained only a firmware Session Protection END notification, not a data MPDU. Local awdl0/IPv6/routes confirmed across three snapshots; native peer data and AirDrop remain unproven. EFI and WAN/LAN unchanged in this runtime round.",
-  "running_candidate": "25G332-Test096",
-  "next_candidate": "25G332-Test097"
+  "running_candidate": "25G332-Test097",
+  "next_candidate": "25G332-Test098"
 }
