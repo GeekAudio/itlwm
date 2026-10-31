@@ -2509,19 +2509,19 @@ void AirportItlwm::unregistPM()
             if (pmPolicyMaker)
                 pmPolicyMaker->acknowledgeSetPowerState();
             release(); // balance the retain paired with the cancelled callout
-            // cancel_wait may cancel a pending invocation without waiting for
-            // an invocation that is already running. Admission is closed, so
-            // a second call drains that running instance or cancels the one
-            // invocation it queued before the stop latch.
+            // A successful cancel_wait only retired that pending instance.
+            // With enqueue admission closed, the second call must drain the
+            // running invocation; if it instead cancels another queued one,
+            // balance it and keep the handle for a later teardown retry.
             const bool cancelledAfterDrain =
                 thread_call_cancel_wait(powerOffThreadCall);
             if (cancelledAfterDrain) {
                 if (pmPolicyMaker)
                     pmPolicyMaker->acknowledgeSetPowerState();
                 release();
+                return;
             }
         }
-        if (thread_call_isactive(powerOffThreadCall)) return;
 #endif
         if (thread_call_free(powerOffThreadCall))
             powerOffThreadCall = NULL;
@@ -2539,9 +2539,9 @@ void AirportItlwm::unregistPM()
                 if (pmPolicyMaker)
                     pmPolicyMaker->acknowledgeSetPowerState();
                 release();
+                return;
             }
         }
-        if (thread_call_isactive(powerOnThreadCall)) return;
 #endif
         if (thread_call_free(powerOnThreadCall))
             powerOnThreadCall = NULL;

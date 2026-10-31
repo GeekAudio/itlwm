@@ -51,6 +51,7 @@ methods=[function(s) for s in [
     'static IOReturn dispatchSetPowerStateOn(',
     'static void handleSetPowerStateOff(',
     'static void handleSetPowerStateOn(']]
+assert 'thread_call_isactive' not in function('void AirportItlwm::unregistPM()')
 for teardown_marker in ['void AirportItlwm::releaseAll()', 'void AirportItlwm::free()']:
     assert 'releaseNativePowerHAL();' in function(teardown_marker), teardown_marker
 release_hal_source=function('void AirportItlwm::releaseNativePowerHAL()')
@@ -157,7 +158,8 @@ static void IOSimpleLockUnlockEnableInterrupt(IOSimpleLock*p,IOInterruptState pr
  p->mutex.unlock();irq=previous;}
 static unsigned g_threadCallEnterCount=0;
 struct FakeThreadCall {bool pending=false,active=false,freed=false;unsigned enters=0;
- bool drainOnWait=true;void(*callback)(void*,void*)=nullptr;void*param0=nullptr;};
+ bool pendingAgainAfterCancelWait=false;
+ void(*callback)(void*,void*)=nullptr;void*param0=nullptr;};
 static bool thread_call_enter(FakeThreadCall*call){++g_threadCallEnterCount;
  if(!call)return false;++call->enters;const bool wasPending=call->pending;
  call->pending=true;return wasPending;}
@@ -165,15 +167,16 @@ using thread_call_t=FakeThreadCall*;
 using thread_call_param_t=void*;
 static void thread_call_enter(void*){++g_threadCallEnterCount;}
 static bool thread_call_cancel_wait(FakeThreadCall*call){if(!call)return false;
- if(call->pending){call->pending=false;return true;}
- if(call->active&&call->drainOnWait){call->active=false;
+ if(call->pending){call->pending=false;
+  if(call->pendingAgainAfterCancelWait){call->pending=true;
+   call->pendingAgainAfterCancelWait=false;}
+  return true;}
+ if(call->active){call->active=false;
   if(call->callback)call->callback(call->param0,nullptr);}
  return false;}
 static bool thread_call_free(FakeThreadCall*call){if(!call||call->pending)return false;
  if(call->active)return false;
  call->freed=true;return true;}
-static bool thread_call_isactive(FakeThreadCall*call){
- return call&&(call->pending||call->active);}
 struct OSData:OSObject {std::vector<uint8_t> bytes;
  static OSData*withBytes(const void*p,size_t n){auto*d=new OSData();
  const auto*b=static_cast<const uint8_t*>(p);d->bytes.assign(b,b+n);return d;}
@@ -468,17 +471,19 @@ int main(){unsigned scenarios=0;
    f.pm.acknowledgements==2&&f.a.retained==2&&f.a.released==2);++scenarios;}
  {Fixture f;f.a.nativePowerStopping=true;f.a.nativePowerPMRequestValid=true;
   f.a.nativePowerPMRequestedState=kPowerStateOff;f.a.nativePowerPMRequestEpoch=1;
-  f.a.nativePowerPMOffCalloutEpoch=1;f.a.retained=1;
-  f.a.offCall.active=true;f.a.offCall.drainOnWait=false;
+  f.a.nativePowerPMOffCalloutEpoch=1;f.a.retained=3;
+  f.a.offCall.active=true;f.a.offCall.pending=true;
+  f.a.offCall.pendingAgainAfterCancelWait=true;
   f.a.offCall.callback=(void(*)(void*,void*))handleSetPowerStateOff;
   f.a.offCall.param0=&f.a;
   assert(!f.a.retireNativePMPowerCallouts());
-  assert(f.a.offCall.active&&!f.a.offCall.freed&&f.pm.acknowledgements==0&&
-   f.a.released==0);
-  f.a.offCall.drainOnWait=true;
+  assert(f.a.offCall.active&&!f.a.offCall.pending&&!f.a.offCall.freed&&
+   f.pm.acknowledgements==2&&f.a.released==2&&f.a.retained==3);
+  assert(f.a.setPowerState(kPowerStateOn,&f.pm)==IOPMAckImplied&&
+   !f.a.onCall.pending);
   assert(f.a.retireNativePMPowerCallouts());
-  assert(f.a.offCall.freed&&!f.a.offCall.active&&f.pm.acknowledgements==1&&
-   f.a.retained==1&&f.a.released==1);++scenarios;}
+  assert(f.a.offCall.freed&&!f.a.offCall.active&&f.pm.acknowledgements==3&&
+   f.a.retained==3&&f.a.released==3);++scenarios;}
  {Fixture f;f.a.nativePowerPMRequestValid=true;
   f.a.nativePowerPMRequestedState=kPowerStateOff;f.a.nativePowerPMRequestEpoch=1;
   f.a.pmPowerState=kPowerStateOff;f.a.nativePowerFlags=1U;
