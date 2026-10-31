@@ -114,10 +114,14 @@ void AirportItlwm::releaseAll()
     OSSafeReleaseNULL(driverSnapshotsPipe);
     OSSafeReleaseNULL(driverFaultReporter);
 #endif
+#ifdef AIRPORT_TAHOE
+    releaseNativePowerHAL();
+#else
     if (fHalService) {
         fHalService->release();
         fHalService = NULL;
     }
+#endif
     if (_fWorkloop) {
         if (_fCommandGate) {
 //            _fCommandGate->disable();
@@ -166,6 +170,45 @@ void AirportItlwm::releaseNativePowerLocks()
         IOSimpleLockFree(nativePowerStateLock);
         nativePowerStateLock = nullptr;
     }
+}
+
+void AirportItlwm::releaseNativePowerHAL()
+{
+    ItlHalService *hal = nullptr;
+    bool cancelledRestart = false;
+    IOSimpleLock *lock = nativePowerStateLock;
+    if (lock) {
+        const IOInterruptState irq = IOSimpleLockLockDisableInterrupt(lock);
+        hal = fHalService;
+        fHalService = nullptr;
+        const uint32_t flags = __atomic_load_n(&nativePowerFlags, __ATOMIC_RELAXED);
+        __atomic_store_n(&nativePowerFlags, flags & ~1U, __ATOMIC_RELEASE);
+        cancelledRestart = nativeAddressRestartNotification.active();
+        nativeAddressRestartNotification.cancel(
+            NativePowerTrace::AddressRestartOutcome::kCancelledManual);
+        nativeAddressRestartPublishedId = 0;
+        nativeAddressRestartPublishedEpoch = 0;
+        nativeAddressRestartStartRevision = 0;
+        IOSimpleLockUnlockEnableInterrupt(lock, irq);
+    } else {
+        // Without the state lock GET_POWER never dereferences the HAL for a
+        // restart grace decision. Keep teardown fail-closed on partial init.
+        hal = fHalService;
+        fHalService = nullptr;
+        __atomic_fetch_and(&nativePowerFlags, ~1U, __ATOMIC_ACQ_REL);
+        cancelledRestart = nativeAddressRestartNotification.active();
+        nativeAddressRestartNotification.cancel(
+            NativePowerTrace::AddressRestartOutcome::kCancelledManual);
+        nativeAddressRestartPublishedId = 0;
+        nativeAddressRestartPublishedEpoch = 0;
+        nativeAddressRestartStartRevision = 0;
+    }
+    if (cancelledRestart)
+        noteNativeAddressRestartOutcome(
+            NativePowerTrace::AddressRestartOutcome::kCancelledManual);
+    // HAL release can run destructors and must never run under the spin lock.
+    if (hal)
+        hal->release();
 }
 
 void AirportItlwm::releaseNativeCapture()
@@ -776,6 +819,11 @@ void AirportItlwm::stop(IOService *provider)
         XYLog("Native ingress closing; stop cannot wait in radio gate\n");
         return;
     }
+    // A true service stop is terminal for the current radio request. Clear the
+    // user's On intent and advance its epoch so an in-flight address restart
+    // cannot keep GET_POWER reporting On while teardown proceeds.
+    updateNativePowerFlags(1U, 0);
+    (void)advanceNativePowerEpoch(false);
 #endif
     super::stop(provider);
     disableAdapter(bsdInterface);
@@ -793,10 +841,14 @@ void AirportItlwm::stop(IOService *provider)
 void AirportItlwm::free()
 {
     XYLog("%s\n", __PRETTY_FUNCTION__);
+#ifdef AIRPORT_TAHOE
+    releaseNativePowerHAL();
+#else
     if (fHalService != NULL) {
         fHalService->release();
         fHalService = NULL;
     }
+#endif
     if (syncFrameTemplate != NULL && syncFrameTemplateLength > 0) {
         IOFree(syncFrameTemplate, syncFrameTemplateLength);
         syncFrameTemplateLength = 0;
@@ -1334,14 +1386,12 @@ getPOWER(OSObject *object,
     uint32_t powerFlags = 0;
     uint64_t restartDeadline = 0;
     bool committedRestartGrace = false;
-    const bool systemPowerOn = __atomic_load_n(&pmPowerState, __ATOMIC_ACQUIRE) !=
-        kPowerStateOff;
     IOSimpleLock *lock = nativePowerStateLock;
     if (lock) {
         const IOInterruptState irq = IOSimpleLockLockDisableInterrupt(lock);
         powerFlags = __atomic_load_n(&nativePowerFlags, __ATOMIC_RELAXED);
         const uint32_t powerEpoch = __atomic_load_n(&nativePowerEpoch, __ATOMIC_RELAXED);
-        if ((powerFlags & 1U) && !(powerFlags & 2U) && systemPowerOn &&
+        if ((powerFlags & 1U) && !(powerFlags & 2U) &&
             fHalService && nativeAddressRestartNotification.active() &&
             nativeAddressRestartNotification.committed()) {
             const uint64_t restartId = nativeAddressRestartNotification.id();
@@ -1366,6 +1416,8 @@ getPOWER(OSObject *object,
     }
     const bool restartStillInWindow = committedRestartGrace &&
         nativePowerUptimeNanoseconds() < restartDeadline;
+    const bool systemPowerOn = __atomic_load_n(&pmPowerState, __ATOMIC_ACQUIRE) !=
+        kPowerStateOff;
     const uint8_t state = systemPowerOn && (powerFlags & 1U) &&
         ((powerFlags & 2U) || restartStillInWindow) ? 1 : 0;
     pd->version = APPLE80211_VERSION;
@@ -1886,6 +1938,17 @@ void AirportItlwm::publishNativePowerState()
     uint32_t powerFlags = __atomic_load_n(&nativePowerFlags, __ATOMIC_ACQUIRE);
     uint64_t revision = UINT64_MAX;
     const bool stableState = nativePowerStateSnapshot(&powerFlags, &revision);
+    ItlHalService *hal = nullptr;
+    IOSimpleLock *stateLock = nativePowerStateLock;
+    if (stateLock) {
+        const IOInterruptState irq = IOSimpleLockLockDisableInterrupt(stateLock);
+        hal = fHalService;
+        // Retain while the teardown path is excluded by this same lock. Any
+        // diagnostics below run unlocked, and releaseNativePowerHAL can then
+        // drop the controller's owner reference without racing this snapshot.
+        if (hal) hal->retain();
+        IOSimpleLockUnlockEnableInterrupt(stateLock, irq);
+    }
     setProperty("NativePowerGetCount", __atomic_load_n(&nativePowerGetCount, __ATOMIC_RELAXED), 32);
     setProperty("NativePowerSetCount", __atomic_load_n(&nativePowerSetCount, __ATOMIC_RELAXED), 32);
     setProperty("NativePowerRequested", powerFlags & 1U, 32);
@@ -1902,14 +1965,19 @@ void AirportItlwm::publishNativePowerState()
     setProperty("NativePowerOffResult", __atomic_load_n(&nativePowerOffResult, __ATOMIC_ACQUIRE), 32);
     setProperty("NativePowerOffPending",
         __atomic_load_n(&nativePowerOffPending, __ATOMIC_ACQUIRE) ? 1U : 0U, 32);
-    if (fHalService) setProperty("NativePowerHALFlags",
-        uint32_t(fHalService->get80211Controller()->ic_if.if_flags & (IFF_UP | IFF_RUNNING)), 32);
-    if (fHalService) {
-        auto ic = fHalService->get80211Controller();
-        setProperty("NativePowerInitStage", ic->ic_tahoe_init_stage, 32);
-        setProperty("NativePowerInitError", uint32_t(ic->ic_tahoe_init_error), 32);
-        if (ic->ic_tahoe_scan_state)
-            setProperty("NativePowerScanPhase", ic->ic_tahoe_scan_state(ic), 32);
+    if (hal) {
+        auto ic = hal->get80211Controller();
+        if (ic) {
+            setProperty("NativePowerHALFlags",
+                uint32_t(ic->ic_if.if_flags & (IFF_UP | IFF_RUNNING)), 32);
+            setProperty("NativePowerInitStage", ic->ic_tahoe_init_stage, 32);
+            setProperty("NativePowerInitError", uint32_t(ic->ic_tahoe_init_error), 32);
+            if (ic->ic_tahoe_scan_state)
+                setProperty("NativePowerScanPhase", ic->ic_tahoe_scan_state(ic), 32);
+        }
+        hal->release();
+    } else {
+        setProperty("NativePowerHALFlags", 0U, 32);
     }
     publishNativePowerTrace();
 }

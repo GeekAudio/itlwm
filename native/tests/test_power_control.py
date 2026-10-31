@@ -13,6 +13,7 @@ def function(marker): return function_from(source,marker)
 methods=[function(s) for s in [
     'bool AirportItlwm::initializeNativePowerLocks(',
     'void AirportItlwm::releaseNativePowerLocks(',
+    'void AirportItlwm::releaseNativePowerHAL(',
     'bool AirportItlwm::init(OSDictionary *properties)',
     'IOReturn AirportItlwm::\ngetPOWER(',
     'uint32_t AirportItlwm::updateNativePowerFlags(',
@@ -39,6 +40,21 @@ methods=[function(s) for s in [
     'IOReturn AirportItlwm::enable(IO80211SkywalkInterface *netif)',
     'IOReturn AirportItlwm::enableAdapter(',
     'IOReturn AirportItlwm::disableAdapter(']]
+for teardown_marker in ['void AirportItlwm::releaseAll()', 'void AirportItlwm::free()']:
+    assert 'releaseNativePowerHAL();' in function(teardown_marker), teardown_marker
+release_hal_source=function('void AirportItlwm::releaseNativePowerHAL()')
+assert release_hal_source.index('IOSimpleLockUnlockEnableInterrupt(lock, irq)') < \
+       release_hal_source.index('hal->release()')
+publish_power_source=function('void AirportItlwm::publishNativePowerState()')
+assert publish_power_source.index('hal->retain()') < \
+       publish_power_source.index('IOSimpleLockUnlockEnableInterrupt(stateLock, irq)') < \
+       publish_power_source.index('hal->release()')
+stop_source=function('void AirportItlwm::stop(IOService *provider)')
+stop_barrier=stop_source.index('->stopNative()')
+stop_requested_off=stop_source.index('updateNativePowerFlags(1U, 0);')
+stop_epoch_off=stop_source.index('advanceNativePowerEpoch(false);')
+stop_disable=stop_source.index('disableAdapter(bsdInterface);')
+assert stop_barrier < stop_requested_off < stop_epoch_off < stop_disable
 shim=r'''
 #include <cstdint>
 #include <cstring>
@@ -49,6 +65,8 @@ shim=r'''
 #include <cstdio>
 #include <functional>
 #include <mutex>
+#include <condition_variable>
+#include <atomic>
 #include <utility>
 #include <vector>
 #include "native/native_power_trace.hpp"
@@ -87,13 +105,14 @@ struct IO80211Controller:OSObject {bool init(OSDictionary*){return parentInitRes
 #define super IO80211Controller
 #define ITL_STARTUP_RESULT(provider,stage,result) (result)
 using IOInterruptState=bool;
-struct IOSimpleLock {std::mutex mutex;};
+struct IOSimpleLock {std::mutex mutex;std::atomic<unsigned> waiters{0};};
 static int lockAllocationFailAt=-1,lockAllocationAttempts=0;
 static IOSimpleLock*IOSimpleLockAlloc(){const int attempt=lockAllocationAttempts++;
  if(attempt==lockAllocationFailAt)return nullptr;return new IOSimpleLock();}
 static void IOSimpleLockFree(IOSimpleLock*p){delete p;}
 static IOInterruptState IOSimpleLockLockDisableInterrupt(IOSimpleLock*p){
- const bool previous=irq;irq=true;p->mutex.lock();return previous;}
+ const bool previous=irq;irq=true;p->waiters.fetch_add(1,std::memory_order_acq_rel);
+ p->mutex.lock();p->waiters.fetch_sub(1,std::memory_order_acq_rel);return previous;}
 static void IOSimpleLockUnlockEnableInterrupt(IOSimpleLock*p,IOInterruptState previous){
  p->mutex.unlock();irq=previous;}
 static unsigned g_threadCallEnterCount=0;
@@ -109,18 +128,34 @@ struct FakeIC {struct {uint32_t if_flags=0;} ic_if;uint32_t ic_tahoe_init_stage=
 struct HAL {FakeIC ic;IOReturn result=0,disableResult=0;unsigned enabled=0,disabled=0,disableBusyCount=0;bool stuck=false;
  uint32_t requestEpoch=0,observedPublicEpoch=0,faultSerial=0;bool requestOn=false,
   faultSerialAvailable=true;unsigned requestUpdates=0;
+ mutable std::mutex faultReadMutex;mutable std::condition_variable faultReadCondition;
+ mutable bool blockFaultRead=false,faultReadEntered=false,allowFaultRead=false;
+ std::atomic<unsigned>*destroyCount=nullptr,*releaseCount=nullptr;bool deleteOnRelease=false;
+ std::atomic<unsigned> references{1};
  uint32_t*publicEpoch=nullptr;std::vector<std::pair<uint32_t,bool>> requestHistory;
  void setNativePowerRequestState(uint32_t epoch,bool on){requestEpoch=epoch;requestOn=on;
  ++requestUpdates;requestHistory.emplace_back(epoch,on);
  if(publicEpoch)observedPublicEpoch=__atomic_load_n(publicEpoch,__ATOMIC_ACQUIRE);}
- bool readNativePowerFaultSerial(uint32_t*out)const{if(!out||!faultSerialAvailable)return false;*out=faultSerial;return true;}
+ bool readNativePowerFaultSerial(uint32_t*out)const{
+  {std::unique_lock<std::mutex> guard(faultReadMutex);
+   if(blockFaultRead){faultReadEntered=true;faultReadCondition.notify_all();
+    faultReadCondition.wait(guard,[this]{return allowFaultRead;});}}
+  if(!out||!faultSerialAvailable)return false;*out=faultSerial;return true;}
+ ~HAL(){if(destroyCount)destroyCount->fetch_add(1,std::memory_order_acq_rel);}
+ void retain(){if(deleteOnRelease)references.fetch_add(1,std::memory_order_acq_rel);}
+ void release(){assert(!irq);if(releaseCount)releaseCount->fetch_add(1,std::memory_order_acq_rel);
+  if(deleteOnRelease&&references.fetch_sub(1,std::memory_order_acq_rel)==1)delete this;}
  FakeIC*get80211Controller(){return &ic;}
  IOReturn enable(IONetworkInterface*){++enabled;if(result)return result;ic.ic_if.if_flags|=IFF_UP;return 0;}
  IOReturn disable(IONetworkInterface*){++disabled;if(disableBusyCount){--disableBusyCount;return kIOReturnBusy;}
  if(disableResult)return disableResult;if(!stuck)ic.ic_if.if_flags=0;return 0;}};
+using ItlHalService=HAL;
 struct Timer {unsigned started=0,stopped=0;void setTimeoutMS(unsigned){}void enable(){++started;}
  void cancelTimeout(){++stopped;}void disable(){}};
-struct Queue {bool gated=false,worker=false;bool inGate(){return gated;}bool onThread(){return worker;}};
+struct Queue;
+static thread_local Queue*g_activeCommandGate=nullptr;
+struct Queue {bool gated=false,worker=false;bool inGate(){return g_activeCommandGate==this;}
+ bool onThread(){return worker;}};
 struct NativeIF {Queue*q;unsigned messages=0;std::function<void()>onPost;
  Queue*getControllerWorkQueue(){return q;}
  void postMessage(unsigned,void*,unsigned,bool){++messages;if(onPost)onPost();}};
@@ -153,7 +188,9 @@ struct Gate {using Action=IOReturn(*)(OSObject*,void*,void*,void*,void*);
   assert(q->gated&&deadline>g_uptimeNanoseconds&&flags==THREAD_INTERRUPTIBLE);
   const uint64_t delay=deadline-g_uptimeNanoseconds;
   const bool retry=delay<=25000000ULL;if(retry)++retrySleeps;
-  ++sleeps;q->gated=false;assert(onSleep);onSleep();assert(!q->gated);q->gated=true;
+  ++sleeps;Queue*savedGate=g_activeCommandGate;g_activeCommandGate=nullptr;
+  q->gated=false;assert(onSleep);onSleep();assert(!q->gated);q->gated=true;
+  g_activeCommandGate=savedGate;
   if(retry&&earlyWakeCount){--earlyWakeCount;g_uptimeNanoseconds+=1000000ULL;
    return THREAD_AWAKENED;}
   if(sleepResult==THREAD_TIMED_OUT)g_uptimeNanoseconds=deadline;
@@ -162,7 +199,9 @@ struct Gate {using Action=IOReturn(*)(OSObject*,void*,void*,void*,void*);
  }
  void commandWakeup(void*,bool one){assert(q->gated&&!one);++wakes;}
  IOReturn runAction(Action action,void*a){const bool old=q->gated;q->gated=!loseGate;
- IOReturn r=action(owner,a,nullptr,nullptr,nullptr);q->gated=old;return r;}};
+ Queue*oldGate=g_activeCommandGate;g_activeCommandGate=loseGate?nullptr:q;
+ IOReturn r=action(owner,a,nullptr,nullptr,nullptr);q->gated=old;
+ g_activeCommandGate=oldGate;return r;}};
 static Gate*_fCommandGate=nullptr;
 struct AirportItlwm:IO80211Controller {
  HAL*fHalService=nullptr;IONetworkInterface*bsdInterface=nullptr;NativeIF*fNetIf=nullptr;Timer*watchdogTimer=nullptr;
@@ -210,6 +249,7 @@ struct AirportItlwm:IO80211Controller {
  bool tickNativeAddressRestartNotification();
  void noteNativeAddressRestartOutcome(NativePowerTrace::AddressRestartOutcome);
  void publishNativeAddressRestartMetrics();
+ void releaseNativePowerHAL();
  void publishNativePowerTrace();bool postNativePowerChangedIfNeeded();void publishNativePowerState();
  IOReturn waitForNativePower(uint32_t,uint32_t);void wakeNativePowerWaiters();
  IOReturn disableAdapterWithRetry(uint32_t,uint32_t);
@@ -294,6 +334,34 @@ int main(){unsigned scenarios=0;
   assert(!f.a.commitNativeAddressRestartNotification(id,false,true));
   f.a.updateNativePowerFlags(2U,0);
   assert(f.state()==0);++scenarios;}
+ {Fixture f;std::atomic<unsigned> destroyed{0},released{0};
+  auto *heapHal=new HAL();heapHal->publicEpoch=&f.a.nativePowerEpoch;
+  heapHal->destroyCount=&destroyed;heapHal->releaseCount=&released;
+  heapHal->deleteOnRelease=true;f.a.fHalService=heapHal;
+  f.a.nativePowerFlags=3;f.a.nativePowerEpoch=5;heapHal->faultSerial=11;
+  uint64_t id=0;assert(f.a.beginNativeAddressRestartNotification(&id)==0&&id);
+  assert(f.a.commitNativeAddressRestartNotification(id,true,true));
+  f.a.updateNativePowerFlags(2U,0);
+  {std::lock_guard<std::mutex> guard(heapHal->faultReadMutex);
+   heapHal->blockFaultRead=true;}
+  std::atomic<unsigned> reported{99};
+  std::thread reader([&]{reported.store(f.state(),std::memory_order_release);});
+  {std::unique_lock<std::mutex> guard(heapHal->faultReadMutex);
+   heapHal->faultReadCondition.wait(guard,[&]{return heapHal->faultReadEntered;});}
+  std::thread teardown([&]{f.a.releaseNativePowerHAL();});
+  while(f.a.nativePowerStateLock->waiters.load(std::memory_order_acquire)==0)
+   std::this_thread::yield();
+  assert(destroyed.load(std::memory_order_acquire)==0&&
+   released.load(std::memory_order_acquire)==0);
+  {std::lock_guard<std::mutex> guard(heapHal->faultReadMutex);
+   heapHal->allowFaultRead=true;}
+  heapHal->faultReadCondition.notify_all();
+  reader.join();teardown.join();
+  assert(reported.load(std::memory_order_acquire)==1);
+  assert(destroyed.load(std::memory_order_acquire)==1&&
+   released.load(std::memory_order_acquire)>=1&&
+   released.load(std::memory_order_acquire)<=2&&f.a.fHalService==nullptr);
+  assert(!(f.a.nativePowerFlags&1U)&&f.state()==0);++scenarios;}
  {Fixture f;const uint32_t onEpoch=f.a.advanceNativePowerEpoch(true);
  assert(onEpoch==1&&f.hal.requestUpdates==1&&f.hal.requestEpoch==onEpoch&&f.hal.requestOn);
  assert(f.hal.observedPublicEpoch==0);

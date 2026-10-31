@@ -346,6 +346,7 @@ public:
     OSObject *nativeFaultReporter {nullptr};
     uint32_t nativeCaptureStarted {0};
     void releaseNativeCapture();
+    void releaseNativePowerHAL();
 #endif
 };
 
