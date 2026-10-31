@@ -1,22 +1,25 @@
 window.TEST_RECORDS = [
   {
-    "id": "record-test094-runtime-boot1793419191",
-    "version": "25G332-Test094",
-    "label": "Test094本轮复验",
+    "id": "record-test095-runtime-boot1793422729",
+    "version": "25G332-Test095",
+    "label": "Test095本轮复验",
     "tone": "warning",
     "date": "2026-10-31",
-    "state": "Test094本轮40项：通过4、部分3、未覆盖33、回退0。",
-    "summary": "Test094 boot 1793419191：Wi-Fi基线、绑定en1网关与公网HTTPS通过；地址更新后仍有READY短降。",
+    "state": "Test095本轮40项：通过6、部分3、未覆盖30、本轮未通过1。",
+    "summary": "首段无人操作观察出现链路/IP短断；开关后独立窗口及en1联网检查通过，但不覆盖前述断链。ROC开始/结束验收通过；149频道仅收到一个非AWDL Beacon管理帧，没有AWDL数据，原生ifnet回包与AirDrop未证实。",
     "evidence": [
-      "309.731秒/61样本中en1持续UP/RUNNING、链路active且有IPv4，所选故障计数无增量。绑定en1的网关探测5/5通过，TLS HTTPS返回200。",
-      "OFF约66ms完成并保持关闭20秒；ON约622ms完成，系统最终恢复连接和扫描。ON后地址更新触发两次重启，READY状态短暂下降。本轮没有执行AWDL收发或AirDrop测试。"
+      "首段305.042秒/61样本期间出现无人操作链路/IP中断，Requested/Ready保持开启，复位、watchdog和固件错误计数没有增加。",
+      "开关后独立304.969秒/61样本窗口与RX后60.971秒/13样本观察稳定；前者窗口内网关、DNS、TLS检查通过。各窗口分开统计，不合并为连续稳定。",
+      "同一owner/代次ROC驻留95.162ms。149频道一个管理Beacon不是AWDL数据；late-read为315/315数字copy但末16项在ROC END后，不能关联窗口内MPDU。原3秒collector仍unknown。",
+      "密钥应答发送跟踪Group2源修复已提交7de62a3，三组定向离线测试通过；Test096尚未构建或部署。"
     ],
     "blockers": [
-      "地址更新后的READY短降和扫描时延仍待定位；睡眠恢复本轮未测。12:04:20是否仍处于手动开关过程不确定，不归类为无人操作掉线。",
-      "本轮未进行149频道、AWDL数据收发或AirDrop诊断。"
+      "修复Wi-Fi无人操作短断；内部两次地址重启，尚不能确认界面全过程无回跳；补长期运行和睡眠恢复验证。",
+      "接通ROC窗口内completion-to-MPDU同次关联；不能使用END之后的16条晚读样本切换生产索引。",
+      "原生awdl0数据交付、对端回包及双向AirDrop没有本轮通过证据。"
     ],
     "next": [
-      "Test095的Group2序号修复已推送b3b721d；有界电源通知改动仍在合并，尚未构建或部署。"
+      "完整构建已提交的Test096 Group2发送跟踪修复，再依据ROC窗口同次关联证据安排下一轮验证；尚未构建kext或写EFI。"
     ]
   }
 ];
