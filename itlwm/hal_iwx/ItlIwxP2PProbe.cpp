@@ -6356,12 +6356,11 @@ static int invalidateRx149LiveStartOnMainGate(ItlIwx *owner)
 {
     if (!owner)
         return EINVAL;
-    IOWorkLoop *workLoop = owner->getMainWorkLoop();
-    if (workLoop && workLoop->inGate())
+    if (owner->tahoeP2pOnMainGate())
         return invalidateRx149LiveStartAction(
             owner, owner, nullptr, nullptr, nullptr) == kIOReturnSuccess ?
             0 : EIO;
-    IOCommandGate *gate = owner->getMainCommandGate();
+    IOCommandGate *gate = owner->tahoeP2pCommandGate();
     if (!gate)
         return EIO;
     return gate->runAction(invalidateRx149LiveStartAction, owner) ==

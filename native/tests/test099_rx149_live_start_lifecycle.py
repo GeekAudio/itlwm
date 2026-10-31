@@ -29,7 +29,8 @@ class Rx149LiveStartLifecycleTests(unittest.TestCase):
         self.assertIn("if (invalidateError)\n        return invalidateError;", body)
 
         retire = function_body(PROBE, "static int invalidateRx149LiveStartOnMainGate(")
-        self.assertIn("workLoop->inGate()", retire)
+        self.assertIn("owner->tahoeP2pOnMainGate()", retire)
+        self.assertIn("owner->tahoeP2pCommandGate()", retire)
         self.assertIn("gate->runAction(invalidateRx149LiveStartAction, owner)", retire)
         action = function_body(PROBE, "static IOReturn invalidateRx149LiveStartAction(")
         self.assertIn("removeRx149LiveStartPublication(owner)", action)
