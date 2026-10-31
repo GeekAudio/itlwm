@@ -123,6 +123,7 @@ typedef struct iwx_tx_completion_event_record {
     uint64_t serial;
     uint64_t monotonic_ns;
     uint32_t output_epoch;
+    uint32_t driver_generation;
     uint32_t kind;
     uint32_t stage;
     uint32_t terminal_reason;
@@ -171,6 +172,7 @@ typedef struct iwx_tx_completion_event_input {
     uint32_t presence_flags;
     uint64_t monotonic_ns;
     uint32_t output_epoch;
+    uint32_t driver_generation;
     uint32_t rx_group;
     uint32_t rx_command;
     uint32_t rx_header_qid;
@@ -212,7 +214,9 @@ typedef struct iwx_tx_completion_observation_state {
     uint32_t lock;
     uint32_t reserved;
     uint64_t dropped_count;
+    uint64_t related_dropped_count;
     uint64_t next_serial;
+    uint64_t publication_serial;
     uint64_t terminal_reason_counts[IWX_TX_COMPLETION_KIND_COUNT]
                                     [IWX_TX_COMPLETION_MAX_REASON_COUNT];
     iwx_tx_completion_event_record last[IWX_TX_COMPLETION_KIND_COUNT];
@@ -222,7 +226,9 @@ typedef struct iwx_tx_completion_observation_snapshot {
     uint32_t available;
     uint32_t complete;
     uint64_t dropped_count;
+    uint64_t related_dropped_count;
     uint64_t next_serial;
+    uint64_t publication_serial;
     uint64_t terminal_reason_counts[IWX_TX_COMPLETION_KIND_COUNT]
                                     [IWX_TX_COMPLETION_MAX_REASON_COUNT];
     iwx_tx_completion_event_record last[IWX_TX_COMPLETION_KIND_COUNT];
@@ -271,6 +277,50 @@ static inline void noteDrop(iwx_tx_completion_observation_state *state)
     (void)__atomic_compare_exchange_n(&state->dropped_count, &expected,
                                       current + 1U, false,
                                       __ATOMIC_RELAXED, __ATOMIC_RELAXED);
+}
+
+/* Related Group2 completions also expose losses that happen before a cut can
+ * be created. This counter is independent of the observer lock so a busy
+ * producer still performs one bounded atomic attempt and never waits. */
+static inline void noteRelatedDrop(iwx_tx_completion_observation_state *state)
+{
+    if (!state)
+        return;
+    uint64_t current = __atomic_load_n(&state->related_dropped_count,
+                                       __ATOMIC_RELAXED);
+    for (uint32_t attempt = 0; attempt < 2U && current != UINT64_MAX;
+         ++attempt) {
+        uint64_t expected = current;
+        if (__atomic_compare_exchange_n(&state->related_dropped_count,
+                &expected, current + 1U, false, __ATOMIC_RELEASE,
+                __ATOMIC_RELAXED))
+            return;
+        current = expected;
+    }
+}
+
+/*
+ * Mark only a completion known to overlap a live Group2 sidecar interval.
+ * This scalar is the cheap main-gate dirty stamp; ordinary TX status traffic
+ * does not cause a full IORegistry snapshot. Call after record() so a
+ * publisher that observes the new serial can also observe its event/drop.
+ */
+static inline bool markPublicationRelevant(
+    iwx_tx_completion_observation_state *state)
+{
+    if (!state)
+        return false;
+    uint64_t current = __atomic_load_n(&state->publication_serial,
+                                       __ATOMIC_RELAXED);
+    for (uint32_t attempt = 0; attempt < 2U && current != UINT64_MAX;
+         ++attempt) {
+        uint64_t expected = current;
+        if (__atomic_compare_exchange_n(&state->publication_serial, &expected,
+                current + 1U, false, __ATOMIC_RELEASE, __ATOMIC_ACQUIRE))
+            return true;
+        current = expected;
+    }
+    return false;
 }
 
 static inline uint32_t reasonLimit(uint32_t kind)
@@ -542,6 +592,7 @@ static inline void copyInput(const iwx_tx_completion_event_input *in,
     out->serial = serial;
     out->monotonic_ns = in->monotonic_ns;
     out->output_epoch = in->output_epoch;
+    out->driver_generation = in->driver_generation;
     out->kind = in->kind;
     out->stage = in->stage;
     out->terminal_reason = in->terminal_reason;
@@ -584,15 +635,45 @@ static inline void copyInput(const iwx_tx_completion_event_input *in,
     out->txcmd_offload_assist = in->txcmd_offload_assist;
 }
 
+static inline void copySnapshotLocked(
+    iwx_tx_completion_observation_state *state,
+    iwx_tx_completion_observation_snapshot *out)
+{
+    if (!state || !out)
+        return;
+    *out = iwx_tx_completion_observation_snapshot{};
+    out->available = 1;
+    out->next_serial = __atomic_load_n(&state->next_serial,
+                                       __ATOMIC_ACQUIRE);
+    out->publication_serial = __atomic_load_n(&state->publication_serial,
+                                               __ATOMIC_ACQUIRE);
+    for (uint32_t kind = 0; kind < kKindCount; ++kind) {
+        for (uint32_t reason = 0; reason < kMaxReasonCount; ++reason)
+            out->terminal_reason_counts[kind][reason] =
+                state->terminal_reason_counts[kind][reason];
+        out->last[kind] = state->last[kind];
+    }
+    out->dropped_count = __atomic_load_n(&state->dropped_count,
+                                          __ATOMIC_ACQUIRE);
+    out->related_dropped_count = __atomic_load_n(
+        &state->related_dropped_count, __ATOMIC_ACQUIRE);
+    out->complete = out->dropped_count == 0 ? 1U : 0U;
+}
+
 static inline bool record(iwx_tx_completion_observation_state *state,
-                          const iwx_tx_completion_event_input *in)
+                          const iwx_tx_completion_event_input *in,
+                          iwx_tx_completion_observation_snapshot *relatedCut = 0)
 {
     if (!state || !validInput(in)) {
         noteDrop(state);
+        if (relatedCut)
+            noteRelatedDrop(state);
         return false;
     }
     if (!tryLock(state)) {
         noteDrop(state);
+        if (relatedCut)
+            noteRelatedDrop(state);
         return false;
     }
 
@@ -600,17 +681,27 @@ static inline bool record(iwx_tx_completion_observation_state *state,
     const uint32_t reason = in->terminal_reason;
     iwx_tx_completion_event_record &last = state->last[kind];
     uint64_t &reasonCount = state->terminal_reason_counts[kind][reason];
-    if (state->next_serial == UINT64_MAX ||
+    const uint64_t serial = __atomic_load_n(&state->next_serial,
+                                            __ATOMIC_RELAXED);
+    if (serial == UINT64_MAX ||
         last.event_count == UINT64_MAX || reasonCount == UINT64_MAX) {
         noteDrop(state);
+        if (relatedCut)
+            noteRelatedDrop(state);
         unlock(state);
         return false;
     }
 
-    ++state->next_serial;
+    const uint64_t nextSerial = __atomic_add_fetch(&state->next_serial, 1U,
+                                                    __ATOMIC_RELEASE);
     ++last.event_count;
     ++reasonCount;
-    copyInput(in, state->next_serial, &last);
+    copyInput(in, nextSerial, &last);
+    if (relatedCut) {
+        if (!markPublicationRelevant(state))
+            noteRelatedDrop(state);
+        copySnapshotLocked(state, relatedCut);
+    }
     unlock(state);
     return true;
 }
@@ -624,20 +715,8 @@ static inline bool snapshot(iwx_tx_completion_observation_state *state,
     if (!state || !tryLock(state))
         return false;
 
-    iwx_tx_completion_observation_snapshot value{};
-    value.available = 1;
-    value.next_serial = state->next_serial;
-    for (uint32_t kind = 0; kind < kKindCount; ++kind) {
-        for (uint32_t reason = 0; reason < kMaxReasonCount; ++reason)
-            value.terminal_reason_counts[kind][reason] =
-                state->terminal_reason_counts[kind][reason];
-        value.last[kind] = state->last[kind];
-    }
-    value.dropped_count = __atomic_load_n(&state->dropped_count,
-                                           __ATOMIC_ACQUIRE);
-    value.complete = value.dropped_count == 0 ? 1U : 0U;
+    copySnapshotLocked(state, out);
     unlock(state);
-    *out = value;
     return true;
 }
 

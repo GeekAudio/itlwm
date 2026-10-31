@@ -86,7 +86,7 @@ def check_production_wiring() -> tuple[str, str, str]:
     helpers_end = source.index(
         "\n#endif\n\nvoid ItlIwx::\niwx_rx_tx_ba_notif", helpers_start) + len("\n#endif")
     helpers = source[helpers_start:helpers_end]
-    record_body = braced_source(helpers, "static void recordTxCompletionEvent(")
+    record_body = braced_source(helpers, "static bool recordTxCompletionEvent(")
     assert "IWX_TX_COMPLETION_HAS_OUTPUT_EPOCH" in record_body
     assert "event.output_epoch = __atomic_load_n(&sc->sc_tx_output_epoch," in record_body
     ring = braced_source(source, "static bool iwx_tx_response_ring(") + "\n" + \
@@ -249,6 +249,8 @@ struct iwx_softc {
 };
 struct ItlIwx {
     void iwx_rx_tx_cmd(iwx_softc *, iwx_rx_packet *, iwx_rx_data *);
+    void tahoeStoreRelatedTxCompletionSnapshot(
+        const iwx_tx_completion_observation_snapshot *) {}
 };
 static uint32_t iwx_lookup_cmd_ver(iwx_softc *, uint8_t, uint8_t) { return 7; }
 static void txCompletionScanLiveTxCommands(
@@ -496,8 +498,8 @@ with tempfile.TemporaryDirectory(prefix="iwx-tx-completion-") as temporary:
     subprocess.run([str(directory / "c-layout-probe")], check=True)
 
     helpers, ring_guards, tx_handler, sta_helpers = check_production_wiring()
-    record_guard = """    if (!sc)\n        return;\n    event.presence_flags |= IWX_TX_COMPLETION_HAS_MONOTONIC_NS |\n        IWX_TX_COMPLETION_HAS_OUTPUT_EPOCH;"""
-    record_hook = """    if (!sc || !gCompletionObservationEnabled)\n        return;\n    event.presence_flags |= IWX_TX_COMPLETION_HAS_MONOTONIC_NS |\n        IWX_TX_COMPLETION_HAS_OUTPUT_EPOCH;"""
+    record_guard = """    if (!sc)\n        return false;\n    event.presence_flags |= IWX_TX_COMPLETION_HAS_MONOTONIC_NS |\n        IWX_TX_COMPLETION_HAS_OUTPUT_EPOCH;"""
+    record_hook = """    if (!sc || !gCompletionObservationEnabled)\n        return false;\n    event.presence_flags |= IWX_TX_COMPLETION_HAS_MONOTONIC_NS |\n        IWX_TX_COMPLETION_HAS_OUTPUT_EPOCH;"""
     assert helpers.count(record_guard) == 1
     helpers = helpers.replace(record_guard, record_hook, 1)
     assert ring_guards.count("IwxTxRingCapacity::responseIndex(") == 1

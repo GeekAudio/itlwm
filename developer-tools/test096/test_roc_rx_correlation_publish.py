@@ -27,17 +27,35 @@ def function(source: str, marker: str) -> str:
 
 
 ACTION = function(DRIVER, "IOReturn ItlIwx::tahoeRxRocCorrelationPublishAction(")
+PERIODIC_ACTION = function(
+    DRIVER, "IOReturn ItlIwx::tahoeRxRocCorrelationPeriodicAction("
+)
+PUBLISH_TRACE = function(
+    DRIVER, "bool ItlIwx::tahoeRxRocCorrelationPublishTrace("
+)
+PERIODIC_TICK = function(
+    DRIVER, "void ItlIwx::tahoeRxRocCorrelationPeriodicTick("
+)
 PUBLISH = function(DRIVER, "void ItlIwx::tahoeRxRocCorrelationPublish(")
 
 assert "owner->tahoeP2pOnMainGate()" in ACTION
-assert "gate->attemptAction(tahoeRxRocCorrelationPublishAction" in PUBLISH
+assert "owner->tahoeP2pRxDrain()" not in ACTION
+assert PERIODIC_ACTION.index("owner->tahoeP2pRxDrain()") < PERIODIC_ACTION.index(
+    "owner->tahoeRxRocCorrelationPublish(controller)")
+assert "gate->attemptAction(" in PERIODIC_TICK
+assert "tahoeRxRocCorrelationPeriodicAction" in PERIODIC_TICK
+assert "runAction" not in PERIODIC_TICK
+assert "gate->attemptAction(" in PUBLISH
+assert "tahoeRxRocCorrelationPublishAction" in PUBLISH
 assert "nativeRxRocPublishAttempts_ >= 3u" in PUBLISH
 assert "nativeRxRocPublished_ = true;" in PUBLISH
 assert PUBLISH.index("nativeRxRocPublished_ = true;") > PUBLISH.index(
     "controller->setProperty(")
+assert "PublishVersionBegin" in PUBLISH_TRACE
+assert "PublishVersionEnd" in PUBLISH_TRACE
 
 
-HARNESS = r"""
+HARNESS = (r"""
 #include <atomic>
 #include <cassert>
 #include <cstdint>
@@ -46,9 +64,13 @@ HARNESS = r"""
 #include <iostream>
 #include <mutex>
 #include <thread>
+#include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "native/iwx_roc_rx_correlation.hpp"
+#include "native/iwx_roc_rx_publication_trace.hpp"
+#include "native/rx_preowner_observation.hpp"
 
 using IOReturn = int32_t;
 static constexpr IOReturn kIOReturnSuccess = 0;
@@ -94,8 +116,22 @@ public:
         value = data->bytes;
         return true;
     }
+    bool setProperty(const char *key, uint64_t scalar, unsigned)
+    {
+        ++scalarPropertyWrites;
+        const std::string name(key);
+        if (failScalarKey == name) {
+            failScalarKey.clear();
+            return false;
+        }
+        scalarProperties[name] = scalar;
+        return true;
+    }
     unsigned propertyWrites = 0;
+    unsigned scalarPropertyWrites = 0;
     bool failNextWrite = false;
+    std::string failScalarKey;
+    std::unordered_map<std::string, uint64_t> scalarProperties;
     std::vector<uint8_t> value;
 };
 
@@ -142,11 +178,22 @@ class ItlIwx : public OSObject {
 public:
     bool tahoeP2pOnMainGate() const { return gate && gate->inGate(); }
     IOCommandGate *getMainCommandGate() { return gate; }
+    IOEthernetController *getController() { return controller; }
+    void tahoeP2pRxDrain()
+    {
+        assert(tahoeP2pOnMainGate());
+        ++drainCalls;
+    }
     void tahoeRxRocCorrelationSync(uint64_t) {}
     static IOReturn tahoeRxRocCorrelationPublishAction(OSObject *, void *,
                                                         void *, void *, void *);
+    static IOReturn tahoeRxRocCorrelationPeriodicAction(OSObject *, void *,
+                                                        void *, void *, void *);
+    void tahoeRxRocCorrelationPeriodicTick(IOEthernetController *);
+    bool tahoeRxRocCorrelationPublishTrace(IOEthernetController *);
     void tahoeRxRocCorrelationPublish(IOEthernetController *);
     IOCommandGate *gate = nullptr;
+    IOEthernetController *controller = nullptr;
     PreOwnerWindow nativeRxPreOwner_;
     NativeIwxRocRxCorrelation::Recorder nativeRxRocCorrelation_{};
     uint64_t nativeRxRocArmUs_ = 0;
@@ -155,10 +202,15 @@ public:
     uint32_t nativeRxRocArmReady_ = 0;
     uint32_t nativeRxRocPublishAttempts_ = 0;
     bool nativeRxRocPublished_ = false;
+    NativeIwxRocRxPublicationTrace::Snapshot nativeRxRocPublishTrace_{};
+    uint32_t nativeRxRocPublishTraceRevision_ = 0;
+    bool nativeRxRocPublishTraceFinalized_ = false;
+    uint32_t drainCalls = 0;
     uint8_t nativeRxRocPublishWire_[NativeIwxRocRxCorrelation::kWireBytes]{};
 };
 
-""" + ACTION + "\n" + PUBLISH + r"""
+""" + ACTION + "\n" + PERIODIC_ACTION + "\n" + PUBLISH_TRACE +
+"\n" + PERIODIC_TICK + "\n" + PUBLISH + r"""
 
 static uint32_t read32(const std::vector<uint8_t> &value, size_t offset)
 {
@@ -173,10 +225,21 @@ static uint16_t read16(const std::vector<uint8_t> &value, size_t offset)
     return uint16_t(value[offset]) | (uint16_t(value[offset + 1]) << 8);
 }
 
+static uint64_t readScalar(const IOEthernetController &controller,
+                           const char *key)
+{
+    const auto found = controller.scalarProperties.find(key);
+    assert(found != controller.scalarProperties.end());
+    return found->second;
+}
+
 static void prepareEndedWindow(ItlIwx &owner, uint32_t slots = 1)
 {
     using namespace NativeIwxRocRxCorrelation;
     Recorder &recorder = owner.nativeRxRocCorrelation_;
+    owner.nativeRxRocArmReady_ = 1;
+    owner.nativeRxRocArmGeneration_ = 11;
+    owner.nativeRxRocArmUs_ = 1000;
     assert(recorder.arm(1, 11, 1000));
     RocEpoch epoch;
     epoch.contextGeneration = 6;
@@ -214,6 +277,10 @@ static void testActiveWindowDoesNotPublishAndEmptyEndDoes()
     ItlIwx active;
     IOEthernetController activeController;
     active.gate = &gate;
+    active.controller = &activeController;
+    active.nativeRxRocArmReady_ = 1;
+    active.nativeRxRocArmGeneration_ = 11;
+    active.nativeRxRocArmUs_ = 1000;
     assert(active.nativeRxRocCorrelation_.arm(1, 11, 1000));
     RocEpoch epoch;
     epoch.contextGeneration = 6;
@@ -222,22 +289,37 @@ static void testActiveWindowDoesNotPublishAndEmptyEndDoes()
     epoch.rocGeneration = 6;
     epoch.sessionToken = 99;
     assert(active.nativeRxRocCorrelation_.beginRoc(epoch, 2000, 97000));
-    active.tahoeRxRocCorrelationPublish(&activeController);
+    active.tahoeRxRocCorrelationPeriodicTick(&activeController);
     assert(active.nativeRxRocPublishAttempts_ == 0);
     assert(!active.nativeRxRocPublished_ && activeController.propertyWrites == 0);
 
     ItlIwx empty;
     IOEthernetController emptyController;
     empty.gate = &gate;
+    empty.controller = &emptyController;
+    empty.nativeRxRocArmReady_ = 1;
+    empty.nativeRxRocArmGeneration_ = 11;
+    empty.nativeRxRocArmUs_ = 1000;
     assert(empty.nativeRxRocCorrelation_.arm(1, 11, 1000));
     assert(empty.nativeRxRocCorrelation_.closeNoStart(2000));
-    empty.tahoeRxRocCorrelationPublish(&emptyController);
+    empty.tahoeRxRocCorrelationPeriodicTick(&emptyController);
     assert(empty.nativeRxRocPublished_ && emptyController.propertyWrites == 1);
     assert(emptyController.value.size() == kWireBytes);
     assert(read32(emptyController.value, 24) == uint32_t(State::kClosed));
     assert(read32(emptyController.value, 28) == uint32_t(CloseReason::kNoStart));
     assert(read32(emptyController.value, 100) == 0);
     assert(read32(emptyController.value, 120) == 0);
+    assert(empty.drainCalls == 1);
+    const uint64_t trace = readScalar(emptyController,
+        "NativeRXRocCopyCorrelationPublishTraceV1");
+    assert((trace & 0xffu) == 1u);
+    assert(((trace >> 8) & 0xffu) == 6u); // published
+    assert(((trace >> 33) & 1u) == 1u); // correlation property succeeded
+    assert(((trace >> 34) & 1u) == 1u); // latch is set
+    assert(readScalar(emptyController,
+        "NativeRXRocCopyCorrelationPublishVersionBegin") == 2u);
+    assert(readScalar(emptyController,
+        "NativeRXRocCopyCorrelationPublishVersionEnd") == 2u);
 }
 
 static void testBusyMainGateDefersWithoutConsumingRetry()
@@ -246,6 +328,7 @@ static void testBusyMainGateDefersWithoutConsumingRetry()
     ItlIwx owner;
     IOEthernetController controller;
     owner.gate = &gate;
+    owner.controller = &controller;
     prepareEndedWindow(owner);
     const unsigned allocationsBefore = OSData::allocations;
     std::atomic<bool> locked{false};
@@ -258,19 +341,62 @@ static void testBusyMainGateDefersWithoutConsumingRetry()
         });
     });
     while (!locked.load(std::memory_order_acquire)) std::this_thread::yield();
-    owner.tahoeRxRocCorrelationPublish(&controller);
+    owner.tahoeRxRocCorrelationPeriodicTick(&controller);
     assert(gate.busyReturns == 1);
+    assert(owner.drainCalls == 0);
     assert(owner.nativeRxRocPublishAttempts_ == 0);
     assert(!owner.nativeRxRocPublished_ &&
            OSData::allocations == allocationsBefore);
     release.store(true, std::memory_order_release);
     holder.join();
-    owner.tahoeRxRocCorrelationPublish(&controller);
+    owner.tahoeRxRocCorrelationPeriodicTick(&controller);
     assert(owner.nativeRxRocPublishAttempts_ == 1);
     assert(owner.nativeRxRocPublished_ && controller.propertyWrites == 1);
+    assert(owner.drainCalls == 1);
+    const uint64_t trace = readScalar(controller,
+        "NativeRXRocCopyCorrelationPublishTraceV1");
+    assert(((trace >> 8) & 0xffu) == 6u);
+    assert(((trace >> 37) & 0xffu) == 2u); // one busy + one entered
+    assert(((trace >> 45) & 0xffu) == 1u); // one action entry
+    assert(readScalar(controller,
+        "NativeRXRocCopyCorrelationPublishGateResult") ==
+        uint32_t(kIOReturnCannotLock)); // Last completed attempt before snapshot.
     const size_t record = NativeIwxRocRxCorrelation::kHeaderBytes;
     assert(controller.value.size() == NativeIwxRocRxCorrelation::kWireBytes);
     assert(read32(controller.value, record + 152) == 66);
+    const unsigned scalarWrites = controller.scalarPropertyWrites;
+    owner.tahoeRxRocCorrelationPeriodicTick(&controller);
+    assert(owner.drainCalls == 2); // Keep the periodic RX drain alive.
+    assert(owner.nativeRxRocPublishAttempts_ == 1);
+    assert(controller.propertyWrites == 1);
+    assert(controller.scalarPropertyWrites == scalarWrites);
+}
+
+static void testAlreadyInGateDrainsInlineAndOrdinaryPublisherDoesNot()
+{
+    IOCommandGate gate;
+    ItlIwx periodic;
+    IOEthernetController periodicController;
+    periodic.gate = &gate;
+    periodic.controller = &periodicController;
+    prepareEndedWindow(periodic);
+    gate.run([&] {
+        periodic.tahoeRxRocCorrelationPeriodicTick(&periodicController);
+    });
+    assert(gate.attempts == 0);
+    assert(periodic.drainCalls == 1);
+    assert(periodic.nativeRxRocPublished_);
+
+    ItlIwx standalone;
+    IOEthernetController standaloneController;
+    standalone.gate = &gate;
+    standalone.controller = &standaloneController;
+    prepareEndedWindow(standalone);
+    gate.run([&] {
+        standalone.tahoeRxRocCorrelationPublish(&standaloneController);
+    });
+    assert(standalone.drainCalls == 0);
+    assert(standalone.nativeRxRocPublished_);
 }
 
 static void testAllocationAndPropertyFailuresHaveThreeFiniteAttempts()
@@ -279,9 +405,10 @@ static void testAllocationAndPropertyFailuresHaveThreeFiniteAttempts()
     ItlIwx owner;
     IOEthernetController controller;
     owner.gate = &gate;
+    owner.controller = &controller;
     prepareEndedWindow(owner);
     OSData::failNextAllocation = true;
-    owner.tahoeRxRocCorrelationPublish(&controller);
+    owner.tahoeRxRocCorrelationPeriodicTick(&controller);
     assert(owner.nativeRxRocPublishAttempts_ == 1 && !owner.nativeRxRocPublished_);
     controller.failNextWrite = true;
     owner.tahoeRxRocCorrelationPublish(&controller);
@@ -295,17 +422,22 @@ static void testAllocationAndPropertyFailuresHaveThreeFiniteAttempts()
     ItlIwx exhausted;
     IOEthernetController exhaustedController;
     exhausted.gate = &gate;
+    exhausted.controller = &exhaustedController;
     prepareEndedWindow(exhausted);
     exhaustedController.failNextWrite = true;
-    exhausted.tahoeRxRocCorrelationPublish(&exhaustedController);
+    exhausted.tahoeRxRocCorrelationPeriodicTick(&exhaustedController);
     exhaustedController.failNextWrite = true;
-    exhausted.tahoeRxRocCorrelationPublish(&exhaustedController);
+    exhausted.tahoeRxRocCorrelationPeriodicTick(&exhaustedController);
     exhaustedController.failNextWrite = true;
-    exhausted.tahoeRxRocCorrelationPublish(&exhaustedController);
-    exhausted.tahoeRxRocCorrelationPublish(&exhaustedController);
+    exhausted.tahoeRxRocCorrelationPeriodicTick(&exhaustedController);
+    exhausted.tahoeRxRocCorrelationPeriodicTick(&exhaustedController);
     assert(exhausted.nativeRxRocPublishAttempts_ == 3);
     assert(!exhausted.nativeRxRocPublished_);
     assert(exhaustedController.propertyWrites == 3);
+    const uint64_t trace = readScalar(exhaustedController,
+        "NativeRXRocCopyCorrelationPublishTraceV1");
+    assert(((trace >> 8) & 0xffu) == 7u); // finite retry exhaustion
+    assert(((trace >> 35) & 0x3u) == 3u);
 }
 
 static void testOverflowPublishesFixedBankAndLatchesIncompleteCoverage()
@@ -314,8 +446,9 @@ static void testOverflowPublishesFixedBankAndLatchesIncompleteCoverage()
     ItlIwx owner;
     IOEthernetController controller;
     owner.gate = &gate;
+    owner.controller = &controller;
     prepareEndedWindow(owner, NativeIwxRocRxCorrelation::kCapacity + 1);
-    owner.tahoeRxRocCorrelationPublish(&controller);
+    owner.tahoeRxRocCorrelationPeriodicTick(&controller);
     assert(owner.nativeRxRocPublished_);
     assert(read32(controller.value, 96) == NativeIwxRocRxCorrelation::kCapacity + 1);
     assert(read32(controller.value, 100) == NativeIwxRocRxCorrelation::kCapacity);
@@ -328,17 +461,55 @@ static void testOverflowPublishesFixedBankAndLatchesIncompleteCoverage()
         (188u + NativeIwxRocRxCorrelation::kCapacity - 1) % 512u);
 }
 
+static void testTraceCommitMarkersAndTeardownGuard()
+{
+    IOCommandGate gate;
+    ItlIwx owner;
+    IOEthernetController controller;
+    owner.gate = &gate;
+    owner.controller = &controller;
+    prepareEndedWindow(owner);
+    controller.failScalarKey =
+        "NativeRXRocCopyCorrelationPublishTraceV1";
+    owner.tahoeRxRocCorrelationPeriodicTick(&controller);
+    assert(controller.propertyWrites == 1);
+    assert(readScalar(controller,
+        "NativeRXRocCopyCorrelationPublishVersionBegin") == 1u);
+    assert(controller.scalarProperties.find(
+        "NativeRXRocCopyCorrelationPublishVersionEnd") ==
+        controller.scalarProperties.end());
+    owner.tahoeRxRocCorrelationPeriodicTick(&controller);
+    assert(readScalar(controller,
+        "NativeRXRocCopyCorrelationPublishVersionBegin") == 2u);
+    assert(readScalar(controller,
+        "NativeRXRocCopyCorrelationPublishVersionEnd") == 2u);
+
+    ItlIwx detached;
+    IOEthernetController staleController;
+    IOEthernetController currentController;
+    detached.gate = &gate;
+    detached.controller = &currentController;
+    prepareEndedWindow(detached);
+    detached.tahoeRxRocCorrelationPeriodicTick(&staleController);
+    assert(gate.attempts >= 3);
+    assert(detached.drainCalls == 0);
+    assert(staleController.propertyWrites == 0);
+    assert(staleController.scalarPropertyWrites == 0);
+}
+
 int main()
 {
     testActiveWindowDoesNotPublishAndEmptyEndDoes();
     testBusyMainGateDefersWithoutConsumingRetry();
+    testAlreadyInGateDrainsInlineAndOrdinaryPublisherDoesNot();
     testAllocationAndPropertyFailuresHaveThreeFiniteAttempts();
     testOverflowPublishesFixedBankAndLatchesIncompleteCoverage();
+    testTraceCommitMarkersAndTeardownGuard();
     std::cout << "PASS active/no-start behavior and actual publish action\n";
-    std::cout << "PASS busy-gate deferral and finite allocation/property retries\n";
+    std::cout << "PASS coalesced gate drain/publication, bounded retries, and stage trace\n";
     std::cout << "PASS fixed append-only overflow publishes incomplete coverage\n";
 }
-"""
+""")
 
 
 class RocCorrelationPublishTests(unittest.TestCase):

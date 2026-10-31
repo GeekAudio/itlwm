@@ -319,10 +319,115 @@ IOReturn ItlIwx::tahoeRxRocCorrelationPublishAction(OSObject *, void *arg0,
 {
     auto *owner = static_cast<ItlIwx *>(arg0);
     auto *controller = static_cast<IOEthernetController *>(arg1);
-    if (!owner || !controller || !owner->tahoeP2pOnMainGate())
+    if (!owner || !controller || !owner->tahoeP2pOnMainGate() ||
+        owner->getController() != controller)
         return kIOReturnNotReady;
     owner->tahoeRxRocCorrelationPublish(controller);
     return kIOReturnSuccess;
+}
+
+IOReturn ItlIwx::tahoeRxRocCorrelationPeriodicAction(OSObject *, void *arg0,
+    void *arg1, void *, void *)
+{
+    auto *owner = static_cast<ItlIwx *>(arg0);
+    auto *controller = static_cast<IOEthernetController *>(arg1);
+    if (!owner || !controller || !owner->tahoeP2pOnMainGate() ||
+        owner->getController() != controller)
+        return kIOReturnNotReady;
+    owner->tahoeP2pRxDrain();
+    owner->tahoeRxRocCorrelationPublish(controller);
+    return kIOReturnSuccess;
+}
+
+bool ItlIwx::tahoeRxRocCorrelationPublishTrace(
+    IOEthernetController *controller)
+{
+    using namespace NativeIwxRocRxPublicationTrace;
+    if (!controller || !tahoeP2pOnMainGate())
+        return false;
+
+    uint32_t nextEven = nativeRxRocPublishTraceRevision_ + 2u;
+    if (nextEven == 0 || (nextEven & 1u))
+        nextEven = 2u;
+    const uint32_t odd = nextEven - 1u;
+    if (!controller->setProperty(
+            "NativeRXRocCopyCorrelationPublishVersionBegin", odd, 32))
+        return false;
+
+    bool complete = true;
+    const auto write = [&complete, controller](const char *key,
+                                               uint64_t value,
+                                               unsigned bits) {
+        const bool written = controller->setProperty(key, value, bits);
+        complete = written && complete;
+    };
+    const auto &trace = nativeRxRocPublishTrace_;
+    write("NativeRXRocCopyCorrelationPublishTraceV1", trace.packed(), 64);
+    write("NativeRXRocCopyCorrelationPublishGateResult",
+          trace.gateResult, 32);
+    write("NativeRXRocCopyCorrelationPublishIdentity", trace.identity(), 64);
+    write("NativeRXRocCopyCorrelationPublishArmUs", trace.armUs, 64);
+    if (!complete)
+        return false;
+    if (!controller->setProperty(
+            "NativeRXRocCopyCorrelationPublishVersionEnd", nextEven, 32))
+        return false;
+    if (!controller->setProperty(
+            "NativeRXRocCopyCorrelationPublishVersionBegin", nextEven, 32))
+        return false;
+
+    nativeRxRocPublishTraceRevision_ = nextEven;
+    return true;
+}
+
+void ItlIwx::tahoeRxRocCorrelationPeriodicTick(
+    IOEthernetController *controller)
+{
+    if (!controller)
+        return;
+
+    auto &trace = nativeRxRocPublishTrace_;
+    const bool track = __atomic_load_n(&nativeRxRocArmReady_,
+        __ATOMIC_ACQUIRE) && !nativeRxRocPublishTraceFinalized_;
+    if (tahoeP2pOnMainGate()) {
+        // Preserve both operations when this timer callback already runs under
+        // the main gate; do not recurse through a second action.
+        tahoeP2pRxDrain();
+        tahoeRxRocCorrelationPublish(controller);
+        return;
+    }
+
+    IOCommandGate *gate = getMainCommandGate();
+    if (!gate) {
+        if (track) {
+            NativeIwxRocRxPublicationTrace::incrementSaturated(
+                trace.gateAttempts);
+            trace.stage = static_cast<uint32_t>(
+                NativeIwxRocRxPublicationTrace::Stage::kGateUnavailable);
+            trace.gateResult = uint32_t(kIOReturnNotReady);
+            trace.gateResultValid = 1;
+        }
+        return;
+    }
+
+    // nativeP2pTick is called by the single periodic watchdog timer. The
+    // command-gate attempt is synchronous and nonblocking: its action runs on
+    // this callback before attemptAction returns, so these counters have one
+    // writer and the main-gate reader does not race the watchdog.
+    if (track)
+        NativeIwxRocRxPublicationTrace::incrementSaturated(
+            trace.gateAttempts);
+    const uint32_t entriesBefore = trace.gateEntries;
+    const IOReturn result = gate->attemptAction(
+        tahoeRxRocCorrelationPeriodicAction, this, controller);
+    if (track) {
+        trace.gateResult = uint32_t(result);
+        trace.gateResultValid = 1;
+        if (trace.gateEntries == entriesBefore &&
+            result != kIOReturnSuccess)
+            trace.stage = static_cast<uint32_t>(
+                NativeIwxRocRxPublicationTrace::Stage::kGateUnavailable);
+    }
 }
 
 void ItlIwx::tahoeRxRocCorrelationPublish(IOEthernetController *controller)
@@ -330,31 +435,110 @@ void ItlIwx::tahoeRxRocCorrelationPublish(IOEthernetController *controller)
     if (!controller)
         return;
     if (!tahoeP2pOnMainGate()) {
+        auto &trace = nativeRxRocPublishTrace_;
+        const bool armed = __atomic_load_n(&nativeRxRocArmReady_,
+                                           __ATOMIC_ACQUIRE) != 0;
+        const bool track = armed && !nativeRxRocPublishTraceFinalized_;
         IOCommandGate *gate = getMainCommandGate();
-        if (gate)
-            (void)gate->attemptAction(tahoeRxRocCorrelationPublishAction,
-                this, controller);
+        if (!gate) {
+            if (track) {
+                NativeIwxRocRxPublicationTrace::incrementSaturated(
+                    trace.gateAttempts);
+                trace.stage = static_cast<uint32_t>(
+                    NativeIwxRocRxPublicationTrace::Stage::kGateUnavailable);
+                trace.gateResult = uint32_t(kIOReturnNotReady);
+                trace.gateResultValid = 1;
+            }
+            return;
+        }
+        if (track)
+            NativeIwxRocRxPublicationTrace::incrementSaturated(
+                trace.gateAttempts);
+        const uint32_t entriesBefore = trace.gateEntries;
+        const IOReturn result = gate->attemptAction(
+            tahoeRxRocCorrelationPublishAction, this, controller);
+        if (track) {
+            trace.gateResult = uint32_t(result);
+            trace.gateResultValid = 1;
+            if (trace.gateEntries == entriesBefore &&
+                result != kIOReturnSuccess)
+                trace.stage = static_cast<uint32_t>(
+                    NativeIwxRocRxPublicationTrace::Stage::kGateUnavailable);
+        }
         return;
     }
-    if (nativeRxRocPublished_ || nativeRxRocPublishAttempts_ >= 3u)
+    if (!__atomic_load_n(&nativeRxRocArmReady_, __ATOMIC_ACQUIRE) ||
+        nativeRxRocPublishTraceFinalized_)
         return;
+
+    using NativeIwxRocRxPublicationTrace::Stage;
+    auto &trace = nativeRxRocPublishTrace_;
+    NativeIwxRocRxPublicationTrace::incrementSaturated(trace.gateEntries);
     tahoeRxRocCorrelationSync(tahoeMonotonicNs() / 1000ULL);
-    if (!nativeRxRocCorrelation_.readyToEncode() ||
-        !nativeRxRocCorrelation_.encode(nativeRxRocPublishWire_,
-                                      sizeof(nativeRxRocPublishWire_)))
+
+    trace.captureSerial = uint32_t(NativeRxPreOwner::kCaptureSerial);
+    trace.driverGeneration = __atomic_load_n(&nativeRxRocArmGeneration_,
+                                              __ATOMIC_RELAXED);
+    trace.armUs = __atomic_load_n(&nativeRxRocArmUs_, __ATOMIC_RELAXED);
+    trace.recorderState = uint32_t(nativeRxRocCorrelation_.state());
+    trace.closeReason = uint32_t(nativeRxRocCorrelation_.closeReason());
+    trace.unfinished = nativeRxRocCorrelation_.unfinished();
+    trace.payloadAttempts = nativeRxRocPublishAttempts_;
+    trace.published = nativeRxRocPublished_ ? 1u : 0u;
+    if (nativeRxRocPublished_) {
+        trace.stage = uint32_t(Stage::kPublished);
+        if (tahoeRxRocCorrelationPublishTrace(controller))
+            nativeRxRocPublishTraceFinalized_ = true;
         return;
+    }
+    if (nativeRxRocPublishAttempts_ >= 3u) {
+        trace.stage = uint32_t(Stage::kRetryExhausted);
+        if (tahoeRxRocCorrelationPublishTrace(controller))
+            nativeRxRocPublishTraceFinalized_ = true;
+        return;
+    }
+
+    trace.readyToEncode = nativeRxRocCorrelation_.readyToEncode() ? 1u : 0u;
+    trace.encodeSucceeded = 0;
+    trace.allocationSucceeded = 0;
+    trace.propertyWriteSucceeded = 0;
+    if (!trace.readyToEncode) {
+        trace.stage = uint32_t(Stage::kRecorderNotReady);
+        (void)tahoeRxRocCorrelationPublishTrace(controller);
+        return;
+    }
+    const bool encoded = nativeRxRocCorrelation_.encode(
+        nativeRxRocPublishWire_, sizeof(nativeRxRocPublishWire_));
+    trace.encodeSucceeded = encoded ? 1u : 0u;
+    if (!encoded) {
+        trace.stage = uint32_t(Stage::kEncodeFailed);
+        (void)tahoeRxRocCorrelationPublishTrace(controller);
+        return;
+    }
+
     // One immutable OSData body avoids a multi-property partial commit. Failed
     // allocations/writes have a finite retry budget; only success latches.
     ++nativeRxRocPublishAttempts_;
+    trace.payloadAttempts = nativeRxRocPublishAttempts_;
     OSData *payload = OSData::withBytes(nativeRxRocPublishWire_,
         unsigned(sizeof(nativeRxRocPublishWire_)));
-    if (!payload)
+    if (!payload) {
+        trace.stage = uint32_t(Stage::kAllocationFailed);
+        (void)tahoeRxRocCorrelationPublishTrace(controller);
         return;
+    }
+    trace.allocationSucceeded = 1;
     const bool published = controller->setProperty(
         "NativeRXRocCopyCorrelation", payload);
     payload->release();
+    trace.propertyWriteSucceeded = published ? 1u : 0u;
     if (published)
         nativeRxRocPublished_ = true;
+    trace.published = nativeRxRocPublished_ ? 1u : 0u;
+    trace.stage = uint32_t(published ? Stage::kPublished :
+        Stage::kPropertyWriteFailed);
+    if (tahoeRxRocCorrelationPublishTrace(controller) && published)
+        nativeRxRocPublishTraceFinalized_ = true;
 }
 #endif
 
@@ -947,7 +1131,8 @@ static bool publishTxProgressSnapshot(
 static bool publishCompletionSnapshot(IOEthernetController *controller,
     uint32_t *versionStorage,
     const iwx_tx_completion_observation_snapshot &snapshot,
-    uint32_t ownerSequence, uint32_t ownerGeneration)
+    uint32_t ownerSequence, uint32_t ownerGeneration,
+    uint32_t publicationSource, uint64_t relatedCutLostCount)
 {
     if (!controller || !versionStorage || (*versionStorage & 1U) != 0 ||
         *versionStorage > UINT32_MAX - 2U)
@@ -970,8 +1155,15 @@ static bool publishCompletionSnapshot(IOEthernetController *controller,
         scalar("SnapshotAvailable", snapshot.available) &&
         scalar("DroppedCount", snapshot.dropped_count) &&
         scalar("NextSerial", snapshot.next_serial) &&
+        scalar("RelevantSerial", snapshot.publication_serial) &&
+        scalar("RelatedRecordDroppedCount",
+               snapshot.related_dropped_count) &&
+        scalar("RelatedCutLostCount", relatedCutLostCount) &&
         scalar("OwnerWatchdogSequence", ownerSequence) &&
         scalar("OwnerGeneration", ownerGeneration) &&
+        scalar("PublicationSequence", finish) &&
+        scalar("PublicationSource", publicationSource) &&
+        scalar("PublicationGeneration", ownerGeneration) &&
         scalar("FirmwareResponseIdentityProven", 0) &&
         scalar("PeerReceiptProven", 0);
     for (uint32_t kind = 0; okay && kind < IWX_TX_COMPLETION_KIND_COUNT; ++kind) {
@@ -997,6 +1189,7 @@ static bool publishCompletionSnapshot(IOEthernetController *controller,
         PUBLISH_COMPLETION_FIELD("Count", event_count);
         PUBLISH_COMPLETION_FIELD("Serial", serial);
         PUBLISH_COMPLETION_FIELD("MonotonicNs", monotonic_ns);
+        PUBLISH_COMPLETION_FIELD("DriverGeneration", driver_generation);
         PUBLISH_COMPLETION_FIELD("Kind", kind);
         PUBLISH_COMPLETION_FIELD("Stage", stage);
         PUBLISH_COMPLETION_FIELD("TerminalReason", terminal_reason);
@@ -1041,6 +1234,22 @@ static bool publishCompletionSnapshot(IOEthernetController *controller,
     }
     return okay && scalar("SnapshotComplete", snapshot.available && snapshot.complete ? 1U : 0U) &&
         scalar("SnapshotVersionEnd", finish) && scalar("SnapshotVersionBegin", finish);
+}
+
+static IwxTxCompletionPublish::Stamp txCompletionPublicationStamp(
+    struct iwx_softc *sc)
+{
+    IwxTxCompletionPublish::Stamp stamp{};
+    if (!sc)
+        return stamp;
+    stamp.publicationSerial = __atomic_load_n(
+        &sc->sc_tx_completion_observation.publication_serial,
+        __ATOMIC_ACQUIRE);
+    stamp.generation = static_cast<uint32_t>(__atomic_load_n(
+        &sc->sc_generation, __ATOMIC_ACQUIRE));
+    stamp.outputEpoch = __atomic_load_n(&sc->sc_tx_output_epoch,
+                                        __ATOMIC_ACQUIRE);
+    return stamp;
 }
 
 static bool publishQueueSnapshot(IOEthernetController *controller,
@@ -1846,12 +2055,114 @@ void ItlIwx::tahoePublishTxProgressSnapshot(
         publishCompletionSnapshot(controller,
             &sc->sc_tx_completion_publish_version,
             sc->sc_tx_completion_pending, ownerSequence,
-            sc->sc_tx_progress_pending_generation) &&
+            sc->sc_tx_progress_pending_generation,
+            IwxTxCompletionPublish::kFrozenWatchdogSnapshot,
+            IwxTxCompletionPublish::lostCount(
+                &nativeStaCompletionPending_)) &&
         publishQueueSnapshot(controller, &sc->sc_tx_queue_publish_version,
             sc->sc_tx_queue_pending, ownerSequence,
             sc->sc_tx_progress_pending_generation) &&
         tahoePublishStaTxSnapshot(controller, sc))
         nativeResetTracePublishedTxProgressWatchdogSequence_ = ownerSequence;
+}
+
+void ItlIwx::tahoePublishOrdinaryTxCompletionSnapshot(
+    IOEthernetController *controller, struct iwx_softc *sc)
+{
+    if (!controller || !sc || !tahoeP2pOnMainGate() ||
+        sc->sc_tx_progress_pending_present)
+        return;
+
+    const uint64_t relatedCutLostCount =
+        IwxTxCompletionPublish::lostCount(&nativeStaCompletionPending_);
+    if (relatedCutLostCount != nativeStaCompletionPublishedLostCount_ &&
+        controller->setProperty("NativeStaCompletionRelatedCutLostCount",
+                                relatedCutLostCount, 64))
+        nativeStaCompletionPublishedLostCount_ = relatedCutLostCount;
+    const uint64_t relatedRecordDroppedCount = __atomic_load_n(
+        &sc->sc_tx_completion_observation.related_dropped_count,
+        __ATOMIC_ACQUIRE);
+    if (relatedRecordDroppedCount !=
+            nativeStaCompletionPublishedRelatedDroppedCount_ &&
+        controller->setProperty("NativeStaCompletionRelatedRecordDroppedCount",
+                                relatedRecordDroppedCount, 64))
+        nativeStaCompletionPublishedRelatedDroppedCount_ =
+            relatedRecordDroppedCount;
+
+    // The small pending stamp is checked first. Ordinary TX_RSP traffic does
+    // not trigger observer copies or the large IORegistry batch.
+    IwxTxCompletionPublish::Stamp before{};
+    if (!IwxTxCompletionPublish::tryReadStamp(
+            &nativeStaCompletionPending_, &before) ||
+        !IwxTxCompletionPublish::shouldPublishOrdinary(true, false,
+            before.publicationSerial != 0, before,
+            nativeStaCompletionCursor_))
+        return;
+
+    if (!IwxTxCompletionPublish::tryClaimCopy(
+            &nativeStaCompletionPending_,
+            &nativeStaCompletionPublishScratch_))
+        return; // Bounded try-copy; the next periodic drain retries.
+    const auto &snapshot = nativeStaCompletionPublishScratch_;
+    const auto &txRsp = snapshot.last[IWX_TX_COMPLETION_TX_RSP];
+    const IwxTxCompletionPublish::Stamp captured {
+        snapshot.publication_serial, txRsp.driver_generation,
+        txRsp.output_epoch
+    };
+    IwxTxCompletionPublish::Stamp pendingAfterCopy{};
+    if (!snapshot.available || !txRsp.event_count ||
+        !IwxTxCompletionPublish::sameStamp(before, captured) ||
+        !IwxTxCompletionPublish::tryReadStamp(
+            &nativeStaCompletionPending_, &pendingAfterCopy) ||
+        !IwxTxCompletionPublish::sameStamp(captured, pendingAfterCopy)) {
+        (void)IwxTxCompletionPublish::finishClaim(
+            &nativeStaCompletionPending_, captured, false);
+        return;
+    }
+
+    const IwxTxCompletionPublish::Stamp live =
+        txCompletionPublicationStamp(sc);
+    if (live.generation != captured.generation ||
+        live.outputEpoch != captured.outputEpoch) {
+        // Consume an old-generation pending cut without publishing it under
+        // the new generation. A later related completion creates a fresh cut.
+        if (IwxTxCompletionPublish::tryDiscard(
+                &nativeStaCompletionPending_, captured))
+            IwxTxCompletionPublish::commitOrdinary(
+                &nativeStaCompletionCursor_, captured);
+        return;
+    }
+
+    const uint64_t batchRelatedCutLostCount =
+        IwxTxCompletionPublish::lostCount(&nativeStaCompletionPending_);
+    const bool published = publishCompletionSnapshot(controller,
+        &sc->sc_tx_completion_publish_version, snapshot, 0,
+        captured.generation, IwxTxCompletionPublish::kOrdinaryCompletion,
+        batchRelatedCutLostCount);
+    // A successful batch is acknowledged only if this exact cut is still
+    // pending. On a contended release the cursor stays put and the next
+    // main-gate pass retries with the same immutable cut.
+    if (published && IwxTxCompletionPublish::tryDiscard(
+            &nativeStaCompletionPending_, captured)) {
+        IwxTxCompletionPublish::commitOrdinary(
+            &nativeStaCompletionCursor_, captured);
+        nativeStaCompletionPublishedLostCount_ = batchRelatedCutLostCount;
+    } else if (!published) {
+        (void)IwxTxCompletionPublish::finishClaim(
+            &nativeStaCompletionPending_, captured, false);
+    }
+    // A changed stamp or failed property write leaves the cursor unchanged;
+    // one later periodic pass retries without a busy loop.
+}
+
+void ItlIwx::tahoeStoreRelatedTxCompletionSnapshot(
+    const iwx_tx_completion_observation_snapshot *snapshot)
+{
+    if (!snapshot || !snapshot->available ||
+        snapshot->publication_serial == 0)
+        return;
+    (void)IwxTxCompletionPublish::tryStore(
+        &nativeStaCompletionPending_, snapshot);
 }
 
 bool ItlIwx::tahoePublishStaTxSnapshot(IOEthernetController *controller,
@@ -2184,6 +2495,11 @@ bool ItlIwx::attach(IOPCIDevice *device)
     com.sc_tx_queue_publish_version = 0;
     com.sc_tx_completion_pending = {};
     com.sc_tx_completion_publish_version = 0;
+    nativeStaCompletionCursor_ = IwxTxCompletionPublish::OrdinaryCursor{};
+    nativeStaCompletionPending_ = IwxTxCompletionPublish::Pending{};
+    nativeStaCompletionPublishScratch_ = {};
+    nativeStaCompletionPublishedLostCount_ = 0;
+    nativeStaCompletionPublishedRelatedDroppedCount_ = 0;
     __atomic_store_n(&com.sc_tx_progress_publish_version, 0U,
                      __ATOMIC_RELEASE);
     com.sc_tx_progress_pending = {};
@@ -9114,31 +9430,42 @@ static void txCompletionSetBaTfdFacts(
     event->ba_tfd_index = le16toh(tfd->tfd_index);
 }
 
-static void recordTxCompletionEvent(
-    struct iwx_softc *sc, iwx_tx_completion_event_input event)
+static bool recordTxCompletionEvent(
+    struct iwx_softc *sc, iwx_tx_completion_event_input event,
+    iwx_tx_completion_observation_snapshot *relatedCut = nullptr)
 {
     if (!sc)
-        return;
+        return false;
     event.presence_flags |= IWX_TX_COMPLETION_HAS_MONOTONIC_NS |
         IWX_TX_COMPLETION_HAS_OUTPUT_EPOCH;
     event.monotonic_ns = tahoeMonotonicNs();
-    // Record-time owner epoch only; this does not prove firmware ACK ownership.
+    // These are local record-time identities, not firmware/peer receipt proof.
     event.output_epoch = __atomic_load_n(&sc->sc_tx_output_epoch,
                                           __ATOMIC_ACQUIRE);
-    (void)IwxTxCompletionObservation::record(
-        &sc->sc_tx_completion_observation, &event);
+    event.driver_generation = static_cast<uint32_t>(__atomic_load_n(
+        &sc->sc_generation, __ATOMIC_ACQUIRE));
+    return IwxTxCompletionObservation::record(
+        &sc->sc_tx_completion_observation, &event, relatedCut);
 }
 
 class TxCompletionTerminalScope {
 public:
     TxCompletionTerminalScope(struct iwx_softc *sc,
-                              const iwx_tx_completion_event_input &event)
-        : sc_(sc), event_(event), active_(sc != nullptr) {}
+                              const iwx_tx_completion_event_input &event,
+                              ItlIwx *owner = nullptr)
+        : sc_(sc), event_(event), owner_(owner), active_(sc != nullptr) {}
 
     ~TxCompletionTerminalScope()
     {
-        if (active_)
-            recordTxCompletionEvent(sc_, event_);
+        if (!active_)
+            return;
+        if (publicationRelevant_ && owner_) {
+            iwx_tx_completion_observation_snapshot cut{};
+            if (recordTxCompletionEvent(sc_, event_, &cut))
+                owner_->tahoeStoreRelatedTxCompletionSnapshot(&cut);
+        } else {
+            (void)recordTxCompletionEvent(sc_, event_);
+        }
     }
 
     TxCompletionTerminalScope(const TxCompletionTerminalScope &) = delete;
@@ -9147,12 +9474,15 @@ public:
 
     void setReason(uint32_t reason) { event_.terminal_reason = reason; }
     iwx_tx_completion_event_input &event() { return event_; }
+    void markPublicationRelevant() { publicationRelevant_ = true; }
     void dismiss() { active_ = false; }
 
 private:
     struct iwx_softc *sc_;
     iwx_tx_completion_event_input event_;
+    ItlIwx *owner_;
     bool active_;
+    bool publicationRelevant_ {false};
 };
 #endif
 
@@ -9670,7 +10000,7 @@ iwx_rx_tx_cmd(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
         IWX_TX_COMPLETION_STAGE_TX_RSP_TERMINAL,
         IWX_TX_COMPLETION_TX_RSP_UNCLASSIFIED_EXIT, pkt);
     txCompletionSetTxRspFacts(&txRspEvent, pkt, payloadLength);
-    TxCompletionTerminalScope txRspCompletion(sc, txRspEvent);
+    TxCompletionTerminalScope txRspCompletion(sc, txRspEvent, this);
 #endif
     if (payloadLength < sizeof(uint8_t)) {
 #ifdef AIRPORT_TAHOE
@@ -9805,8 +10135,9 @@ iwx_rx_tx_cmd(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
             iwx_lookup_cmd_ver(sc, IWX_LONG_GROUP, IWX_TX_CMD));
         auto *group2Trace = &sc->sc_ic.ic_tahoe_auth_trace.group2_tx;
         IwxGroup2TxSlot group2MatchedSlot{};
+        uint32_t group2RelatedSidecar = 0;
         const uint32_t group2CompletionMatch =
-            iwx_group2_tx_trace_match_completion(
+            iwx_group2_tx_trace_match_completion_ex(
                 group2Trace, tahoeMonotonicNs() / 1000ULL,
                 responseOldTail, responseOldQueued,
                 static_cast<uint32_t>(checkedIndex), queueId,
@@ -9815,7 +10146,9 @@ iwx_rx_tx_cmd(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
                 le16toh(tx_resp->frame_ctrl), le16toh(tx_resp->seq_ctl),
                 0, // The outer requiredLength check validated status.status.
                 static_cast<int32_t>(le16toh(tx_resp->status.status)),
-                &group2MatchedSlot);
+                &group2MatchedSlot, &group2RelatedSidecar);
+        if (group2RelatedSidecar)
+            txRspCompletion.markPublicationRelevant();
 #endif
         txd = &ring->data[idx];
         iwx_rx_tx_cmd_single(sc, pkt, txd);

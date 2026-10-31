@@ -151,10 +151,12 @@ int main()
     IwxGroup2TxTrace unrelatedResponses{};
     iwx_group2_tx_trace_init(&unrelatedResponses);
     for (uint32_t i = 0; i < 100; ++i) {
-        match = iwx_group2_tx_trace_match_completion(&unrelatedResponses,
+        uint32_t relatedSidecar = 1;
+        match = iwx_group2_tx_trace_match_completion_ex(&unrelatedResponses,
             510 + i, 1, 2, 3, 5, 8, 21, 22, 0x0008, 0x5000, 0,
-            1, &integratedMatch);
+            1, &integratedMatch, &relatedSidecar);
         assert(match == IWX_GROUP2_TX_MATCH_NONE);
+        assert(relatedSidecar == 0);
     }
     assert(unrelatedResponses.next_event_sequence == 0 &&
            unrelatedResponses.event_count == 0 &&
@@ -175,10 +177,12 @@ int main()
     assert(iwx_group2_tx_trace_prepare_slot(&unmatchedResponse,
         &unmatchedTag, 21, 22, 5, 2, 8, 0x0008, 0x5000, 15,
         &unmatchedSlot));
-    match = iwx_group2_tx_trace_match_completion(&unmatchedResponse, 622,
+    uint32_t relatedSidecar = 0;
+    match = iwx_group2_tx_trace_match_completion_ex(&unmatchedResponse, 622,
         1, 2, 3, 5, 8, 21, 22, 0x0008, 0x5010, 0,
-        1, &integratedMatch);
+        1, &integratedMatch, &relatedSidecar);
     assert(match == IWX_GROUP2_TX_MATCH_NONE && !integratedMatch.valid);
+    assert(relatedSidecar == 1); // MATCH_NONE with a real sidecar is relevant.
     const IwxGroup2TxEvent &unmatchedEvent = unmatchedResponse.events[
         (unmatchedResponse.event_cursor + IWX_GROUP2_TX_TRACE_CAPACITY - 1) %
         IWX_GROUP2_TX_TRACE_CAPACITY];

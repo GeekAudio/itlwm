@@ -158,10 +158,12 @@
 #include "../../native/p2p_hal_probe.hpp"
 #include "../../native/intel_roc_event_state.hpp"
 #include "../../native/iwx_reset_trace.hpp"
+#include "../../native/iwx_tx_completion_publish.hpp"
 #include "../../native/iwx_init_dispatch.hpp"
 #include "../../native/iwx_link_state_trace.hpp"
 #include "../../native/iwx_completion_observer_kernel.hpp"
 #include "../../native/iwx_roc_rx_correlation.hpp"
+#include "../../native/iwx_roc_rx_publication_trace.hpp"
 #include "../../native/iwx_mcc_refresh_policy.hpp"
 #include "../../native/iwx_fw_diagnostics.hpp"
 #include "ItlIwxP2PTx.hpp"
@@ -449,6 +451,11 @@ public:
     uint32_t nativeResetTracePublishedTxProgressWatchdogSequence_ {UINT32_MAX};
     uint32_t nativeResetTracePublishVersion_ {0};
     bool nativeResetTracePublishedOnce_ {false};
+    IwxTxCompletionPublish::OrdinaryCursor nativeStaCompletionCursor_ {};
+    IwxTxCompletionPublish::Pending nativeStaCompletionPending_ {};
+    iwx_tx_completion_observation_snapshot nativeStaCompletionPublishScratch_ {};
+    uint64_t nativeStaCompletionPublishedLostCount_ {0};
+    uint64_t nativeStaCompletionPublishedRelatedDroppedCount_ {0};
     uint32_t nativeLinkTransitionResetSequence_ {0};
     uint32_t nativeLinkTransitionWatchdogSequence_ {0};
     uint32_t nativeLinkTransitionPublishedVersion_ {0};
@@ -501,6 +508,10 @@ public:
     int tahoeQueueInitTask(struct iwx_softc *, uint32_t faultSerial = 0);
     void tahoeRecordTxWatchdogSnapshot(struct iwx_softc *, uint32_t);
     void tahoePublishTxProgressSnapshot(IOEthernetController *, struct iwx_softc *);
+    void tahoePublishOrdinaryTxCompletionSnapshot(
+        IOEthernetController *, struct iwx_softc *);
+    void tahoeStoreRelatedTxCompletionSnapshot(
+        const iwx_tx_completion_observation_snapshot *);
     bool tahoePublishStaTxSnapshot(IOEthernetController *, struct iwx_softc *);
     uint32_t tahoeRecordReset(IwxResetTrace::ResetReason, struct iwx_softc *);
     void tahoePublishResetTrace(IOEthernetController *);
@@ -558,7 +569,11 @@ public:
     static IOReturn tahoeRxCompletionPublishAction(OSObject *, void *,
         void *, void *, void *);
     void tahoeRxRocCorrelationSync(uint64_t nowUs);
+    void tahoeRxRocCorrelationPeriodicTick(IOEthernetController *);
     void tahoeRxRocCorrelationPublish(IOEthernetController *);
+    bool tahoeRxRocCorrelationPublishTrace(IOEthernetController *);
+    static IOReturn tahoeRxRocCorrelationPeriodicAction(OSObject *, void *,
+        void *, void *, void *);
     static IOReturn tahoeRxRocCorrelationPublishAction(OSObject *, void *,
         void *, void *, void *);
 #endif
@@ -669,6 +684,11 @@ public:
     uint32_t nativeRxRocPublishAttempts_ {0};
     bool nativeRxRocPublished_ {false};
     uint8_t nativeRxRocPublishWire_[NativeIwxRocRxCorrelation::kWireBytes] {};
+    // This stage trace is written only by the periodic, synchronous main-gate
+    // ROC publication action. It contains no RX pointers and never gates RX.
+    NativeIwxRocRxPublicationTrace::Snapshot nativeRxRocPublishTrace_{};
+    uint32_t nativeRxRocPublishTraceRevision_ {0};
+    bool nativeRxRocPublishTraceFinalized_ {false};
 #endif
     bool nativeRxPreOwnerPublished_ {false};
     NativeRxPreOwner::Snapshot nativeRxPreOwnerPublishSnapshot_{};

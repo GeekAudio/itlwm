@@ -8,6 +8,7 @@ import unittest
 HERE = Path(__file__).resolve().parent
 spec = importlib.util.spec_from_file_location('integration', HERE/'collect_after_capture.py')
 module = importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+import roc_rx_correlation_collect as correlation
 
 class CaptureIntegrationTests(unittest.TestCase):
     def fixture(self):
@@ -53,6 +54,32 @@ class CaptureIntegrationTests(unittest.TestCase):
         result = module.collect(report, binding, forbidden, publication_timeout=0)
         self.assertEqual(result['status'], 'unknown')
         self.assertIsNone(result['copies'])
+
+    def test_publication_trace_reader_is_forwarded_without_changing_timeout(self):
+        report, build, binding = self.fixture()
+        expected = {'captureSerial': 101, 'driverGeneration': 202,
+                    'armUs': 1479306056}
+        word = (1 | (4 << 8) | (3 << 16) | (2 << 18) |
+                (1 << 30) | (1 << 31) | (1 << 35) |
+                (2 << 37) | (1 << 45) | (1 << 53))
+        props = {
+            correlation.PUBLICATION_TRACE_PROPERTIES['versionBegin']: 2,
+            correlation.PUBLICATION_TRACE_PROPERTIES['versionEnd']: 2,
+            correlation.PUBLICATION_TRACE_PROPERTIES['traceV1']: word,
+            correlation.PUBLICATION_TRACE_PROPERTIES['gateResult']: 0,
+            correlation.PUBLICATION_TRACE_PROPERTIES['identity']:
+                (expected['driverGeneration'] << 32) | expected['captureSerial'],
+            correlation.PUBLICATION_TRACE_PROPERTIES['armUs']: expected['armUs'],
+        }
+        calls = []
+        result = module.collect(report, binding, lambda: None,
+            publication_timeout=0,
+            publication_trace_reader=lambda: calls.append('trace') or props)
+        self.assertEqual(calls, ['trace'])
+        self.assertEqual(result['status'], 'publication_timeout')
+        self.assertEqual(result['propertyReadCount'], 1)
+        self.assertEqual(result['publicationTrace']['lastStable']['stage'],
+                         'allocation_failed')
 
 if __name__ == '__main__':
     unittest.main()

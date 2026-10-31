@@ -42,7 +42,8 @@ def bind_capture(report, build, boot, loaded_uuid):
             'armRunToken': report['arm_run_token']}
 
 
-def collect(report, binding, reader, publication_timeout=3.0):
+def collect(report, binding, reader, publication_timeout=3.0,
+            publication_trace_reader=None):
     p = report.get('preowner_observation', {})
     comparison = p.get('comparison', {})
     preowner = {'binding': binding, 'stable': comparison.get('stable'),
@@ -57,7 +58,8 @@ def collect(report, binding, reader, publication_timeout=3.0):
                 'attempts': None, 'copies': None, 'independent_marker': adapted}
     result = collect_after_closed_marker(lambda: adapted['marker'], reader,
         expected_identity=adapted['expected_identity'], close_marker_timeout=0,
-        publication_timeout=publication_timeout, stable_reads=3)
+        publication_timeout=publication_timeout, stable_reads=3,
+        publication_trace_reader=publication_trace_reader)
     result['independent_marker'] = adapted
     result['coverage_scope'] = ('Retained ROC records only. Empty or complete '
         'records do not prove full RF coverage or absence of peer packets.')

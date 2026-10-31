@@ -218,7 +218,8 @@ class RocRxCorrelationSourceTests(unittest.TestCase):
         )
         self.assertIn("nativeRxRocPublishAttempts_ >= 3u", publisher)
         self.assertIn("readyToEncode()", publisher)
-        self.assertIn("encode(nativeRxRocPublishWire_", publisher)
+        self.assertIn("nativeRxRocCorrelation_.encode(", publisher)
+        self.assertIn("nativeRxRocPublishWire_", publisher)
         self.assertEqual(publisher.count("controller->setProperty("), 1)
         self.assertIn('"NativeRXRocCopyCorrelation"', publisher)
         for hardware_operation in (

@@ -8109,7 +8109,15 @@ void ItlIwx::tahoeRxPreOwnerPublish(IOEthernetController *controller)
 
 void ItlIwx::nativeP2pTick()
 {
+#if defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
+    IOEthernetController *rocController = getController();
+    if (rocController)
+        tahoeRxRocCorrelationPeriodicTick(rocController);
+    else
+        tahoeP2pRxDrain();
+#else
     tahoeP2pRxDrain();
+#endif
     // A CHUB profile refresh blocked by an active/unknown ROC lease remains
     // pending. Retry the inexpensive queue gate once per watchdog tick; the
     // MCC worker itself never spins while a P2P resource is retained.
@@ -8126,7 +8134,6 @@ void ItlIwx::nativeP2pTick()
     tahoeRxPreOwnerPublish(controller);
 #if defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
     tahoeRxCompletionPublish(controller);
-    tahoeRxRocCorrelationPublish(controller);
 #endif
     tahoePublishMccSnapshot(controller);
     publishRx149ProfileAvailabilityOnce(this, controller);

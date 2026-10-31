@@ -44,9 +44,37 @@ def decode_scalars(values: dict[str, int]) -> dict:
     if values.get("DroppedCount") != 0:
         raise ValueError("completion observer reports dropped records")
 
+    publication = None
+    publication_sequence = values.get("PublicationSequence")
+    if publication_sequence is not None:
+        source = values.get("PublicationSource")
+        generation = values.get("PublicationGeneration")
+        if (publication_sequence != begin or source not in (1, 2) or
+                generation != values.get("OwnerGeneration")):
+            raise ValueError("completion publication metadata is torn or inconsistent")
+        relevant_serial = values.get("RelevantSerial")
+        next_serial = values.get("NextSerial")
+        if (relevant_serial is not None and
+                (not isinstance(relevant_serial, int) or relevant_serial < 0 or
+                 not isinstance(next_serial, int) or relevant_serial > next_serial)):
+            raise ValueError("related completion serial exceeds observer cut")
+        if source == 1 and (relevant_serial is None or relevant_serial == 0):
+            raise ValueError("ordinary completion publication lacks a related serial")
+        publication = {
+            "sequence": publication_sequence,
+            "source": "ordinary_completion" if source == 1 else
+                      "frozen_watchdog_snapshot",
+            "generation": generation,
+            "relevant_serial": relevant_serial,
+        }
+
     result = {
         "schema": schema,
         "snapshot_version": begin,
+        "publication": publication,
+        "related_record_dropped_count": values.get(
+            "RelatedRecordDroppedCount"),
+        "related_cut_lost_count": values.get("RelatedCutLostCount"),
         "next_serial": values.get("NextSerial"),
         "firmware_response_identity_proven": values.get(
             "FirmwareResponseIdentityProven", 0) == 1,
@@ -64,6 +92,9 @@ def decode_scalars(values: dict[str, int]) -> dict:
     event_prefix = "Event0"
     present = values.get(event_prefix + "Present") == 1
     if not present:
+        if (publication is not None and
+                publication["source"] == "ordinary_completion"):
+            raise ValueError("ordinary completion publication has no retained TX_RSP row")
         result["txrsp_event"] = None
         return result
 
@@ -90,7 +121,15 @@ def decode_scalars(values: dict[str, int]) -> dict:
         "ssn": values.get(event_prefix + "Ssn"),
         "ra_tid": values.get(event_prefix + "RaTid"),
         "status": values.get(event_prefix + "Status"),
+        "driver_generation": values.get(event_prefix + "DriverGeneration"),
     }
+
+    if (publication is not None and
+            publication["source"] == "ordinary_completion" and
+            (result["txrsp_event"]["driver_generation"] !=
+                 publication["generation"] or
+             result["txrsp_event"]["output_epoch"] is None)):
+        raise ValueError("ordinary completion row does not match its publication generation")
 
     if schema == 1:
         return result

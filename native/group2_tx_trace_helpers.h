@@ -17,6 +17,13 @@
 #define IWX_GROUP2_TX_TAG_VERSION 1u
 #define IWX_GROUP2_TX_TAG_TYPE 0x0942u
 
+/* Keep aggregate zero-initialization warning-clean in C++ and strict C11. */
+#ifdef __cplusplus
+#define IWX_GROUP2_TX_ZERO_INITIALIZER {}
+#else
+#define IWX_GROUP2_TX_ZERO_INITIALIZER {0}
+#endif
+
 enum IwxGroup2TxSource {
     IWX_GROUP2_TX_SOURCE_UNKNOWN = 0,
     IWX_GROUP2_TX_SOURCE_RSN = 1,
@@ -328,7 +335,7 @@ static inline int iwx_group2_tx_trace_begin(
     tag_out->source = source;
     tag_out->origin_generation = origin_generation;
     tag_out->origin_association = origin_association;
-    struct IwxGroup2TxEvent event = {};
+    struct IwxGroup2TxEvent event = IWX_GROUP2_TX_ZERO_INITIALIZER;
     event.monotonic_us = monotonic_us;
     event.cookie = tag_out->cookie;
     event.attempt_id = attempt_id;
@@ -550,7 +557,7 @@ static inline int iwx_group2_tx_trace_prepare_slot(
         iwx_group2_tx_trace_unlock(trace);
         return 0;
     }
-    struct IwxGroup2TxSlot slot = {};
+    struct IwxGroup2TxSlot slot = IWX_GROUP2_TX_ZERO_INITIALIZER;
     slot.cookie = tag->cookie;
     slot.slot_generation = ++trace->next_slot_generation;
     slot.attempt_id = tag->attempt_id;
@@ -604,7 +611,7 @@ static inline uint32_t iwx_group2_tx_match_completion(
     uint32_t candidates = 0;
     uint32_t generation_mismatch = 0;
     uint32_t stale_candidate = 0;
-    struct IwxGroup2TxSlot candidate = {};
+    struct IwxGroup2TxSlot candidate = IWX_GROUP2_TX_ZERO_INITIALIZER;
     for (uint32_t offset = 0; offset < distance; ++offset) {
         const uint32_t index = (old_tail + offset) % ring_count;
         const struct IwxGroup2TxSlot *slot = &slots[index];
@@ -694,7 +701,7 @@ static inline uint32_t iwx_group2_tx_match_completion_sparse(
     uint32_t candidates = 0;
     uint32_t generation_mismatch = 0;
     uint32_t stale_candidate = 0;
-    struct IwxGroup2TxSlot candidate = {};
+    struct IwxGroup2TxSlot candidate = IWX_GROUP2_TX_ZERO_INITIALIZER;
     for (uint32_t i = 0; i < slot_capacity; ++i) {
         const struct IwxGroup2TxSlot *slot = &slots[i];
         if (!slot->valid || slot->cookie == 0 || slot->queue_id != queue_id ||
@@ -733,23 +740,26 @@ static inline uint32_t iwx_group2_tx_match_completion_sparse(
     return IWX_GROUP2_TX_MATCH_NONE;
 }
 
-static inline uint32_t iwx_group2_tx_trace_match_completion(
+static inline uint32_t iwx_group2_tx_trace_match_completion_ex(
     struct IwxGroup2TxTrace *trace, uint64_t monotonic_us,
     uint32_t old_tail, uint32_t old_queued, uint32_t checked_index,
     uint32_t queue_id, uint32_t ring_count, uint32_t context_generation,
     uint32_t output_epoch, uint32_t frame_control,
     uint32_t sequence_control, uint32_t reset_ambiguous,
     int32_t firmware_status,
-    struct IwxGroup2TxSlot *matched_out)
+    struct IwxGroup2TxSlot *matched_out,
+    uint32_t *related_sidecar_out)
 {
     if (matched_out != NULL)
         __builtin_memset(matched_out, 0, sizeof(*matched_out));
+    if (related_sidecar_out != NULL)
+        *related_sidecar_out = 0;
     if (trace == NULL || !iwx_group2_tx_trace_try_lock(trace)) {
         if (trace != NULL)
             iwx_group2_tx_trace_note_lost(trace);
         return IWX_GROUP2_TX_MATCH_UNKNOWN;
     }
-    struct IwxGroup2TxSlot matched = {};
+    struct IwxGroup2TxSlot matched = IWX_GROUP2_TX_ZERO_INITIALIZER;
     uint32_t result = IWX_GROUP2_TX_MATCH_UNKNOWN;
     const uint32_t identityEpoch =
         iwx_group2_tx_trace_identity_epoch(trace);
@@ -761,13 +771,18 @@ static inline uint32_t iwx_group2_tx_trace_match_completion(
         return reset_ambiguous ? IWX_GROUP2_TX_MATCH_RESET_AMBIGUOUS :
             IWX_GROUP2_TX_MATCH_NONE;
     }
+    // Report only the existing interval-sidecar predicate. The caller can use
+    // this scalar to publish a relevant completion, while the match result
+    // and all descriptor/FC/SC decisions remain unchanged.
+    if (related_sidecar_out != NULL)
+        *related_sidecar_out = 1;
     if (identityEpoch != UINT32_MAX)
         result = iwx_group2_tx_match_completion_sparse(
             trace->slots, IWX_GROUP2_TX_SLOT_CAPACITY, ring_count, old_tail,
             old_queued, checked_index, queue_id, context_generation,
             output_epoch, frame_control, sequence_control, reset_ambiguous,
             identityEpoch, &matched);
-    struct IwxGroup2TxEvent event = {};
+    struct IwxGroup2TxEvent event = IWX_GROUP2_TX_ZERO_INITIALIZER;
     event.monotonic_us = monotonic_us;
     event.stage = result == IWX_GROUP2_TX_MATCH_UNIQUE ?
         IWX_GROUP2_TX_STAGE_TX_RSP_MATCH :
@@ -825,6 +840,22 @@ static inline uint32_t iwx_group2_tx_trace_match_completion(
     return result;
 }
 
+/* Backward-compatible API for existing C and C++ callers. */
+static inline uint32_t iwx_group2_tx_trace_match_completion(
+    struct IwxGroup2TxTrace *trace, uint64_t monotonic_us,
+    uint32_t old_tail, uint32_t old_queued, uint32_t checked_index,
+    uint32_t queue_id, uint32_t ring_count, uint32_t context_generation,
+    uint32_t output_epoch, uint32_t frame_control,
+    uint32_t sequence_control, uint32_t reset_ambiguous,
+    int32_t firmware_status,
+    struct IwxGroup2TxSlot *matched_out)
+{
+    return iwx_group2_tx_trace_match_completion_ex(trace, monotonic_us,
+        old_tail, old_queued, checked_index, queue_id, ring_count,
+        context_generation, output_epoch, frame_control, sequence_control,
+        reset_ambiguous, firmware_status, matched_out, 0);
+}
+
 static inline int iwx_group2_tx_trace_retire_slot(
     struct IwxGroup2TxTrace *trace, const struct IwxGroup2TxSlot *slot,
     uint64_t monotonic_us)
@@ -843,7 +874,7 @@ static inline int iwx_group2_tx_trace_retire_slot(
             candidate->slot_generation != slot->slot_generation ||
             candidate->cookie != slot->cookie)
             continue;
-        struct IwxGroup2TxEvent event = {};
+        struct IwxGroup2TxEvent event = IWX_GROUP2_TX_ZERO_INITIALIZER;
         event.monotonic_us = monotonic_us;
         event.cookie = candidate->cookie;
         event.slot_generation = candidate->slot_generation;
@@ -937,7 +968,7 @@ static inline uint32_t iwx_group2_tx_trace_retire_interval(
             iwx_group2_tx_trace_identity_epoch(trace);
         const int identityKnown = eventIdentityEpoch != UINT32_MAX &&
             slot->identity_epoch == eventIdentityEpoch;
-        struct IwxGroup2TxEvent event = {};
+        struct IwxGroup2TxEvent event = IWX_GROUP2_TX_ZERO_INITIALIZER;
         if (identityKnown)
             iwx_group2_tx_event_from_slot(&event, slot, monotonic_us,
                 retirement_stage);
@@ -1010,7 +1041,7 @@ static inline void iwx_group2_tx_trace_invalidate_slots(
         struct IwxGroup2TxSlot *slot = &trace->slots[i];
         if (!slot->valid)
             continue;
-        struct IwxGroup2TxEvent event = {};
+        struct IwxGroup2TxEvent event = IWX_GROUP2_TX_ZERO_INITIALIZER;
         event.monotonic_us = monotonic_us;
         event.cookie = slot->cookie;
         event.slot_generation = slot->slot_generation;
@@ -1180,5 +1211,7 @@ static inline void iwx_group2_tx_snapshot_to_le_in_place(
     for (uint32_t i = 0; i < IWX_GROUP2_TX_TRACE_CAPACITY; ++i)
         iwx_group2_tx_event_to_le(&snapshot->events[i], &snapshot->events[i]);
 }
+
+#undef IWX_GROUP2_TX_ZERO_INITIALIZER
 
 #endif /* IWX_GROUP2_TX_TRACE_HELPERS_H */

@@ -2070,6 +2070,11 @@ void ItlIwx::tahoePublishResetTrace(IOEthernetController *controller)
 {
     if (!controller)
         return;
+    // Completion events are recorded on RX paths, but this method runs from
+    // the serialized main-gate drain. The ordinary publisher performs only a
+    // cheap atomic dirty-stamp check on unchanged ticks and keeps the frozen
+    // watchdog snapshot authoritative once one exists.
+    tahoePublishOrdinaryTxCompletionSnapshot(controller, &com);
     IwxResetTrace::Snapshot snapshot{};
     if (!nativeResetTrace_.read(&snapshot))
         return;
