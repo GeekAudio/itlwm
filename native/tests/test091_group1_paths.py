@@ -241,6 +241,8 @@ static uint8_t g_expected_key[16];
 static const uint64_t kMonotonicBase = 0x102030405060ULL;
 static uint32_t g_scan_phase;
 static uint32_t g_last_m2_preceding_kind;
+static uint32_t g_m2_replay_echo_flags;
+static int g_force_m2_replay_mismatch;
 #endif
 
 #ifdef AIRPORT_TAHOE
@@ -336,12 +338,26 @@ static int ieee80211_send_group_msg2(struct ieee80211com *ic,
 
 #ifdef AIRPORT_TAHOE
 /* Exercise the extracted production Tahoe wrapper; the traced output mock
- * delegates to the same send behavior and counters as the legacy mock. */
+ * constructs the replay field from the production output's ni counter, then
+ * publishes only the equality relation passed back by the production input. */
 static int ieee80211_send_group_msg2_traced(struct ieee80211com *ic,
     struct ieee80211_node *ni, const struct ieee80211_key *key,
-    const struct IwxGroup2TxTag *tag)
+    const struct IwxGroup2TxTag *tag, const u_int8_t *receivedReplay,
+    uint32_t *replayEchoFlags)
 {
     assert(iwx_group2_tx_tag_valid(tag));
+    uint8_t transmittedReplay[8];
+    uint64_t value = ni->ni_replaycnt;
+    for (unsigned i = 0; i < 8; ++i) {
+        transmittedReplay[7 - i] = (uint8_t)value;
+        value >>= 8;
+    }
+    if (g_force_m2_replay_mismatch)
+        transmittedReplay[7] ^= 1;
+    g_m2_replay_echo_flags = iwx_sta_auth_replay_echo_flags(
+        receivedReplay, transmittedReplay);
+    if (replayEchoFlags != NULL)
+        *replayEchoFlags = g_m2_replay_echo_flags;
     return ieee80211_send_group_msg2(ic, ni, key);
 }
 #endif
@@ -382,6 +398,8 @@ static void reset_globals(void)
 #ifdef AIRPORT_TAHOE
     g_scan_phase = 0;
     g_last_m2_preceding_kind = 0;
+    g_m2_replay_echo_flags = 0;
+    g_force_m2_replay_mismatch = 0;
 #endif
     for (unsigned i = 0; i < sizeof(g_expected_key); ++i)
         g_expected_key[i] = (uint8_t)(0xd3u ^ (i * 7u));
@@ -502,6 +520,34 @@ static void assert_group2_callsite_gate(struct fixture *fixture,
     assert(gate->result == IEEE80211_S_RUN);
     assert(gate->flags == expected_flags);
     assert(gate->detail == expected_phase);
+    assert(group2->flags ==
+        (IWX_STA_FLAG_GROUP2_REPLAY_ECHO_CHECKED |
+         IWX_STA_FLAG_GROUP2_REPLAY_ECHO_EQUAL));
+}
+
+static void test_group2_replay_echo_mismatch_is_boolean_only(void)
+{
+    reset_globals();
+    struct fixture f; init_fixture(&f);
+    g_force_m2_replay_mismatch = 1;
+    struct ieee80211_eapol_key *key = init_rsn_group1(&f, 6, 1, 1);
+    ieee80211_recv_rsn_group_msg1(&f.ic, key, &f.ni);
+    assert(g_m2_calls == 1 && f.ni.ni_replaycnt == 6);
+    const uint32_t expected = IWX_STA_FLAG_GROUP2_REPLAY_ECHO_CHECKED |
+        IWX_STA_FLAG_GROUP2_REPLAY_ECHO_MISMATCH;
+    assert(g_m2_replay_echo_flags == expected);
+    struct IwxStaAuthTraceSnapshot snapshot;
+    assert(iwx_sta_auth_trace_snapshot(&f.ic.ic_tahoe_auth_trace, &snapshot));
+    unsigned matches = 0;
+    for (uint32_t i = 0; i < snapshot.live_count; ++i) {
+        const struct IwxStaAuthTraceEvent *event = &snapshot.live[i];
+        if (event->kind == IWX_STA_TRACE_GROUP2_RESULT) {
+            assert(event->flags == expected);
+            assert(event->detail == 0);
+            ++matches;
+        }
+    }
+    assert(matches == 1);
 }
 
 static void test_rsn_group2_callsite_gate_capture(void)
@@ -703,6 +749,7 @@ int main(void)
 #ifdef AIRPORT_TAHOE
     test_rsn_group2_callsite_gate_capture();
     test_wpa_group2_callsite_gate_capture();
+    test_group2_replay_echo_mismatch_is_boolean_only();
 #endif
     return 0;
 }
