@@ -149,7 +149,7 @@ static uint64_t iwxMonotonicNs()
 // sc_init_complete is a notification latch shared by the init thread and RX
 // notification path. Keep PNVM separate from the public init-complete bit.
 static constexpr int kIwxPnvmInitComplete = 0x04;
-static constexpr uint64_t kIwxFirmwareInitWaitPollNs = SEC_TO_NSEC(1) / 10;
+static constexpr uint64_t kIwxFirmwareInitWaitPollNs = 100000000ULL; // 100 ms
 
 #ifdef AIRPORT_TAHOE
 static uint32_t gTahoeStaAuthTraceInstance = 0;
