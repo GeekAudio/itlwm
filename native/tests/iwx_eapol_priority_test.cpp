@@ -21,10 +21,11 @@ static void makeGroup2(uint8_t *body, uint16_t keyInfo = 0x0302)
 
 static bool classify(const uint8_t *body, size_t length,
                      uint8_t fc0 = 0x08, uint8_t fc1 = 0x41,
-                     uint8_t address1FirstOctet = 0x00)
+                     uint8_t address1FirstOctet = 0x00,
+                     uint16_t sequenceControl = 0)
 {
     return IwxEapolPriority::isRsnGroup2(
-        fc0, fc1, address1FirstOctet, body, length);
+        fc0, fc1, address1FirstOctet, sequenceControl, body, length);
 }
 
 int main()
@@ -44,6 +45,9 @@ int main()
     assert(!classify(body, sizeof(body), 0x08, 0x40)); /* not ToDS */
     assert(!classify(body, sizeof(body), 0x08, 0x43)); /* FromDS */
     assert(!classify(body, sizeof(body), 0x08, 0x45)); /* fragmented */
+    /* Final fragment has MoreFrag clear, but a nonzero fragment number. */
+    assert(!classify(body, sizeof(body), 0x08, 0x41, 0x00, 0x0001));
+    assert(classify(body, sizeof(body), 0x08, 0x41, 0x00, 0x0010));
     assert(!classify(body, sizeof(body), 0xc1)); /* Order/HT shape */
     assert(!classify(body, sizeof(body), 0x08, 0x01)); /* unprotected */
     assert(!classify(body, sizeof(body), 0x08, 0x41, 0x01)); /* multicast */

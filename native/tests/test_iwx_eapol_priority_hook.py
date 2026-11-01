@@ -30,10 +30,14 @@ def test_production_hooks() -> None:
     tx_source = (ROOT / "itlwm/hal_iwx/ItlIwx.cpp").read_text()
     tx = function_body(tx_source, "iwx_tx(struct iwx_softc *sc, mbuf_t m")
     classify = tx.index("IwxEapolPriority::isRsnGroup2(")
+    sequence_control = tx.index("const uint16_t sequenceControl =")
     copy = tx.index("mbuf_copydata(m, hdrlen, sizeof(body), body) == 0")
     mark = tx.index("flags |= htole32(IWX_TX_FLAGS_HIGH_PRI)", classify)
     protect = tx.index("if (wh->i_fc[1] & IEEE80211_FC1_PROTECTED)", mark)
-    assert copy < classify < mark < protect
+    assert sequence_control < copy < classify < mark < protect
+    assert "wh->i_seq[0]" in tx[sequence_control:classify]
+    assert "wh->i_seq[1]) << 8" in tx[sequence_control:classify]
+    assert "sequenceControl, body, sizeof(body)" in tx[classify:mark]
     assert "hdrlen == sizeof(struct ieee80211_frame)" in tx
     assert "mbuf_pkthdr_len(m) == hdrlen +" in tx
     assert "group2Tag" not in tx[copy:protect]

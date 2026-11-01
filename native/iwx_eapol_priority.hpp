@@ -11,6 +11,7 @@ static constexpr size_t kLlcSnapBytes = 8;
 static constexpr size_t kRsnGroup2BodyBytes = kLlcSnapBytes + kGroup2KeyBytes;
 
 static constexpr uint32_t kHighPriorityFlag = 1u << 2;
+static constexpr uint16_t kSequenceFragmentMask = 0x000fu;
 
 /*
  * Fail-closed recognition of the exact unfragmented STA->AP RSN Group Key
@@ -21,6 +22,7 @@ static constexpr uint32_t kHighPriorityFlag = 1u << 2;
 inline bool isRsnGroup2(const uint8_t frameControl0,
                         const uint8_t frameControl1,
                         const uint8_t address1FirstOctet,
+                        const uint16_t sequenceControl,
                         const uint8_t *body,
                         const size_t bodyLength)
 {
@@ -36,6 +38,10 @@ inline bool isRsnGroup2(const uint8_t frameControl0,
         (frameControl1 & 0x40u) == 0 ||
         (frameControl1 & 0x04u) != 0 ||
         (frameControl1 & 0x80u) != 0)
+        return false;
+
+    /* Reject fragments even when this is the final fragment (MoreFrag=0). */
+    if ((sequenceControl & kSequenceFragmentMask) != 0)
         return false;
 
     /* EAPOL must be unicast to the AP. */

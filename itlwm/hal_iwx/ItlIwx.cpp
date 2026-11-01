@@ -11802,10 +11802,13 @@ iwx_tx(struct iwx_softc *sc, mbuf_t m, struct ieee80211_node *ni, int ac
         mbuf_pkthdr_len(m) == hdrlen +
             IwxEapolPriority::kRsnGroup2BodyBytes) {
         uint8_t body[IwxEapolPriority::kRsnGroup2BodyBytes];
+        const uint16_t sequenceControl =
+            static_cast<uint16_t>(wh->i_seq[0]) |
+            (static_cast<uint16_t>(wh->i_seq[1]) << 8);
         if (mbuf_copydata(m, hdrlen, sizeof(body), body) == 0 &&
             IwxEapolPriority::isRsnGroup2(
-                wh->i_fc[0], wh->i_fc[1], wh->i_addr1[0], body,
-                sizeof(body)))
+                wh->i_fc[0], wh->i_fc[1], wh->i_addr1[0],
+                sequenceControl, body, sizeof(body)))
             flags |= htole32(IWX_TX_FLAGS_HIGH_PRI);
     }
 #endif

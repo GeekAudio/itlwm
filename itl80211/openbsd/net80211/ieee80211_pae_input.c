@@ -964,6 +964,7 @@ ieee80211_recv_rsn_group_msg1(struct ieee80211com *ic,
     int keylen;
     int group2Result;
 #ifdef AIRPORT_TAHOE
+    uint32_t group2ReplayEchoFlags = 0;
     uint32_t traceAttempt = iwx_sta_auth_trace_begin_attempt(
         &ic->ic_tahoe_auth_trace, ieee80211_tahoe_trace_time_us(),
         __atomic_load_n(&ic->ic_tahoe_auth_trace.driver_generation,
@@ -1238,7 +1239,6 @@ ieee80211_recv_rsn_group_msg1(struct ieee80211com *ic,
     /* send message 2 to authenticator */
 #ifdef AIRPORT_TAHOE
     ieee80211_tahoe_trace_group2_callsite_gate(ic, traceAttempt);
-    uint32_t group2ReplayEchoFlags = 0;
     group2Result = ieee80211_tahoe_send_group_msg2(ic, ni, NULL,
         traceAttempt, key->replaycnt, &group2ReplayEchoFlags);
 #else
@@ -1286,6 +1286,7 @@ ieee80211_recv_wpa_group_msg1(struct ieee80211com *ic,
     int keylen;
     const uint8_t *gtk;
 #ifdef AIRPORT_TAHOE
+    uint32_t group2ReplayEchoFlags = 0;
     uint32_t traceAttempt = iwx_sta_auth_trace_begin_attempt(
         &ic->ic_tahoe_auth_trace, ieee80211_tahoe_trace_time_us(),
         __atomic_load_n(&ic->ic_tahoe_auth_trace.driver_generation,
@@ -1475,7 +1476,6 @@ ieee80211_recv_wpa_group_msg1(struct ieee80211com *ic,
     /* send message 2 to authenticator */
 #ifdef AIRPORT_TAHOE
     ieee80211_tahoe_trace_group2_callsite_gate(ic, traceAttempt);
-    uint32_t group2ReplayEchoFlags = 0;
     int group2Result = ieee80211_tahoe_send_group_msg2(ic, ni, k,
         traceAttempt, key->replaycnt, &group2ReplayEchoFlags);
 #else
