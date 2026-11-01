@@ -211,7 +211,10 @@ struct iwx_softc {
 enum class TahoeP2PResourceState : uint8_t {
     kAbsent, kPending, kActive, kRemoving, kReleasing, kUnknown
 };
+enum class TahoeP2PStationRole : uint8_t { kBroadcastGeneralPurpose = 0, kDirectedPeerLink = 1 };
 struct TahoeP2PTxQueueLease {
+    TahoeP2PStationRole stationRole = TahoeP2PStationRole::kBroadcastGeneralPurpose;
+    uint8_t firmwareTid = 15;
     uint8_t stationId = 3;
     uint16_t queueId = 12;
     uint32_t generation = 7;
@@ -843,6 +846,20 @@ int main() {
             IntelP2PFirmware::TxLayout::kUnsupported);
     gDoorbells = gDoorbellMarkCalls = gMbufFrees = gStaReclaims = gDmaPostReads = 0;
     gDoorbellMarkResult = 0;
+    // A LINK lease, a non-management TID, or both must be rejected before
+    // descriptor ownership, queue submission, or an MMIO doorbell changes.
+    for (unsigned mismatch = 1; mismatch <= 3; ++mismatch) {
+        Fixture f;
+        if (mismatch & 1) f.lease.stationRole = TahoeP2PStationRole::kDirectedPeerLink;
+        if (mismatch & 2) f.lease.firmwareTid = 0;
+        mbuf_t frame = makeFrame(); const unsigned id = frame->id;
+        const unsigned beforeMarks = gDoorbellMarkCalls;
+        assert(f.submit(frame) == EOPNOTSUPP);
+        assert(gFreedById[id] == 1 && gDoorbells == 0);
+        assert(gDoorbellMarkCalls == beforeMarks && !f.lease.everDoorbelled);
+        assert(f.ring()->queued == 0 && f.lease.outstanding == 0);
+        assert(f.context.state == TahoeP2PActionTxState::kIdle);
+    }
 
     // Rejected before queue prep: caller's frame is consumed exactly once.
     {
@@ -1558,7 +1575,13 @@ def main():
     assert "IWX_TX_COMPLETION_TX_RSP_DECLARED_LENGTH_TRUNCATED" in length_exit
     assert ring_exit.count("return;") == 1
     assert "IWX_TX_COMPLETION_TX_RSP_QUEUE_OR_RING_UNADDRESSABLE" in ring_exit
-    assert "!iwx_tx_response_index(queueId, ring, ssn, &checkedIndex)" in source_guard[generic_handler:]
+    index_check = handler.index("iwx_tx_response_index(queueId, ring, ssn, &checkedIndex)")
+    index_exit = extract_function(handler, "if (!responseIndexValid)")
+    assert index_check < handler.index("if (!responseIndexValid)") < handler.index("idx = checkedIndex;")
+    assert "const bool responseIndexValid = !responseRingEmpty &&" in handler
+    assert index_exit.count("return;") == 1
+    assert "IWX_TX_COMPLETION_TX_RSP_SINGLE_RING_EMPTY" in index_exit
+    assert "IWX_TX_COMPLETION_TX_RSP_SSN_INDEX_REJECTED" in index_exit
     with tempfile.TemporaryDirectory(prefix="itl-p2p-action-hal-") as temp:
         cpp = Path(temp) / "action_hal_test.cpp"
         binary = Path(temp) / "action_hal_test"

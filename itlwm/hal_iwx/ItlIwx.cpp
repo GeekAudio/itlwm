@@ -196,6 +196,38 @@ static_assert(IwxTxRate::kDuplicateMask == IWX_RATE_MCS_DUP_MSK &&
               "TX rate helper optional-field masks must match Intel firmware flags");
 static_assert(IwxTxRate::kV3NssMask == (1u << 5),
               "V3 TX rate NSS marker must match Intel firmware API");
+// BEGIN TX_RSP local prefix ABI assertions (not firmware compatibility proof).
+static_assert(offsetof(struct iwx_tx_resp, seq_ctl) ==
+    IwxTxRspPrefixObservation::kSequenceControlOffset, "local TX ABI offset drift");
+static_assert(offsetof(struct iwx_tx_resp, byte_cnt) ==
+    IwxTxRspPrefixObservation::kByteCountOffset, "local TX ABI offset drift");
+static_assert(offsetof(struct iwx_tx_resp, ra_tid) ==
+    IwxTxRspPrefixObservation::kRaTidOffset, "local TX ABI offset drift");
+static_assert(offsetof(struct iwx_tx_resp, frame_ctrl) ==
+    IwxTxRspPrefixObservation::kFrameControlOffset, "local TX ABI offset drift");
+static_assert(offsetof(struct iwx_tx_resp, tx_queue) ==
+    IwxTxRspPrefixObservation::kQueueOffset, "local TX ABI offset drift");
+static_assert(offsetof(struct iwx_tx_resp, status) ==
+    IwxTxRspPrefixObservation::kStatusOffset, "local TX ABI offset drift");
+static_assert(offsetof(struct iwx_tx_cmd_gen2, flags) ==
+    IwxTxRspPrefixObservation::kGen2FlagsOffset, "local TX ABI offset drift");
+static_assert(offsetof(struct iwx_tx_cmd_gen2, offload_assist) ==
+    IwxTxRspPrefixObservation::kGen2OffloadOffset, "local TX ABI offset drift");
+static_assert(offsetof(struct iwx_tx_cmd_gen2, hdr) ==
+    IwxTxRspPrefixObservation::kGen2HeaderOffset, "local TX ABI offset drift");
+static_assert(offsetof(struct iwx_tx_cmd_gen3, flags) ==
+    IwxTxRspPrefixObservation::kGen3FlagsOffset, "local TX ABI offset drift");
+static_assert(offsetof(struct iwx_tx_cmd_gen3, offload_assist) ==
+    IwxTxRspPrefixObservation::kGen3OffloadOffset, "local TX ABI offset drift");
+static_assert(offsetof(struct iwx_tx_cmd_gen3, hdr) ==
+    IwxTxRspPrefixObservation::kGen3HeaderOffset, "local TX ABI offset drift");
+static_assert(offsetof(struct iwx_tx_resp, status) +
+    offsetof(struct iwx_agg_tx_status, sequence) ==
+    IwxTxRspPrefixObservation::kStatusSequenceOffset, "local status offset drift");
+static_assert(sizeof(struct iwx_agg_tx_status) == 4 &&
+    sizeof(struct iwx_tx_resp) + sizeof(uint32_t) ==
+    IwxTxRspPrefixObservation::kSinglePayloadLength, "local TX_RSP size drift");
+// END TX_RSP local prefix ABI assertions.
 static_assert(offsetof(struct iwx_tx_resp, initial_rate) == 4,
               "TX response completion rate offset must match its wire vector");
 static_assert(offsetof(struct iwx_compressed_ba_notif, tx_rate) == 24,
@@ -1185,7 +1217,12 @@ static bool publishCompletionSnapshot(IOEthernetController *controller,
         scalar("PublicationSource", publicationSource) &&
         scalar("PublicationGeneration", ownerGeneration) &&
         scalar("FirmwareResponseIdentityProven", 0) &&
-        scalar("PeerReceiptProven", 0);
+        scalar("PeerReceiptProven", 0) &&
+        scalar("TxRspPrefixExtensionSchema", 1) &&
+        scalar("TxRspVersionLookupGroup",
+               IwxTxRspPrefixObservation::kVersionLookupGroup) &&
+        scalar("TxRspVersionLookupCommand",
+               IwxTxRspPrefixObservation::kVersionLookupCommand);
     for (uint32_t kind = 0; okay && kind < IWX_TX_COMPLETION_KIND_COUNT; ++kind) {
         for (uint32_t reason = 0; okay &&
              reason < IWX_TX_COMPLETION_MAX_REASON_COUNT; ++reason) {
@@ -1234,6 +1271,10 @@ static bool publishCompletionSnapshot(IOEthernetController *controller,
         PUBLISH_COMPLETION_FIELD("TxRspFailureRts", tx_rsp_failure_rts);
         PUBLISH_COMPLETION_FIELD("TxRspFailureFrame",
                                  tx_rsp_failure_frame);
+        PUBLISH_COMPLETION_FIELD("TxRspPrefixObservationVersion",
+                                 tx_rsp_prefix_observation_version);
+        PUBLISH_COMPLETION_FIELD("TxRspNotificationVersion",
+                                 tx_rsp_notification_version);
         PUBLISH_COMPLETION_FIELD("Ssn", ssn);
         PUBLISH_COMPLETION_FIELD("RaTid", ra_tid);
         PUBLISH_COMPLETION_FIELD("Status", status);
@@ -2500,6 +2541,8 @@ bool ItlIwx::attach(IOPCIDevice *device)
     com.sc_sta_tx_pending_generation = 0;
     com.sc_sta_tx_pending_present = 0;
     IwxFirmwareDiagnostics::initialize(&nativeFwDiagnosticTrace_);
+    nativeKeyLiveLastSampleNs_ = 0;
+    nativeKeyLivePublishRevision_ = 0;
     nativeFwDiagnosticPendingTrace_ = {};
     nativeFwErrorSnapshot_ = {};
     nativeFwDiagnosticPendingTraceGeneration_ = 0;
@@ -9582,6 +9625,31 @@ static void txCompletionSetTxRspFacts(
     }
 }
 
+/* Tag only a complete local single-frame prefix. The version lookup is
+ * diagnostic; it never selects a handler, authorizes a match, or reclaims. */
+static void txCompletionSetTxRspPrefixFacts(
+    iwx_tx_completion_event_input *event, const struct iwx_rx_packet *pkt,
+    size_t payloadLength, uint8_t notificationVersion)
+{
+    if (!event || !pkt || event->kind != IWX_TX_COMPLETION_TX_RSP)
+        return;
+    IwxTxRspPrefixObservation::Fields decoded{};
+    if (!IwxTxRspPrefixObservation::decodeLocalSingleV1(
+            reinterpret_cast<const uint8_t *>(pkt->data), payloadLength,
+            &decoded))
+        return;
+    // Cross-check the independent byte decode with this event's typed fields.
+    if (decoded.sequence_control != event->response_sequence_control ||
+        decoded.frame_control != event->response_frame_control ||
+        decoded.queue != event->firmware_qid || decoded.status != event->status ||
+        decoded.ra_tid != event->ra_tid ||
+        (decoded.raw_scd_ssn & 0x0fffU) != event->ssn)
+        return;
+    event->tx_rsp_prefix_observation_version =
+        IwxTxRspPrefixObservation::kLocalSinglePrefixV1;
+    event->tx_rsp_notification_version = notificationVersion;
+}
+
 /* Only attach the common TX_RSP retry-counter prefix after the STA path has
  * validated a single-frame response against a live queue/ring/SSN interval.
  * This remains host-side parsing; it does not establish RF, TX success, ACK,
@@ -10235,6 +10303,9 @@ iwx_rx_tx_cmd(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
         IWX_TX_COMPLETION_STAGE_TX_RSP_TERMINAL,
         IWX_TX_COMPLETION_TX_RSP_UNCLASSIFIED_EXIT, pkt);
     txCompletionSetTxRspFacts(&txRspEvent, pkt, payloadLength);
+    txCompletionSetTxRspPrefixFacts(&txRspEvent, pkt, payloadLength,
+        iwx_lookup_notif_ver(sc, IwxTxRspPrefixObservation::kVersionLookupGroup,
+                            IwxTxRspPrefixObservation::kVersionLookupCommand));
     TxCompletionTerminalScope txRspCompletion(sc, txRspEvent, this);
 #endif
     if (payloadLength < sizeof(uint8_t)) {
@@ -15784,7 +15855,7 @@ iwx_deauth(struct iwx_softc *sc)
     
     if (!isset(sc->sc_enabled_capa, IWX_UCODE_TLV_CAPA_SESSION_PROT_CMD))
         iwx_unprotect_session(sc, in);
-    else
+    else if (sc->sc_flags & IWX_FLAG_MAC_ACTIVE)
         iwx_cancel_session_protection(sc, in);
     
     if (sc->sc_flags & IWX_FLAG_STA_ACTIVE) {
@@ -18749,6 +18820,33 @@ bool ItlIwx::tahoePublishFirmwareDiagnostics(
         nativeFwDiagnosticTraceLastSampleNs_ = now;
         if (forceTraceSample)
             nativeFwDiagnosticTraceManualLatched_ = 1;
+    }
+
+    // The sealed/manual HCTX cut remains immutable. Publish the current key
+    // metadata independently, even after an AWDL cut or a firmware error latch.
+    // This is read-only and main-gate owned; it issues no command or key action.
+    if (nativeKeyLiveLastSampleNs_ == 0 || now < nativeKeyLiveLastSampleNs_ ||
+        now - nativeKeyLiveLastSampleNs_ >= 1000000000ULL || forceTraceSample) {
+        const uint32_t generationBefore = static_cast<uint32_t>(
+            __atomic_load_n(&sc->sc_generation, __ATOMIC_ACQUIRE));
+        const uint32_t outputEpochBefore = __atomic_load_n(
+            &sc->sc_tx_output_epoch, __ATOMIC_ACQUIRE);
+        const IwxLiveKey::Snapshot liveKey = IwxLiveKey::snapshot(nativeFwDiagnosticTrace_);
+        const uint32_t outputEpochAfter = __atomic_load_n(
+            &sc->sc_tx_output_epoch, __ATOMIC_ACQUIRE);
+        const uint32_t generationAfter = static_cast<uint32_t>(
+            __atomic_load_n(&sc->sc_generation, __ATOMIC_ACQUIRE));
+        const uint64_t sampledAt = tahoeMonotonicNs();
+        const bool contextStable = generationBefore == generationAfter &&
+            outputEpochBefore == outputEpochAfter && generationAfter != 0 &&
+            outputEpochAfter != 0;
+        if (!IwxLiveKey::publish(controller, liveKey, sampledAt,
+                generationAfter, outputEpochAfter, contextStable,
+                nativeFwDiagnosticTraceFrozen_ != 0,
+                nativeFwDiagnosticTraceManualLatched_ != 0,
+                nativeKeyLivePublishRevision_))
+            return false;
+        nativeKeyLiveLastSampleNs_ = sampledAt;
     }
 
     bool okay = true;

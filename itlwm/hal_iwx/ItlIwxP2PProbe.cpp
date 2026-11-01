@@ -49,6 +49,8 @@
 
 namespace {
 
+static constexpr uint32_t kDirectedPrepareArmMode = 3u;
+
 static uint32_t tahoeP2pProbeReadLe32(const uint8_t *bytes)
 {
     return uint32_t(bytes[0]) | (uint32_t(bytes[1]) << 8) |
@@ -198,6 +200,9 @@ struct P2PProbeRun {
     bool leasePublished;
     bool addAcknowledged;
     bool rx149ObservationOnly;
+    bool directedPrepareOnly;
+    uint8_t directedPeerMac[6];
+    char directedRunToken[33];
     bool txProbeEnabled;
     uint32_t nativeDataAttempts;
 #if defined(ITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332)
@@ -687,6 +692,61 @@ static uint32_t manualProbeArmMode(ItlIwx *owner)
 {
     return owner ? __atomic_load_n(&owner->nativeP2pManualArmRequested_,
                                     __ATOMIC_ACQUIRE) : 0u;
+}
+
+static bool directedPrepareProfileEnabled(IOEthernetController *controller)
+{
+#if defined(ITL_NATIVE_AWDL_DIRECTED_PREPARE_25G332)
+    return controller && controller->getProperty(
+        "NativeP2PDirectedPrepareEnabled") == kOSBooleanTrue;
+#else
+    (void)controller;
+    return false;
+#endif
+}
+
+static bool validDirectedPeerMac(const uint8_t peer[6])
+{
+    if (!peer || (peer[0] & 1u) != 0)
+        return false;
+    uint8_t any = 0;
+    for (unsigned i = 0; i < 6; ++i)
+        any |= peer[i];
+    return any != 0;
+}
+
+static bool validDirectedPrepareRunToken(const char token[33])
+{
+    if (!token || token[32] != '\0')
+        return false;
+    bool nonzero = false;
+    for (unsigned i = 0; i < 32; ++i) {
+        const char value = token[i];
+        if (!((value >= '0' && value <= '9') ||
+              (value >= 'a' && value <= 'f')))
+            return false;
+        nonzero |= value != '0';
+    }
+    return nonzero;
+}
+
+// The queued worker (or its serialized finish/cancel callback) owns these
+// bytes. Retire the request before clearing queued/busy; a new arm checks
+// those states and cannot race the erase. Never reset the attempt/resource
+// ledger here, including on a quarantined firmware outcome.
+static void retireDirectedPrepareInput(ItlIwx *owner)
+{
+    if (!owner || manualProbeArmMode(owner) != kDirectedPrepareArmMode)
+        return;
+    __atomic_store_n(&owner->nativeP2pDirectedPrepareArmed_, 0u,
+                     __ATOMIC_RELEASE);
+    memset(owner->nativeP2pDirectedPreparePeer_, 0,
+           sizeof(owner->nativeP2pDirectedPreparePeer_));
+    memset(owner->nativeP2pDirectedPrepareRunToken_, 0,
+           sizeof(owner->nativeP2pDirectedPrepareRunToken_));
+    uint32_t expected = kDirectedPrepareArmMode;
+    (void)__atomic_compare_exchange_n(&owner->nativeP2pManualArmRequested_,
+        &expected, 0u, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
 }
 
 static bool rx149ArmModeSelected(ItlIwx *owner)
@@ -5908,6 +5968,15 @@ static NativeP2PProbe::BlockedReason validateCurrentState(
     struct iwx_softc *sc = &owner->com;
     struct ieee80211com *ic = &sc->sc_ic;
     struct _ifnet *ifp = &ic->ic_ac.ac_if;
+    if (run->directedPrepareOnly &&
+        (__atomic_load_n(&owner->nativeP2pDirectedPrepareArmed_,
+                         __ATOMIC_ACQUIRE) == 0 ||
+         !directedPrepareProfileEnabled(owner->tahoeP2pController()) ||
+         memcmp(run->directedPeerMac,
+                owner->nativeP2pDirectedPreparePeer_, 6) != 0 ||
+         memcmp(run->directedRunToken,
+                owner->nativeP2pDirectedPrepareRunToken_, 33) != 0))
+        return NativeP2PProbe::kP2pContextOwned;
     NativeP2PProbe::Revalidation state{};
     state.generationMatches =
         owner->nativeP2pProbeGeneration_ == run->contextGeneration &&
@@ -6430,7 +6499,8 @@ static bool psfQueueProvenUnused(const P2PProbeRun *probe,
 {
     // A helper call is not a doorbell. Require the explicit monotonic
     // transport witness plus a current, empty, installed lease snapshot.
-    return probe && probe->awdlPsfProbeEnabled && snapshot &&
+    return probe && (probe->awdlPsfProbeEnabled ||
+                     probe->directedPrepareOnly) && snapshot &&
         snapshot->queueLeaseActive && snapshot->txRingEmpty &&
         snapshot->ringIndicesConsistent && !snapshot->queueDoorbelled &&
         snapshot->outstandingTx == 0 && !snapshot->ticketArmed &&
@@ -6445,7 +6515,8 @@ static int runTxProbeSession(P2PProbeRun *probe, mbuf_t *frame,
                              P2PTxDiagnosticSnapshot *txOut)
 {
     if (!probe || !probe->owner || !frame || !sessionOut || !txOut ||
-        (!*frame && !probe->awdlPsfProbeEnabled))
+        (!*frame && !probe->awdlPsfProbeEnabled &&
+         !probe->directedPrepareOnly))
         return EINVAL;
     ItlIwx *owner = probe->owner;
     struct iwx_softc *sc = &owner->com;
@@ -7110,6 +7181,277 @@ static int runTxProbeSession(P2PProbeRun *probe, mbuf_t *frame,
             TahoeP2PActionTxState::kIdle);
     if (queueReady && !txCompleted && !psfQueueProvenUnused(probe, txOut))
         return ETIMEDOUT;
+    return 0;
+}
+
+struct DirectedNoTicketProof {
+    P2PProbeRun *probe;
+    bool snapshotValid;
+    bool neverArmed;
+};
+
+static IOReturn captureDirectedNoTicketProofAction(
+    OSObject *, void *opaque, void *, void *, void *)
+{
+    auto proof = static_cast<DirectedNoTicketProof *>(opaque);
+    auto probe = proof ? proof->probe : nullptr;
+    auto owner = probe ? probe->owner : nullptr;
+    if (!proof || !probe || !owner || !owner->tahoeP2pOnMainGate() ||
+        !probe->directedPrepareOnly || !owner->nativeP2pBusy() ||
+        __atomic_load_n(&owner->nativeP2pProbeOwner_, __ATOMIC_ACQUIRE) !=
+            reinterpret_cast<void *>(probe->workerThread) ||
+        owner->nativeP2pProbeGeneration_ != probe->contextGeneration ||
+        uint32_t(owner->com.sc_generation) != probe->powerGeneration ||
+        __atomic_load_n(&owner->com.sc_tx_rate_generation,
+                        __ATOMIC_ACQUIRE) != probe->stationGeneration)
+        return kIOReturnNotReady;
+
+    const auto &roc = owner->com.sc_p2p_roc;
+    if (roc.phase != IWX_P2P_ROC_PREPARED ||
+        roc.token != probe->contextGeneration ||
+        roc.fw_generation != probe->powerGeneration ||
+        roc.session_conf_id != IWX_SESSION_PROTECT_CONF_P2P_GO_NEGOTIATION ||
+        roc.session_submit_seen != 0 ||
+        roc.session_submit_result != EINPROGRESS)
+        return kIOReturnNotReady;
+
+    P2PTxDiagnosticSnapshot snapshot{};
+    if (!captureP2PTxSnapshot(owner, &snapshot))
+        return kIOReturnNotReady;
+    proof->snapshotValid = true;
+    proof->neverArmed = !snapshot.ticketArmed && !snapshot.ticketCompleted &&
+        !snapshot.queueDoorbelled && snapshot.outstandingTx == 0 &&
+        snapshot.actionState == static_cast<uint32_t>(
+            TahoeP2PActionTxState::kIdle) &&
+        owner->nativeP2pActionTx_.state == TahoeP2PActionTxState::kIdle;
+    return kIOReturnSuccess;
+}
+
+static void publishDirectedPrepareState(
+    ItlIwx *owner, uint32_t stage, int result, bool stationAck,
+    bool queueAck, bool cleanupAck, bool resourcesAbsent = false)
+{
+    IOEthernetController *controller = owner ? owner->tahoeP2pController() :
+                                                nullptr;
+    if (!controller)
+        return;
+    controller->setProperty("NativeP2PDirectedPrepareStage", stage, 32);
+    controller->setProperty("NativeP2PDirectedPrepareResult",
+                            static_cast<uint32_t>(result), 32);
+    controller->setProperty("NativeP2PDirectedPrepareStationAck",
+                            stationAck ? 1u : 0u, 32);
+    controller->setProperty("NativeP2PDirectedPrepareQueueAck",
+                            queueAck ? 1u : 0u, 32);
+    controller->setProperty("NativeP2PDirectedPrepareCleanupAck",
+                            cleanupAck ? 1u : 0u, 32);
+    controller->setProperty("NativeP2PDirectedPrepareResourcesAbsent",
+                            resourcesAbsent ? 1u : 0u, 32);
+    // This profile is prepare-only. A future data submitter needs a separate
+    // role and gate; no event from this worker may claim a doorbell occurred.
+    controller->setProperty("NativeP2PDirectedPrepareDoorbellIssued",
+                            uint32_t(0), 32);
+    controller->setProperty("NativeP2PDirectedPrepareSessionSubmitted",
+                            uint32_t(0), 32);
+}
+
+static int exerciseDirectedPrepare(P2PProbeRun *probe)
+{
+    ItlIwx *owner = probe ? probe->owner : nullptr;
+    if (!owner || !probe->directedPrepareOnly ||
+        !owner->nativeP2pCommandAllowed())
+        return EBUSY;
+    struct iwx_softc *sc = &owner->com;
+    const uint32_t generation = static_cast<uint32_t>(sc->sc_generation);
+    publishDirectedPrepareState(owner, 1, EAGAIN, false, false, false);
+
+    // Revalidate the one-shot input after the worker crosses the gate. The
+    // MAC address is an explicit diagnostic endpoint, never a TX permission.
+    if (!validDirectedPeerMac(probe->directedPeerMac) ||
+        !validDirectedPrepareRunToken(probe->directedRunToken) ||
+        __atomic_load_n(&owner->nativeP2pDirectedPrepareArmed_,
+                        __ATOMIC_ACQUIRE) == 0 ||
+        memcmp(probe->directedPeerMac,
+               owner->nativeP2pDirectedPreparePeer_, 6) != 0 ||
+        memcmp(probe->directedRunToken,
+               owner->nativeP2pDirectedPrepareRunToken_, 33) != 0 ||
+        memcmp(probe->directedPeerMac, sc->sc_ic.ic_myaddr, 6) == 0 ||
+        (sc->sc_ic.ic_bss && memcmp(probe->directedPeerMac,
+                                   sc->sc_ic.ic_bss->ni_macaddr, 6) == 0) ||
+        memcmp(probe->directedPeerMac, sc->sc_p2p.mac_address, 6) == 0) {
+        publishDirectedPrepareState(owner, 6, EINVAL, false, false, false,
+                                    false);
+        return EINVAL; // Identity changed: do not authorize outer MAC removal.
+    }
+
+    const auto priorTicket = owner->nativeP2pActionTx_.completion.snapshot();
+    if (priorTicket.armed || priorTicket.completed ||
+        owner->nativeP2pActionTx_.state != TahoeP2PActionTxState::kIdle ||
+        owner->nativeP2pTxQueue_.state != TahoeP2PResourceState::kAbsent ||
+        owner->nativeP2pTxQueue_.pendingRing ||
+        owner->nativeP2pTxQueue_.retainedRing ||
+        owner->nativeP2pTxQueue_.everDoorbelled) {
+        publishDirectedPrepareState(owner, 6, EBUSY, false, false, false,
+                                    false);
+        return EBUSY;
+    }
+
+    const uint32_t configuration =
+        IWX_SESSION_PROTECT_CONF_P2P_GO_NEGOTIATION;
+    struct ieee80211_channel *channel = &sc->sc_ic.ic_channels[6];
+    __atomic_store_n(&owner->nativeP2pRocChannel_, 6u, __ATOMIC_RELEASE);
+    __atomic_store_n(&owner->nativeP2pRocDurationMs_, 0u, __ATOMIC_RELEASE);
+    int error = owner->tahoeP2pRocPrepare(
+        sc, channel, probe->contextGeneration, configuration);
+    publishP2PTxSetup(owner, 1, error);
+    if (error) {
+        const bool fullyAbsent =
+            sc->sc_p2p.binding_state == IWX_P2P_RESOURCE_ABSENT &&
+            !sc->sc_p2p.phy_leased &&
+            sc->sc_p2p_roc.phase == IWX_P2P_ROC_IDLE &&
+            sc->sc_p2p_roc.session_submit_seen == 0;
+        publishDirectedPrepareState(owner, 6, error, false, false, false,
+                                    fullyAbsent);
+        return fullyAbsent ? 0 : error;
+    }
+
+    auto rocResourcesAbsent = [&]() {
+        return owner->nativeP2pStation_.state ==
+                TahoeP2PResourceState::kAbsent &&
+            owner->nativeP2pTxQueue_.state ==
+                TahoeP2PResourceState::kAbsent &&
+            owner->nativeP2pTxQueue_.pendingRing == nullptr &&
+            owner->nativeP2pTxQueue_.retainedRing == nullptr &&
+            !owner->nativeP2pTxQueue_.submissionBusy &&
+            !owner->nativeP2pTxQueue_.everDoorbelled;
+    };
+    auto abortPreparedRoc = [&]() {
+        DirectedNoTicketProof proof{probe, false, false};
+        IOCommandGate *gate = owner->tahoeP2pCommandGate();
+        if (!gate || gate->runAction(captureDirectedNoTicketProofAction,
+                                     &proof) != kIOReturnSuccess ||
+            !proof.snapshotValid || !proof.neverArmed || !rocResourcesAbsent())
+            return EBUSY;
+        const int abortError = owner->tahoeP2pRocAbortPrepared(
+            sc, probe->contextGeneration, configuration, true);
+        if (abortError)
+            return abortError;
+        return sc->sc_p2p.binding_state == IWX_P2P_RESOURCE_ABSENT &&
+            !sc->sc_p2p.phy_leased ? 0 : EBUSY;
+    };
+
+    uint8_t stationId = 0;
+    error = reserveP2PStation(owner, generation, &stationId);
+    if (error) {
+        const int abortError = abortPreparedRoc();
+        publishDirectedPrepareState(owner, 6,
+            abortError ? abortError : error, false, false, false,
+            abortError == 0);
+        return abortError;
+    }
+
+    auto &station = owner->nativeP2pStation_;
+    auto &queue = owner->nativeP2pTxQueue_;
+    bool stationMayExist = false;
+    error = iwx_tahoe_p2p_add_directed_peer_station(
+        owner, sc, &station, stationId, probe->directedPeerMac,
+        &stationMayExist);
+    if (error) {
+        if (stationMayExist) {
+            (void)changeP2PStationReservation(owner, generation,
+                                              stationId, 1);
+            publishDirectedPrepareState(owner, 6, error, false, false, false,
+                                        false);
+            return error; // ADD_STA outcome unknown: retain, never retry.
+        }
+        const int releaseError = changeP2PStationReservation(
+            owner, generation, stationId, 3);
+        const int abortError = releaseError ? releaseError : abortPreparedRoc();
+        publishDirectedPrepareState(owner, 6,
+            abortError ? abortError : error, false, false, false,
+            abortError == 0);
+        return abortError; // Negative ADD_STA is reported, then safely removed.
+    }
+
+    if (changeP2PStationReservation(owner, generation, stationId, 0) != 0) {
+        (void)changeP2PStationReservation(owner, generation, stationId, 1);
+        publishDirectedPrepareState(owner, 6, EBUSY, true, false, false,
+                                    false);
+        return EBUSY;
+    }
+    // Even if queue allocation rejects before issuing a command, station
+    // removal must carry the same typed LINK/TID0 peer identity.
+    queue.stationId = stationId;
+    queue.generation = generation;
+    queue.stationRole = TahoeP2PStationRole::kDirectedPeerLink;
+    queue.firmwareTid = 0;
+    memcpy(queue.peerAddress, station.address, sizeof(queue.peerAddress));
+    queue.macIdAndColor = station.macIdAndColor;
+    publishDirectedPrepareState(owner, 2, 0, true, false, false);
+
+    uint16_t queueId = 0;
+    bool queueMayExist = false;
+    error = iwx_tahoe_p2p_tvqm_allocate(
+        owner, sc, &queue, &station, IWX_DEFAULT_QUEUE_SIZE, &queueId,
+        &queueMayExist, TahoeP2PQueueUse::kDirectedNonQosDataTid0);
+    if (error) {
+        if (queueMayExist) {
+            const int abortError = iwx_tahoe_p2p_tvqm_abort_unsubmitted(
+                owner, sc, &station, &queue, &queueMayExist);
+            if (abortError || queueMayExist ||
+                changeP2PStationReservation(owner, generation,
+                                             stationId, 2) != 0) {
+                publishDirectedPrepareState(owner, 6,
+                    abortError ? abortError : error, true, false, false,
+                    false);
+                return abortError ? abortError : EBUSY;
+            }
+        } else {
+            bool stationStillMayExist = true;
+            const int removeError = iwx_tahoe_p2p_remove_directed_peer_station(
+                owner, sc, &station, &queue, &stationStillMayExist);
+            if (removeError || stationStillMayExist ||
+                changeP2PStationReservation(owner, generation,
+                                             stationId, 2) != 0) {
+                publishDirectedPrepareState(owner, 6,
+                    removeError ? removeError : error, true, false, false,
+                    false);
+                return removeError ? removeError : EBUSY;
+            }
+        }
+        const int abortError = abortPreparedRoc();
+        publishDirectedPrepareState(owner, 6,
+            abortError ? abortError : error, true, false, abortError == 0,
+            abortError == 0);
+        return abortError; // Rejection remains a failed prepare result.
+    }
+
+    publishDirectedPrepareState(owner, 3, 0, true, true, false);
+    DirectedNoTicketProof proof{probe, false, false};
+    IOCommandGate *gate = owner->tahoeP2pCommandGate();
+    if (!gate || gate->runAction(captureDirectedNoTicketProofAction,
+                                 &proof) != kIOReturnSuccess ||
+        !proof.snapshotValid || !proof.neverArmed) {
+        publishDirectedPrepareState(owner, 6, EBUSY, true, true, false);
+        return EBUSY;
+    }
+    bool resourceMayExist = true;
+    const int cleanupError = iwx_tahoe_p2p_tvqm_abort_idle_no_session(
+        owner, sc, &station, &queue, true, proof.neverArmed,
+        &resourceMayExist);
+    if (cleanupError || resourceMayExist ||
+        changeP2PStationReservation(owner, generation, stationId, 2) != 0) {
+        publishDirectedPrepareState(owner, 6,
+            cleanupError ? cleanupError : EBUSY, true, true, false, false);
+        return cleanupError ? cleanupError : EBUSY;
+    }
+
+    const int abortError = abortPreparedRoc();
+    if (abortError) {
+        publishDirectedPrepareState(owner, 6, abortError, true, true, false,
+                                    false);
+        return abortError;
+    }
+    publishDirectedPrepareState(owner, 5, 0, true, true, true, true);
     return 0;
 }
 
@@ -7926,6 +8268,8 @@ int ItlIwx::tahoeP2pExerciseRoc(void *opaque)
     auto probe = static_cast<P2PProbeRun *>(opaque);
     if (probe && probe->rx149ObservationOnly)
         return exerciseRx149Observation(probe);
+    if (probe && probe->directedPrepareOnly)
+        return exerciseDirectedPrepare(probe);
     if (probe && probe->txProbeEnabled)
         return exerciseTxProbe(probe);
     auto owner = probe ? probe->owner : nullptr;
@@ -8266,6 +8610,69 @@ IOReturn ItlIwx::nativeP2pArmProbe()
     return kIOReturnSuccess;
 }
 
+IOReturn ItlIwx::nativeP2pArmDirectedPrepare(
+    const uint8_t peer[6], const char runToken[33])
+{
+#if !defined(ITL_NATIVE_AWDL_DIRECTED_PREPARE_25G332)
+    (void)peer;
+    (void)runToken;
+    return kIOReturnUnsupported;
+#else
+    IOEthernetController *controller = getController();
+    if (!tahoeP2pOnMainGate() || !controller ||
+        !directedPrepareProfileEnabled(controller) ||
+        controller->getProperty("NativeP2PManualTrigger") != kOSBooleanTrue)
+        return kIOReturnUnsupported;
+    if (!validDirectedPeerMac(peer) ||
+        !validDirectedPrepareRunToken(runToken))
+        return kIOReturnBadArgument;
+    if (nativeP2pBusy() ||
+        __atomic_load_n(&nativeP2pProbeQueued_, __ATOMIC_ACQUIRE) != 0 ||
+        __atomic_load_n(&nativeP2pNswqPaused_, __ATOMIC_ACQUIRE) != 0 ||
+        __atomic_load_n(&nativeP2pProbeOwner_, __ATOMIC_ACQUIRE) != nullptr ||
+        nativeP2pResourcesRetained() ||
+        com.sc_p2p.mac_state != IWX_P2P_RESOURCE_ABSENT ||
+        com.sc_p2p.binding_state != IWX_P2P_RESOURCE_ABSENT ||
+        com.sc_p2p.phy_leased)
+        return kIOReturnBusy;
+
+    // This generic worker currently has a single-attempt ledger. If another
+    // P2P run consumed it this boot, fail closed and require a fresh boot
+    // rather than resetting its history or overlapping leases.
+    const NativeP2PProbe::Snapshot previous = nativeP2pProbe_.snapshot();
+    if (previous.attempted != 0 || previous.resourceMayExist != 0)
+        return kIOReturnBusy;
+
+    if (memcmp(peer, com.sc_ic.ic_myaddr, 6) == 0 ||
+        (com.sc_ic.ic_bss &&
+         memcmp(peer, com.sc_ic.ic_bss->ni_macaddr, 6) == 0) ||
+        (com.sc_p2p.initialized &&
+         memcmp(peer, com.sc_p2p.mac_address, 6) == 0))
+        return kIOReturnBadArgument;
+
+    uint32_t expected = 0;
+    if (__atomic_load_n(&nativeP2pManualArmRequested_, __ATOMIC_ACQUIRE) != 0)
+        return kIOReturnBusy;
+    memcpy(nativeP2pDirectedPreparePeer_, peer,
+           sizeof(nativeP2pDirectedPreparePeer_));
+    memcpy(nativeP2pDirectedPrepareRunToken_, runToken,
+           sizeof(nativeP2pDirectedPrepareRunToken_));
+    __atomic_store_n(&nativeP2pDirectedPrepareArmed_, 1u, __ATOMIC_RELEASE);
+    if (!__atomic_compare_exchange_n(&nativeP2pManualArmRequested_, &expected,
+            kDirectedPrepareArmMode, false, __ATOMIC_ACQ_REL,
+            __ATOMIC_ACQUIRE)) {
+        __atomic_store_n(&nativeP2pDirectedPrepareArmed_, 0u,
+                         __ATOMIC_RELEASE);
+        memset(nativeP2pDirectedPreparePeer_, 0,
+               sizeof(nativeP2pDirectedPreparePeer_));
+        memset(nativeP2pDirectedPrepareRunToken_, 0,
+               sizeof(nativeP2pDirectedPrepareRunToken_));
+        return kIOReturnBusy;
+    }
+    return kIOReturnSuccess;
+#endif
+}
+
 void ItlIwx::tahoeP2pInitializeTask()
 {
     if (__atomic_load_n(&tahoe_p2p_probe_task_initialized_, __ATOMIC_ACQUIRE))
@@ -8401,7 +8808,12 @@ void ItlIwx::nativeP2pTick()
         tahoeP2pPublishProbeState();
         return; // Keep software resident initialization; never retry RF after OOM.
     }
-    if (!residentStart && !probeEnabled(this, controller) && !txProbeEnabled(this, controller)) {
+    const bool directedPrepareSelected =
+        manualProbeArmMode(this) == kDirectedPrepareArmMode &&
+        __atomic_load_n(&nativeP2pDirectedPrepareArmed_, __ATOMIC_ACQUIRE) != 0 &&
+        directedPrepareProfileEnabled(controller);
+    if (!residentStart && !directedPrepareSelected &&
+        !probeEnabled(this, controller) && !txProbeEnabled(this, controller)) {
         NativeP2PProbe::Admission disabled{};
         nativeP2pProbe_.tryQueue(disabled);
         tahoeP2pPublishProbeState();
@@ -8528,7 +8940,8 @@ IOReturn ItlIwx::tahoeP2pAdmitAction(OSObject *, void *contextArg,
     IOCommandGate *gate = owner->getMainCommandGate();
     IOWorkLoop *workLoop = owner->getMainWorkLoop();
     run->blocked = admissionFailure(owner, sc, run, &admission,
-        probeEnabled(owner, owner->getController()) || run->txProbeEnabled,
+        probeEnabled(owner, owner->getController()) || run->txProbeEnabled ||
+            run->directedPrepareOnly,
         gate && workLoop);
     if (run->blocked != NativeP2PProbe::kNotBlocked) {
         owner->nativeP2pProbe_.tryQueue(admission, run->blocked);
@@ -8595,7 +9008,7 @@ IOReturn ItlIwx::tahoeP2pAdmitAction(OSObject *, void *contextArg,
     deriveProbeAddress(sc->sc_ic.ic_myaddr, run->address);
 #endif
 
-    if (run->txProbeEnabled) {
+    if (run->txProbeEnabled || run->directedPrepareOnly) {
         const int registryError = initializeTxStationRegistry(owner, sc);
         if (registryError != 0) {
             taskq_resume(sc->sc_nswq);
@@ -8794,6 +9207,13 @@ IOReturn ItlIwx::tahoeP2pFinishAction(OSObject *, void *contextArg,
     }
     if (run->canceled)
         owner->nativeP2pProbe_.cancelQueued();
+    if ((run->directedPrepareOnly || run->canceled) &&
+        owner->tahoeP2pOnMainGate()) {
+        retireDirectedPrepareInput(owner);
+        if (auto *controller = owner->tahoeP2pController())
+            controller->setProperty(
+                "NativeP2PDirectedPrepareArmed", uint32_t(0), 32);
+    }
     __atomic_store_n(&owner->nativeP2pProbeOwner_, nullptr, __ATOMIC_RELEASE);
     __atomic_store_n(&owner->nativeP2pProbeBusy_, 0u, __ATOMIC_RELEASE);
     if (__atomic_exchange_n(&owner->nativeP2pNswqPaused_, 0u,
@@ -8953,6 +9373,7 @@ void ItlIwx::tahoeP2pProbeTask(void *opaque)
     IOCommandGate *gate = owner->getMainCommandGate();
     if (!gate) {
         recordBlocked(owner, NativeP2PProbe::kMainGateUnavailable);
+        retireDirectedPrepareInput(owner);
         __atomic_store_n(&owner->nativeP2pProbeQueued_, 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&owner->nativeP2pCancelRequested_, 0u, __ATOMIC_RELEASE);
         return;
@@ -8975,6 +9396,7 @@ void ItlIwx::tahoeP2pProbeTask(void *opaque)
     NativeP2PProbe::ScopedRunStorage<P2PProbeRun> storage;
     if (!storage.get()) {
         __atomic_store_n(&owner->nativeP2pProbeRunAllocationFailed_, 1u, __ATOMIC_RELEASE);
+        retireDirectedPrepareInput(owner);
         __atomic_store_n(&owner->nativeP2pProbeQueued_, 0u, __ATOMIC_RELEASE);
         __atomic_store_n(&owner->nativeP2pCancelRequested_, 0u, __ATOMIC_RELEASE);
         return; // No admission, queue pause, firmware command or run pointer.
@@ -8986,17 +9408,29 @@ void ItlIwx::tahoeP2pProbeTask(void *opaque)
     const uint32_t armMode = manualProbeArmMode(owner);
     const bool rx149Latched =
         NativeP2PRx149Observation::isRx149ArmMode(armMode);
+    const bool directedPrepareLatched =
+        armMode == kDirectedPrepareArmMode;
     const bool rx149Requested = rx149ObservationOnlyRequested(controller);
+    const bool directedPrepareRequested = directedPrepareLatched &&
+        __atomic_load_n(&owner->nativeP2pDirectedPrepareArmed_,
+                        __ATOMIC_ACQUIRE) != 0 &&
+        directedPrepareProfileEnabled(controller);
     const bool manualTrigger = controller && controller->getProperty(
         "NativeP2PManualTrigger") == kOSBooleanTrue;
     // The once-per-boot arm latch freezes the selected profile. A mutable
     // property that no longer agrees with this mode is a hard stop, never a
     // request to enter the other profile.
-    if (rx149Latched != rx149Requested ||
+    if ((rx149Latched && !rx149Requested) ||
+        (!rx149Latched && !directedPrepareLatched && rx149Requested) ||
+        (directedPrepareLatched != directedPrepareRequested) ||
+        (directedPrepareLatched && !manualTrigger) ||
         (manualTrigger && !rx149Latched &&
-         !NativeP2PRx149Observation::isLegacyArmMode(armMode)) ||
+         !NativeP2PRx149Observation::isLegacyArmMode(armMode) &&
+         !directedPrepareLatched) ||
         (!manualTrigger && (rx149Latched ||
-         NativeP2PRx149Observation::isLegacyArmMode(armMode)))) {
+         NativeP2PRx149Observation::isLegacyArmMode(armMode)) &&
+         !directedPrepareLatched)) {
+        retireDirectedPrepareInput(owner);
         if (rx149Requested || rx149Latched)
             publishRx149ProfileState(owner, false, false, true);
         __atomic_store_n(&owner->nativeP2pProbeQueued_, 0u,
@@ -9004,6 +9438,14 @@ void ItlIwx::tahoeP2pProbeTask(void *opaque)
         return;
     }
     run.rx149ObservationOnly = rx149Latched;
+    run.directedPrepareOnly = directedPrepareLatched;
+    if (run.directedPrepareOnly) {
+        memcpy(run.directedPeerMac, owner->nativeP2pDirectedPreparePeer_,
+               sizeof(run.directedPeerMac));
+        memcpy(run.directedRunToken,
+               owner->nativeP2pDirectedPrepareRunToken_,
+               sizeof(run.directedRunToken));
+    }
     run.txProbeEnabled = txProbeEnabled(owner, owner->getController());
     run.awdlPsfProbeEnabled = awdlPsfProbeEnabled(
         owner, owner->getController());
@@ -9040,6 +9482,13 @@ void ItlIwx::tahoeP2pProbeTask(void *opaque)
         run.currentAwTrace.fallbackEnabled = false;
 #endif
         publishRx149ProfileState(owner, true, false, true);
+    }
+    if (run.directedPrepareOnly) {
+        // Directed preparation installs a typed LINK/TID0 lease only. It
+        // must not inherit any PSF/MIF/action-data submission path.
+        run.txProbeEnabled = false;
+        run.awdlPsfProbeEnabled = false;
+        run.awdlMifFollowupEnabled = false;
     }
 #if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
     if (nativeResidentAddressProfileEnabled(owner)) {
@@ -9097,7 +9546,7 @@ void ItlIwx::tahoeP2pProbeTask(void *opaque)
             &run, tahoeP2pRevalidate, tahoeP2pConfigure, tahoeP2pAdd,
             tahoeP2pRemove, tahoeP2pPublishLease
         };
-        if (run.rx149ObservationOnly || run.txProbeEnabled ||
+        if (run.rx149ObservationOnly || run.directedPrepareOnly || run.txProbeEnabled ||
             owner->getController()->getProperty("NativeP2PRocProbe") ==
                 kOSBooleanTrue)
             operations.exercise = tahoeP2pExerciseRoc;
@@ -9111,6 +9560,7 @@ void ItlIwx::tahoeP2pProbeTask(void *opaque)
     run.canceled = nativeInitOnly || nativeLifecycleOnly;
     IOReturn finishResult = gate->runAction(tahoeP2pFinishAction, &run);
     if (finishResult != kIOReturnSuccess) {
+        retireDirectedPrepareInput(owner);
         // The task has stopped issuing commands. Release an otherwise stranded
         // state-queue pause even if the command gate itself stopped responding.
         __atomic_store_n(&owner->nativeP2pProbeOwner_, nullptr, __ATOMIC_RELEASE);

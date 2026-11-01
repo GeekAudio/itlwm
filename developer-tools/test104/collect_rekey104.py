@@ -29,6 +29,9 @@ HERE = Path(__file__).resolve().parent
 DEVTOOLS = HERE.parent
 sys.path.insert(0, str(DEVTOOLS / "test100"))
 sys.path.insert(0, str(DEVTOOLS / "test103"))
+sys.path.insert(0, str(DEVTOOLS / "test105"))
+
+from live_key105 import parse_live_key, completion_with_live_authority  # noqa: E402
 
 import collect_rekey100 as base  # noqa: E402
 import hcmd_rx_trace_test103 as hcmd  # noqa: E402
@@ -275,6 +278,7 @@ def sample_once(expected_build: str, identity: dict,
     service = _locate_candidate_service(tree, expected_build)
     selected = base.select_allowlisted(service, expected_build)
     hcmd_decoded = _hcmd_sample_from_service(service, before, after)
+    live_key = parse_live_key(service)
     auth_raw = service.get(AUTH_PROPERTY)
     auth = _decode_auth_trace(auth_raw)
     link_trace = _decode_link_trace(service.get(LINK_PROPERTY))
@@ -297,6 +301,9 @@ def sample_once(expected_build: str, identity: dict,
         "numeric_counters": selected.get("numeric_counters", {}),
         "hcmd": hcmd_decoded,
         "auth_trace": auth,
+        "live_key": live_key,
+        "firmware_queue_completion": completion_with_live_authority(
+            selected.get("completion_scalars", {}), live_key),
         "group2_tx_trace": _decode_group2_trace(service.get(base.GROUP2_PROPERTY)),
         "completion_scalars": selected.get("completion_scalars", {}),
         "completion_live_counters": selected.get("completion_live_counters", {}),
@@ -526,6 +533,8 @@ def capture(output: Path, *, boot_epoch: int, expected_uuid: str,
                         "numeric_counters": point.get("numeric_counters", {}),
                         "hcmd": _selected_hcmd(decoded_hcmd),
                         "auth_trace": _selected_auth(auth),
+                        "live_key": point.get("live_key", {"status": "not_published"}),
+                        "firmware_queue_completion": point.get("firmware_queue_completion"),
                         "group2_tx_trace": point.get("group2_tx_trace"),
                         "completion_scalars": point.get("completion_scalars", {}),
                         "completion_live_counters": point.get("completion_live_counters", {}),

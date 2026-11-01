@@ -20,10 +20,29 @@ enum class TahoeP2PResourceState : uint8_t {
     kUnknown
 };
 
+// The station role and queue TID are part of the firmware resource identity.
+// A GP/TID15 management lease must never be reused as a peer LINK/TID0 data
+// lease, even though both currently use LONG_GROUP SCD_QUEUE_CFG v2.
+enum class TahoeP2PStationRole : uint8_t {
+    kBroadcastGeneralPurpose = 0,
+    kDirectedPeerLink = 1
+};
+
+enum class TahoeP2PQueueUse : uint8_t {
+    kManagementTid15 = 0,
+    kDirectedNonQosDataTid0 = 1
+};
+
 struct TahoeP2PStationLease {
     uint8_t stationId;
     uint32_t generation;
     TahoeP2PResourceState state;
+    TahoeP2PStationRole role;
+    uint8_t address[6];
+    uint32_t macIdAndColor;
+    uint8_t stationType;
+    uint8_t addCommandVersion;
+    uint8_t addNotificationVersion;
 };
 
 struct TahoeP2PTxQueueLease {
@@ -31,6 +50,10 @@ struct TahoeP2PTxQueueLease {
     uint16_t queueId;
     uint32_t generation;
     TahoeP2PResourceState state;
+    TahoeP2PStationRole stationRole;
+    uint8_t firmwareTid;
+    uint8_t peerAddress[6];
+    uint32_t macIdAndColor;
     IOSimpleLock *stateLock;
     bool submissionBusy;
     uint16_t submissionDescriptorIndex;
@@ -64,17 +87,30 @@ int iwx_tahoe_p2p_add_broadcast_station(ItlIwx *owner, struct iwx_softc *sc,
                                         TahoeP2PStationLease *lease,
                                         uint8_t stationId,
                                         bool *resourceMayExist);
+// Prepare-only directed peer binding. This installs no key and submits no
+// frame. The exact unicast address is copied into the lease and used by the
+// separate TID0 queue allocation API below.
+int iwx_tahoe_p2p_add_directed_peer_station(
+    ItlIwx *owner, struct iwx_softc *sc,
+    TahoeP2PStationLease *lease, uint8_t stationId,
+    const uint8_t peerAddress[6], bool *resourceMayExist);
 int iwx_tahoe_p2p_remove_broadcast_station(ItlIwx *owner,
                                            struct iwx_softc *sc,
                                            TahoeP2PStationLease *lease,
                                            TahoeP2PTxQueueLease *queueLease,
                                            bool *resourceMayExist);
+int iwx_tahoe_p2p_remove_directed_peer_station(
+    ItlIwx *owner, struct iwx_softc *sc,
+    TahoeP2PStationLease *lease, TahoeP2PTxQueueLease *queueLease,
+    bool *resourceMayExist);
 int iwx_tahoe_p2p_tvqm_allocate(ItlIwx *owner, struct iwx_softc *sc,
                                 TahoeP2PTxQueueLease *lease,
                                 const TahoeP2PStationLease *stationLease,
                                 uint32_t size,
                                 uint16_t *queueId,
-                                bool *resourceMayExist);
+                                bool *resourceMayExist,
+                                TahoeP2PQueueUse use =
+                                    TahoeP2PQueueUse::kManagementTid15);
 int iwx_tahoe_p2p_tvqm_remove(ItlIwx *owner, struct iwx_softc *sc,
                               TahoeP2PStationLease *stationLease,
                               TahoeP2PTxQueueLease *queueLease,
@@ -96,6 +132,15 @@ int iwx_tahoe_p2p_tvqm_abort_idle_after_end(
     TahoeP2PStationLease *stationLease,
     TahoeP2PTxQueueLease *queueLease,
     bool rocEndConfirmed, bool noTicketArmed,
+    bool *resourceMayExist);
+// Test105's prepare-only path never submits or arms a ROC session. It may
+// reclaim only an installed DirectedPeerLink/TID0 queue after proving no
+// doorbell/ticket and receiving exact flush + REMOVE_STA acknowledgements.
+int iwx_tahoe_p2p_tvqm_abort_idle_no_session(
+    ItlIwx *owner, struct iwx_softc *sc,
+    TahoeP2PStationLease *stationLease,
+    TahoeP2PTxQueueLease *queueLease,
+    bool rocNeverSubmitted, bool ticketNeverArmed,
     bool *resourceMayExist);
 // Retained displaced rings remain allocated across normal queue/STA cleanup.
 // Both booleans must be sourced from the actual MASTER_DISABLED + SW_RESET

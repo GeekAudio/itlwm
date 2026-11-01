@@ -1175,6 +1175,17 @@ int iwx_tahoe_p2p_action_tx_submit(
                           EBUSY);
         return EBUSY;
     }
+    // The only accepted Action frame submit path remains the legacy GP/TID15
+    // management lease. A prepared LINK/TID0 peer queue is not a data-doorbell
+    // capability; it must have a separate, independently reviewed submitter.
+    if (queueLease->stationRole !=
+            TahoeP2PStationRole::kBroadcastGeneralPurpose ||
+        queueLease->firmwareTid != IWX_MGMT_TID) {
+        mbuf_freem(frame);
+        recordSubmitStage(context,
+            TahoeP2PActionTxSubmitStage::kRocOrResource, EOPNOTSUPP);
+        return EOPNOTSUPP;
+    }
     const IntelP2PFirmware::TxLayout layout = fw68TxLayout(owner, sc);
     if (layout == IntelP2PFirmware::TxLayout::kUnsupported) {
         mbuf_freem(frame);

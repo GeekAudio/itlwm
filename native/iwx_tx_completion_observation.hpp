@@ -6,6 +6,7 @@
 #include <stddef.h>
 
 #include "iwx_tx_rsp_retry_observation.hpp"
+#include "iwx_tx_rsp_prefix_observation.hpp"
 
 /*
  * Fixed-size numeric observations for RX dispatch and TX-completion handler
@@ -198,6 +199,9 @@ typedef struct iwx_tx_completion_event_record {
     uint16_t host_origin_frame_control;
     uint16_t host_origin_sequence_control;
     uint8_t host_origin_tid;
+    /* Independently versioned scalar extension in existing alignment padding. */
+    uint8_t tx_rsp_prefix_observation_version;
+    uint8_t tx_rsp_notification_version;
     uint64_t host_origin_cookie;
     uint64_t host_origin_slot_generation;
 } iwx_tx_completion_event_record;
@@ -260,6 +264,8 @@ typedef struct iwx_tx_completion_event_input {
     uint32_t host_origin_frame_control;
     uint32_t host_origin_sequence_control;
     uint32_t host_origin_tid;
+    uint32_t tx_rsp_prefix_observation_version;
+    uint32_t tx_rsp_notification_version;
     uint64_t host_origin_cookie;
     uint64_t host_origin_slot_generation;
 } iwx_tx_completion_event_input;
@@ -296,6 +302,10 @@ static constexpr uint32_t kKindCount = IWX_TX_COMPLETION_KIND_COUNT;
 static constexpr uint32_t kMaxReasonCount =
     IWX_TX_COMPLETION_MAX_REASON_COUNT;
 
+static_assert(offsetof(iwx_tx_completion_event_record, host_origin_cookie) == 224 &&
+              offsetof(iwx_tx_completion_event_record, tx_rsp_prefix_observation_version) == 221 &&
+              offsetof(iwx_tx_completion_event_record, tx_rsp_notification_version) == 222,
+              "TX_RSP prefix extension must use existing alignment padding");
 static_assert(sizeof(iwx_tx_completion_event_record) <= 256,
               "TX completion record must remain fixed and scalar");
 static_assert(sizeof(iwx_tx_completion_event_record) <= 240,
@@ -606,6 +616,25 @@ static inline bool validTxRspRetryStats(
             IwxTxRspRetryObservation::kSingleFrameMinimumPayloadLength;
 }
 
+static inline bool validTxRspPrefix(const iwx_tx_completion_event_input *in)
+{
+    if (in->tx_rsp_prefix_observation_version >
+            IwxTxRspPrefixObservation::kLocalSinglePrefixV1 ||
+        in->tx_rsp_notification_version > UINT8_MAX)
+        return false;
+    if (in->tx_rsp_prefix_observation_version == 0)
+        return in->tx_rsp_notification_version == 0;
+    const uint32_t required = IWX_TX_COMPLETION_HAS_FRAME_COUNT |
+        IWX_TX_COMPLETION_HAS_PAYLOAD_LENGTH |
+        IWX_TX_COMPLETION_HAS_RESPONSE_FRAME_CONTROL |
+        IWX_TX_COMPLETION_HAS_RESPONSE_SEQUENCE_CONTROL |
+        IWX_TX_COMPLETION_HAS_FIRMWARE_QID | IWX_TX_COMPLETION_HAS_STATUS |
+        IWX_TX_COMPLETION_HAS_SSN | IWX_TX_COMPLETION_HAS_RA_TID;
+    return in->kind == IWX_TX_COMPLETION_TX_RSP &&
+        (in->presence_flags & required) == required && in->frame_count == 1 &&
+        in->payload_length >= IwxTxRspPrefixObservation::kSinglePayloadLength;
+}
+
 static inline bool validWidths(const iwx_tx_completion_event_input *in)
 {
     if (in->host_origin_state >
@@ -788,7 +817,7 @@ static inline bool validInput(const iwx_tx_completion_event_input *in)
     if ((in->presence_flags & IWX_TX_COMPLETION_HAS_OUTPUT_EPOCH) == 0U)
         return false;
     return absentValuesAreZero(in) && validWidths(in) &&
-        validTxRspRetryStats(in);
+        validTxRspRetryStats(in) && validTxRspPrefix(in);
 }
 
 static inline void copyInput(const iwx_tx_completion_event_input *in,
@@ -862,6 +891,10 @@ static inline void copyInput(const iwx_tx_completion_event_input *in,
     out->host_origin_sequence_control =
         static_cast<uint16_t>(in->host_origin_sequence_control);
     out->host_origin_tid = static_cast<uint8_t>(in->host_origin_tid);
+    out->tx_rsp_prefix_observation_version = static_cast<uint8_t>(
+        in->tx_rsp_prefix_observation_version);
+    out->tx_rsp_notification_version = static_cast<uint8_t>(
+        in->tx_rsp_notification_version);
 }
 
 static inline void copySnapshotLocked(

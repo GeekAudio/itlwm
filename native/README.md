@@ -8,12 +8,39 @@ interface lifecycle.
 
 The current development candidate, Test105, targets x86_64 macOS Tahoe 26.7.2
 (build 25G332) and the AX201 device match documented in the main README. It is
-an offline, disarmed reply-path candidate. Test104 received controlled channel-149
+a disarmed, manually triggered reply-path candidate. Test104 received controlled channel-149
 frames through the driver and delivered a complete eight-byte UDP marker to a
 native `awdl0` listener. That sender was an OpenWrt test tool, not an iPhone.
 Native replies, iPhone data return, and AirDrop file transfers remain unverified;
 key-update disconnects also remain unresolved.
 See [the RX review](../developer-tools/RX-DATA-PATH.md) for the current boundary.
+
+Test105 also publishes `NativeKeyLive*` independently of the sealed command/RX
+snapshot. It retains the latest ADD_STA_KEY submission and response as separate
+observations, with serials, timestamps, generations, loss counters and a guarded
+publication revision. A manual AWDL snapshot no longer prevents these new
+properties from refreshing. This does not correlate the two entries into a
+transaction, prove key installation, or change encryption behavior. The existing
+sealed `NativeHcmdRxTrace` and `NativeKeyResponse*` evidence remains unchanged.
+TX completion adds an independently versioned prefix observation and the loaded
+firmware's TX notification version. Host-slot ownership and exact FC/SC matching
+remain separate from firmware completion and peer receipt.
+
+Repeated deauthentication no longer sends SESSION_PROTECTION cancellation when
+the host has already marked the MAC context inactive. This prevents a known
+invalid cleanup command; it does not establish why the AP's group-key exchange
+timed out or recover a firmware MAC that disappeared while the host flag stayed
+active. The normal association protection duration and encryption are unchanged.
+
+The optional `--native-awdl-directed-prepare` profile adds a separate HAL
+resource probe: a unicast LINK station and non-QoS TID0 queue, with typed identity
+checks during cleanup. It preserves the RX149 profile; the two modes cannot run
+at the same time. They currently share the existing one-shot controller, so
+a completed RX149 run does not rearm this probe in the same boot. This probe submits no data frame and does not enable the BSD
+reply shadow. It is not proof of radio TX, a native reply, or AirDrop. The
+[prepare tool](../developer-tools/test105/arm_directed_prepare105.swift) defaults
+to argument validation only; explicit execution also requires the loaded
+candidate UUID, administrator privileges and the kernel main gate.
 
 Test105 adds `awdl_reply_shadow.hpp` to the actual BSD input/output bridge.
 It keeps one bounded request/reply record: input is provisional until the real

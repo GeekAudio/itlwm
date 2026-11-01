@@ -94,6 +94,9 @@ struct TraceRing {
     uint32_t serial_exhausted;
     Slot slots[kTraceCapacity];
     Slot latest_add_sta_key_response;
+    Slot latest_add_sta_key_submit;
+    uint32_t latest_add_sta_key_submit_dropped_count;
+    uint64_t latest_add_sta_key_submit_dropped_serial;
     uint32_t latest_add_sta_key_dropped_count;
     uint64_t latest_add_sta_key_dropped_serial;
 };
@@ -324,6 +327,46 @@ inline void initialize(TraceRing *ring)
                       __ATOMIC_RELAXED);
     __atomic_store_n(&ring->latest_add_sta_key_dropped_serial, 0ULL,
                       __ATOMIC_RELAXED);
+    __atomic_store_n(&ring->latest_add_sta_key_submit.writer, 0U,
+                      __ATOMIC_RELAXED);
+    __atomic_store_n(&ring->latest_add_sta_key_submit.entry.serial, 0ULL,
+                      __ATOMIC_RELAXED);
+    __atomic_store_n(&ring->latest_add_sta_key_submit.entry.monotonic_ns, 0ULL,
+                      __ATOMIC_RELAXED);
+    __atomic_store_n(&ring->latest_add_sta_key_submit.entry.driver_generation, 0U,
+                      __ATOMIC_RELAXED);
+    __atomic_store_n(&ring->latest_add_sta_key_submit.entry.firmware_generation, 0U,
+                      __ATOMIC_RELAXED);
+    __atomic_store_n(&ring->latest_add_sta_key_submit.entry.phase, 0U,
+                      __ATOMIC_RELAXED);
+    __atomic_store_n(&ring->latest_add_sta_key_submit.entry.source, 0U,
+                      __ATOMIC_RELAXED);
+    __atomic_store_n(&ring->latest_add_sta_key_submit.entry.command_id, 0U,
+                      __ATOMIC_RELAXED);
+    __atomic_store_n(&ring->latest_add_sta_key_submit.entry.group_id, 0U,
+                      __ATOMIC_RELAXED);
+    __atomic_store_n(&ring->latest_add_sta_key_submit.entry.version, 0U,
+                      __ATOMIC_RELAXED);
+    __atomic_store_n(&ring->latest_add_sta_key_submit.entry.qid, 0U,
+                      __ATOMIC_RELAXED);
+    __atomic_store_n(&ring->latest_add_sta_key_submit.entry.index, 0U,
+                      __ATOMIC_RELAXED);
+    __atomic_store_n(&ring->latest_add_sta_key_submit.entry.header_sequence, 0U,
+                      __ATOMIC_RELAXED);
+    __atomic_store_n(&ring->latest_add_sta_key_submit.entry.flags, 0U,
+                      __ATOMIC_RELAXED);
+    __atomic_store_n(&ring->latest_add_sta_key_submit.entry.result, 0U,
+                      __ATOMIC_RELAXED);
+    __atomic_store_n(&ring->latest_add_sta_key_submit.entry.result_detail, 0U,
+                      __ATOMIC_RELAXED);
+    __atomic_store_n(&ring->latest_add_sta_key_submit.entry.packet_length, 0U,
+                      __ATOMIC_RELAXED);
+    __atomic_store_n(&ring->latest_add_sta_key_submit.entry.payload_length, 0U,
+                      __ATOMIC_RELAXED);
+    __atomic_store_n(&ring->latest_add_sta_key_submit_dropped_count, 0U,
+                      __ATOMIC_RELAXED);
+    __atomic_store_n(&ring->latest_add_sta_key_submit_dropped_serial, 0ULL,
+                      __ATOMIC_RELAXED);
     for (uint32_t index = 0; index < kTraceCapacity; ++index) {
         Slot &slot = ring->slots[index];
         __atomic_store_n(&slot.writer, 0U, __ATOMIC_RELAXED);
@@ -345,6 +388,16 @@ inline void initialize(TraceRing *ring)
         __atomic_store_n(&slot.entry.packet_length, 0U, __ATOMIC_RELAXED);
         __atomic_store_n(&slot.entry.payload_length, 0U, __ATOMIC_RELAXED);
     }
+}
+
+// Captured immediately after the command doorbell; metadata only, no key bytes.
+inline bool isLatestAddStaKeySubmit(const Entry &entry)
+{
+    return entry.phase == static_cast<uint32_t>(Phase::CommandSubmitted) &&
+        entry.source == static_cast<uint32_t>(Source::HostCommand) &&
+        entry.command_id == 0x17U && entry.qid == 0U &&
+        (entry.group_id == 0U || entry.group_id == 1U) &&
+        (entry.flags & kHeaderFieldsPresent) != 0U;
 }
 
 inline bool isLatestAddStaKeyResponse(const Entry &entry)
@@ -469,8 +522,9 @@ inline uint32_t record(TraceRing *ring, const Entry &input)
     }
 
     const bool retainLatest = isLatestAddStaKeyResponse(input);
-    Slot *latestSlot = retainLatest
-        ? &ring->latest_add_sta_key_response : nullptr;
+    const bool retainSubmit = isLatestAddStaKeySubmit(input);
+    Slot *latestSlot = retainLatest ? &ring->latest_add_sta_key_response :
+        (retainSubmit ? &ring->latest_add_sta_key_submit : nullptr);
     bool latestLocked = false;
     if (latestSlot) {
         uint32_t expectedWriter = 0;
@@ -499,8 +553,23 @@ inline uint32_t record(TraceRing *ring, const Entry &input)
         __atomic_add_fetch(&ring->dropped_count, 1U, __ATOMIC_RELAXED);
         return 0;
     }
-    if (latestSlot && !latestLocked)
-        recordLatestAddStaKeyDrop(ring, serial);
+    if (latestSlot && !latestLocked) {
+        if (retainLatest) {
+            recordLatestAddStaKeyDrop(ring, serial);
+        } else {
+            __atomic_add_fetch(&ring->latest_add_sta_key_submit_dropped_count,
+                               1U, __ATOMIC_RELAXED);
+            // Bounded even under contention. Count changes invalidate a read;
+            // the highest missed serial is supplementary evidence only.
+            uint64_t missed = __atomic_load_n(
+                &ring->latest_add_sta_key_submit_dropped_serial, __ATOMIC_ACQUIRE);
+            for (unsigned attempt = 0; attempt != 4 && missed < serial; ++attempt)
+                if (__atomic_compare_exchange_n(
+                        &ring->latest_add_sta_key_submit_dropped_serial,
+                        &missed, serial, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+                    break;
+        }
+    }
 
     Entry committed = input;
     committed.serial = serial;

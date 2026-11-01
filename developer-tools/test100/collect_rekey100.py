@@ -165,7 +165,7 @@ def read_host_identity(expected_boot: int, expected_build: str) -> dict:
     loaded = _run_bytes([
         "/usr/bin/kmutil", "showloaded", "--list-only",
         "--bundle-identifier", BUNDLE_ID,
-    ]).decode("ascii", "replace")
+    ], timeout=30.0).decode("ascii", "replace")
     uuid = extract_bundle_uuid(loaded)
     if uuid != EXPECTED_KEXT_UUID:
         raise IdentityMismatch("loaded_kext_uuid", EXPECTED_KEXT_UUID, uuid)
@@ -394,18 +394,34 @@ def select_allowlisted(service: dict, expected_build: str) -> dict:
 
 
 def parse_completion_host_origin(scalars: dict) -> dict:
-    """Decode only a stable Test100 schema-4 TX_RSP host-origin witness.
+    """Decode stable schema-4/schema-5 TX_RSP host-origin witnesses.
 
     The structured result is deliberately distinct from firmware response
     identity, peer acknowledgement, and AirDrop receipt. An UNBOUND sidecar
     carries host metadata from the interval but has no matching raw command
-    header and must never be treated as a same-attempt join.
+    header and must never be treated as a same-attempt join. Schema 4 keeps
+    its historical interpretation. Schema 5 additionally validates the
+    published presence mask and the raw host-origin/command-header tuple.
     """
     def get(suffix: str):
         return scalars.get("NativeStaCompletion" + suffix)
 
+    presence_bits = {
+        "firmware_qid": 1 << 7,
+        "queue_index": 1 << 8,
+        "ring_count": 1 << 9,
+        "queued": 1 << 10,
+        "tail": 1 << 12,
+        "output_epoch": 1 << 25,
+        "response_frame_control": 1 << 26,
+        "response_sequence_control": 1 << 27,
+        "tx_command_scan": 1 << 28,
+        "tx_command_unique_candidate": 1 << 29,
+        "single_slot_tx_command_header": 1 << 30,
+    }
+
     schema = get("Schema")
-    if type(schema) is not int or schema != 4:
+    if type(schema) is not int or schema not in (4, 5):
         return {"status": "schema_unavailable", "schema": schema}
     begin = get("SnapshotVersionBegin")
     end = get("SnapshotVersionEnd")
@@ -419,6 +435,40 @@ def parse_completion_host_origin(scalars: dict) -> dict:
         return {"status": "tx_response_not_present", "schema": schema,
                 "snapshot_version": begin}
 
+    raw_witness = None
+    if schema == 5:
+        raw_witness = {
+            "host_origin_state": get("Event0HostOriginState"),
+            "host_origin_cookie": get("Event0HostOriginCookie"),
+            "host_origin_slot_generation": get("Event0HostOriginSlotGeneration"),
+            "host_origin_context_generation": get("Event0HostOriginContextGeneration"),
+            "host_origin_output_epoch": get("Event0HostOriginOutputEpoch"),
+            "host_origin_identity_epoch": get("Event0HostOriginIdentityEpoch"),
+            "host_origin_attempt_id": get("Event0HostOriginAttemptId"),
+            "host_origin_source": get("Event0HostOriginSource"),
+            "host_origin_index": get("Event0HostOriginIndex"),
+            "presence_flags": get("Event0PresenceFlags"),
+            "host_origin_frame_control": get("Event0HostOriginFrameControl"),
+            "host_origin_sequence_control": get("Event0HostOriginSequenceControl"),
+            "host_origin_tid": get("Event0HostOriginTid"),
+            "event_output_epoch": get("Event0OutputEpoch"),
+            "firmware_qid": get("Event0FirmwareQid"),
+            "queue_index": get("Event0QueueIndex"),
+            "ring_count": get("Event0RingCount"),
+            "queued": get("Event0Queued"),
+            "tail": get("Event0Tail"),
+            "single_slot_tx_command_header": get("Event0SingleSlotTxCommandHeader"),
+            "tx_command_candidate_index": get("Event0TxCommandCandidateIndex"),
+            "tx_command_candidate_count": get("Event0TxCommandCandidateCount"),
+            "tx_command_api_generation": get("Event0TxCommandApiGeneration"),
+            "tx_command_version": get("Event0TxCommandVersion"),
+            "tx_command_scan_status": get("Event0TxCommandScanStatus"),
+            "tx_command_expected_count": get("Event0TxCommandExpectedCount"),
+            "tx_command_scanned_count": get("Event0TxCommandScannedCount"),
+            "response_frame_control": get("Event0ResponseFrameControl"),
+            "response_sequence_control": get("Event0ResponseSequenceControl"),
+        }
+
     state = get("Event0HostOriginState")
     state_names = {
         0: "unavailable",
@@ -429,14 +479,35 @@ def parse_completion_host_origin(scalars: dict) -> dict:
         5: "interval_sidecar_unbound_from_command_header",
     }
     if type(state) is not int or state not in state_names:
-        return {"status": "invalid_host_origin_state", "schema": schema,
-                "snapshot_version": begin}
+        result = {"status": "invalid_host_origin_state", "schema": schema,
+                  "snapshot_version": begin}
+        if raw_witness is not None:
+            result["raw_witness"] = raw_witness
+        return result
+
+    def invalid_schema5(status: str, parsed_result=None) -> dict:
+        result = dict(parsed_result or {})
+        result.update({"status": status, "schema": schema,
+                       "snapshot_version": begin})
+        if parsed_result is None:
+            result["same_slot_descriptor"] = False
+        if raw_witness is not None:
+            result.setdefault("raw_witness", raw_witness)
+        return result
+
+    presence_value = get("Event0PresenceFlags")
+    if schema == 5:
+        response_candidate_flag = (type(presence_value) is int and
+                                   bool(presence_value & (1 << 29)))
+    else:
+        response_candidate_flag = bool((presence_value or 0) & (1 << 29))
     result = {"status": state_names[state], "schema": schema,
               "snapshot_version": begin,
               "event_serial": get("Event0Serial"),
               "same_slot_descriptor": state == 2,
-              "exact_response_tuple_match": bool(
-                  (get("Event0PresenceFlags") or 0) & (1 << 29))}
+              "exact_response_tuple_match": response_candidate_flag}
+    if raw_witness is not None:
+        result["raw_witness"] = raw_witness
     payload_fields = {
         "cookie": "Event0HostOriginCookie",
         "slot_generation": "Event0HostOriginSlotGeneration",
@@ -453,6 +524,8 @@ def parse_completion_host_origin(scalars: dict) -> dict:
     values = {name: get(suffix) for name, suffix in payload_fields.items()}
     if state in (2, 5):
         if any(type(value) is not int for value in values.values()):
+            if schema == 5:
+                return invalid_schema5("invalid_host_origin_payload")
             return {"status": "invalid_host_origin_payload", "schema": schema,
                     "snapshot_version": begin}
         qid = get("Event0FirmwareQid")
@@ -462,6 +535,8 @@ def parse_completion_host_origin(scalars: dict) -> dict:
         queued = get("Event0Queued")
         required_range = (qid, boundary, ring_count, tail, queued)
         if any(type(value) is not int for value in required_range):
+            if schema == 5:
+                return invalid_schema5("invalid_host_origin_range")
             return {"status": "invalid_host_origin_range", "schema": schema,
                     "snapshot_version": begin}
         if (values["cookie"] == 0 or values["slot_generation"] == 0 or
@@ -475,17 +550,60 @@ def parse_completion_host_origin(scalars: dict) -> dict:
                 values["sequence_control"] < 0 or
                 values["sequence_control"] > 0xffff or
                 values["tid"] < 0 or values["tid"] > 15):
+            if schema == 5:
+                return invalid_schema5("invalid_host_origin_payload")
             return {"status": "invalid_host_origin_payload", "schema": schema,
                     "snapshot_version": begin}
         distance = (boundary + ring_count - tail) % ring_count
         origin_offset = (values["index"] + ring_count - tail) % ring_count
         if distance == 0 or distance > queued or origin_offset >= distance:
+            if schema == 5:
+                return invalid_schema5("invalid_host_origin_range")
             return {"status": "invalid_host_origin_range", "schema": schema,
                     "snapshot_version": begin}
         if state == 2:
             presence = get("Event0PresenceFlags")
             raw_candidate = get("Event0TxCommandCandidateIndex")
             preceding_index = boundary - 1 if boundary else ring_count - 1
+            if schema == 5:
+                # Schema 5's publisher derives this packed header from the
+                # same unique scanner candidate used to identify the host
+                # origin. Require every producer presence bit; scalar zeros
+                # alone are not evidence that a field was captured.
+                required_presence = (
+                    presence_bits["firmware_qid"] |
+                    presence_bits["queue_index"] |
+                    presence_bits["ring_count"] |
+                    presence_bits["queued"] |
+                    presence_bits["tail"] |
+                    presence_bits["output_epoch"] |
+                    presence_bits["tx_command_scan"] |
+                    presence_bits["single_slot_tx_command_header"])
+                scan_values = (
+                    get("Event0TxCommandScanStatus"),
+                    get("Event0TxCommandExpectedCount"),
+                    get("Event0TxCommandScannedCount"),
+                    get("Event0TxCommandCandidateCount"),
+                    get("Event0TxCommandApiGeneration"),
+                    get("Event0TxCommandVersion"),
+                    raw_candidate,
+                    get("Event0SingleSlotTxCommandHeader"),
+                )
+                if (type(presence) is not int or presence < 0 or
+                        presence > 0xffffffff or
+                        (presence & required_presence) != required_presence or
+                        any(type(value) is not int for value in scan_values) or
+                        qid < 0 or qid > 0xffff):
+                    return invalid_schema5("invalid_host_origin_presence")
+                if (get("Event0TxCommandApiGeneration") not in (2, 3) or
+                        get("Event0TxCommandVersion") < 0 or
+                        get("Event0TxCommandVersion") > 0xff or
+                        get("Event0TxCommandCandidateCount") < 0 or
+                        get("Event0TxCommandCandidateCount") > 1 or
+                        ((get("Event0TxCommandCandidateCount") == 1) !=
+                         bool(presence & presence_bits[
+                             "tx_command_unique_candidate"]))):
+                    return invalid_schema5("invalid_host_origin_scan")
             if (type(presence) is not int or not (presence & (1 << 30)) or
                     get("Event0TxCommandScanStatus") != 1 or
                     get("Event0TxCommandExpectedCount") != 1 or
@@ -493,15 +611,96 @@ def parse_completion_host_origin(scalars: dict) -> dict:
                     distance != 1 or origin_offset != 0 or
                     raw_candidate != preceding_index or
                     raw_candidate != values["index"]):
+                if schema == 5:
+                    return invalid_schema5("invalid_host_origin_binding")
                 return {"status": "invalid_host_origin_binding", "schema": schema,
                         "snapshot_version": begin}
+            if schema == 5:
+                packed_origin = ((values["frame_control"] << 16) |
+                                 values["sequence_control"])
+                raw_header = get("Event0SingleSlotTxCommandHeader")
+                if raw_header != packed_origin:
+                    return invalid_schema5(
+                        "invalid_host_origin_header_conflict")
         result["host_origin"] = values
         result["host_origin_queue_id"] = qid
         result["command_header_index"] = get("Event0TxCommandCandidateIndex")
     else:
         if any(get(suffix) != 0 for suffix in payload_fields.values()):
+            if schema == 5:
+                return invalid_schema5("invalid_nonunique_payload")
             return {"status": "invalid_nonunique_payload", "schema": schema,
                     "snapshot_version": begin}
+    if schema == 5:
+        presence = get("Event0PresenceFlags")
+        if state in (2, 5):
+            required_origin_presence = (
+                presence_bits["firmware_qid"] |
+                presence_bits["queue_index"] |
+                presence_bits["ring_count"] |
+                presence_bits["queued"] |
+                presence_bits["tail"] |
+                presence_bits["output_epoch"])
+            if (type(presence) is not int or presence < 0 or
+                    presence > 0xffffffff or
+                    (presence & required_origin_presence) !=
+                    required_origin_presence):
+                return invalid_schema5("invalid_host_origin_presence")
+            event_output_epoch = get("Event0OutputEpoch")
+            u32_origin_fields = (
+                values["context_generation"], values["output_epoch"],
+                values["identity_epoch"], values["attempt_id"], qid,
+                boundary, ring_count, tail, queued)
+            if (type(event_output_epoch) is not int or
+                    not 0 <= event_output_epoch <= 0xffffffff or
+                    any(not 0 <= value <= 0xffffffff
+                        for value in u32_origin_fields) or
+                    not 0 < values["cookie"] <= 0xffffffffffffffff or
+                    not 0 < values["slot_generation"] <= 0xffffffffffffffff or
+                    values["index"] > 0xffff or
+                    values["output_epoch"] != event_output_epoch):
+                return invalid_schema5("invalid_host_origin_epoch")
+        exact_candidate = (type(presence) is int and
+                           bool(presence & presence_bits[
+                               "tx_command_unique_candidate"]))
+        result["response_tuple_status"] = "not_marked_unique_candidate"
+        result["response_tuple_matches_single_slot_header"] = None
+        if (type(presence) is int and
+                presence & (presence_bits["response_frame_control"] |
+                            presence_bits["response_sequence_control"]) ==
+                (presence_bits["response_frame_control"] |
+                 presence_bits["response_sequence_control"])):
+            response_fc = get("Event0ResponseFrameControl")
+            response_sc = get("Event0ResponseSequenceControl")
+            if (type(response_fc) is int and type(response_sc) is int and
+                    0 <= response_fc <= 0xffff and
+                    0 <= response_sc <= 0xffff):
+                response_packed = (response_fc << 16) | response_sc
+                raw_header = get("Event0SingleSlotTxCommandHeader")
+                result["response_tuple_matches_single_slot_header"] = (
+                    type(raw_header) is int and response_packed == raw_header)
+                if exact_candidate:
+                    if not (presence & presence_bits[
+                            "single_slot_tx_command_header"]):
+                        result["exact_response_tuple_match"] = False
+                        return invalid_schema5(
+                            "invalid_response_tuple_presence", result)
+                    if not result["response_tuple_matches_single_slot_header"]:
+                        result["exact_response_tuple_match"] = False
+                        return invalid_schema5(
+                            "invalid_response_tuple_binding", result)
+                    result["response_tuple_status"] = "exact_candidate_header_match"
+                else:
+                    result["response_tuple_status"] = "raw_tuple_unmarked"
+            elif exact_candidate:
+                result["exact_response_tuple_match"] = False
+                return invalid_schema5("invalid_response_tuple_presence", result)
+        elif exact_candidate:
+            result["exact_response_tuple_match"] = False
+            return invalid_schema5("invalid_response_tuple_presence", result)
+        result["exact_response_tuple_match"] = (
+            exact_candidate and
+            result["response_tuple_status"] == "exact_candidate_header_match")
     return result
 
 

@@ -166,6 +166,7 @@
 #include "../../native/iwx_roc_rx_publication_trace.hpp"
 #include "../../native/iwx_mcc_refresh_policy.hpp"
 #include "../../native/iwx_fw_diagnostics.hpp"
+#include "../../native/iwx_live_key_publish.hpp"
 #include "ItlIwxP2PTx.hpp"
 #include "ItlIwxP2PAction.hpp"
 #endif
@@ -412,6 +413,8 @@ public:
     IwxResetTrace::Trace nativeResetTrace_ {};
     IwxLinkStateTrace::Trace nativeLinkTransitionTrace_ {};
     IwxFirmwareDiagnostics::TraceRing nativeFwDiagnosticTrace_ {};
+    uint64_t nativeKeyLiveLastSampleNs_ {0};
+    uint32_t nativeKeyLivePublishRevision_ {0};
     IwxFirmwareDiagnostics::TraceSnapshot nativeFwDiagnosticPendingTrace_ {};
     IwxFirmwareDiagnostics::TraceWireBuffer nativeFwDiagnosticWireBuffer_ {};
     IwxFirmwareDiagnostics::FirmwareErrorSnapshot nativeFwErrorSnapshot_ {};
@@ -524,6 +527,8 @@ public:
     void nativeP2pTick() override;
     bool nativeP2pBusy() override;
     IOReturn nativeP2pArmProbe() override;
+    IOReturn nativeP2pArmDirectedPrepare(const uint8_t peer[6],
+                                         const char runToken[33]);
     bool nativeP2pCommandAllowed() const;
     void tahoeP2pInitializeTask();
     int tahoeP2pStopBeforeReset(struct iwx_softc *);
@@ -626,6 +631,11 @@ public:
     // record. It is written only from the main command gate, never under the
     // RX observer lock or in the interrupt notification reducer.
     uint8_t nativeP2pRx149RunToken_[16] {};
+    // One admin-gated Test105 prepare request. These fields are copied only
+    // while the main command gate is held and consumed by one worker run.
+    uint8_t nativeP2pDirectedPreparePeer_[6] {};
+    char nativeP2pDirectedPrepareRunToken_[33] {};
+    uint32_t nativeP2pDirectedPrepareArmed_ {0};
     uint32_t nativeP2pRx149LiveSnapshotRevision_ {0};
     uint64_t nativeP2pRx149LiveSnapshotOwnerSerial_ {0};
     uint32_t nativeP2pRx149LiveSnapshotValid_ {0};

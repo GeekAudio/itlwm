@@ -16,6 +16,12 @@ PROJECT = Path(__file__).resolve().parents[1]
 
 def receive149_profile_errors(args):
     data_input = getattr(args, 'native_awdl_rx149_data_input', False)
+    directed_prepare = getattr(args, 'native_awdl_directed_prepare', False)
+    if directed_prepare and not (
+            data_input and args.native_awdl_rx149_observation_only and
+            args.native_awdl_resident_data and args.p2p_probe and
+            args.p2p_manual_trigger):
+        return ['Directed prepare requires the manual resident RX149 data-input profile']
     if getattr(args, 'native_awdl_reply_shadow', False) and not data_input:
         return ['Reply shadow requires the isolated RX149 data-input profile']
     if getattr(args, 'native_rx_preowner_observation', False) and not data_input:
@@ -56,6 +62,8 @@ def resident_build_flags(args):
         flags += ' -DITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332=1'
     if getattr(args, 'native_awdl_reply_shadow', False):
         flags += ' -DITL_NATIVE_AWDL_REPLY_SHADOW_25G332=1'
+    if getattr(args, 'native_awdl_directed_prepare', False):
+        flags += ' -DITL_NATIVE_AWDL_DIRECTED_PREPARE_25G332=1'
     return flags
 
 
@@ -81,6 +89,10 @@ def apply_artifact_profile(personality, args):
         # Compile availability never arms the shadow or grants firmware TX.
         'NativeAwdlReplyShadowCompiled': bool(getattr(args, 'native_awdl_reply_shadow', False)),
         'NativeAwdlReplyShadowEnabled': False,
+        # The prepare candidate is enabled only in an explicitly built
+        # artifact, and the driver still requires an administrator one-shot.
+        'NativeP2PDirectedPrepareCompiled': bool(getattr(args, 'native_awdl_directed_prepare', False)),
+        'NativeP2PDirectedPrepareEnabled': bool(getattr(args, 'native_awdl_directed_prepare', False)),
     })
 
 
@@ -134,6 +146,8 @@ def main():
                         help='Test087: independent bounded numeric RX observation before owner admission; no RX/TX policy changes')
     parser.add_argument('--native-awdl-reply-shadow', action='store_true',
                         help='Test105: compile disarmed request/reply association; no firmware TX or automatic runtime enable')
+    parser.add_argument('--native-awdl-directed-prepare', action='store_true',
+                        help='Test105: compile one administrator-armed peer LINK/TID0 prepare-only experiment; no data doorbell')
     args = parser.parse_args()
     for error in receive149_profile_errors(args):
         parser.error(error)
@@ -261,6 +275,8 @@ def main():
                           'native_rx_preowner_observation': args.native_rx_preowner_observation,
                           'native_awdl_reply_shadow_compiled': args.native_awdl_reply_shadow,
                           'native_awdl_reply_shadow_enabled': False,
+                          'native_awdl_directed_prepare_compiled': args.native_awdl_directed_prepare,
+                          'native_awdl_directed_prepare_enabled': args.native_awdl_directed_prepare,
                           'test_build': build_tag, 'mach_o_uuid': match.group(1),
                           'log': str(log_path)}, ensure_ascii=False))
 

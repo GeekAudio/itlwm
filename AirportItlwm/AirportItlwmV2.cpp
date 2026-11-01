@@ -63,6 +63,40 @@ bool validRx149RunToken(OSObject *object)
     return true;
 }
 
+bool validDirectedPrepareRunToken(OSObject *object)
+{
+    auto token = OSDynamicCast(OSString, object);
+    if (!token || token->getLength() != 32)
+        return false;
+    const char *text = token->getCStringNoCopy();
+    if (!text)
+        return false;
+    bool nonZero = false;
+    for (size_t index = 0; index < 32; ++index) {
+        const char value = text[index];
+        if (!((value >= '0' && value <= '9') ||
+              (value >= 'a' && value <= 'f')))
+            return false;
+        nonZero |= value != '0';
+    }
+    return nonZero;
+}
+
+bool validDirectedPreparePeer(OSObject *object)
+{
+    auto peer = OSDynamicCast(OSData, object);
+    if (!peer || peer->getLength() != 6)
+        return false;
+    const uint8_t *address = static_cast<const uint8_t *>(
+        peer->getBytesNoCopy());
+    if (!address || (address[0] & 1u) != 0)
+        return false;
+    uint8_t any = 0;
+    for (size_t index = 0; index < 6; ++index)
+        any |= address[index];
+    return any != 0;
+}
+
 struct NativeRx149ArmContext {
     OSString *runToken;
 };
@@ -93,6 +127,70 @@ IOReturn armNativeRx149OnMainGate(OSObject *target, void *argument,
     if (result != kIOReturnSuccess)
         controller->removeProperty("NativeP2PRx149RunToken");
     return result;
+}
+
+struct NativeP2PDirectedPrepareArmContext {
+    OSData *peerMac;
+    OSString *runToken;
+};
+
+IOReturn armNativeP2PDirectedPrepareOnMainGate(
+    OSObject *target, void *argument, void *, void *, void *)
+{
+    auto controller = OSDynamicCast(AirportItlwm, target);
+    auto context = static_cast<NativeP2PDirectedPrepareArmContext *>(argument);
+    auto hal = controller ? OSDynamicCast(ItlIwx, controller->fHalService) : nullptr;
+    if (!controller || !context || !validDirectedPreparePeer(context->peerMac) ||
+        !validDirectedPrepareRunToken(context->runToken) || !hal ||
+        !controller->fHalService || !_fCommandGate ||
+        hal->tahoeP2pCommandGate() != _fCommandGate)
+        return kIOReturnNotReady;
+
+#if defined(ITL_NATIVE_AWDL_DIRECTED_PREPARE_25G332) && \
+    defined(ITL_NATIVE_AWDL_RX149_OBSERVATION_25G332) && \
+    defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332) && \
+    defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
+    if (controller->getProperty("NativeP2PDirectedPrepareEnabled") !=
+            kOSBooleanTrue ||
+        controller->getProperty("NativeP2PRx149ObservationOnly") !=
+            kOSBooleanTrue ||
+        controller->getProperty("NativeP2PRx149DataInputExperiment") !=
+            kOSBooleanTrue ||
+        controller->getProperty("NativeP2PRx149DataInputProfileEnabled") !=
+            kOSBooleanTrue ||
+        controller->getProperty("NativeAwdlResidentEnabled") !=
+            kOSBooleanTrue ||
+        controller->getProperty("NativeP2PProbe") != kOSBooleanTrue ||
+        controller->getProperty("NativeP2PManualTrigger") !=
+            kOSBooleanTrue)
+        return kIOReturnUnsupported;
+#else
+    return kIOReturnUnsupported;
+#endif
+
+    const uint8_t *peer = static_cast<const uint8_t *>(
+        context->peerMac->getBytesNoCopy());
+    const char *token = context->runToken->getCStringNoCopy();
+    if (!peer || !token)
+        return kIOReturnBadArgument;
+
+    // The receipt is output-only. Clear any previous success before asking
+    // the HAL to consume this one-shot request; only a successful HAL arm may
+    // publish the token that the CLI reads back.
+    controller->removeProperty(
+        "NativeP2PDirectedPrepareAcceptedRunToken");
+    const IOReturn result = hal->nativeP2pArmDirectedPrepare(peer, token);
+    if (result != kIOReturnSuccess)
+        return result;
+    if (!controller->setProperty(
+            "NativeP2PDirectedPrepareAcceptedRunToken", context->runToken) ||
+        controller->getProperty(
+            "NativeP2PDirectedPrepareAcceptedRunToken") != context->runToken) {
+        controller->removeProperty(
+            "NativeP2PDirectedPrepareAcceptedRunToken");
+        return kIOReturnNoMemory;
+    }
+    return kIOReturnSuccess;
 }
 
 struct NativePowerActionContext {
@@ -388,6 +486,9 @@ IOReturn AirportItlwm::setProperties(OSObject *properties)
                     request->getObject("NativeP2PRx149Selected") ||
                     request->getObject("NativeP2PRx149HostTxBlocked") ||
                     request->getObject("NativeP2PRx149LiveStartSnapshot") ||
+                    request->getObject("NativeP2PDirectedPrepareEnabled") ||
+                    request->getObject("NativeP2PDirectedPrepareCompiled") ||
+                    request->getObject("NativeP2PDirectedPrepareAcceptedRunToken") ||
                     request->getObject("NativeP2PTxProbeEverDoorbelled") ||
                     request->getObject("NativeP2PAwdlActionFramesSubmitted") ||
                     request->getObject("NativeP2PAwdlPsfFrameSubmitted") ||
@@ -407,16 +508,30 @@ IOReturn AirportItlwm::setProperties(OSObject *properties)
     OSObject *arm = request ? request->getObject("NativeP2PArmOnce") : nullptr;
     OSObject *rxArm = request ? request->getObject("NativeP2PRx149ArmOnce") : nullptr;
     OSObject *rxToken = request ? request->getObject("NativeP2PRx149RunToken") : nullptr;
-    if (!arm && !rxArm)
+    OSObject *directedArm = request ?
+        request->getObject("NativeP2PDirectedPrepareOnce") : nullptr;
+    OSObject *directedPeer = request ?
+        request->getObject("NativeP2PDirectedPreparePeerMAC") : nullptr;
+    OSObject *directedToken = request ?
+        request->getObject("NativeP2PDirectedPrepareRunToken") : nullptr;
+    const bool hasDirectedFields = directedArm || directedPeer || directedToken;
+    if (!arm && !rxArm && !hasDirectedFields) {
         if (rxToken)
             return kIOReturnUnsupported;
-    if (!arm && !rxArm)
         return super::setProperties(properties);
-    if (!request || (rxArm && (arm || request->getCount() != 2 ||
-                               rxArm != kOSBooleanTrue ||
-                               !validRx149RunToken(rxToken))) ||
-        (!rxArm && (request->getCount() != 1 ||
-                    arm != kOSBooleanTrue)))
+    }
+    const bool legacyArmRequest = request && arm && !rxArm &&
+        !hasDirectedFields && request->getCount() == 1 &&
+        arm == kOSBooleanTrue;
+    const bool rxArmRequest = request && rxArm && !arm &&
+        !hasDirectedFields && request->getCount() == 2 &&
+        rxArm == kOSBooleanTrue && validRx149RunToken(rxToken);
+    const bool directedArmRequest = request && directedArm && !arm && !rxArm &&
+        request->getCount() == 3 &&
+        directedArm == kOSBooleanTrue &&
+        validDirectedPreparePeer(directedPeer) &&
+        validDirectedPrepareRunToken(directedToken);
+    if (!legacyArmRequest && !rxArmRequest && !directedArmRequest)
         return kIOReturnBadArgument;
     IOReturn privilege = IOUserClient::clientHasPrivilege(
         current_task(), kIOClientPrivilegeAdministrator);
@@ -426,6 +541,18 @@ IOReturn AirportItlwm::setProperties(OSObject *properties)
         return kIOReturnNotReady;
     const bool receive149Profile =
         getProperty("NativeP2PRx149ObservationOnly") == kOSBooleanTrue;
+    if (directedArm) {
+        auto peer = OSDynamicCast(OSData, directedPeer);
+        auto token = OSDynamicCast(OSString, directedToken);
+        if (!peer || !token || !_fCommandGate || !_fWorkloop)
+            return kIOReturnNotReady;
+        NativeP2PDirectedPrepareArmContext context {peer, token};
+        if (_fWorkloop->inGate())
+            return armNativeP2PDirectedPrepareOnMainGate(
+                this, &context, nullptr, nullptr, nullptr);
+        return _fCommandGate->runAction(
+            armNativeP2PDirectedPrepareOnMainGate, &context);
+    }
     if (rxArm) {
 #if defined(ITL_NATIVE_AWDL_RX149_OBSERVATION_25G332)
         if (!receive149Profile)

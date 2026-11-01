@@ -13,6 +13,10 @@ PROBE = (ROOT / "itlwm/hal_iwx/ItlIwxP2PProbe.cpp").read_text()
 ITL = (ROOT / "itlwm/hal_iwx/ItlIwx.cpp").read_text()
 MIF_BURST = (ROOT / "native/awdl_mif_burst.hpp").read_text()
 MIF_PACING = (ROOT / "native/awdl_mif_pacing.hpp").read_text()
+# The directed prepare worker now sits between the existing TX session loop
+# and exerciseTxProbe. Do not accidentally pull its independent dependencies
+# into this older session-loop harness.
+SESSION_END = "struct DirectedNoTicketProof {"
 
 
 def extract(source, marker, end_marker=None):
@@ -57,7 +61,7 @@ def verify_receive_pump_contract():
     assert "event->consumeRxAfterRead = consumeRx;" in read_state
     worker = " ".join(extract(
         PROBE, "static int runTxProbeSession(",
-        end_marker="static int exerciseTxProbe(",
+        end_marker=SESSION_END,
     ).split())
     assert "readRocState(probe, &event, true)" in worker
 
@@ -103,7 +107,7 @@ session_helpers = "\n\n".join((
     # different brace counts. Bound it by the next top-level definition so the
     # fixture compiles the actual source body without swallowing exerciseTxProbe.
     extract(PROBE, "static int runTxProbeSession(",
-            end_marker="static int exerciseTxProbe("),
+            end_marker=SESSION_END),
 ))
 
 session_shim = r"""
@@ -183,6 +187,7 @@ struct P2PProbeRun {
     bool actionTxAttempted = false;
     bool actionTxRequired = false;
     bool awdlPsfProbeEnabled = false;
+    bool directedPrepareOnly = false;
     bool awdlMifFollowupEnabled = false;
     bool psfCandidatePrepared = false;
     bool mifCandidatePrepared = false;
@@ -1471,6 +1476,12 @@ IOReturn ItlIwx::tahoeP2pCancelAction(OSObject *, void *, void *, void *, void *
 IOReturn ItlIwx::tahoeP2pFinishAction(OSObject *, void *, void *, void *, void *) {
     return kIOReturnSuccess;
 }
+// Inject only the publication-invalidation boundary; the stop guard below
+// must propagate failure before considering resources safe to stop.
+static int gInvalidateError = 0;
+static int invalidateRx149LiveStartOnMainGate(ItlIwx *) {
+    return gInvalidateError;
+}
 """
 
 stop_functions = "\n\n".join((
@@ -1494,6 +1505,9 @@ int main() {
     { ItlIwx owner; owner.com.sc_p2p.phy_leased = true; assertStopBlocked(owner); }
     { ItlIwx owner; assert(!owner.nativeP2pResourcesRetained()); assert(owner.tahoeP2pStopBeforeReset(&owner.com) == 0); }
     { ItlIwx owner; assert(owner.tahoeP2pStopBeforeReset(nullptr) == EINVAL); }
+    { ItlIwx owner; gInvalidateError = EIO;
+      assert(owner.tahoeP2pStopBeforeReset(&owner.com) == EIO);
+      gInvalidateError = 0; }
 }
 """
 
