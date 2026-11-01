@@ -737,6 +737,8 @@ static void record_rejected_radiotap(
 
 #ifdef SENDER_TIMING_TEST
 static uint64_t test_monotonic_now_ns = UINT64_C(100000000000);
+static uint64_t test_schedule_overrun_ns;
+static uint64_t test_send_overrun_ns;
 static const char *test_monotonic_stage = "gate";
 static bool test_clock_failure_used;
 struct timing_test_capture_wait {
@@ -744,6 +746,7 @@ struct timing_test_capture_wait {
     bool event_pending;
     bool fail_wait;
     uint64_t expected_deadline_ns;
+    uint64_t finish_overrun_ns;
     uint64_t event_ns;
     uint64_t event_observed_ns;
     unsigned wait_calls;
@@ -797,7 +800,11 @@ static bool sleep_until_ns(uint64_t deadline_ns, int *error_code) {
         return false;
     }
     if (deadline_ns <= test_monotonic_now_ns) return true;
-    test_monotonic_now_ns = deadline_ns;
+    if (deadline_ns > UINT64_MAX - test_schedule_overrun_ns) {
+        if (error_code != NULL) *error_code = EOVERFLOW;
+        return false;
+    }
+    test_monotonic_now_ns = deadline_ns + test_schedule_overrun_ns;
     return true;
 #else
 #ifdef SENDER_HOST_TEST
@@ -1222,9 +1229,14 @@ static bool wait_for_capture_until(uint64_t deadline_ns,
         capture->rx_packets++;
         test_capture_wait.event_pending = false;
     }
-    /* Model the final poll timeout and absolute-deadline check. */
+    /* Model the final poll timeout, plus optional scheduler delay before the
+     * caller records its actual finish timestamp. */
     test_capture_wait.wait_calls++;
-    test_monotonic_now_ns = deadline_ns;
+    if (deadline_ns > UINT64_MAX - test_capture_wait.finish_overrun_ns) {
+        if (error_code != NULL) *error_code = EOVERFLOW;
+        return false;
+    }
+    test_monotonic_now_ns = deadline_ns + test_capture_wait.finish_overrun_ns;
     return true;
 #else
     (void)deadline_ns;
@@ -1734,6 +1746,15 @@ static int send_sequence(const struct options *options, int fd,
         } else {
             sent = (ssize_t)PACKET_LENGTH;
         }
+        if (sent == (ssize_t)PACKET_LENGTH && test_send_overrun_ns != 0U) {
+            if (test_monotonic_now_ns >
+                UINT64_MAX - test_send_overrun_ns) {
+                errno = EOVERFLOW;
+                sent = -1;
+            } else {
+                test_monotonic_now_ns += test_send_overrun_ns;
+            }
+        }
 #elif defined(SENDER_HOST_TEST)
         (void)fd;
         ssize_t sent = -1;
@@ -1805,7 +1826,17 @@ static int send_sequence(const struct options *options, int fd,
         result->finished_ns = finished;
         result->finished_time_valid = true;
         result->elapsed_ns = finished - started;
-        if (finished > deadline) result->deadline_hit = true;
+        /* elapsed_ms and deadline_hit describe the send sequence. A successful
+         * receive tail may finish after its fixed cutoff due to scheduler
+         * latency; keep that actual finish in finished_ns and capture timing,
+         * without turning it into a send-deadline miss. */
+        if (result->frames_completed == options->count &&
+            result->frames_attempted > 0U) {
+            const struct send_sample *last =
+                &result->samples[result->frames_attempted - 1U];
+            if (last->after_time_valid && last->after_ns >= started)
+                result->elapsed_ns = last->after_ns - started;
+        }
     }
     if (capture != NULL && capture->available && capture->capture_started) {
         uint64_t observation_end = finished;

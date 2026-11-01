@@ -206,8 +206,10 @@ static void test_exact_observation_publish_is_atomic_on_clock_failure(void) {
                   "packet_outgoing_echo") == 0);
 }
 
-static void test_final_frame_keeps_capture_open_to_fixed_deadline(void) {
-    const uint64_t base_ns = UINT64_C(100000000000);
+static const uint64_t TAIL_TEST_BASE_NS = UINT64_C(100000000000);
+static const uint64_t TAIL_TEST_FINISH_OVERRUN_NS = UINT64_C(498450);
+
+static int run_tail_capture_case(struct send_result *result) {
     struct options options;
     memset(&options, 0, sizeof(options));
     options.count = MAX_FRAMES;
@@ -220,53 +222,69 @@ static void test_final_frame_keeps_capture_open_to_fixed_deadline(void) {
     capture.complete = true;
     capture.pre_send_queue_empty = true;
 
-    struct send_result result;
-    memset(&result, 0, sizeof(result));
     memset(&test_capture_wait, 0, sizeof(test_capture_wait));
     test_capture_wait.enabled = true;
-    test_capture_wait.event_pending = true;
-    test_capture_wait.event_ns = base_ns + UINT64_C(35000000);
-    test_monotonic_now_ns = base_ns;
+    test_capture_wait.finish_overrun_ns = TAIL_TEST_FINISH_OVERRUN_NS;
+    test_monotonic_now_ns = TAIL_TEST_BASE_NS;
+    test_schedule_overrun_ns = 0U;
+    test_send_overrun_ns = 0U;
     test_clock_failure_used = false;
     (void)unsetenv("SENDER_TIMING_TEST_FAIL_AT");
     (void)unsetenv("SENDER_TIMING_TEST_SLEEP_ERROR");
     (void)unsetenv("SENDER_TIMING_TEST_CLOCK_FAIL_STAGE");
 
-    assert(send_sequence(&options, -1, &result, &capture,
-                         base_ns - UINT64_C(1000000)) == 0);
+    return send_sequence(&options, -1, result, &capture,
+                         TAIL_TEST_BASE_NS - UINT64_C(1000000));
+}
+
+static void test_final_frame_keeps_capture_open_to_fixed_deadline(void) {
+    struct send_result result;
+    memset(&result, 0, sizeof(result));
+    assert(run_tail_capture_case(&result) == 0);
     assert(result.frames_requested == 4U);
     assert(result.frames_attempted == 4U);
     assert(result.frames_completed == 4U);
     assert(result.error_count == 0U);
-    assert(result.samples[3].before_ns == base_ns + UINT64_C(30000000));
-    assert(result.samples[3].after_ns == base_ns + UINT64_C(30001000));
+    assert(result.samples[3].before_ns >=
+           TAIL_TEST_BASE_NS + UINT64_C(30000000));
+    assert(result.samples[3].after_ns < TAIL_TEST_BASE_NS + TX_BUDGET_NS);
     for (unsigned index = 0U; index < MAX_FRAMES; ++index) {
         assert(result.samples[index].return_value == (ssize_t)PACKET_LENGTH);
         assert(result.samples[index].send_errno == 0);
     }
 
     const struct provenance_capture *observed = &result.provenance;
-    assert(observed->started_ns == base_ns);
-    assert(observed->deadline_ns == base_ns + TX_BUDGET_NS);
+    assert(observed->started_ns == TAIL_TEST_BASE_NS);
+    assert(observed->deadline_ns == TAIL_TEST_BASE_NS + TX_BUDGET_NS);
     assert(observed->deadline_ns - observed->started_ns == TX_BUDGET_NS);
-    assert(observed->rx_packets == 1U);
+    assert(observed->rx_packets == 0U);
     assert(test_capture_wait.wait_calls == 2U);
-    assert(test_capture_wait.drain_calls == 1U);
+    assert(test_capture_wait.drain_calls == 0U);
     assert(test_capture_wait.attempted_frames == 4U);
-    assert(test_capture_wait.event_observed_ns == base_ns + UINT64_C(35000000));
-    assert(test_capture_wait.expected_deadline_ns == base_ns + TX_BUDGET_NS);
-    assert(result.finished_time_valid && result.finished_ns == base_ns + TX_BUDGET_NS);
+    assert(test_capture_wait.expected_deadline_ns ==
+           TAIL_TEST_BASE_NS + TX_BUDGET_NS);
+    assert(result.finished_time_valid && result.finished_ns ==
+           TAIL_TEST_BASE_NS + TX_BUDGET_NS + TAIL_TEST_FINISH_OVERRUN_NS);
+    assert(result.deadline_hit == false);
+    assert(result.elapsed_ns == result.samples[3].after_ns - TAIL_TEST_BASE_NS);
+    assert(result.elapsed_ns < TX_BUDGET_NS);
     assert(observed->capture_finished);
-    assert(observed->ended_ns == base_ns + TX_BUDGET_NS);
-    assert(observed->actual_finished_ns == base_ns + TX_BUDGET_NS);
+    assert(observed->ended_ns == TAIL_TEST_BASE_NS + TX_BUDGET_NS);
+    assert(observed->actual_finished_ns == result.finished_ns);
+    assert(observed->actual_finished_ns > observed->ended_ns);
 
     /* A receive-side error stops observation early but does not relabel four
      * locally completed sends as failed or stretch the capture deadline. */
+    const uint64_t base_ns = TAIL_TEST_BASE_NS + UINT64_C(1000000000);
+    struct options options;
+    memset(&options, 0, sizeof(options));
+    options.count = MAX_FRAMES;
+    options.interval_ms = MAX_INTERVAL_MS;
+    struct provenance_capture capture;
     memset(&capture, 0, sizeof(capture));
     capture.available = true;
     capture.receive_fd = -1;
     capture.complete = true;
-    memset(&result, 0, sizeof(result));
     memset(&test_capture_wait, 0, sizeof(test_capture_wait));
     test_capture_wait.enabled = true;
     test_capture_wait.fail_wait = true;
@@ -281,6 +299,84 @@ static void test_final_frame_keeps_capture_open_to_fixed_deadline(void) {
            result.provenance.started_ns + TX_BUDGET_NS);
     assert(result.provenance.actual_finished_ns <
            result.provenance.deadline_ns);
+}
+
+static void test_send_deadline_miss_still_fails_closed(void) {
+    const uint64_t base_ns = TAIL_TEST_BASE_NS + UINT64_C(2000000000);
+    struct options options;
+    memset(&options, 0, sizeof(options));
+    options.count = MAX_FRAMES;
+    options.interval_ms = MAX_INTERVAL_MS;
+    struct send_result result;
+    memset(&result, 0, sizeof(result));
+    memset(&test_capture_wait, 0, sizeof(test_capture_wait));
+    test_monotonic_now_ns = base_ns;
+    test_schedule_overrun_ns = UINT64_C(30000000);
+    test_send_overrun_ns = 0U;
+    test_clock_failure_used = false;
+    (void)unsetenv("SENDER_TIMING_TEST_FAIL_AT");
+    (void)unsetenv("SENDER_TIMING_TEST_SLEEP_ERROR");
+    (void)unsetenv("SENDER_TIMING_TEST_CLOCK_FAIL_STAGE");
+
+    const int status = send_sequence(&options, -1, &result, NULL,
+                                     base_ns - UINT64_C(1000000));
+    test_schedule_overrun_ns = 0U;
+    assert(status != 0);
+    assert(result.frames_attempted == 1U);
+    assert(result.frames_completed == 1U);
+    assert(result.error_count > 0U);
+    assert(result.deadline_hit);
+    assert(strcmp(result.stop_reason, "send_budget_expired") == 0);
+}
+
+static void test_send_call_crossing_deadline_still_fails(void) {
+    const uint64_t base_ns = TAIL_TEST_BASE_NS + UINT64_C(3000000000);
+    struct options options;
+    memset(&options, 0, sizeof(options));
+    options.count = MAX_FRAMES;
+    options.interval_ms = MAX_INTERVAL_MS;
+    struct send_result result;
+    memset(&result, 0, sizeof(result));
+    memset(&test_capture_wait, 0, sizeof(test_capture_wait));
+    test_monotonic_now_ns = base_ns;
+    test_schedule_overrun_ns = 0U;
+    test_send_overrun_ns = TX_BUDGET_NS;
+    test_clock_failure_used = false;
+    (void)unsetenv("SENDER_TIMING_TEST_FAIL_AT");
+    (void)unsetenv("SENDER_TIMING_TEST_SLEEP_ERROR");
+    (void)unsetenv("SENDER_TIMING_TEST_CLOCK_FAIL_STAGE");
+
+    const int status = send_sequence(&options, -1, &result, NULL,
+                                     base_ns - UINT64_C(1000000));
+    test_send_overrun_ns = 0U;
+    assert(status != 0);
+    assert(result.frames_attempted == 1U);
+    assert(result.frames_completed == 1U);
+    assert(result.samples[0].before_time_valid);
+    assert(result.samples[0].before_ns < base_ns + TX_BUDGET_NS);
+    assert(result.samples[0].return_value == (ssize_t)PACKET_LENGTH);
+    assert(result.samples[0].send_errno == 0);
+    assert(result.samples[0].after_time_valid);
+    assert(result.samples[0].after_ns > base_ns + TX_BUDGET_NS);
+    assert(result.error_count > 0U);
+    assert(result.deadline_hit);
+    assert(strcmp(result.stop_reason, "send_completed_after_budget") == 0);
+}
+
+static int emit_tail_deadline_regression(void) {
+    struct send_result result;
+    memset(&result, 0, sizeof(result));
+    if (run_tail_capture_case(&result) != 0 ||
+        result.frames_attempted != MAX_FRAMES ||
+        result.frames_completed != MAX_FRAMES || result.deadline_hit ||
+        result.error_count != 0U || result.finished_ns <=
+            result.provenance.deadline_ns ||
+        result.provenance.ended_ns != result.provenance.deadline_ns ||
+        result.provenance.actual_finished_ns != result.finished_ns ||
+        result.elapsed_ns >= TX_BUDGET_NS)
+        return 1;
+    result.provenance.synthetic_fixture = true;
+    return emit_send_result(&result);
 }
 
 static int emit_synthetic_result(void) {
@@ -438,6 +534,8 @@ static int emit_synthetic_short_header_results(void) {
 }
 
 int main(int argc, char **argv) {
+    if (argc == 2 && strcmp(argv[1], "--emit-tail-deadline-regression") == 0)
+        return emit_tail_deadline_regression();
     if (argc == 2 && strcmp(argv[1], "--emit-synthetic") == 0)
         return emit_synthetic_result();
     if (argc == 2 && strcmp(argv[1], "--emit-synthetic-failure") == 0)
@@ -454,6 +552,8 @@ int main(int argc, char **argv) {
     test_rejected_sample_fields_prefix_hash_and_overflow();
     test_exact_observation_publish_is_atomic_on_clock_failure();
     test_final_frame_keeps_capture_open_to_fixed_deadline();
+    test_send_deadline_miss_still_fails_closed();
+    test_send_call_crossing_deadline_still_fails();
     puts("radiotap_observation_fixtures=passed");
     return 0;
 }

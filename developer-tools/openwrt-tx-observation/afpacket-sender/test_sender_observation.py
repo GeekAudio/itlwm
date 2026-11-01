@@ -11,6 +11,9 @@ import unittest
 ROOT = Path(__file__).resolve().parent
 FIXTURE_SOURCE = ROOT / "test_radiotap_observation.c"
 CLASSIFIER = ROOT.parent / "openwrt_tx_observation.py"
+TEST087_DIR = ROOT.parents[1] / "test087"
+sys.path.insert(0, str(TEST087_DIR))
+import test087_controlled
 
 
 class SenderObservationTests(unittest.TestCase):
@@ -168,6 +171,70 @@ class SenderObservationTests(unittest.TestCase):
             self.assertFalse(summary["rf_transmission_proven"])
             self.assertFalse(summary["ack_proven"])
             self.assertFalse(summary["peer_receipt_proven"])
+
+            # The receive tail may finish slightly after its fixed cutoff due
+            # to scheduling. That actual horizon remains visible, while the
+            # strict Test087 compatibility validator judges only send time.
+            tail = subprocess.run(
+                [str(binary), "--emit-tail-deadline-regression"],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(tail.returncode, 0, tail.stderr)
+            tail_lines = [line for line in tail.stdout.splitlines() if line.strip()]
+            self.assertEqual(len(tail_lines), 2)
+            started_event = json.loads(tail_lines[0])
+            self.assertEqual(started_event["event"], "SENDER_STARTED")
+            tail_result = json.loads(tail_lines[1])
+            self.assertEqual(tail_result["status"], "complete")
+            self.assertEqual(tail_result["frames_attempted"], 4)
+            self.assertEqual(tail_result["frames_completed"], 4)
+            self.assertEqual(tail_result["sent"], 4)
+            self.assertFalse(tail_result["deadline_hit"])
+            self.assertEqual(tail_result["elapsed_ms"], 30)
+            tail_capture = tail_result["tx_provenance"]["capture"]
+            self.assertEqual(tail_capture["budget_ns"], 40_000_000)
+            self.assertEqual(tail_capture["ended_ns"],
+                             tail_capture["started_ns"] + 40_000_000)
+            self.assertEqual(tail_capture["actual_finished_ns"],
+                             tail_result["finished_ns"])
+            self.assertEqual(tail_capture["actual_horizon_ns"], 40_498_450)
+            self.assertGreater(tail_capture["actual_finished_ns"],
+                               tail_capture["ended_ns"])
+
+            legacy = {key: tail_result[key]
+                      for key in test087_controlled.SENDER_RESULT_ALLOWED_KEYS}
+            old_frames = test087_controlled.SENDER_FRAMES
+            old_deadline = test087_controlled.SENDER_DEADLINE_SECONDS
+            old_interval = test087_controlled.SENDER_INTERVAL_MS
+            try:
+                test087_controlled.SENDER_FRAMES = 4
+                test087_controlled.SENDER_DEADLINE_SECONDS = 0.04
+                test087_controlled.SENDER_INTERVAL_MS = 10
+                accepted = test087_controlled.parse_sender_result(
+                    json.dumps(legacy, sort_keys=True, separators=(",", ":")))
+            finally:
+                test087_controlled.SENDER_FRAMES = old_frames
+                test087_controlled.SENDER_DEADLINE_SECONDS = old_deadline
+                test087_controlled.SENDER_INTERVAL_MS = old_interval
+            self.assertEqual(accepted["status"], "complete")
+            self.assertFalse(accepted["deadline_hit"])
+
+            tail_input = Path(temp) / "tail-deadline-sender-result.json"
+            tail_input.write_text(json.dumps(tail_result), encoding="utf-8")
+            tail_classified = subprocess.run(
+                [sys.executable, str(CLASSIFIER), str(tail_input)],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(tail_classified.returncode, 0,
+                             tail_classified.stderr)
+            tail_summary = json.loads(tail_classified.stdout)
+            self.assertEqual(tail_summary["evidence_scope"], "synthetic")
+            self.assertEqual(tail_summary["capture"]["actual_horizon_ns"],
+                             40_498_450)
+            self.assertEqual(tail_summary["capture"]["ended_ns"],
+                             tail_summary["capture"]["started_ns"] +
+                             40_000_000)
+            self.assertFalse(tail_summary["rf_transmission_proven"])
 
 
 if __name__ == "__main__":
