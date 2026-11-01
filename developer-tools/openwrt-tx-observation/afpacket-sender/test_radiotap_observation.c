@@ -1,5 +1,6 @@
 #define SENDER_HOST_TEST 1
 #define SENDER_UNIT_TEST 1
+#define SENDER_TIMING_TEST 1
 #include "awdl_probe_sender.c"
 
 #include <assert.h>
@@ -205,6 +206,83 @@ static void test_exact_observation_publish_is_atomic_on_clock_failure(void) {
                   "packet_outgoing_echo") == 0);
 }
 
+static void test_final_frame_keeps_capture_open_to_fixed_deadline(void) {
+    const uint64_t base_ns = UINT64_C(100000000000);
+    struct options options;
+    memset(&options, 0, sizeof(options));
+    options.count = MAX_FRAMES;
+    options.interval_ms = MAX_INTERVAL_MS;
+
+    struct provenance_capture capture;
+    memset(&capture, 0, sizeof(capture));
+    capture.available = true;
+    capture.receive_fd = -1;
+    capture.complete = true;
+    capture.pre_send_queue_empty = true;
+
+    struct send_result result;
+    memset(&result, 0, sizeof(result));
+    memset(&test_capture_wait, 0, sizeof(test_capture_wait));
+    test_capture_wait.enabled = true;
+    test_capture_wait.event_pending = true;
+    test_capture_wait.event_ns = base_ns + UINT64_C(35000000);
+    test_monotonic_now_ns = base_ns;
+    test_clock_failure_used = false;
+    (void)unsetenv("SENDER_TIMING_TEST_FAIL_AT");
+    (void)unsetenv("SENDER_TIMING_TEST_SLEEP_ERROR");
+    (void)unsetenv("SENDER_TIMING_TEST_CLOCK_FAIL_STAGE");
+
+    assert(send_sequence(&options, -1, &result, &capture,
+                         base_ns - UINT64_C(1000000)) == 0);
+    assert(result.frames_requested == 4U);
+    assert(result.frames_attempted == 4U);
+    assert(result.frames_completed == 4U);
+    assert(result.error_count == 0U);
+    assert(result.samples[3].before_ns == base_ns + UINT64_C(30000000));
+    assert(result.samples[3].after_ns == base_ns + UINT64_C(30001000));
+    for (unsigned index = 0U; index < MAX_FRAMES; ++index) {
+        assert(result.samples[index].return_value == (ssize_t)PACKET_LENGTH);
+        assert(result.samples[index].send_errno == 0);
+    }
+
+    const struct provenance_capture *observed = &result.provenance;
+    assert(observed->started_ns == base_ns);
+    assert(observed->deadline_ns == base_ns + TX_BUDGET_NS);
+    assert(observed->deadline_ns - observed->started_ns == TX_BUDGET_NS);
+    assert(observed->rx_packets == 1U);
+    assert(test_capture_wait.wait_calls == 2U);
+    assert(test_capture_wait.drain_calls == 1U);
+    assert(test_capture_wait.attempted_frames == 4U);
+    assert(test_capture_wait.event_observed_ns == base_ns + UINT64_C(35000000));
+    assert(test_capture_wait.expected_deadline_ns == base_ns + TX_BUDGET_NS);
+    assert(result.finished_time_valid && result.finished_ns == base_ns + TX_BUDGET_NS);
+    assert(observed->capture_finished);
+    assert(observed->ended_ns == base_ns + TX_BUDGET_NS);
+    assert(observed->actual_finished_ns == base_ns + TX_BUDGET_NS);
+
+    /* A receive-side error stops observation early but does not relabel four
+     * locally completed sends as failed or stretch the capture deadline. */
+    memset(&capture, 0, sizeof(capture));
+    capture.available = true;
+    capture.receive_fd = -1;
+    capture.complete = true;
+    memset(&result, 0, sizeof(result));
+    memset(&test_capture_wait, 0, sizeof(test_capture_wait));
+    test_capture_wait.enabled = true;
+    test_capture_wait.fail_wait = true;
+    test_monotonic_now_ns = base_ns + UINT64_C(1000000000);
+    test_clock_failure_used = false;
+    assert(send_sequence(&options, -1, &result, &capture,
+                         base_ns + UINT64_C(999000000)) == 0);
+    assert(result.frames_completed == 4U && result.error_count == 0U);
+    assert(result.provenance.receive_error == EIO);
+    assert(!result.provenance.complete);
+    assert(test_capture_wait.expected_deadline_ns ==
+           result.provenance.started_ns + TX_BUDGET_NS);
+    assert(result.provenance.actual_finished_ns <
+           result.provenance.deadline_ns);
+}
+
 static int emit_synthetic_result(void) {
     struct send_result result;
     memset(&result, 0, sizeof(result));
@@ -375,6 +453,7 @@ int main(int argc, char **argv) {
     test_field_bounds_and_present_capacity_overflow();
     test_rejected_sample_fields_prefix_hash_and_overflow();
     test_exact_observation_publish_is_atomic_on_clock_failure();
+    test_final_frame_keeps_capture_open_to_fixed_deadline();
     puts("radiotap_observation_fixtures=passed");
     return 0;
 }

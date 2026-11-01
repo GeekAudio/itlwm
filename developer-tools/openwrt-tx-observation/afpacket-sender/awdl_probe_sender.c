@@ -739,6 +739,18 @@ static void record_rejected_radiotap(
 static uint64_t test_monotonic_now_ns = UINT64_C(100000000000);
 static const char *test_monotonic_stage = "gate";
 static bool test_clock_failure_used;
+struct timing_test_capture_wait {
+    bool enabled;
+    bool event_pending;
+    bool fail_wait;
+    uint64_t expected_deadline_ns;
+    uint64_t event_ns;
+    uint64_t event_observed_ns;
+    unsigned wait_calls;
+    unsigned drain_calls;
+    unsigned attempted_frames;
+};
+static struct timing_test_capture_wait test_capture_wait;
 
 static void set_timing_test_stage(const char *stage) {
     test_monotonic_stage = stage;
@@ -885,12 +897,16 @@ static enum gate_result wait_for_go(const struct options *options,
 }
 
 static bool post_go_control_pending(void) {
+#ifdef SENDER_TIMING_TEST
+    return false;
+#else
     struct pollfd descriptor = {.fd = STDIN_FILENO, .events = POLLIN};
     int result;
     do {
         result = poll(&descriptor, 1, 0);
     } while (result < 0 && errno == EINTR);
     return result > 0 && (descriptor.revents & (POLLIN | POLLHUP | POLLERR));
+#endif
 }
 
 static int dry_run(const struct options *options) {
@@ -1173,6 +1189,50 @@ static void collect_packet_statistics(struct provenance_capture *capture) {
 }
 
 #endif
+
+/* Keep the production poll/drain loop testable without opening an AF_PACKET
+ * socket on the host. The timing fixture models one packet during the tail
+ * window, then a timeout at the same absolute deadline. */
+static bool wait_for_capture_until(uint64_t deadline_ns,
+                                   struct provenance_capture *capture,
+                                   unsigned attempted_frames,
+                                   int *error_code) {
+    if (error_code != NULL) *error_code = 0;
+#ifndef SENDER_HOST_TEST
+    return wait_until_with_capture(deadline_ns, capture, attempted_frames,
+                                   error_code);
+#elif defined(SENDER_TIMING_TEST)
+    if (!test_capture_wait.enabled || capture == NULL) {
+        if (error_code != NULL) *error_code = EIO;
+        return false;
+    }
+    test_capture_wait.expected_deadline_ns = deadline_ns;
+    test_capture_wait.attempted_frames = attempted_frames;
+    test_capture_wait.wait_calls++;
+    if (test_capture_wait.fail_wait) {
+        if (error_code != NULL) *error_code = EIO;
+        return false;
+    }
+    if (test_capture_wait.event_pending &&
+        test_capture_wait.event_ns >= test_monotonic_now_ns &&
+        test_capture_wait.event_ns < deadline_ns) {
+        test_monotonic_now_ns = test_capture_wait.event_ns;
+        test_capture_wait.event_observed_ns = monotonic_ns();
+        test_capture_wait.drain_calls++;
+        capture->rx_packets++;
+        test_capture_wait.event_pending = false;
+    }
+    /* Model the final poll timeout and absolute-deadline check. */
+    test_capture_wait.wait_calls++;
+    test_monotonic_now_ns = deadline_ns;
+    return true;
+#else
+    (void)deadline_ns;
+    (void)capture;
+    (void)attempted_frames;
+    return true;
+#endif
+}
 
 struct send_sample {
     unsigned ordinal;
@@ -1715,6 +1775,22 @@ static int send_sequence(const struct options *options, int fd,
         if (capture != NULL && capture->available)
             capture_nonblocking(capture, result->frames_attempted);
 #endif
+    }
+    /* A successful send sequence keeps receiving after the final frame until
+     * the original absolute budget expires. This adds no frames and does not
+     * extend the 40 ms window; receive errors terminate observation early. */
+    if (capture != NULL && capture->available && capture->capture_started &&
+        result->error_count == 0U &&
+        result->frames_completed == options->count &&
+        !capture->limit_reached && capture->receive_error == 0) {
+        int capture_error = 0;
+        SET_TIMING_TEST_STAGE("tail_capture");
+        if (!wait_for_capture_until(deadline, capture,
+                                    result->frames_attempted,
+                                    &capture_error)) {
+            capture->complete = false;
+            capture->receive_error = capture_error != 0 ? capture_error : EIO;
+        }
     }
     SET_TIMING_TEST_STAGE("finish");
     errno = 0;

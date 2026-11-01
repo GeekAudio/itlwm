@@ -115,6 +115,7 @@
 #include "../../native/iwx_tx_ring_capacity.hpp"
 #include "../../native/iwx_tx_response_metadata.hpp"
 #include "../../native/iwx_txcmd_identity_observation.hpp"
+#include "../../native/iwx_add_sta_key_status.hpp"
 #ifdef AIRPORT_TAHOE
 #include "IwxTxRate.hpp"
 #include <kern/clock.h>
@@ -18481,6 +18482,29 @@ static uint64_t tahoeTraceFingerprint(
         mix(row.packet_length);
         mix(row.payload_length);
     }
+    mix(snapshot.latest_add_sta_key_present);
+    mix(snapshot.latest_add_sta_key_stable);
+    mix(snapshot.latest_add_sta_key_dropped_count);
+    mix(snapshot.latest_add_sta_key_dropped_serial);
+    const IwxFirmwareDiagnostics::Entry &latest =
+        snapshot.latest_add_sta_key_response;
+    mix(latest.serial);
+    mix(latest.monotonic_ns);
+    mix(latest.driver_generation);
+    mix(latest.firmware_generation);
+    mix(latest.phase);
+    mix(latest.source);
+    mix(latest.command_id);
+    mix(latest.group_id);
+    mix(latest.version);
+    mix(latest.qid);
+    mix(latest.index);
+    mix(latest.header_sequence);
+    mix(latest.flags);
+    mix(latest.result);
+    mix(latest.result_detail);
+    mix(latest.packet_length);
+    mix(latest.payload_length);
     return hash;
 }
 
@@ -18577,6 +18601,22 @@ bool ItlIwx::tahoePublishFirmwareDiagnostics(
                 return length > 0 && static_cast<size_t>(length) < sizeof(key) &&
                     controller->setProperty(key, value, 64);
             };
+            const auto setKeyResponse32 = [controller](const char *suffix,
+                                                        uint32_t value) {
+                char key[96];
+                const int length = snprintf(key, sizeof(key),
+                    "NativeKeyResponse%s", suffix);
+                return length > 0 && static_cast<size_t>(length) < sizeof(key) &&
+                    controller->setProperty(key, value, 32);
+            };
+            const auto setKeyResponse64 = [controller](const char *suffix,
+                                                        uint64_t value) {
+                char key[96];
+                const int length = snprintf(key, sizeof(key),
+                    "NativeKeyResponse%s", suffix);
+                return length > 0 && static_cast<size_t>(length) < sizeof(key) &&
+                    controller->setProperty(key, value, 64);
+            };
             if (okay)
                 okay = controller->setProperty("NativeHcmdRxTrace", payload);
             payload->release();
@@ -18609,6 +18649,46 @@ bool ItlIwx::tahoePublishFirmwareDiagnostics(
                         nativeFwDiagnosticPendingTrace_.stable) &&
                     set32("SnapshotComplete",
                         nativeFwDiagnosticPendingTrace_.complete) &&
+                    setKeyResponse32("Present",
+                        nativeFwDiagnosticPendingTrace_.latest_add_sta_key_present) &&
+                    setKeyResponse32("Stable",
+                        nativeFwDiagnosticPendingTrace_.latest_add_sta_key_stable) &&
+                    setKeyResponse32("DroppedCount",
+                        nativeFwDiagnosticPendingTrace_.latest_add_sta_key_dropped_count) &&
+                    setKeyResponse64("DroppedSerial",
+                        nativeFwDiagnosticPendingTrace_.latest_add_sta_key_dropped_serial) &&
+                    setKeyResponse64("Serial",
+                        nativeFwDiagnosticPendingTrace_.latest_add_sta_key_response.serial) &&
+                    setKeyResponse64("MonotonicNs",
+                        nativeFwDiagnosticPendingTrace_.latest_add_sta_key_response.monotonic_ns) &&
+                    setKeyResponse32("DriverGeneration",
+                        nativeFwDiagnosticPendingTrace_.latest_add_sta_key_response.driver_generation) &&
+                    setKeyResponse32("FirmwareGeneration",
+                        nativeFwDiagnosticPendingTrace_.latest_add_sta_key_response.firmware_generation) &&
+                    setKeyResponse32("Phase",
+                        nativeFwDiagnosticPendingTrace_.latest_add_sta_key_response.phase) &&
+                    setKeyResponse32("Source",
+                        nativeFwDiagnosticPendingTrace_.latest_add_sta_key_response.source) &&
+                    setKeyResponse32("CommandId",
+                        nativeFwDiagnosticPendingTrace_.latest_add_sta_key_response.command_id) &&
+                    setKeyResponse32("GroupId",
+                        nativeFwDiagnosticPendingTrace_.latest_add_sta_key_response.group_id) &&
+                    setKeyResponse32("Qid",
+                        nativeFwDiagnosticPendingTrace_.latest_add_sta_key_response.qid) &&
+                    setKeyResponse32("Index",
+                        nativeFwDiagnosticPendingTrace_.latest_add_sta_key_response.index) &&
+                    setKeyResponse32("HeaderSequence",
+                        nativeFwDiagnosticPendingTrace_.latest_add_sta_key_response.header_sequence) &&
+                    setKeyResponse32("Flags",
+                        nativeFwDiagnosticPendingTrace_.latest_add_sta_key_response.flags) &&
+                    setKeyResponse32("Result",
+                        nativeFwDiagnosticPendingTrace_.latest_add_sta_key_response.result) &&
+                    setKeyResponse32("PayloadLength",
+                        nativeFwDiagnosticPendingTrace_.latest_add_sta_key_response.payload_length) &&
+                    setKeyResponse64("TraceVersionBegin",
+                        nativeFwDiagnosticPendingTrace_.version_begin) &&
+                    setKeyResponse64("TraceVersionEnd",
+                        nativeFwDiagnosticPendingTrace_.version_end) &&
                     controller->setProperty(
                         "NativeHcmdRxTracePublishRevisionEnd",
                         finalRevision, 32) &&
@@ -19184,6 +19264,39 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
             break;
         }
 #ifdef AIRPORT_TAHOE
+        // Failed command responses set IWX_CMD_FAILED_MSK in the response
+        // group/flags byte, so their raw wide ID no longer matches the normal
+        // command case. Normalize only a failed ADD_STA_KEY response whose
+        // command-queue slot is still pending and whose host header proves
+        // the exact narrow-command identity. This also lets the existing
+        // response path retire that one command; it does not infer success.
+        if ((pkt->hdr.group_id & IWX_CMD_FAILED_MSK) != 0 &&
+            qid == IWX_DQA_CMD_QUEUE && pkt->hdr.cmd == IWX_ADD_STA_KEY) {
+            struct iwx_tx_ring *commandRing = &sc->txq[IWX_DQA_CMD_QUEUE];
+            if (commandRing->cmd != nullptr && commandRing->data != nullptr &&
+                idx < commandRing->ring_count &&
+                IwxAddStaKeyStatus::isPendingCommandQueueIndex(
+                    commandRing->ring_count, commandRing->cur,
+                    commandRing->queued, static_cast<size_t>(idx))) {
+                const struct iwx_device_cmd *hostCommand =
+                    &commandRing->cmd[idx];
+                const struct iwx_tx_data *hostData =
+                    &commandRing->data[idx];
+                const uint8_t responseGroup = static_cast<uint8_t>(
+                    pkt->hdr.group_id & ~IWX_CMD_FAILED_MSK);
+                const bool exactNarrowKeyCommand =
+                    (hostData->flags & IWX_TXDATA_FLAG_CMD_IS_NARROW) != 0 &&
+                    hostCommand->hdr_wide.group_id == IWX_LONG_GROUP &&
+                    hostCommand->hdr_wide.cmd == IWX_ADD_STA_KEY &&
+                    hostCommand->hdr_wide.qid == IWX_DQA_CMD_QUEUE &&
+                    hostCommand->hdr_wide.idx == idx &&
+                    responseGroup == IWX_LONG_GROUP;
+                if (exactNarrowKeyCommand)
+                    code = IWX_ADD_STA_KEY;
+            }
+        }
+#endif
+#ifdef AIRPORT_TAHOE
         IwxFirmwareDiagnostics::Entry diagnosticEntry{};
         diagnosticEntry.phase = static_cast<uint32_t>(
             IwxFirmwareDiagnostics::Phase::RxValidated);
@@ -19536,7 +19649,34 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
                         IwxFirmwareDiagnostics::kPacketLengthPresent |
                         IwxFirmwareDiagnostics::kSourceIsHintOnly;
                     diagnosticEntry.packet_length = iwx_rx_packet_len(pkt);
-                    diagnosticEntry.payload_length = iwx_rx_packet_payload_len(pkt);
+                    const size_t payloadLength =
+                        iwx_rx_packet_payload_len(pkt);
+                    diagnosticEntry.payload_length =
+                        static_cast<uint32_t>(payloadLength);
+                    const IwxAddStaKeyStatus::Observation keyStatus =
+                        IwxAddStaKeyStatus::decode(
+                            static_cast<uint32_t>(code),
+                            IWX_ADD_STA_KEY,
+                            static_cast<uint32_t>(qid),
+                            IWX_DQA_CMD_QUEUE,
+                            (pkt->hdr.group_id & IWX_CMD_FAILED_MSK) != 0,
+                            pkt->data, payloadLength,
+                            IWX_RBUF_SIZE - offset - minsz);
+                    if (keyStatus.outcome !=
+                            IwxAddStaKeyStatus::Outcome::NotApplicable) {
+                        if (keyStatus.commandResponseFailed)
+                            diagnosticEntry.flags |=
+                                IwxFirmwareDiagnostics::kCommandResponseFailed;
+                        if (keyStatus.outcome ==
+                                IwxAddStaKeyStatus::Outcome::StatusPresent) {
+                            diagnosticEntry.flags |=
+                                IwxFirmwareDiagnostics::kFirmwareStatusPresent;
+                            diagnosticEntry.result = keyStatus.status;
+                        } else {
+                            diagnosticEntry.flags |=
+                                IwxFirmwareDiagnostics::kFirmwareStatusUnavailable;
+                        }
+                    }
                     tahoeRecordFirmwareMetadata(sc, diagnosticEntry);
 #endif
                     break;
@@ -19568,10 +19708,40 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
                         IwxFirmwareDiagnostics::kResponseBufferPresent |
                         IwxFirmwareDiagnostics::kSourceIsHintOnly;
                     diagnosticEntry.packet_length = static_cast<uint32_t>(pkt_len);
-                    diagnosticEntry.result =
+                    const uint32_t rejectionDetail =
                         ((pkt->hdr.group_id & IWX_CMD_FAILED_MSK) ? 1U : 0U) |
                         ((pkt_len < sizeof(*pkt)) ? 2U : 0U) |
                         ((pkt_len > sc->sc_cmd_resp_len[idx]) ? 4U : 0U);
+                    diagnosticEntry.result = rejectionDetail;
+                    const size_t payloadLength =
+                        iwx_rx_packet_payload_len(pkt);
+                    diagnosticEntry.payload_length =
+                        static_cast<uint32_t>(payloadLength);
+                    const IwxAddStaKeyStatus::Observation keyStatus =
+                        IwxAddStaKeyStatus::decode(
+                            static_cast<uint32_t>(code),
+                            IWX_ADD_STA_KEY,
+                            static_cast<uint32_t>(qid),
+                            IWX_DQA_CMD_QUEUE,
+                            (pkt->hdr.group_id & IWX_CMD_FAILED_MSK) != 0,
+                            pkt->data, payloadLength,
+                            IWX_RBUF_SIZE - offset - minsz);
+                    if (keyStatus.outcome !=
+                            IwxAddStaKeyStatus::Outcome::NotApplicable) {
+                        diagnosticEntry.result_detail = rejectionDetail;
+                        if (keyStatus.commandResponseFailed)
+                            diagnosticEntry.flags |=
+                                IwxFirmwareDiagnostics::kCommandResponseFailed;
+                        if (keyStatus.outcome ==
+                                IwxAddStaKeyStatus::Outcome::StatusPresent) {
+                            diagnosticEntry.flags |=
+                                IwxFirmwareDiagnostics::kFirmwareStatusPresent;
+                            diagnosticEntry.result = keyStatus.status;
+                        } else {
+                            diagnosticEntry.flags |=
+                                IwxFirmwareDiagnostics::kFirmwareStatusUnavailable;
+                        }
+                    }
                     tahoeRecordFirmwareMetadata(sc, diagnosticEntry);
 #endif
                     ::free(sc->sc_cmd_resp_pkt[idx]);
