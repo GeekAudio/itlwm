@@ -116,10 +116,12 @@
 #include "../../native/iwx_tx_response_metadata.hpp"
 #include "../../native/iwx_txcmd_identity_observation.hpp"
 #include "../../native/iwx_add_sta_key_status.hpp"
+#include "../../native/iwx_init_wait.hpp"
+#include "../../native/iwx_eapol_priority.hpp"
 #ifdef AIRPORT_TAHOE
 #include "IwxTxRate.hpp"
-#include <kern/clock.h>
 #endif
+#include <kern/clock.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <FwData.h>
@@ -136,8 +138,26 @@
 #include <sys/pcireg.h>
 #include <net80211/ieee80211_priv.h>
 
+static uint64_t iwxMonotonicNs()
+{
+    uint64_t absolute = 0, nanoseconds = 0;
+    clock_get_uptime(&absolute);
+    absolutetime_to_nanoseconds(absolute, &nanoseconds);
+    return nanoseconds;
+}
+
+// sc_init_complete is a notification latch shared by the init thread and RX
+// notification path. Keep PNVM separate from the public init-complete bit.
+static constexpr int kIwxPnvmInitComplete = 0x04;
+static constexpr uint64_t kIwxFirmwareInitWaitPollNs = SEC_TO_NSEC(1) / 10;
+
 #ifdef AIRPORT_TAHOE
 static uint32_t gTahoeStaAuthTraceInstance = 0;
+// Values 31-33 refine existing stage 3 only while a firmware handshake is
+// pending; reset trace keeps the substage when a wait fails.
+static constexpr uint32_t kTahoeInitStageAliveWait = 31;
+static constexpr uint32_t kTahoeInitStagePnvmWait = 32;
+static constexpr uint32_t kTahoeInitStageCompleteWait = 33;
 static_assert(IWX_GROUP2_TX_RING_COUNT_MAX == IWX_MIN_256_BA_QUEUE_SIZE_GEN3,
               "Group2 observation must accept the largest allocated host TX ring");
 static_assert(__atomic_always_lock_free(sizeof(uint64_t), nullptr),
@@ -192,10 +212,7 @@ enum : uint32_t {
 
 static uint64_t tahoeMonotonicNs()
 {
-    uint64_t absolute = 0, nanoseconds = 0;
-    clock_get_uptime(&absolute);
-    absolutetime_to_nanoseconds(absolute, &nanoseconds);
-    return nanoseconds;
+    return iwxMonotonicNs();
 }
 
 #ifdef AIRPORT_TAHOE
@@ -4751,28 +4768,73 @@ int ItlIwx::
 iwx_load_pnvm(struct iwx_softc *sc)
 {
     XYLog("%s\n", __FUNCTION__);
-    int err;
+    int err = 0;
+    const int initGeneration = sc->sc_generation;
     
     /* if the SKU_ID is empty, there's nothing to do */
     if (!sc->sku_id[0] && !sc->sku_id[1] && !sc->sku_id[2])
         return 0;
     
-    if (!iwx_read_pnvm(sc)) {
-        goto out;
-    };
-    
-out:
+    // Keep the existing fallback behavior for a missing/unsupported PNVM
+    // image. Completion still requires the matching firmware notification.
+    (void)iwx_read_pnvm(sc);
+
+    // Clear the old latch before asking this firmware generation to load
+    // PNVM. The notification may arrive before the waiter starts sleeping.
+    __atomic_fetch_and(&sc->sc_init_complete, ~kIwxPnvmInitComplete,
+                       __ATOMIC_ACQ_REL);
+
     /* kick the doorbell */
-    if (iwx_nic_lock(sc)) {
+    if (sc->sc_generation != initGeneration ||
+        (sc->sc_flags & IWX_FLAG_SHUTDOWN) != 0) {
+        err = ENXIO;
+        XYLog("%s: PNVM load cancelled before doorbell old_generation=%d current_generation=%d flags=0x%x\n",
+              DEVNAME(sc), initGeneration, sc->sc_generation, sc->sc_flags);
+    } else if (!iwx_nic_lock(sc)) {
+        err = EBUSY;
+        XYLog("%s: PNVM doorbell blocked before firmware wait error=%d\n",
+              DEVNAME(sc), err);
+    } else {
+#ifdef AIRPORT_TAHOE
+        sc->sc_ic.ic_tahoe_init_stage = kTahoeInitStagePnvmWait;
+#endif
         iwx_write_umac_prph(sc, IWX_UREG_DOORBELL_TO_ISR6,
-        IWX_UREG_DOORBELL_TO_ISR6_PNVM);
+                            IWX_UREG_DOORBELL_TO_ISR6_PNVM);
         iwx_nic_unlock(sc);
+
+        const auto pnvmWait = IwxInitWait::waitFor(
+            [&]() {
+                return (__atomic_load_n(&sc->sc_init_complete,
+                                        __ATOMIC_ACQUIRE) &
+                        kIwxPnvmInitComplete) != 0;
+            },
+            [&]() {
+                return sc->sc_generation != initGeneration ||
+                       (sc->sc_flags & IWX_FLAG_SHUTDOWN) != 0;
+            },
+            [&](uint64_t intervalNs) {
+                return tsleep_nsec(&sc->sc_init_complete, 0, "iwxpnvm",
+                                   static_cast<int>(intervalNs));
+            },
+            iwxMonotonicNs, SEC_TO_NSEC(2), kIwxFirmwareInitWaitPollNs,
+            EWOULDBLOCK, ENXIO);
+        const uint32_t observedFlags = static_cast<uint32_t>(
+            __atomic_load_n(&sc->sc_init_complete, __ATOMIC_ACQUIRE));
+        if (pnvmWait.outcome != IwxInitWait::Outcome::Ready) {
+            err = pnvmWait.error ? pnvmWait.error : EWOULDBLOCK;
+            XYLog("%s: PNVM_INIT_COMPLETE wait failed outcome=%u error=%d flags=0x%x waits=%u elapsed_ns=%llu generation=%d\n",
+                  DEVNAME(sc), static_cast<unsigned>(pnvmWait.outcome), err,
+                  observedFlags, pnvmWait.sleepCalls,
+                  static_cast<unsigned long long>(pnvmWait.elapsedNs),
+                  sc->sc_generation);
+        } else {
+#ifdef AIRPORT_TAHOE
+            sc->sc_ic.ic_tahoe_init_stage = 3;
+#endif
+        }
     }
-    
-    err = tsleep_nsec(&sc->sc_init_complete, 0, "iwxinit", SEC_TO_NSEC(2));
-    
+
     iwx_pnvm_free(&sc->sc_fw);
-    
     return err;
 }
 
@@ -7654,7 +7716,9 @@ iwx_load_firmware(struct iwx_softc *sc)
     struct iwx_fw_sects *fws;
     int err/*, w*/;
 
-    sc->sc_uc.uc_intr = 0;
+    const int initGeneration = sc->sc_generation;
+    __atomic_store_n(&sc->sc_uc.uc_ok, 0, __ATOMIC_RELAXED);
+    __atomic_store_n(&sc->sc_uc.uc_intr, 0, __ATOMIC_RELEASE);
     
     fws = &sc->sc_fw.fw_sects[IWX_UCODE_TYPE_REGULAR];
     if (sc->sc_device_family >= IWX_DEVICE_FAMILY_AX210)
@@ -7666,12 +7730,40 @@ iwx_load_firmware(struct iwx_softc *sc)
         return err;
     }
     
-    /* wait for the firmware to load */
-//    for (w = 0; !sc->sc_uc.uc_intr && w < 10; w++) {
-//        err = tsleep_nsec(&sc->sc_uc, 0, "iwxuc", MSEC_TO_NSEC(100));
-//    }
-    err = tsleep_nsec(&sc->sc_uc, 0, "iwxuc", SEC_TO_NSEC(1));
-    if (err || !sc->sc_uc.uc_ok) {
+    /*
+     * ALIVE can arrive before this thread enters tsleep_nsec(). The RX side
+     * release-latches uc_intr, and this bounded predicate wait also handles
+     * the HAL's wakeup()/msleep() check-to-sleep race.
+     */
+#ifdef AIRPORT_TAHOE
+    sc->sc_ic.ic_tahoe_init_stage = kTahoeInitStageAliveWait;
+#endif
+    const auto aliveWait = IwxInitWait::waitFor(
+        [&]() {
+            return __atomic_load_n(&sc->sc_uc.uc_intr, __ATOMIC_ACQUIRE) != 0;
+        },
+        [&]() {
+            return sc->sc_generation != initGeneration ||
+                   (sc->sc_flags & IWX_FLAG_SHUTDOWN) != 0;
+        },
+        [&](uint64_t intervalNs) {
+            return tsleep_nsec(&sc->sc_uc, 0, "iwxuc",
+                               static_cast<int>(intervalNs));
+        },
+        iwxMonotonicNs, SEC_TO_NSEC(1), kIwxFirmwareInitWaitPollNs,
+        EWOULDBLOCK, ENXIO);
+    const int aliveOk = __atomic_load_n(&sc->sc_uc.uc_ok, __ATOMIC_ACQUIRE);
+    const uint32_t aliveObserved =
+        (__atomic_load_n(&sc->sc_uc.uc_intr, __ATOMIC_ACQUIRE) ? 1U : 0U) |
+        (aliveOk ? 2U : 0U);
+    err = aliveWait.outcome == IwxInitWait::Outcome::Ready
+        ? (aliveOk ? 0 : EINVAL) : aliveWait.error;
+    if (err) {
+        XYLog("%s: firmware ALIVE wait failed outcome=%u error=%d observed=0x%x waits=%u elapsed_ns=%llu generation=%d\n",
+              DEVNAME(sc), static_cast<unsigned>(aliveWait.outcome), err,
+              aliveObserved, aliveWait.sleepCalls,
+              static_cast<unsigned long long>(aliveWait.elapsedNs),
+              sc->sc_generation);
         if (iwx_nic_lock(sc)) {
             XYLog("SecBoot CPU1 Status: 0x%x, CPU2 Status: 0x%x\n",
                   iwx_read_umac_prph(sc, IWX_UMAG_SB_CPU_1_STATUS),
@@ -7692,8 +7784,12 @@ iwx_load_firmware(struct iwx_softc *sc)
     
     iwx_dma_contig_free(&sc->iml_dma);
     
-    if (!sc->sc_uc.uc_ok)
-        return EINVAL;
+    if (err)
+        return err;
+
+#ifdef AIRPORT_TAHOE
+    sc->sc_ic.ic_tahoe_init_stage = 3;
+#endif
     
     XYLog("%s: load firmware ok\n", DEVNAME(sc));
     
@@ -7817,6 +7913,7 @@ iwx_run_init_mvm_ucode(struct iwx_softc *sc, int readnvm)
 {
     XYLog("%s\n", __FUNCTION__);
     const int wait_flags = IWX_INIT_COMPLETE;
+    const int initGeneration = sc->sc_generation;
     struct iwx_nvm_access_complete_cmd nvm_complete = {};
     struct iwx_init_extended_cfg_cmd init_cfg = {
         .init_flags = htole32(IWX_INIT_NVM),
@@ -7829,11 +7926,17 @@ iwx_run_init_mvm_ucode(struct iwx_softc *sc, int readnvm)
         return EPERM;
     }
 
-    sc->sc_init_complete = 0;
+    __atomic_store_n(&sc->sc_init_complete, 0, __ATOMIC_RELEASE);
     err = iwx_load_ucode_wait_alive(sc);
     if (err) {
         XYLog("%s: failed to load init firmware\n", DEVNAME(sc));
         return err;
+    }
+    if (sc->sc_generation != initGeneration ||
+        (sc->sc_flags & IWX_FLAG_SHUTDOWN) != 0) {
+        XYLog("%s: init firmware generation changed before NVM commands; old=%d current=%d flags=0x%x\n",
+              DEVNAME(sc), initGeneration, sc->sc_generation, sc->sc_flags);
+        return ENXIO;
     }
     
     if (sc->sc_tx_with_siso_diversity)
@@ -7853,17 +7956,39 @@ iwx_run_init_mvm_ucode(struct iwx_softc *sc, int readnvm)
     if (err)
         return err;
 
-    /* Wait for the init complete notification from the firmware. */
-//    while ((sc->sc_init_complete & wait_flags) != wait_flags) {
-//        err = tsleep_nsec(&sc->sc_init_complete, 0, "iwxinit",
-//            SEC_TO_NSEC(2));
-//        if (err)
-//            return err;
-//    }
-    err = tsleep_nsec(&sc->sc_init_complete, 0, "iwxinit", SEC_TO_NSEC(2));
-    if (err) {
+    /* Wait for the init-complete bit, not any wake on the shared channel. */
+#ifdef AIRPORT_TAHOE
+    sc->sc_ic.ic_tahoe_init_stage = kTahoeInitStageCompleteWait;
+#endif
+    const auto initWait = IwxInitWait::waitFor(
+        [&]() {
+            return (__atomic_load_n(&sc->sc_init_complete, __ATOMIC_ACQUIRE) &
+                    wait_flags) == wait_flags;
+        },
+        [&]() {
+            return sc->sc_generation != initGeneration ||
+                   (sc->sc_flags & IWX_FLAG_SHUTDOWN) != 0;
+        },
+        [&](uint64_t intervalNs) {
+            return tsleep_nsec(&sc->sc_init_complete, 0, "iwxinit",
+                               static_cast<int>(intervalNs));
+        },
+        iwxMonotonicNs, SEC_TO_NSEC(2), kIwxFirmwareInitWaitPollNs,
+        EWOULDBLOCK, ENXIO);
+    const uint32_t observedFlags = static_cast<uint32_t>(
+        __atomic_load_n(&sc->sc_init_complete, __ATOMIC_ACQUIRE));
+    if (initWait.outcome != IwxInitWait::Outcome::Ready) {
+        err = initWait.error ? initWait.error : EWOULDBLOCK;
+        XYLog("%s: INIT_COMPLETE wait failed outcome=%u error=%d flags=0x%x waits=%u elapsed_ns=%llu generation=%d\n",
+              DEVNAME(sc), static_cast<unsigned>(initWait.outcome), err,
+              observedFlags, initWait.sleepCalls,
+              static_cast<unsigned long long>(initWait.elapsedNs),
+              sc->sc_generation);
         return err;
     }
+#ifdef AIRPORT_TAHOE
+    sc->sc_ic.ic_tahoe_init_stage = 3;
+#endif
 
     if (readnvm) {
         err = iwx_nvm_get(sc);
@@ -11666,6 +11791,24 @@ iwx_tx(struct iwx_softc *sc, mbuf_t m, struct ieee80211_node *ni, int ac
     cmd->hdr.idx = idx;
     
     rinfo = iwx_tx_fill_cmd(sc, in, wh, &flags, &rate_n_flags);
+
+#ifdef AIRPORT_TAHOE
+    /*
+     * Give only the exact net80211 RSN Group Key Message 2 frame the
+     * firmware's EAPOL high-priority treatment. This is independent of the
+     * diagnostic tag and runs before CCMP hardware IV/MIC insertion.
+     */
+    if (hdrlen == sizeof(struct ieee80211_frame) &&
+        mbuf_pkthdr_len(m) == hdrlen +
+            IwxEapolPriority::kRsnGroup2BodyBytes) {
+        uint8_t body[IwxEapolPriority::kRsnGroup2BodyBytes];
+        if (mbuf_copydata(m, hdrlen, sizeof(body), body) == 0 &&
+            IwxEapolPriority::isRsnGroup2(
+                wh->i_fc[0], wh->i_fc[1], wh->i_addr1[0], body,
+                sizeof(body)))
+            flags |= htole32(IWX_TX_FLAGS_HIGH_PRI);
+    }
+#endif
     
 #if NBPFILTER > 0
     if (sc->sc_drvbpf != NULL) {
@@ -19523,9 +19666,9 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
                     sc->sc_uc.uc_umac_error_event_table = le32toh(
                                                                   resp4->umac_data.dbg_ptrs.error_info_addr);
                     if (resp4->status == IWX_ALIVE_STATUS_OK)
-                        sc->sc_uc.uc_ok = 1;
+                        __atomic_store_n(&sc->sc_uc.uc_ok, 1, __ATOMIC_RELAXED);
                     else
-                        sc->sc_uc.uc_ok = 0;
+                        __atomic_store_n(&sc->sc_uc.uc_ok, 0, __ATOMIC_RELAXED);
                 } else {
                     SYNC_RESP_STRUCT(resp5, pkt, struct iwx_alive_resp_v5 *);
                     sc->sc_uc.uc_lmac_error_event_table[0] = le32toh(
@@ -19537,9 +19680,9 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
                     sc->sc_uc.uc_umac_error_event_table = le32toh(
                                                                   resp5->umac_data.dbg_ptrs.error_info_addr);
                     if (resp5->status == IWX_ALIVE_STATUS_OK)
-                        sc->sc_uc.uc_ok = 1;
+                        __atomic_store_n(&sc->sc_uc.uc_ok, 1, __ATOMIC_RELAXED);
                     else
-                        sc->sc_uc.uc_ok = 0;
+                        __atomic_store_n(&sc->sc_uc.uc_ok, 0, __ATOMIC_RELAXED);
                     
                     sc->sku_id[0] = le32toh(resp5->sku_id.data[0]);
                     sc->sku_id[1] = le32toh(resp5->sku_id.data[1]);
@@ -19551,7 +19694,9 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
                                  sc->sku_id[2]);
                 }
                 
-                sc->sc_uc.uc_intr = 1;
+                // Publish all ALIVE payload state before the waiter observes
+                // the event latch, even when the wakeup raced its sleep.
+                __atomic_store_n(&sc->sc_uc.uc_intr, 1, __ATOMIC_RELEASE);
 #ifdef AIRPORT_TAHOE
                 __atomic_store_n(&nativeFwDiagnosticAliveGeneration_,
                     sc->sc_uc.uc_ok
@@ -19775,15 +19920,27 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
                 break;
             }
                 
-            case IWX_WIDE_ID(IWX_REGULATORY_AND_NVM_GROUP, IWX_PNVM_INIT_COMPLETE_NTFY):
-                wakeupOn(&sc->sc_init_complete);
+            case IWX_WIDE_ID(IWX_REGULATORY_AND_NVM_GROUP, IWX_PNVM_INIT_COMPLETE_NTFY): {
                 struct iwl_pnvm_init_complete_ntfy *pnvm_ntf;
+                if (iwx_rx_packet_payload_len(pkt) < sizeof(*pnvm_ntf)) {
+                    XYLog("%s: short PNVM_INIT_COMPLETE notification payload=%zu expected>=%zu\n",
+                          DEVNAME(sc), iwx_rx_packet_payload_len(pkt),
+                          sizeof(*pnvm_ntf));
+                    break;
+                }
                 SYNC_RESP_STRUCT(pnvm_ntf, pkt, struct iwl_pnvm_init_complete_ntfy *);
                 XYLog("PNVM complete notification received with status 0x%0x\n", le32toh(pnvm_ntf->status));
+                // Latch before wakeup so an early/overlapped notification is
+                // still visible when the init waiter checks its predicate.
+                __atomic_fetch_or(&sc->sc_init_complete,
+                                  kIwxPnvmInitComplete, __ATOMIC_RELEASE);
+                wakeupOn(&sc->sc_init_complete);
                 break;
+            }
                 
             case IWX_INIT_COMPLETE_NOTIF:
-                sc->sc_init_complete |= IWX_INIT_COMPLETE;
+                __atomic_fetch_or(&sc->sc_init_complete, IWX_INIT_COMPLETE,
+                                  __ATOMIC_RELEASE);
                 wakeupOn(&sc->sc_init_complete);
                 break;
                 

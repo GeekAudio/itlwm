@@ -80,8 +80,26 @@ enum IwxStaAuthTraceFlags {
     IWX_STA_FLAG_FIRST_TRIGGER_LOST = 1u << 8,
     IWX_STA_FLAG_GROUP2_TX_MGMT_ONLY = 1u << 9,
     IWX_STA_FLAG_GROUP2_BGSCAN = 1u << 10,
-    IWX_STA_FLAG_GROUP2_SCAN_PHASE_PRESENT = 1u << 11
+    IWX_STA_FLAG_GROUP2_SCAN_PHASE_PRESENT = 1u << 11,
+    IWX_STA_FLAG_GROUP2_REPLAY_ECHO_CHECKED = 1u << 12,
+    IWX_STA_FLAG_GROUP2_REPLAY_ECHO_EQUAL = 1u << 13,
+    IWX_STA_FLAG_GROUP2_REPLAY_ECHO_MISMATCH = 1u << 14
 };
+
+/* Compare EAPOL replay fields without publishing or retaining their values. */
+static inline uint32_t iwx_sta_auth_replay_echo_flags(
+    const uint8_t *receivedReplay, const uint8_t *transmittedReplay)
+{
+    if (receivedReplay == NULL || transmittedReplay == NULL)
+        return 0;
+    for (size_t i = 0; i < 8; ++i) {
+        if (receivedReplay[i] != transmittedReplay[i])
+            return IWX_STA_FLAG_GROUP2_REPLAY_ECHO_CHECKED |
+                   IWX_STA_FLAG_GROUP2_REPLAY_ECHO_MISMATCH;
+    }
+    return IWX_STA_FLAG_GROUP2_REPLAY_ECHO_CHECKED |
+           IWX_STA_FLAG_GROUP2_REPLAY_ECHO_EQUAL;
+}
 
 enum IwxStaAuthSubmitState {
     IWX_STA_SUBMIT_UNKNOWN = 0,

@@ -124,7 +124,7 @@ extern	int ieee80211_send_group_msg2(struct ieee80211com *,
 struct IwxGroup2TxTag;
 extern	int ieee80211_send_group_msg2_traced(struct ieee80211com *,
 		struct ieee80211_node *, const struct ieee80211_key *,
-		const struct IwxGroup2TxTag *);
+		const struct IwxGroup2TxTag *, const u_int8_t *, uint32_t *);
 #endif
 extern	int ieee80211_send_eapol_key_req(struct ieee80211com *,
 		struct ieee80211_node *, u_int16_t, u_int64_t);

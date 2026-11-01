@@ -657,7 +657,8 @@ static int
 ieee80211_send_group_msg2_internal(struct ieee80211com *ic,
     struct ieee80211_node *ni, const struct ieee80211_key *k
 #ifdef AIRPORT_TAHOE
-    , const struct IwxGroup2TxTag *group2Tag
+    , const struct IwxGroup2TxTag *group2Tag,
+    const u_int8_t *receivedReplay, uint32_t *replayEchoFlags
 #endif
     )
 {
@@ -682,6 +683,11 @@ ieee80211_send_group_msg2_internal(struct ieee80211com *ic,
     
     /* copy key replay counter from authenticator */
     BE_WRITE_8(key->replaycnt, ni->ni_replaycnt);
+#ifdef AIRPORT_TAHOE
+    if (replayEchoFlags != NULL)
+        *replayEchoFlags = iwx_sta_auth_replay_echo_flags(
+            receivedReplay, key->replaycnt);
+#endif
     
     if (ni->ni_rsnprotos == IEEE80211_PROTO_WPA) {
         /* WPA sets the key length and key id fields here */
@@ -714,7 +720,7 @@ ieee80211_send_group_msg2(struct ieee80211com *ic, struct ieee80211_node *ni,
                           const struct ieee80211_key *k)
 {
 #ifdef AIRPORT_TAHOE
-    return ieee80211_send_group_msg2_internal(ic, ni, k, NULL);
+    return ieee80211_send_group_msg2_internal(ic, ni, k, NULL, NULL, NULL);
 #else
     return ieee80211_send_group_msg2_internal(ic, ni, k);
 #endif
@@ -724,9 +730,11 @@ ieee80211_send_group_msg2(struct ieee80211com *ic, struct ieee80211_node *ni,
 int
 ieee80211_send_group_msg2_traced(struct ieee80211com *ic,
     struct ieee80211_node *ni, const struct ieee80211_key *k,
-    const struct IwxGroup2TxTag *group2Tag)
+    const struct IwxGroup2TxTag *group2Tag,
+    const u_int8_t *receivedReplay, uint32_t *replayEchoFlags)
 {
-    return ieee80211_send_group_msg2_internal(ic, ni, k, group2Tag);
+    return ieee80211_send_group_msg2_internal(
+        ic, ni, k, group2Tag, receivedReplay, replayEchoFlags);
 }
 #endif
 

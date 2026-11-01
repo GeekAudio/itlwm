@@ -116,11 +116,13 @@ static void ieee80211_tahoe_trace_group2_callsite_gate(
 }
 
 /* The unique numeric tag is created per Group2 attempt and passed directly to
- * the Group2 output builder. Failure to allocate diagnostic identity falls
- * back to the unchanged untraced send path. */
+ * the Group2 output builder. If trace identity allocation fails, a zero/invalid
+ * tag preserves the untagged send path; the builder can still compare replay
+ * fields without publishing their values. */
 static int ieee80211_tahoe_send_group_msg2(
     struct ieee80211com *ic, struct ieee80211_node *ni,
-    const struct ieee80211_key *key, uint32_t attempt)
+    const struct ieee80211_key *key, uint32_t attempt,
+    const u_int8_t *receivedReplay, uint32_t *replayEchoFlags)
 {
     struct IwxStaAuthTrace *auth = &ic->ic_tahoe_auth_trace;
     const uint32_t source = ni->ni_rsnprotos == IEEE80211_PROTO_WPA ?
@@ -130,11 +132,16 @@ static int ieee80211_tahoe_send_group_msg2(
     const uint32_t association = __atomic_load_n(
         &auth->association_id, __ATOMIC_RELAXED);
     struct IwxGroup2TxTag tag = {};
-    if (!iwx_group2_tx_trace_begin(&auth->group2_tx,
-            ieee80211_tahoe_trace_time_us(), attempt, source, generation,
-            association, &tag))
-        return ieee80211_send_group_msg2(ic, ni, key);
-    return ieee80211_send_group_msg2_traced(ic, ni, key, &tag);
+    if (replayEchoFlags != NULL)
+        *replayEchoFlags = 0;
+    (void)iwx_group2_tx_trace_begin(&auth->group2_tx,
+        ieee80211_tahoe_trace_time_us(), attempt, source, generation,
+        association, &tag);
+    /* An invalid zero tag preserves the ordinary send path while keeping the
+     * local, value-free replay relation observable when trace allocation is
+     * unavailable. */
+    return ieee80211_send_group_msg2_traced(
+        ic, ni, key, &tag, receivedReplay, replayEchoFlags);
 }
 
 static int ieee80211_tahoe_install_group_key(struct ieee80211com *ic,
@@ -1231,8 +1238,9 @@ ieee80211_recv_rsn_group_msg1(struct ieee80211com *ic,
     /* send message 2 to authenticator */
 #ifdef AIRPORT_TAHOE
     ieee80211_tahoe_trace_group2_callsite_gate(ic, traceAttempt);
+    uint32_t group2ReplayEchoFlags = 0;
     group2Result = ieee80211_tahoe_send_group_msg2(ic, ni, NULL,
-        traceAttempt);
+        traceAttempt, key->replaycnt, &group2ReplayEchoFlags);
 #else
     group2Result = ieee80211_send_group_msg2(ic, ni, NULL);
 #endif
@@ -1240,7 +1248,7 @@ ieee80211_recv_rsn_group_msg1(struct ieee80211com *ic,
     ieee80211_tahoe_trace_group(ic, traceAttempt,
         IWX_STA_TRACE_GROUP2_RESULT, IWX_STA_STAGE_GROUP2_OUTPUT,
         IWX_STA_COMPONENT_NONE, IWX_STA_SOURCE_LOCAL_GROUP1,
-        group2Result, 0, 0, group2Result != 0);
+        group2Result, group2ReplayEchoFlags, 0, group2Result != 0);
 #endif
     (void)group2Result;
     return;
@@ -1467,8 +1475,9 @@ ieee80211_recv_wpa_group_msg1(struct ieee80211com *ic,
     /* send message 2 to authenticator */
 #ifdef AIRPORT_TAHOE
     ieee80211_tahoe_trace_group2_callsite_gate(ic, traceAttempt);
+    uint32_t group2ReplayEchoFlags = 0;
     int group2Result = ieee80211_tahoe_send_group_msg2(ic, ni, k,
-        traceAttempt);
+        traceAttempt, key->replaycnt, &group2ReplayEchoFlags);
 #else
     int group2Result = ieee80211_send_group_msg2(ic, ni, k);
 #endif
@@ -1476,7 +1485,7 @@ ieee80211_recv_wpa_group_msg1(struct ieee80211com *ic,
     ieee80211_tahoe_trace_group(ic, traceAttempt,
         IWX_STA_TRACE_GROUP2_RESULT, IWX_STA_STAGE_GROUP2_OUTPUT,
         IWX_STA_COMPONENT_NONE, IWX_STA_SOURCE_LOCAL_GROUP1,
-        group2Result, 0, 0, group2Result != 0);
+        group2Result, group2ReplayEchoFlags, 0, group2Result != 0);
 #endif
     (void)group2Result;
 }
