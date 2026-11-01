@@ -339,6 +339,7 @@ def configure_test099_profile():
         "protocol_interval": PROTOCOL.SENDER_INTERVAL_MS,
         "protocol_frozen_interval": PROTOCOL.FROZEN_METADATA_SENDER_INTERVAL_MS,
         "protocol_deadline": PROTOCOL.SENDER_DEADLINE_SECONDS,
+        "protocol_helper_source": PROTOCOL.HELPER_SOURCE,
         "base_sender_profile": BASE.SENDER_PROFILE,
         "base_native_worker": BASE.NATIVE_WORKER,
         "base_sender_binary": BASE.DEFAULT_SENDER_BINARY,
@@ -351,6 +352,7 @@ def configure_test099_profile():
     PROTOCOL.SENDER_INTERVAL_MS = PROFILE_INTERVAL_MS
     PROTOCOL.FROZEN_METADATA_SENDER_INTERVAL_MS = PROFILE_INTERVAL_MS
     PROTOCOL.SENDER_DEADLINE_SECONDS = PROFILE_BUDGET_MS / 1000
+    PROTOCOL.HELPER_SOURCE = ARM_HELPER
     BASE.SENDER_PROFILE = {
         "frames_max": PROFILE_FRAMES,
         "interval_ms": PROFILE_INTERVAL_MS,
@@ -384,6 +386,7 @@ def configure_test099_profile():
         PROTOCOL.SENDER_INTERVAL_MS = restore_values["protocol_interval"]
         PROTOCOL.FROZEN_METADATA_SENDER_INTERVAL_MS = restore_values["protocol_frozen_interval"]
         PROTOCOL.SENDER_DEADLINE_SECONDS = restore_values["protocol_deadline"]
+        PROTOCOL.HELPER_SOURCE = restore_values["protocol_helper_source"]
         BASE.SENDER_PROFILE = restore_values["base_sender_profile"]
         BASE.NATIVE_WORKER = restore_values["base_native_worker"]
         BASE.DEFAULT_SENDER_BINARY = restore_values["base_sender_binary"]
