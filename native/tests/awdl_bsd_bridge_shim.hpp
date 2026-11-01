@@ -25,7 +25,7 @@
 using errno_t=int;
 using protocol_family_t=unsigned;
 struct FakeIf {unsigned refs=0;bool ipv6=false;uint8_t lladdr[6]{};uint8_t address[16]{};};using ifnet_t=FakeIf *;
-struct FakeMbuf {uint8_t bytes[2048]{};size_t offset=0,length=0,total=0;unsigned flags=0;void *header=nullptr;};
+struct FakeMbuf {uint8_t bytes[2048]{};size_t offset=0,length=0,total=0;unsigned flags=0;void *header=nullptr;FakeIf *receiveIf=nullptr;};
 using mbuf_t=FakeMbuf *;
 using IOSimpleLock=std::mutex;using IOInterruptState=unsigned;
 extern std::atomic<unsigned> allocated,freed,delivered,finalized,socketsOpen,socketsClosed;extern uint64_t fakeTime;
@@ -47,7 +47,7 @@ inline void *mbuf_data(mbuf_t m){return m->bytes+m->offset;}
 inline void mbuf_freem(mbuf_t m){assert(m);delete m;++freed;}
 inline void mbuf_setlen(mbuf_t m,size_t n){m->length=n;}
 inline void mbuf_pkthdr_setlen(mbuf_t m,size_t n){m->total=n;}
-inline void mbuf_pkthdr_setrcvif(mbuf_t,ifnet_t){}
+inline void mbuf_pkthdr_setrcvif(mbuf_t m,ifnet_t dev){m->receiveIf=dev;}
 inline void mbuf_pkthdr_setheader(mbuf_t m,void *p){m->header=p;}
 inline void mbuf_adj(mbuf_t m,int n){m->offset+=n;m->length-=n;if(m->flags&MBUF_PKTHDR)m->total-=n;}
 inline void mbuf_outbound_finalize(mbuf_t,unsigned family,size_t offset){assert(family==AF_INET6&&offset==14);++finalized;}
@@ -80,15 +80,19 @@ using interface_filter_t=iff_filter *;
 extern iff_filter installed;extern ifnet_t filterIf;
 inline int iflt_attach(ifnet_t p,const iff_filter *f,interface_filter_t *r){installed=*f;filterIf=p;*r=&installed;return 0;}
 inline void iflt_detach(interface_filter_t f){if(!detachDelay)f->iff_detached(f->iff_cookie,filterIf);}
-inline int ifnet_input(ifnet_t,mbuf_t m,void *){
+using FakeInputObserver=void (*)(ifnet_t,mbuf_t);
+inline FakeInputObserver &fakeInputObserver(){static FakeInputObserver value=nullptr;return value;}
+inline int ifnet_input(ifnet_t dev,mbuf_t m,void *){
 #if defined(HOST_EXPECT_MISSING_PKTHDR)
     // Controlled negative regression: model the kernel's invariant without
     // deliberately crashing a host process or ever injecting into the kernel.
     if(!(m->flags&MBUF_PKTHDR))exit(86);
 #endif
     assert((m->flags&MBUF_PKTHDR)&&"DLIL requires M_PKTHDR");
+    assert(dev&&m->receiveIf==dev&&"input and packet receive-interface binding must match");
     assert(m->header==m->bytes&&m->offset==14&&m->total>=40);
     assert(m->bytes[12]==0x86&&m->bytes[13]==0xdd&&(m->bytes[14]>>4)==6);
+    if(fakeInputObserver())fakeInputObserver()(dev,m);
     if(!inputFail)++delivered;
     mbuf_freem(m);return inputFail?EIO:0;
 }

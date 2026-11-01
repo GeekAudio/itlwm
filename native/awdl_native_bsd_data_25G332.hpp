@@ -141,7 +141,11 @@ CaptureResult captureRx149Data(const uint8_t *,size_t,bool protectedFrame,
 void captureRx149Diagnostics(Rx149CaptureDiagnostics::Wire *out);
 // Only the main-gate lease publisher may activate/refresh a lease. Worker
 // drains validate this authority and can never reopen it from a copied guard.
-void publishRx149DataInputLease(
+// True means activation/refresh succeeded at the locked authorization point;
+// it does not reserve an input ticket or prevent subsequent revocation.
+// A strictly qualified first-START wait returns false without tombstoning a
+// fresh owner only while the bridge has no active lease and remains ready.
+bool publishRx149DataInputLease(
           const NativeP2PRx149DataInput::Lease &lease);
 // Revoke only if the numeric owner tuple still names the active permit. The
 // unconditional overload is for terminal cancellation/reset paths.

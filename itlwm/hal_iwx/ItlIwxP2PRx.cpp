@@ -1049,11 +1049,13 @@ bool ItlIwx::tahoeP2pRx149DataLease(
     out->startUs = session.startObservedMonotonicUs;
     out->nowUs = nowUs;
 
-    if (NativeP2PRx149DataInput::leaseCurrent(*out, nowUs)) {
+    if (NativeP2PRx149DataInput::leaseCurrent(*out, nowUs) ||
+        NativeP2PRx149DataInput::waitingForFirstStart(*out)) {
         // This call is deliberately restricted to the main gate: worker
         // snapshots may consume a permit but can never reopen a revoked one.
-        NativeAwdlBSD::publishRx149DataInputLease(*out);
-        return true;
+        // Pending START stays unready; current snapshots report true only
+        // after the bridge's locked activation/refresh actually succeeded.
+        return NativeAwdlBSD::publishRx149DataInputLease(*out);
     }
     if (out->ownerSerial &&
         NativeP2PRx149DataInput::validEpochs(out->epochs))

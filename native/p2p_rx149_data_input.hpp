@@ -97,6 +97,21 @@ inline bool validEpochs(const Epochs &epochs)
         epochs.context == epochs.roc;
 }
 
+// A current observation owner may have a successful command ACK before its
+// first START. This is an unready observation, never an input permission.
+// Do not generalize it to disabled profiles, pending/failed ACK, failed START,
+// changed owners/epochs, END, unknown outcomes, or a copied post-START lease.
+inline bool waitingForFirstStart(const Lease &lease)
+{
+    return lease.compiled && lease.runtimeEnabled && lease.profileEnabled &&
+        lease.profileSelected && lease.receiveObservationOnly &&
+        lease.leaseActive && lease.ownerCurrent && lease.epochsMatch &&
+        lease.tokenMatches && lease.commandReturned && lease.commandSucceeded &&
+        lease.deviceDiscoveryConfiguration && !lease.startSeen &&
+        !lease.startSucceeded && !lease.endSeen && !lease.outcomeUnknown &&
+        validEpochs(lease.epochs) && lease.ownerSerial != 0 && lease.startUs == 0;
+}
+
 inline bool leaseCurrent(const Lease &lease, uint64_t nowUs)
 {
     if (!lease.compiled || !lease.runtimeEnabled || !lease.profileEnabled ||

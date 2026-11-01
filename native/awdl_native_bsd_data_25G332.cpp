@@ -644,10 +644,11 @@ bool address(uint32_t expectedPowerGeneration,uint8_t out[6]) {
     if(!addressMatches||!stillCurrent)return false;
     memcpy(out,actual,sizeof(actual));return true;
 }
-void publishRx149DataInputLease(
+bool publishRx149DataInputLease(
     const NativeP2PRx149DataInput::Lease &lease) {
-    if(!bridgeLock())return;
+    if(!bridgeLock())return false;
     size_t discarded=0;
+    bool activated=false;
     auto irq=IOSimpleLockLockDisableInterrupt(lock);
     // Authorization time is sampled only after acquiring the same lock that
     // publishes the lease, so lock contention cannot revive an expired ROC.
@@ -656,13 +657,28 @@ void publishRx149DataInputLease(
 #endif
     const uint64_t lockedNow=nowUs();
     if(NativeP2PRx149DataInput::leaseCurrent(lease,lockedNow))
-        (void)activateRx149LeaseLocked(lease,&discarded,lockedNow);
+        activated=activateRx149LeaseLocked(lease,&discarded,lockedNow);
+    else if(NativeP2PRx149DataInput::waitingForFirstStart(lease)&&
+            !activeRx149LeaseValid&&activeRx149Version!=UINT64_MAX&&
+            lease.ownerSerial>rx149OwnerSerialHighWater&&
+            !Rx149InputGateState::blocked(__atomic_load_n(
+                &rx149InputGateState,__ATOMIC_ACQUIRE))&&
+            interfaceIncarnation!=0&&interface&&!closing&&!detached&&radio&&
+            radioGeneration==lease.epochs.power&&
+            __atomic_load_n(&closingRequested,__ATOMIC_ACQUIRE)==0&&
+            __atomic_load_n(&counters[Attached],__ATOMIC_ACQUIRE)!=0) {
+        // ACK-before-START is not a terminal event. Leave all authority,
+        // versions, high-water, queue and receipt state unchanged, and return
+        // false. An active old lease, tombstone, fault or closing bridge never
+        // enters this exception; the original fail-closed revoke stays below.
+    }
     else if(lease.ownerSerial&&
             NativeP2PRx149DataInput::validEpochs(lease.epochs))
         discarded=revokeRx149LeaseLocked(lease.ownerSerial,&lease.epochs,
                                          lockedNow);
     IOSimpleLockUnlockEnableInterrupt(lock,irq);
     for(size_t i=0;i<discarded;++i)add(RxRejected);
+    return activated;
 }
 void revokeRx149DataInput(uint64_t ownerSerial,
     const NativeP2PRx149DataInput::Epochs &epochs) {
