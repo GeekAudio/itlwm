@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "74db2eeaa916210181765016aaccb7808a86a98cf448b4c0e8c35d7df2165dc1"
+      "sha256": "bf1fe9ff66caf00f1bbd4f3439fb861b70a9f9d8ec3d4eae249d5eeb6514172d"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "173c9f1b86062c8ebc8fbfae99520a3b1fd621f4fd92a2bb44ba972e52390632"
+      "sha256": "988805983d137fb6ac7392611f97e83eb5c79401adf24fb691f313d729edb513"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -50,8 +50,8 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-01T18:17:04+08:00",
-  "runtime_scope": "Test103本次启动固定40项：6通过、5部分、1未通过、28未覆盖；睡眠按要求跳过。",
+  "updated_at": "2026-11-01T18:58:15.566627+08:00",
+  "runtime_scope": "Test103本次启动固定40项：6通过、5部分、28未覆盖、1项回归。Test104已部署待重启，不计入当前实测；睡眠测试跳过。",
   "running_candidate": "25G332-Test103",
-  "next_candidate": null
+  "next_candidate": "25G332-Test104"
 }
