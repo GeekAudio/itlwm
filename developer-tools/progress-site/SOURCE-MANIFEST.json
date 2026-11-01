@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "71ff876b7277884c4013725120bf77db9bd37038096fd9c3dd2faf34db153603"
+      "sha256": "aae7d6b1689f584aca9369bddb30a94dce55e71e09c6b3bf48a90b002985a54b"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "b93765f57f0b0920d3e7a9b56c1b7e8401800eff65b3a09259341d32e1565fcf"
+      "sha256": "2ac8f31fdfd52a0daae4abe2ffd1a5490f2b2a6f80f992de41a2083a645c268f"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -50,8 +50,8 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-01T16:32:13.330627+08:00",
-  "runtime_scope": "Test102本次启动固定40项：4通过、7部分、1项回归、28项未覆盖。四个149频道AWDL候选进入Intel RX后均CaptureRejected；ifnet/listener/peer/AirDrop未证实。GROUP_TIMEOUT断链与探针回收终态待查；睡眠跳过。",
+  "updated_at": "2026-11-01T17:20:21.668388+08:00",
+  "runtime_scope": "Test102本次启动固定40项：4通过、7部分、28未覆盖、1项回归。Test103已部署待重启，不计入当前实测；睡眠测试跳过。",
   "running_candidate": "25G332-Test102",
-  "next_candidate": null
+  "next_candidate": "25G332-Test103"
 }
