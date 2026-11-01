@@ -17,6 +17,11 @@ TOOL_DIR = Path(__file__).resolve().parent
 REPO_ROOT = TOOL_DIR.parents[1]
 TEST087_WORKER = REPO_ROOT / "developer-tools/test087/native_controlled_capture.py"
 TEST099_ARM_HELPER = TOOL_DIR / "arm_p2p_rx149_test099.swift"
+TEST099_SENDER_PROFILE = {
+    "frames": 4,
+    "interval_ms": 10,
+    "deadline_seconds": 0.04,
+}
 
 
 class _WorkerSubprocessAdapter:
@@ -62,6 +67,14 @@ def configure_worker(namespace: dict) -> None:
         module = original_load(name, path)
         if Path(path).name == "test087_controlled.py":
             module.HELPER_SOURCE = TEST099_ARM_HELPER
+            # The child worker imports its own protocol module. The coordinator's
+            # in-process Test099 profile changes do not cross this process boundary.
+            # Keep the worker's metadata gate and READY/result decoders aligned with
+            # the frozen 4-frame / 10 ms / 40 ms Test099 sender contract.
+            module.SENDER_FRAMES = TEST099_SENDER_PROFILE["frames"]
+            module.SENDER_INTERVAL_MS = TEST099_SENDER_PROFILE["interval_ms"]
+            module.FROZEN_METADATA_SENDER_INTERVAL_MS = TEST099_SENDER_PROFILE["interval_ms"]
+            module.SENDER_DEADLINE_SECONDS = TEST099_SENDER_PROFILE["deadline_seconds"]
         return module
 
     namespace["_load_module"] = load_with_test099_helper
