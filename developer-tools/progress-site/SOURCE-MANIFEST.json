@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "8bc067c89b03aa12a644592cf22798ca0629db34a6d1dd4bfc15fd0cf9008367"
+      "sha256": "c75db18835a6c536d4e530389273f2477ae01bfc53f7c7e7a5d008cd1b6a64b7"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "9d62b1e21c71ebe2996ab9201cfbdb23c3433f5d7bcbcda69ce34ff4648b9a64"
+      "sha256": "2189dd9b8b8c54b9053a0f3958c874b2a380d04b2bf0c821404ecda5062de512"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -50,7 +50,7 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-01T11:04:09.456687+08:00",
+  "updated_at": "2026-11-01T11:08:34.810434+08:00",
   "runtime_scope": "Test099本次启动固定40项：6项通过、6项部分通过、1项未通过、15项受限未覆盖、12项未测试。启动初段reason 16链路中断且用户确认此前没有操作；后续W0 300秒窗口通过，但300秒密钥观察没有新锚点，不能抵消启动初段故障，也不代表密钥更新稳定性通过。睡眠按要求跳过。",
   "running_candidate": "25G332-Test099",
   "next_candidate": "25G332-Test100"
