@@ -17,6 +17,8 @@ Test103 在原有 Hcmd 只读采样旁读取 `NativeAwdlDataRx149CaptureAttempts
 
 Test103 还会只读采集 TX completion trace。schema 4 没有本轮新增的三项重试计数时会标记不可用；只有 schema 5 的单帧完整布局才解读为具名计数。它们是驱动观察字段，不代表固件 API 布局、硬件 ACK 或对端收件。
 
+Test103 仅在收到 `NATIVE_ARM_RESULT` 后，把 native worker 下一次读取 `NATIVE_RESULT` 的等待上限设为 45 秒；ARM、READY、GO、listener、sender 和射频窗口均沿用原有时序与超时。worker 的其他状态仍即时发送。父进程收到终态前，采集线程已退出，post-worker 只读快照及汇总已原子写入并同步到目录；写入未确认时只回报失败终态，不把不完整报告标成成功。45 秒仍是硬上限，超时照常失败关闭。
+
 ## 离线准备
 
 所有命令默认只读或写入尚未启用的私有配置；不会启动无线采集。

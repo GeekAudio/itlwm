@@ -55,6 +55,7 @@ PROFILE_FRAMES = 4
 PROFILE_INTERVAL_MS = 10
 PROFILE_BUDGET_MS = 40
 PROFILE_BUDGET_NS = PROFILE_BUDGET_MS * 1_000_000
+NATIVE_FINAL_RESULT_TIMEOUT_SECONDS = 45.0
 RESULT_NAME = "test103-tools-private.json"
 CAPTURE_NAME = "native-controlled-capture-private.json"
 ROUTER_SOURCE_RECEIPT = None
@@ -62,6 +63,48 @@ TARGET_IDENTITY_RECEIPT = None
 ACTIVE_PACKET_SET: bytes | None = None
 ACTIVE_PACKET_MANIFEST: dict | None = None
 ACTIVE_LISTENER_EXPECTATION: dict | None = None
+
+
+class _NativeFinalResultWaitPipe:
+    """Give only the post-arm native terminal read Test103's bounded budget."""
+
+    def __init__(self, pipe):
+        self._pipe = pipe
+        self._awaiting_final_result = False
+
+    def read_line(self, timeout: float):
+        if self._awaiting_final_result:
+            self._awaiting_final_result = False
+            line = self._pipe.read_line(NATIVE_FINAL_RESULT_TIMEOUT_SECONDS)
+        else:
+            line = self._pipe.read_line(timeout)
+        if isinstance(line, str) and line.startswith("NATIVE_ARM_RESULT "):
+            self._awaiting_final_result = True
+        return line
+
+    def __getattr__(self, name: str):
+        return getattr(self._pipe, name)
+
+
+def _test103_managed_pipe(argv, pipe_factory):
+    """Apply Test103's listener binding and native-only final wait wrapper."""
+    adapted = list(argv)
+    if (len(adapted) >= 5 and
+            Path(str(adapted[0])).name == "awdl0_udp_probe_listener" and
+            adapted[1:3] == ["--listen", LISTENER_PROTOCOL.MARKER]):
+        expected = ACTIVE_LISTENER_EXPECTATION
+        if expected is None:
+            raise PROTOCOL.ControlledProbeError(
+                "TEST103_LISTENER_EXPECTATION_NOT_BOUND")
+        adapted.extend([
+            "--expected-source-ipv6", expected["source_ipv6"],
+            "--expected-destination-ipv6", expected["destination_ipv6"],
+            "--expected-ifindex", str(expected["ifindex"]),
+        ])
+    pipe = pipe_factory(adapted)
+    if any(str(argument) == str(NATIVE_WORKER) for argument in adapted):
+        return _NativeFinalResultWaitPipe(pipe)
+    return pipe
 
 
 class ControlledRunError(RuntimeError):
@@ -479,20 +522,7 @@ def configure_test103_profile():
     original_managed_pipe = BASE.ManagedPipe
 
     def test103_managed_pipe(argv):
-        adapted = list(argv)
-        if (len(adapted) >= 5 and
-                Path(adapted[0]).name == "awdl0_udp_probe_listener" and
-                adapted[1:3] == ["--listen", LISTENER_PROTOCOL.MARKER]):
-            expected = ACTIVE_LISTENER_EXPECTATION
-            if expected is None:
-                raise PROTOCOL.ControlledProbeError(
-                    "TEST103_LISTENER_EXPECTATION_NOT_BOUND")
-            adapted.extend([
-                "--expected-source-ipv6", expected["source_ipv6"],
-                "--expected-destination-ipv6", expected["destination_ipv6"],
-                "--expected-ifindex", str(expected["ifindex"]),
-            ])
-        return original_managed_pipe(adapted)
+        return _test103_managed_pipe(argv, original_managed_pipe)
 
     BASE.ManagedPipe = test103_managed_pipe
 

@@ -33,7 +33,7 @@ TEST103_SENDER_PROFILE = {
     "deadline_seconds": 0.04,
 }
 MAX_WORKER_SAMPLE_SECONDS = 120.0
-READ_Ioreg_TIMEOUT_SECONDS = 4.0
+READ_IOREG_TIMEOUT_SECONDS = 4.0
 
 
 class _WorkerSubprocessAdapter:
@@ -119,24 +119,29 @@ def load_test087_worker():
     return module
 
 
-def _atomic_append_hcmd_report(output_dir: Path, evidence: dict) -> None:
+def _atomic_append_hcmd_report(output_dir: Path, evidence: dict) -> tuple[bool, str]:
+    if (output_dir.is_symlink() or not output_dir.is_dir() or
+            stat.S_IMODE(output_dir.stat().st_mode) != 0o700):
+        return False, "report_directory_unavailable_or_mode_invalid"
     report_path = output_dir / "native-controlled-capture-private.json"
     if (report_path.is_symlink() or not report_path.is_file() or
             stat.S_IMODE(report_path.stat().st_mode) != 0o600):
-        return
+        return False, "report_unavailable_or_mode_invalid"
     try:
         original = json.loads(report_path.read_text(encoding="utf-8"))
     except (OSError, ValueError, TypeError):
-        return
+        return False, "report_read_or_json_invalid"
     if not isinstance(original, dict):
-        return
+        return False, "report_root_not_object"
     original["hcmd_rx_trace_observation"] = evidence
     payload = json.dumps(original, ensure_ascii=False, indent=2,
                          sort_keys=True).encode("utf-8") + b"\n"
     temporary = output_dir / ".native-controlled-capture-test103.tmp"
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    created_temporary = False
     try:
         fd = os.open(temporary, flags, 0o600)
+        created_temporary = True
         try:
             if os.geteuid() == 0:
                 os.fchown(fd, report_path.stat().st_uid, report_path.stat().st_gid)
@@ -148,11 +153,106 @@ def _atomic_append_hcmd_report(output_dir: Path, evidence: dict) -> None:
         finally:
             os.close(fd)
         os.replace(temporary, report_path)
-    except OSError:
+        created_temporary = False
+        dir_fd = os.open(output_dir, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                         getattr(os, "O_NOFOLLOW", 0))
         try:
-            temporary.unlink(missing_ok=True)
-        except OSError:
-            pass
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+        return True, "published_and_directory_synced"
+    except OSError as error:
+        if created_temporary:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+        return False, "atomic_publish_failed_" + type(error).__name__
+
+
+class _DeferredNativeResult:
+    """Hold only NATIVE_RESULT until Test103's final report append succeeds."""
+
+    def __init__(self, emitter):
+        if not callable(emitter):
+            raise TypeError("native_json_emitter_unavailable")
+        self._emitter = emitter
+        self._pending: tuple[str, dict] | None = None
+        self._released = False
+
+    def emit(self, event: str, fields: dict) -> None:
+        if event != "NATIVE_RESULT":
+            self._emitter(event, fields)
+            return
+        if self._pending is not None or self._released or not isinstance(fields, dict):
+            raise RuntimeError("native_terminal_result_duplicate_or_invalid")
+        self._pending = (event, dict(fields))
+
+    def release_after_report_publish(self) -> bool:
+        if self._pending is None or self._released:
+            return False
+        event, fields = self._pending
+        self._emitter(event, fields)
+        self._released = True
+        self._pending = None
+        return True
+
+    def release_report_publish_failure(self) -> bool:
+        """Emit an explicit fail-closed terminal when final append failed."""
+        if self._pending is None or self._released:
+            return False
+        event, fields = self._pending
+        fields["status"] = "native_report_write_failed_no_retry"
+        fields["report_saved"] = False
+        self._emitter(event, fields)
+        self._released = True
+        self._pending = None
+        return True
+
+
+def _run_worker_with_deferred_terminal(worker_namespace: dict, worker_main,
+                                       publish_report, *, sampler=sample_once,
+                                       interval_seconds: float = 1.0,
+                                       maximum_seconds: float = MAX_WORKER_SAMPLE_SECONDS,
+                                       clock=time.monotonic, waiter=None):
+    """Capture NATIVE_RESULT, publish Test103 evidence, then release terminal.
+
+    Every nonterminal worker event is forwarded immediately. The final event is
+    released only after the periodic collector has joined, its post-worker read
+    is appended, and publish_report confirms the atomic report update.
+    """
+    original_emitter = worker_namespace.get("_json_line")
+    terminal = _DeferredNativeResult(original_emitter)
+    worker_namespace["_json_line"] = terminal.emit
+    try:
+        result, frozen_samples, state = _run_worker_with_collector(
+            worker_main, sampler=sampler,
+            interval_seconds=interval_seconds,
+            maximum_seconds=maximum_seconds,
+            clock=clock, waiter=waiter,
+        )
+    finally:
+        worker_namespace["_json_line"] = original_emitter
+
+    try:
+        published, publish_status = publish_report(result, frozen_samples, state)
+        published = type(published) is bool and published
+        if not isinstance(publish_status, str):
+            publish_status = "report_publish_status_invalid"
+    except Exception as error:
+        published = False
+        publish_status = "report_publish_exception_" + type(error).__name__
+    state["final_report_publish_succeeded"] = published
+    state["final_report_publish_status"] = publish_status
+    if published:
+        terminal_released = terminal.release_after_report_publish()
+        release_kind = "success_after_report_publish" if terminal_released else "missing_pending_result"
+    else:
+        terminal_released = terminal.release_report_publish_failure()
+        release_kind = "explicit_report_publish_failure" if terminal_released else "missing_pending_result"
+    state["terminal_result_released_after_report_publish"] = terminal_released
+    state["terminal_result_release_kind"] = release_kind
+    return result, frozen_samples, state, bool(terminal_released and published)
 
 
 def _collector_error_sample(error: Exception, *, phase: str) -> dict:
@@ -304,7 +404,7 @@ def _run_worker_with_collector(worker_main, *, sampler=sample_once,
         # catches a ledger publication that lands after the last one-second
         # sample; read_ioreg_sample keeps its subprocess read bounded to 4s.
         state["post_worker_sample_attempted"] = True
-        state["post_worker_sample_timeout_seconds"] = READ_Ioreg_TIMEOUT_SECONDS
+        state["post_worker_sample_timeout_seconds"] = READ_IOREG_TIMEOUT_SECONDS
         try:
             tail_sample = sampler()
             if not isinstance(tail_sample, dict):
@@ -387,27 +487,34 @@ def main() -> int:
         if item == "--output":
             output_dir = Path(args[index + 1])
             break
-    result, frozen_samples, collection_state = _run_worker_with_collector(worker_main)
-    samples = list(frozen_samples)
-    summary = summarize_samples(samples)
-    capture_summary = summarize_capture_samples(samples)
-    retry_summary = summarize_tx_rsp_retry_samples(samples)
-    evidence = {
-        **summary,
-        "rx149_capture_attempts": capture_summary,
-        "tx_rsp_retry_observation": retry_summary,
-        "sampling_interval_seconds": 1.0,
-        "sampling_scope": (
-            "read_only_worker_lifetime" if collection_state["coverage_complete"]
-            else "bounded_worker_observation_incomplete"),
-        "sampling_coverage": collection_state,
-        "samples": samples,
-        "sample_clock_domain": "host_monotonic_ns_bounded_around_ioreg_read",
-        "driver_monotonic_values_are_unmapped": True,
-    }
-    if output_dir is not None and output_dir.is_absolute():
-        _atomic_append_hcmd_report(output_dir, evidence)
-    return result
+    def publish_report(result_code, frozen_samples, collection_state):
+        samples = list(frozen_samples)
+        summary = summarize_samples(samples)
+        capture_summary = summarize_capture_samples(samples)
+        retry_summary = summarize_tx_rsp_retry_samples(samples)
+        evidence = {
+            **summary,
+            "rx149_capture_attempts": capture_summary,
+            "tx_rsp_retry_observation": retry_summary,
+            "sampling_interval_seconds": 1.0,
+            "sampling_scope": (
+                "read_only_worker_lifetime"
+                if collection_state["coverage_complete"]
+                else "bounded_worker_observation_incomplete"),
+            "sampling_coverage": collection_state,
+            "samples": samples,
+            "sample_clock_domain": "host_monotonic_ns_bounded_around_ioreg_read",
+            "driver_monotonic_values_are_unmapped": True,
+            "terminal_result_release": "after_atomic_report_publish",
+        }
+        if output_dir is None or not output_dir.is_absolute():
+            return False, "output_directory_unavailable"
+        return _atomic_append_hcmd_report(output_dir, evidence)
+
+    result, _frozen_samples, _collection_state, report_published = (
+        _run_worker_with_deferred_terminal(
+            worker.__dict__, worker_main, publish_report))
+    return result if report_published else 2
 
 
 if __name__ == "__main__":

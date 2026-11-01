@@ -63,6 +63,16 @@ class Rx149CaptureAttemptTests(unittest.TestCase):
             complete=False, overflow=0, commit_mask=1,
             reserved_begin=1, reserved_end=2))
         self.assertEqual(partial["status"], "partial_cut")
+        # The first ledger snapshot can reserve seven slots, then an append
+        # commits the eighth and a following append sets sticky overflow
+        # before the second reservation load.
+        partial_overflow = decode_capture_attempts(make_wire(
+            complete=False, overflow=1, commit_mask=0x7f,
+            reserved_begin=7, reserved_end=8))
+        self.assertEqual(partial_overflow["status"], "partial_cut")
+        self.assertEqual(partial_overflow["record_count"], 7)
+        self.assertTrue(partial_overflow["overflow_observed"])
+        self.assertFalse(partial_overflow["complete_cut"])
         overflow = decode_capture_attempts(make_wire(
             complete=True, overflow=1, commit_mask=(1 << CAPACITY) - 1,
             reserved_begin=CAPACITY, reserved_end=CAPACITY))
@@ -71,6 +81,62 @@ class Rx149CaptureAttemptTests(unittest.TestCase):
         self.assertFalse(partial["overflow_observed"])
         self.assertEqual(partial["record_count"], 1)
         self.assertFalse(partial["complete_cut_is_freshness_proof"])
+
+    def test_captured_requires_every_production_check_to_pass(self):
+        captured = decode_capture_attempts(make_wire(record_overrides={
+            "Outcome": 1,
+            "FailureCheck": 0,
+            "EvaluatedMask": (1 << 25) - 1,
+            "PassedMask": (1 << 25) - 1,
+        }))
+        self.assertEqual(captured["records"][0]["outcome_name"],
+                         "captured_to_bounded_queue")
+        with self.assertRaisesRegex(CaptureLedgerError, "captured_failure"):
+            decode_capture_attempts(make_wire(record_overrides={
+                "Outcome": 1,
+                "FailureCheck": 3,
+                "EvaluatedMask": 0b111,
+                "PassedMask": 0b011,
+            }))
+        with self.assertRaisesRegex(CaptureLedgerError, "captured_failure"):
+            decode_capture_attempts(make_wire(record_overrides={
+                "Outcome": 1,
+                "FailureCheck": 0,
+                "EvaluatedMask": 0b111,
+                "PassedMask": 0b111,
+            }))
+
+    def test_queue_full_and_rejected_outcomes_match_first_failed_check(self):
+        full_mask = (1 << 25) - 1
+        queue_full = decode_capture_attempts(make_wire(record_overrides={
+            "Outcome": 3,
+            "FailureCheck": 25,
+            "EvaluatedMask": full_mask,
+            "PassedMask": full_mask & ~(1 << 24),
+        }))
+        self.assertEqual(queue_full["records"][0]["failure_check_name"],
+                         "QueueSpaceAvailable")
+        with self.assertRaisesRegex(CaptureLedgerError, "queue_full_failure"):
+            decode_capture_attempts(make_wire(record_overrides={
+                "Outcome": 3,
+                "FailureCheck": 24,
+                "EvaluatedMask": full_mask,
+                "PassedMask": full_mask & ~(1 << 23),
+            }))
+        with self.assertRaisesRegex(CaptureLedgerError, "rejected_failure"):
+            decode_capture_attempts(make_wire(record_overrides={
+                "Outcome": 2,
+                "FailureCheck": 3,
+                "EvaluatedMask": 0b111,
+                "PassedMask": 0b001,
+            }))
+        with self.assertRaisesRegex(CaptureLedgerError, "unknown"):
+            decode_capture_attempts(make_wire(record_overrides={
+                "Outcome": 4,
+                "FailureCheck": 3,
+                "EvaluatedMask": 0b111,
+                "PassedMask": 0b011,
+            }))
 
     def test_uncommitted_slot_is_not_read_and_complete_cut_is_strict(self):
         partial = decode_capture_attempts(make_wire(
@@ -93,6 +159,10 @@ class Rx149CaptureAttemptTests(unittest.TestCase):
             decode_capture_attempts(make_wire(
                 complete=False, commit_mask=0b11,
                 reserved_begin=2, reserved_end=1))
+        with self.assertRaisesRegex(CaptureLedgerError, "header_value"):
+            decode_capture_attempts(make_wire(
+                complete=False, overflow=1, commit_mask=0x7f,
+                reserved_begin=7, reserved_end=7))
 
     def test_collector_errors_do_not_count_as_property_present(self):
         summary = summarize_capture_samples([{
@@ -105,6 +175,32 @@ class Rx149CaptureAttemptTests(unittest.TestCase):
         }])
         self.assertEqual(summary["property_present_sample_count"], 0)
         self.assertEqual(summary["sample_errors"], {"collector_error": 1})
+
+    def test_collector_error_keeps_prior_cut_historical_not_current(self):
+        valid = decode_capture_attempts(make_wire())
+        error = {
+            "schema": SCHEMA,
+            "status": "collector_error",
+            "records": [],
+        }
+        summary = summarize_capture_samples([
+            {"rx149_capture_attempts": valid},
+            {"rx149_capture_attempts": error},
+        ])
+        self.assertEqual(summary["status"], "collector_error")
+        self.assertFalse(summary["current_cut_available"])
+        self.assertIsNone(summary["latest_wire_sha256"])
+        self.assertIsNone(summary["latest_record_count"])
+        self.assertIsNone(summary["latest_overflow_observed"])
+        self.assertIsNone(summary["latest_complete_cut"])
+        self.assertFalse(summary["latest_cut_is_last_sample"])
+        self.assertFalse(summary["latest_cut_freshness_proven"])
+        self.assertEqual(summary["last_valid_sample"]["sample_index"], 0)
+        self.assertFalse(summary["last_valid_sample"]["is_current_sample"])
+        self.assertEqual(summary["last_decodable_cut"]["sample_index"], 0)
+        self.assertEqual(summary["last_decodable_cut"]["record_count"], 1)
+        self.assertFalse(summary["last_decodable_cut"]["is_current_sample"])
+        self.assertFalse(summary["last_decodable_cut"]["freshness_proven"])
 
     def test_worker_sampler_reads_capture_ledger_from_same_ioreg_sample(self):
         from hcmd_rx_trace_test103 import sample_once
