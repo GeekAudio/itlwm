@@ -45,7 +45,7 @@
 #define EXIT_INTERFACE 4
 #define EXIT_SEND 5
 
-static const uint8_t magic[8] = {'T','1','0','3','P','K','T','1'};
+static const uint8_t magic[8] = {'T','1','0','4','P','K','T','1'};
 static const uint8_t rtap_noack_clear[RTAP_LEN] = {
     0x00,0x00,0x0a,0x00,0x00,0x80,0x00,0x00,0x10,0x00
 };
