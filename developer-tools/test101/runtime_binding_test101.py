@@ -31,7 +31,7 @@ SENDER_BINARY_RELATIVE = Path(
     "developer-tools/openwrt-tx-observation/afpacket-sender/build/"
     "awdl_probe_sender-aarch64-linux-musl")
 SENDER_SOURCE_SHA256 = "5ff9f26def49743e803cae4e700b899b826fcc27ecfe996071bc89c8fc4592ad"
-SENDER_BINARY_SHA256 = "73861350463b4129b862f8e65d18a3449c6954a13ed74faaf0b882505d647b1c"
+SENDER_BINARY_SHA256 = "b304381f776ecf4c91a531341a541d311d754523c2b96dc9441684e0bc7e2f22"
 SENDER_RECEIPT_RELATIVE = Path("research/test101-preparation-private/sender-build-private.json")
 SENDER_PROVENANCE_SCHEMA = "openwrt-tx-observation/v1"
 

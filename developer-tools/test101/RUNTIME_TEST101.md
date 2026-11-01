@@ -7,7 +7,7 @@ The coordinator accepts only an explicit local IWN root. It validates the Test10
 | Artifact | SHA-256 |
 | --- | --- |
 | `developer-tools/openwrt-tx-observation/afpacket-sender/awdl_probe_sender.c` | `5ff9f26def49743e803cae4e700b899b826fcc27ecfe996071bc89c8fc4592ad` |
-| `developer-tools/openwrt-tx-observation/afpacket-sender/build/awdl_probe_sender-aarch64-linux-musl` | `73861350463b4129b862f8e65d18a3449c6954a13ed74faaf0b882505d647b1c` |
+| `developer-tools/openwrt-tx-observation/afpacket-sender/build/awdl_probe_sender-aarch64-linux-musl` | `b304381f776ecf4c91a531341a541d311d754523c2b96dc9441684e0bc7e2f22` |
 
 Test088 retains its strict old result parser. The adapter keeps the complete new `SENDER_RESULT` event for the Test101 provenance classifier and constructs a separate legacy projection containing only the fields Test088 accepts. That projection is for transport compatibility; it is not RF evidence. AF_PACKET `send()` success, monitor echoes, radiotap completion copies, and native RX readiness do not prove over-air transmission, peer receipt, ACK, or AirDrop.
 
