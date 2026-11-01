@@ -1,5 +1,23 @@
 # Test101 schema-4 queue attribution
 
+Test101 also includes a driver candidate and [runtime tools](RUNTIME_TEST101.md).
+Failed `ADD_STA_KEY` responses are admitted to the existing command-retirement
+path only when their command queue, pending index and narrow host command match.
+The raw firmware status is retained separately from enqueue success and peer
+delivery. No new key-install success decision is inferred from that status.
+The protocol supplies no transaction generation, so a delayed response after
+reuse of the same index and command cannot be distinguished by these fields.
+
+The OpenWrt sender still sends four frames, ten milliseconds apart. It now drains
+receive observations through the remainder of the existing forty-millisecond
+budget after its final send. This changes neither frame count nor the radio
+budget. Local echoes and completion copies remain distinct from RF evidence.
+
+The RX149 candidate keeps the 100 ms receive profile, native data-input gate and
+pre-owner observation. No receive-filter bit or firmware image is changed. The
+firmware review has not established a P2P data-drop branch that would justify
+such a change. Actual data ingress and AirDrop require post-reboot validation.
+
 This is an offline report tool for JSONL files produced by `test100/collect_rekey100.py`. It adds no kernel ABI, I/O Registry write, radio action, or EFI change.
 
 Run it against an existing private capture:
