@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "4eef47070d114c56a767b5dffe07550ff5b008c78364b073b5e1efa273d4ee88"
+      "sha256": "7122c2bbb2db920906e4898922c51be93d22360c8b4d4efdea0332f15b2f5770"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "1db69b6be6872de77c7ae647ea3836bdd9d72b801b49f9668c7017d2df0a10ce"
+      "sha256": "89f6515df17cd697cd1d1b16ffaee81898d4f5e1fb075c1780c3c558be984630"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -50,8 +50,8 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-01T12:40:21.786308+08:00",
-  "runtime_scope": "Test100本次启动固定40项：8通过、4部分、28未覆盖、0项明确判为未通过。身份与联网、149频道ROC、MIF控制帧接纳、awdl0常驻和IPv6链路本地有本轮证据。自然GTK更新后30秒未掉线；独立复核确认同一发送槽位已完成队列处理，严格帧头匹配仍为否，对端收件未知。真实AWDL数据尚未进入ifnet，双向AirDrop未打通。睡眠按要求跳过；离线修正不增加无线验收项。",
-  "running_candidate": "25G332-Test100",
-  "next_candidate": null
+  "updated_at": "2026-11-01T15:01:23.514182+08:00",
+  "runtime_scope": "Test101本次启动固定40项：5通过、5部分、29未覆盖、1项回归。Test102已部署待重启，不计入当前实测；睡眠测试跳过。",
+  "running_candidate": "25G332-Test101",
+  "next_candidate": "25G332-Test102"
 }
