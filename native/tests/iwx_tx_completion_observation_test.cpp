@@ -25,7 +25,7 @@ static iwx_tx_completion_event_input txRsp(
 static void testFixedBoundsFullWidthAndValidZero()
 {
     static_assert(sizeof(iwx_tx_completion_event_record) == 240,
-                  "schema-4 event must stay compact enough for pending cut");
+                  "schema-5 event must stay compact enough for pending cut");
     static_assert(sizeof(iwx_tx_completion_observation_state) <= 1024,
                   "embedded observer exceeds its bound");
     static_assert(sizeof(iwx_tx_completion_observation_snapshot) <= 1024,
@@ -76,6 +76,73 @@ static void testFixedBoundsFullWidthAndValidZero()
     assert(snapshot.terminal_reason_counts[IWX_TX_COMPLETION_TX_RSP]
                                             [IWX_TX_COMPLETION_TX_RSP_SINGLE_RECLAIM_COMPLETED] == 1);
     assert(snapshot.last[IWX_TX_COMPLETION_BA].event_count == 0);
+}
+
+static void testTxRspRetryStatsAreVersionedAndBounded()
+{
+    iwx_tx_completion_observation_state state{};
+    auto event = txRsp();
+    event.presence_flags = IWX_TX_COMPLETION_HAS_OUTPUT_EPOCH |
+        IWX_TX_COMPLETION_HAS_FRAME_COUNT |
+        IWX_TX_COMPLETION_HAS_PAYLOAD_LENGTH;
+    event.frame_count = 1;
+    event.payload_length =
+        IwxTxRspRetryObservation::kSingleFrameMinimumPayloadLength;
+    event.tx_rsp_retry_stats_version =
+        IwxTxRspRetryObservation::kLayoutCommonPrefixV1;
+    // A present zero is not the same as an unavailable field.
+    event.tx_rsp_bt_kill_count = 0;
+    event.tx_rsp_failure_rts = 0;
+    event.tx_rsp_failure_frame = 0;
+    assert(record(&state, &event));
+
+    iwx_tx_completion_observation_snapshot snapshot{};
+    assert(IwxTxCompletionObservation::snapshot(&state, &snapshot));
+    const auto &last = snapshot.last[IWX_TX_COMPLETION_TX_RSP];
+    assert(last.tx_rsp_retry_stats_version ==
+        IwxTxRspRetryObservation::kLayoutCommonPrefixV1);
+    assert(last.tx_rsp_bt_kill_count == 0);
+    assert(last.tx_rsp_failure_rts == 0);
+    assert(last.tx_rsp_failure_frame == 0);
+
+    // The three BA values remain separate and retain their existing meaning.
+    auto ba = iwx_tx_completion_event_input{};
+    ba.kind = IWX_TX_COMPLETION_BA;
+    ba.stage = IWX_TX_COMPLETION_STAGE_BA_TFD_TERMINAL;
+    ba.terminal_reason = IWX_TX_COMPLETION_BA_TFD_RECLAIM_COMPLETED;
+    ba.presence_flags = IWX_TX_COMPLETION_HAS_OUTPUT_EPOCH |
+        IWX_TX_COMPLETION_HAS_BA_STA_ID;
+    ba.ba_sta_id = 2;
+    assert(record(&state, &ba));
+    assert(IwxTxCompletionObservation::snapshot(&state, &snapshot));
+    assert(snapshot.last[IWX_TX_COMPLETION_BA].ba_sta_id == 2);
+    assert(snapshot.last[IWX_TX_COMPLETION_BA].tx_rsp_retry_stats_version == 0);
+    assert(snapshot.last[IWX_TX_COMPLETION_BA].tx_rsp_bt_kill_count == 0);
+
+    auto invalid = txRsp();
+    invalid.tx_rsp_bt_kill_count = 1; // Values without version/presence are invalid.
+    assert(!record(&state, &invalid));
+    invalid = txRsp();
+    invalid.tx_rsp_retry_stats_version = 2; // Unknown layout is fail-closed.
+    assert(!record(&state, &invalid));
+    invalid = txRsp();
+    invalid.presence_flags = IWX_TX_COMPLETION_HAS_OUTPUT_EPOCH |
+        IWX_TX_COMPLETION_HAS_FRAME_COUNT |
+        IWX_TX_COMPLETION_HAS_PAYLOAD_LENGTH;
+    invalid.frame_count = 2; // Aggregated replies do not define these counters.
+    invalid.payload_length =
+        IwxTxRspRetryObservation::kSingleFrameMinimumPayloadLength;
+    invalid.tx_rsp_retry_stats_version =
+        IwxTxRspRetryObservation::kLayoutCommonPrefixV1;
+    assert(!record(&state, &invalid));
+    invalid.frame_count = 1;
+    invalid.payload_length =
+        IwxTxRspRetryObservation::kSingleFrameMinimumPayloadLength - 1;
+    assert(!record(&state, &invalid));
+    invalid.payload_length =
+        IwxTxRspRetryObservation::kSingleFrameMinimumPayloadLength;
+    invalid.tx_rsp_failure_frame = UINT8_MAX + 1U;
+    assert(!record(&state, &invalid));
 }
 
 static void testBAFieldsAndReasonStage()
@@ -406,6 +473,7 @@ static void testLatestRowsKeepTheirOwnRecordEpochAcrossEpochChange()
 int main()
 {
     testFixedBoundsFullWidthAndValidZero();
+    testTxRspRetryStatsAreVersionedAndBounded();
     testBAFieldsAndReasonStage();
     testTXCMDIdentityFieldsRequireCompleteUniqueInterval();
     testStrictPresenceAndRXParseStops();

@@ -6,6 +6,7 @@
 #include <net/kpi_interface.h>
 #include "awdl_bsd_attach_trace.hpp"
 #include "p2p_rx149_data_input.hpp"
+#include "rx149_capture_diagnostics.hpp"
 namespace NativeAwdlBSD {
 enum Counter : unsigned {
     Attached, Closing, Detached, LinkReady, TxAccepted, TxRejected,
@@ -135,6 +136,9 @@ CaptureResult capture(const uint8_t *,size_t,bool protectedFrame,bool leaseCurre
 CaptureResult captureRx149Data(const uint8_t *,size_t,bool protectedFrame,
           const NativeP2PRx149DataInput::Lease &,
           const NativeP2PRx149DataInput::Permit &,uint32_t powerGeneration);
+// Immutable first-eight-attempt numeric diagnostics. This does not return
+// permission, alter a lease/gate, or claim packet/input completion.
+void captureRx149Diagnostics(Rx149CaptureDiagnostics::Wire *out);
 // Only the main-gate lease publisher may activate/refresh a lease. Worker
 // drains validate this authority and can never reopen it from a copied guard.
 void publishRx149DataInputLease(

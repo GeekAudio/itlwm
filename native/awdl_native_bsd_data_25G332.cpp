@@ -67,6 +67,7 @@ uint64_t rx149ReceiptSequence=0;
 uint64_t rx149ReceiptContentRevision=0;
 Rx149InputReceipt rx149Receipt{};
 Rx149InputGateState::Word rx149InputGateState=0;
+Rx149CaptureDiagnostics::Ledger rx149CaptureLedger;
 uint32_t rx149RecoveryPreparedFaultSerial=0;
 bool reserveRx149InputTicketFast() {
     return Rx149InputGateState::reserveTicket(&rx149InputGateState);
@@ -1081,14 +1082,55 @@ CaptureResult captureRx149Data(
     const NativeP2PRx149DataInput::Permit &permit,uint32_t generation) {
     if(!bytes||!NativeAwdlData::isAwdlDataCandidate(bytes,length))
         return CaptureResult::NotAwdlDataCandidate;
-    if(!bridgeLock()) {
-        add(RxRejected);
-        return CaptureResult::Rejected;
+    namespace D = Rx149CaptureDiagnostics;
+    D::Record diagnostic{};
+    auto &v=diagnostic.value;
+    v[D::FrameLength]=length;
+    if(length>=2) {
+        v[D::HeaderPresentMask]|=1;
+        v[D::FrameControl]=uint16_t(bytes[0])|(uint16_t(bytes[1])<<8);
     }
-    if(protectedFrame||length>2048||!permit.valid||
-       generation!=permit.epochs.power) {
+    if(length>=24) {
+        v[D::HeaderPresentMask]|=2;
+        v[D::SequenceControl]=uint16_t(bytes[22])|(uint16_t(bytes[23])<<8);
+    }
+    v[D::PowerGeneration]=generation;
+    v[D::PermitOwner]=permit.ownerSerial;
+    v[D::PermitContext]=permit.epochs.context;
+    v[D::PermitPower]=permit.epochs.power;
+    v[D::PermitStation]=permit.epochs.station;
+    v[D::PermitRoc]=permit.epochs.roc;
+    v[D::PermitStartUs]=permit.startUs;
+    v[D::PermitCapturedUs]=permit.capturedUs;
+    v[D::PermitDeadlineUs]=permit.deadlineUs;
+    v[D::PermitChannel]=permit.ieeeChannel;
+    v[D::PermitMacIndex]=permit.macIndex;
+    v[D::PermitDecodeMode]=permit.decodeMode;
+    v[D::PermitRxStatus]=permit.originalRawStatus;
+    v[D::LeaseOwner]=lease.ownerSerial;
+    v[D::LeaseContext]=lease.epochs.context;
+    v[D::LeasePower]=lease.epochs.power;
+    v[D::LeaseStation]=lease.epochs.station;
+    v[D::LeaseRoc]=lease.epochs.roc;
+    v[D::LeaseStartUs]=lease.startUs;
+    v[D::LeaseNowUs]=lease.nowUs;
+    v[D::LeaseFlags]=D::leaseFlags(lease);
+    const auto finish=[&](CaptureResult result) {
+        v[D::Outcome]=static_cast<uint32_t>(result);
+        rx149CaptureLedger.append(diagnostic);
+        return result;
+    };
+    if(!diagnostic.test(D::BridgeLock,bridgeLock()!=nullptr)) {
         add(RxRejected);
-        return CaptureResult::Rejected;
+        return finish(CaptureResult::Rejected);
+    }
+    if(!diagnostic.test(D::Unprotected,!protectedFrame)||
+       !diagnostic.test(D::LengthWithinLimit,length<=2048)||
+       !diagnostic.test(D::PermitValid,permit.valid)||
+       !diagnostic.test(D::PowerGenerationMatches,
+                        generation==permit.epochs.power)) {
+        add(RxRejected);
+        return finish(CaptureResult::Rejected);
     }
 
     Rx item{};
@@ -1107,12 +1149,36 @@ CaptureResult captureRx149Data(
     runRx149TestHook(Rx149TestHookPoint::CaptureAuthorization);
 #endif
     const uint64_t captureNow=nowUs();
-    if(Rx149InputGateState::blocked(
-           __atomic_load_n(&rx149InputGateState,__ATOMIC_ACQUIRE))||
-       !NativeP2PRx149DataInput::stillCurrent(permit,lease,captureNow)) {
+    // Plain bridge-owned fields below are one observation under the existing
+    // queue lock. Gate words are captured separately at the exact original
+    // predicate loads: interrupt invalidation does not take this queue lock.
+    v[D::DecisionNowUs]=captureNow;
+    v[D::StatePresent]=1;
+    v[D::ActiveOwner]=activeRx149Lease.ownerSerial;
+    v[D::ActiveContext]=activeRx149Lease.epochs.context;
+    v[D::ActivePower]=activeRx149Lease.epochs.power;
+    v[D::ActiveStation]=activeRx149Lease.epochs.station;
+    v[D::ActiveRoc]=activeRx149Lease.epochs.roc;
+    v[D::ActiveStartUs]=activeRx149Lease.startUs;
+    v[D::ActiveNowUs]=activeRx149Lease.nowUs;
+    v[D::ActiveFlags]=D::leaseFlags(activeRx149Lease);
+    v[D::ActiveVersion]=activeRx149Version;
+    v[D::OwnerHighWater]=rx149OwnerSerialHighWater;
+    v[D::InterfaceIncarnation]=interfaceIncarnation;
+    v[D::RadioGeneration]=radioGeneration;
+    v[D::BridgeFlags]=(activeRx149LeaseValid?1u:0u)|
+        (interface?2u:0u)|(closing?4u:0u)|(detached?8u:0u)|(radio?16u:0u);
+    v[D::ReceiptSequenceBefore]=rx149ReceiptSequence;
+    v[D::ReceiptRevisionBefore]=rx149ReceiptContentRevision;
+    v[D::QueueCountAtDecision]=rx.count;
+    if(!diagnostic.test(D::FirstGateClear,!Rx149InputGateState::blocked(
+           v[D::FirstGateWord]=__atomic_load_n(
+               &rx149InputGateState,__ATOMIC_ACQUIRE)))||
+       !diagnostic.test(D::PermitCurrent,
+           NativeP2PRx149DataInput::stillCurrent(permit,lease,captureNow))) {
         IOSimpleLockUnlockEnableInterrupt(lock,irq);
         add(RxRejected);
-        return CaptureResult::Rejected;
+        return finish(CaptureResult::Rejected);
     }
     // Expired scoped entries never block a fresh packet behind them. This is
     // a bounded fixed-ring compaction and performs no packet/KPI operation.
@@ -1130,26 +1196,43 @@ CaptureResult captureRx149Data(
         }
     }
     const bool authorityCurrent=
-        !Rx149InputGateState::blocked(
-            __atomic_load_n(&rx149InputGateState,__ATOMIC_ACQUIRE))&&
-        activeRx149LeaseValid&&
-        activeRx149Version!=0&&sameRx149LeaseIdentity(activeRx149Lease,lease)&&
-        sameRx149PermitIdentity(activeRx149Lease,permit)&&
-        NativeP2PRx149DataInput::leaseCurrent(activeRx149Lease,captureNow)&&
-        NativeP2PRx149DataInput::stillCurrent(
-            permit,activeRx149Lease,captureNow);
-    const bool current=authorityCurrent&&interfaceIncarnation!=0&&
-        interface&&!closing&&!detached&&radio&&
-        __atomic_load_n(&closingRequested,__ATOMIC_ACQUIRE)==0&&
-        radioGeneration==generation&&
-        __atomic_load_n(&counters[Attached],__ATOMIC_ACQUIRE)!=0;
+        diagnostic.test(D::AuthorityGateClear,!Rx149InputGateState::blocked(
+            v[D::AuthorityGateWord]=__atomic_load_n(
+                &rx149InputGateState,__ATOMIC_ACQUIRE)))&&
+        diagnostic.test(D::ActiveLeaseValid,activeRx149LeaseValid)&&
+        diagnostic.test(D::ActiveVersionNonzero,activeRx149Version!=0)&&
+        diagnostic.test(D::LeaseIdentityMatches,
+            sameRx149LeaseIdentity(activeRx149Lease,lease))&&
+        diagnostic.test(D::PermitIdentityMatches,
+            sameRx149PermitIdentity(activeRx149Lease,permit))&&
+        diagnostic.test(D::ActiveLeaseCurrent,
+            NativeP2PRx149DataInput::leaseCurrent(activeRx149Lease,captureNow))&&
+        diagnostic.test(D::ActivePermitCurrent,
+            NativeP2PRx149DataInput::stillCurrent(
+                permit,activeRx149Lease,captureNow));
+    const bool current=authorityCurrent&&
+        diagnostic.test(D::InterfaceIncarnationNonzero,interfaceIncarnation!=0)&&
+        diagnostic.test(D::InterfacePresent,interface!=nullptr)&&
+        diagnostic.test(D::NotClosing,!closing)&&
+        diagnostic.test(D::NotDetached,!detached)&&
+        diagnostic.test(D::RadioReady,radio)&&
+        diagnostic.test(D::ClosingNotRequested,
+            (v[D::ClosingRequested]=__atomic_load_n(
+                &closingRequested,__ATOMIC_ACQUIRE))==0)&&
+        diagnostic.test(D::RadioGenerationMatches,radioGeneration==generation)&&
+        diagnostic.test(D::Attached,
+            (v[D::AttachedCount]=__atomic_load_n(
+                &counters[Attached],__ATOMIC_ACQUIRE))!=0);
     item.interfaceIncarnation=interfaceIncarnation;
     item.rx149GuardVersion=activeRx149Version;
     const bool sequenceAvailable=rx149ReceiptSequence!=UINT64_MAX;
     const bool revisionAvailable=rx149ReceiptContentRevision!=UINT64_MAX;
     const bool spaceAvailable=rx.count<QueueDepth;
-    const bool accepted=current&&sequenceAvailable&&revisionAvailable&&
-        spaceAvailable;
+    v[D::QueueCountAtDecision]=rx.count;
+    const bool accepted=current&&
+        diagnostic.test(D::SequenceAvailable,sequenceAvailable)&&
+        diagnostic.test(D::RevisionAvailable,revisionAvailable)&&
+        diagnostic.test(D::QueueSpaceAvailable,spaceAvailable);
     if(accepted) {
         item.rx149ReceiptSequence=++rx149ReceiptSequence;
         rx149Receipt=makeRx149Receipt(
@@ -1167,22 +1250,26 @@ CaptureResult captureRx149Data(
         rx149Receipt.schemaVersion=0;
     }
     set(RxPending,rx.count);
+    v[D::AssignedReceiptSequence]=item.rx149ReceiptSequence;
     IOSimpleLockUnlockEnableInterrupt(lock,irq);
     for(size_t index=0;index<expired;++index)add(RxRejected);
     if(accepted) {
         add(RxCaptured);
-        return CaptureResult::Captured;
+        return finish(CaptureResult::Captured);
     }
     if(!current) {
         add(RxRejected);
-        return CaptureResult::Rejected;
+        return finish(CaptureResult::Rejected);
     }
     if(!sequenceAvailable||!revisionAvailable) {
         add(RxRejected);
-        return CaptureResult::Rejected;
+        return finish(CaptureResult::Rejected);
     }
     add(RxQueueFull);
-    return CaptureResult::QueueFull;
+    return finish(CaptureResult::QueueFull);
+}
+void captureRx149Diagnostics(Rx149CaptureDiagnostics::Wire *out) {
+    rx149CaptureLedger.copy(out);
 }
 namespace {
 mbuf_t nextTxImpl(uint16_t sequence,uint64_t *token,

@@ -12,6 +12,7 @@
 #endif
 #if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
 #include "../../native/p2p_rx149_input_receipt_publisher.hpp"
+#include <libkern/c++/OSData.h>
 #endif
 #if defined(ITL_NATIVE_AWDL_LIFECYCLE_25G332)
 #include "../../native/awdl_native_lifecycle_25G332.hpp"
@@ -1615,6 +1616,22 @@ void ItlIwx::tahoeP2pRxDrain()
     }
 #if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
     publishRx149InputReceipt(controller,data.rx149Input);
+    // A single OSData replacement exports a fixed numeric cut, outside the
+    // RX/queue lock. It may lag capture; CompleteCut is not freshness or END
+    // proof. A failed property replacement leaves the older blob intact.
+    NativeAwdlBSD::Rx149CaptureDiagnostics::Wire captureAttempts{};
+    NativeAwdlBSD::captureRx149Diagnostics(&captureAttempts);
+    auto retainedCaptureAttempts=controller->copyProperty(
+        "NativeAwdlDataRx149CaptureAttempts");
+    auto priorCaptureAttempts=OSDynamicCast(OSData,retainedCaptureAttempts);
+    const bool captureAttemptsChanged=!priorCaptureAttempts||
+       priorCaptureAttempts->getLength()!=sizeof(captureAttempts)||
+       memcmp(priorCaptureAttempts->getBytesNoCopy(),&captureAttempts,
+              sizeof(captureAttempts))!=0;
+    if(retainedCaptureAttempts)retainedCaptureAttempts->release();
+    if(captureAttemptsChanged)
+        controller->setProperty("NativeAwdlDataRx149CaptureAttempts",
+                                &captureAttempts,sizeof(captureAttempts));
 #endif
 #endif
 #if defined(ITL_NATIVE_AWDL_LIFECYCLE_25G332)

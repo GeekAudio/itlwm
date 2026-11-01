@@ -118,6 +118,7 @@
 #include "../../native/iwx_add_sta_key_status.hpp"
 #include "../../native/iwx_init_wait.hpp"
 #include "../../native/iwx_eapol_priority.hpp"
+#include "../../native/iwx_tx_rsp_retry_observation.hpp"
 #ifdef AIRPORT_TAHOE
 #include "IwxTxRate.hpp"
 #endif
@@ -1170,7 +1171,7 @@ static bool publishCompletionSnapshot(IOEthernetController *controller,
     };
     if (!scalar("SnapshotVersionBegin", finish - 1U))
         return false;
-    bool okay = scalar("Schema", 4) && scalar("SnapshotComplete", 0) &&
+    bool okay = scalar("Schema", 5) && scalar("SnapshotComplete", 0) &&
         scalar("SnapshotAvailable", snapshot.available) &&
         scalar("DroppedCount", snapshot.dropped_count) &&
         scalar("NextSerial", snapshot.next_serial) &&
@@ -1227,6 +1228,12 @@ static bool publishCompletionSnapshot(IOEthernetController *controller,
         PUBLISH_COMPLETION_FIELD("Cur", cur);
         PUBLISH_COMPLETION_FIELD("Tail", tail);
         PUBLISH_COMPLETION_FIELD("FrameCount", frame_count);
+        PUBLISH_COMPLETION_FIELD("TxRspRetryStatsVersion",
+                                 tx_rsp_retry_stats_version);
+        PUBLISH_COMPLETION_FIELD("TxRspBtKillCount", tx_rsp_bt_kill_count);
+        PUBLISH_COMPLETION_FIELD("TxRspFailureRts", tx_rsp_failure_rts);
+        PUBLISH_COMPLETION_FIELD("TxRspFailureFrame",
+                                 tx_rsp_failure_frame);
         PUBLISH_COMPLETION_FIELD("Ssn", ssn);
         PUBLISH_COMPLETION_FIELD("RaTid", ra_tid);
         PUBLISH_COMPLETION_FIELD("Status", status);
@@ -9575,6 +9582,41 @@ static void txCompletionSetTxRspFacts(
     }
 }
 
+/* Only attach the common TX_RSP retry-counter prefix after the STA path has
+ * validated a single-frame response against a live queue/ring/SSN interval.
+ * This remains host-side parsing; it does not establish RF, TX success, ACK,
+ * or peer receipt. */
+static void txCompletionSetTxRspRetryFacts(
+    iwx_tx_completion_event_input *event,
+    const struct iwx_rx_packet *pkt, size_t payloadLength)
+{
+    if (!event || !pkt || event->kind != IWX_TX_COMPLETION_TX_RSP ||
+        (event->presence_flags & (IWX_TX_COMPLETION_HAS_FRAME_COUNT |
+                                  IWX_TX_COMPLETION_HAS_PAYLOAD_LENGTH)) !=
+            (IWX_TX_COMPLETION_HAS_FRAME_COUNT |
+             IWX_TX_COMPLETION_HAS_PAYLOAD_LENGTH) ||
+        event->frame_count != 1)
+        return;
+
+    const size_t oneFrameRequiredLength =
+        offsetof(struct iwx_tx_resp, status) +
+        sizeof(struct iwx_agg_tx_status) + sizeof(uint32_t);
+    static_assert(oneFrameRequiredLength ==
+            IwxTxRspRetryObservation::kSingleFrameMinimumPayloadLength,
+        "TX_RSP retry-stat layout must match the local host declaration");
+    IwxTxRspRetryObservation::Fields retryStats{};
+    if (!IwxTxRspRetryObservation::decodeSingleFrameV1(
+            reinterpret_cast<const uint8_t *>(pkt->data), payloadLength,
+            oneFrameRequiredLength, &retryStats))
+        return;
+
+    event->tx_rsp_retry_stats_version =
+        IwxTxRspRetryObservation::kLayoutCommonPrefixV1;
+    event->tx_rsp_bt_kill_count = retryStats.bt_kill_count;
+    event->tx_rsp_failure_rts = retryStats.failure_rts;
+    event->tx_rsp_failure_frame = retryStats.failure_frame;
+}
+
 
 static void txCompletionSetBaFacts(
     iwx_tx_completion_event_input *event,
@@ -10309,6 +10351,8 @@ iwx_rx_tx_cmd(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
         txRspCompletion.event().presence_flags |=
             IWX_TX_COMPLETION_HAS_QUEUE_INDEX;
         txRspCompletion.event().queue_index = checkedIndex;
+        txCompletionSetTxRspRetryFacts(&txRspCompletion.event(), pkt,
+                                       payloadLength);
 #endif
         // Do not discharge the shared TX watchdog for a response that cannot
         // identify a live single-frame ring interval. This is deliberately

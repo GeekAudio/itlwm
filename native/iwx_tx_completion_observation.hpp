@@ -3,6 +3,9 @@
 #define GEEK_IWX_TX_COMPLETION_OBSERVATION_HPP
 
 #include <stdint.h>
+#include <stddef.h>
+
+#include "iwx_tx_rsp_retry_observation.hpp"
 
 /*
  * Fixed-size numeric observations for RX dispatch and TX-completion handler
@@ -12,8 +15,9 @@
  * headers in the response's reclaim interval. Schema 3 may additionally
  * retain one raw TX_CMD header from a complete one-entry interval. Schema 4
  * adds unique current Group2 host-side slot provenance observed during the
- * existing matcher traversal. None changes ring ownership or claims firmware
- * acceptance or peer receipt.
+ * existing matcher traversal. Schema 5 adds a versioned single-frame TX_RSP
+ * retry-counter variant in existing record padding. None changes ring
+ * ownership or claims firmware acceptance or peer receipt.
  *
  * Producers make one CAS attempt only. Invalid input, a saturated counter,
  * or contention increments dropped_count where possible; any such loss makes
@@ -181,11 +185,15 @@ typedef struct iwx_tx_completion_event_record {
     /* FC in bits 31..16 and SC in bits 15..0 for a single readable slot. */
     uint32_t single_slot_txcmd_header;
     uint8_t host_origin_state;
+    uint8_t tx_rsp_bt_kill_count;
+    uint8_t tx_rsp_failure_rts;
+    uint8_t tx_rsp_failure_frame;
     uint32_t host_origin_context_generation;
     uint32_t host_origin_output_epoch;
     uint32_t host_origin_identity_epoch;
     uint32_t host_origin_attempt_id;
     uint8_t host_origin_source;
+    uint8_t tx_rsp_retry_stats_version;
     uint16_t host_origin_index;
     uint16_t host_origin_frame_control;
     uint16_t host_origin_sequence_control;
@@ -244,6 +252,10 @@ typedef struct iwx_tx_completion_event_input {
     uint32_t host_origin_identity_epoch;
     uint32_t host_origin_attempt_id;
     uint32_t host_origin_source;
+    uint32_t tx_rsp_retry_stats_version;
+    uint32_t tx_rsp_bt_kill_count;
+    uint32_t tx_rsp_failure_rts;
+    uint32_t tx_rsp_failure_frame;
     uint32_t host_origin_index;
     uint32_t host_origin_frame_control;
     uint32_t host_origin_sequence_control;
@@ -288,6 +300,26 @@ static_assert(sizeof(iwx_tx_completion_event_record) <= 256,
               "TX completion record must remain fixed and scalar");
 static_assert(sizeof(iwx_tx_completion_event_record) <= 240,
               "compact TX completion record exceeded the pending-cut budget");
+static_assert(offsetof(iwx_tx_completion_event_record, tx_rsp_bt_kill_count) ==
+                  offsetof(iwx_tx_completion_event_record, host_origin_state) + 1,
+              "TX_RSP bt_kill_count must occupy existing record padding");
+static_assert(offsetof(iwx_tx_completion_event_record, tx_rsp_failure_rts) ==
+                  offsetof(iwx_tx_completion_event_record, host_origin_state) + 2,
+              "TX_RSP failure_rts must occupy existing record padding");
+static_assert(offsetof(iwx_tx_completion_event_record, tx_rsp_failure_frame) ==
+                  offsetof(iwx_tx_completion_event_record, host_origin_state) + 3,
+              "TX_RSP failure_frame must occupy existing record padding");
+static_assert(offsetof(iwx_tx_completion_event_record,
+                       host_origin_context_generation) ==
+                  offsetof(iwx_tx_completion_event_record, host_origin_state) + 4,
+              "TX_RSP fields must not grow the host-origin record block");
+static_assert(offsetof(iwx_tx_completion_event_record,
+                       tx_rsp_retry_stats_version) ==
+                  offsetof(iwx_tx_completion_event_record, host_origin_source) + 1,
+              "TX_RSP layout version must occupy existing record padding");
+static_assert(offsetof(iwx_tx_completion_event_record, host_origin_index) ==
+                  offsetof(iwx_tx_completion_event_record, host_origin_source) + 2,
+              "TX_RSP layout version must not move host-origin index");
 static_assert(sizeof(iwx_tx_completion_observation_state) <=
                   IWX_TX_COMPLETION_STATE_MAX_BYTES,
               "TX completion observer state exceeded its embedded bound");
@@ -548,6 +580,32 @@ static inline bool absentValuesAreZero(
 #undef IWX_TX_COMPLETION_ABSENT_ZERO
 }
 
+static inline bool validTxRspRetryStats(
+    const iwx_tx_completion_event_input *in)
+{
+    if (!in || in->tx_rsp_retry_stats_version >
+            IwxTxRspRetryObservation::kLayoutCommonPrefixV1 ||
+        in->tx_rsp_bt_kill_count > UINT8_MAX ||
+        in->tx_rsp_failure_rts > UINT8_MAX ||
+        in->tx_rsp_failure_frame > UINT8_MAX)
+        return false;
+
+    if (in->tx_rsp_retry_stats_version ==
+        IwxTxRspRetryObservation::kLayoutUnavailable)
+        return in->tx_rsp_bt_kill_count == 0 &&
+            in->tx_rsp_failure_rts == 0 &&
+            in->tx_rsp_failure_frame == 0;
+
+    const uint32_t requiredPresence =
+        IWX_TX_COMPLETION_HAS_FRAME_COUNT |
+        IWX_TX_COMPLETION_HAS_PAYLOAD_LENGTH;
+    return in->kind == IWX_TX_COMPLETION_TX_RSP &&
+        (in->presence_flags & requiredPresence) == requiredPresence &&
+        in->frame_count == 1 &&
+        in->payload_length >=
+            IwxTxRspRetryObservation::kSingleFrameMinimumPayloadLength;
+}
+
 static inline bool validWidths(const iwx_tx_completion_event_input *in)
 {
     if (in->host_origin_state >
@@ -729,7 +787,8 @@ static inline bool validInput(const iwx_tx_completion_event_input *in)
         return false;
     if ((in->presence_flags & IWX_TX_COMPLETION_HAS_OUTPUT_EPOCH) == 0U)
         return false;
-    return absentValuesAreZero(in) && validWidths(in);
+    return absentValuesAreZero(in) && validWidths(in) &&
+        validTxRspRetryStats(in);
 }
 
 static inline void copyInput(const iwx_tx_completion_event_input *in,
@@ -790,6 +849,13 @@ static inline void copyInput(const iwx_tx_completion_event_input *in,
     out->host_origin_identity_epoch = in->host_origin_identity_epoch;
     out->host_origin_attempt_id = in->host_origin_attempt_id;
     out->host_origin_source = static_cast<uint8_t>(in->host_origin_source);
+    out->tx_rsp_retry_stats_version = static_cast<uint8_t>(
+        in->tx_rsp_retry_stats_version);
+    out->tx_rsp_bt_kill_count = static_cast<uint8_t>(
+        in->tx_rsp_bt_kill_count);
+    out->tx_rsp_failure_rts = static_cast<uint8_t>(in->tx_rsp_failure_rts);
+    out->tx_rsp_failure_frame = static_cast<uint8_t>(
+        in->tx_rsp_failure_frame);
     out->host_origin_index = static_cast<uint16_t>(in->host_origin_index);
     out->host_origin_frame_control =
         static_cast<uint16_t>(in->host_origin_frame_control);
