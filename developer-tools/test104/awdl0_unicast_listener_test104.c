@@ -419,7 +419,9 @@ int main(int argc, char **argv) {
         message.msg_iovlen = 1;
         message.msg_control = control;
         message.msg_controllen = sizeof(control);
-        received = recvmsg(fd, &message, MSG_TRUNC | MSG_DONTWAIT);
+        /* On Darwin, passing MSG_TRUNC as an input flag is reflected in
+         * msg_flags even when the full datagram fits. Keep it output-only. */
+        received = recvmsg(fd, &message, MSG_DONTWAIT);
         if (received < 0) {
             if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
             receive_error = errno;
