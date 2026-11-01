@@ -122,6 +122,7 @@ CPP_HANDLER_PREFIX = r"""
 #include "native/iwx_tx_ring_capacity.hpp"
 #include "native/iwx_tx_response_metadata.hpp"
 #include "native/iwx_sta_tx_observation.hpp"
+#include "native/iwx_txcmd_identity_observation.hpp"
 #include "native/group2_tx_trace_helpers.h"
 
 #define AIRPORT_TAHOE 1
