@@ -13,7 +13,8 @@ window.TEST_RECORDS = [
       "149频道同owner ROC START/END通过；MIF Action来源归属、解析和队列接纳通过，未验证具体外部iPhone身份。",
       "OpenWrt 4次本地send与4个精确PACKET_OUTGOING回显；无PID/cookie TXS、ACK或RF证明，跨时钟映射未校准。",
       "同一RX descriptor含host/GP2/TSF时钟值，但缺该硬件样本的误差界。awdl0 30.480秒/7次快照保持UP/RUNNING并有IPv6路由；无AWDL数据/ifnet回执。",
-      "12:04捕获自然GTK更新；随后30秒、31个样本保持链路与IP，无新增watchdog、复位或固件错误。提交、doorbell和回收侧车指向同一host槽位，但TX_RSP帧头身份仍不匹配，完成回报未闭合；一次稳定窗口不代表问题已彻底修复。"
+      "12:04捕获自然GTK更新；随后30秒、31个样本保持链路与IP，无新增watchdog、复位或固件错误。提交、doorbell和回收侧车指向同一host槽位，但TX_RSP帧头身份仍不匹配，完成回报未闭合；一次稳定窗口不代表问题已彻底修复。",
+      "后续公网对照：强制绑定Wi-Fi和有线接口访问同一HTTPS站点均超时；默认路由请求返回200，绑定Wi-Fi接口的网关检查通过。不能据此归因Intel掉线，也不把默认路由成功算成Wi-Fi公网验收。"
     ],
     "blockers": [
       "AWDL数据帧进入原生ifnet仍无直接证据。",
