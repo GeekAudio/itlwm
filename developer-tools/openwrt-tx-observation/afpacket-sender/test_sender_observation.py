@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 
 
 ROOT = Path(__file__).resolve().parent
 FIXTURE_SOURCE = ROOT / "test_radiotap_observation.c"
+CLASSIFIER = ROOT.parent / "openwrt_tx_observation.py"
 
 
 class SenderObservationTests(unittest.TestCase):
@@ -96,6 +98,76 @@ class SenderObservationTests(unittest.TestCase):
             self.assertIsNone(failed_capture["actual_finished_ns"])
             self.assertFalse(failed_capture["decode_coverage"]["kernel_stats_available"])
             self.assertEqual(failed_capture["decode_coverage"]["receive_error"], 5)
+
+            short_headers = subprocess.run(
+                [str(binary), "--emit-short-header-fixtures"],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(short_headers.returncode, 0, short_headers.stderr)
+            short_rows = [line for line in short_headers.stdout.splitlines()
+                          if line.strip()]
+            self.assertEqual(len(short_rows), 1)
+            short_result = json.loads(short_rows[0])
+            short_capture = short_result["tx_provenance"]["capture"]
+            self.assertEqual(short_result["tx_provenance"]["fixture_mode"],
+                             "synthetic_host_fixture")
+            self.assertEqual(short_capture["decode_coverage"]["packet_received"], 3)
+            self.assertEqual(short_capture["decode_coverage"]["invalid_radiotap"], 3)
+            self.assertEqual(short_capture["decode_coverage"]["packet_decoded"], 0)
+            self.assertEqual(short_capture["decode_coverage"][
+                "rejected_radiotap_samples_recorded"], 3)
+            self.assertEqual([sample["raw_prefix_len"] for sample in
+                              short_capture["rejected_radiotap_samples"]],
+                             [1, 3, 7])
+
+            saved_input = Path(temp) / "short-header-sender-result.json"
+            saved_input.write_text(json.dumps(short_result), encoding="utf-8")
+            classified = subprocess.run(
+                [sys.executable, str(CLASSIFIER), str(saved_input)],
+                capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(classified.returncode, 0, classified.stderr)
+            summary = json.loads(classified.stdout)
+            self.assertEqual(summary["evidence_scope"], "synthetic")
+            self.assertEqual(summary["capture"]["decode_coverage"][
+                "invalid_radiotap"], 3)
+            decoded_samples = summary["capture"]["rejected_samples"]
+            self.assertEqual(len(decoded_samples), 3)
+            expected_fields = [
+                {"version_present": True, "version": 0,
+                 "pad_present": False, "pad": None,
+                 "rtap_declared_len_present": False,
+                 "rtap_declared_len": None,
+                 "present_bitmap_present": False,
+                 "present_bitmap_complete": False,
+                 "present_bitmap_capacity_exceeded": False,
+                 "present_word_count": 0, "present_words": []},
+                {"version_present": True, "version": 0,
+                 "pad_present": True, "pad": 0,
+                 "rtap_declared_len_present": False,
+                 "rtap_declared_len": None,
+                 "present_bitmap_present": False,
+                 "present_bitmap_complete": False,
+                 "present_bitmap_capacity_exceeded": False,
+                 "present_word_count": 0, "present_words": []},
+                {"version_present": True, "version": 0,
+                 "pad_present": True, "pad": 0,
+                 "rtap_declared_len_present": True,
+                 "rtap_declared_len": 8,
+                 "present_bitmap_present": False,
+                 "present_bitmap_complete": False,
+                 "present_bitmap_capacity_exceeded": False,
+                 "present_word_count": 0, "present_words": []},
+            ]
+            for sample, expected in zip(decoded_samples, expected_fields):
+                self.assertEqual(sample["reject_reason"], "short_header")
+                self.assertEqual(sample["classification"],
+                                 "rejected_prefix_unmatched")
+                self.assertEqual(sample["raw_header_fields"], expected)
+                self.assertEqual(sample["full_packet_identity"], "unknown")
+            self.assertFalse(summary["rf_transmission_proven"])
+            self.assertFalse(summary["ack_proven"])
+            self.assertFalse(summary["peer_receipt_proven"])
 
 
 if __name__ == "__main__":

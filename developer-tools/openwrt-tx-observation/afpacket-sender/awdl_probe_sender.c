@@ -538,18 +538,28 @@ static enum radiotap_parse_result parse_radiotap(
     bool extended;
     if (out == NULL) return RADIOTAP_INVALID;
     memset(out, 0, sizeof(*out));
+
+    /* Preserve only header bytes that were actually available, even when the
+     * packet is too short to contain a complete radiotap header. */
+    if (packet != NULL) {
+        if (packet_length >= 1U) {
+            out->version_present = true;
+            out->version = packet[0];
+        }
+        if (packet_length >= 2U) {
+            out->pad_present = true;
+            out->pad = packet[1];
+        }
+        if (packet_length >= 4U) {
+            out->declared_header_length_present = true;
+            out->declared_header_length = read_le16(packet + 2U);
+        }
+        capture_present_bitmap_bytes(packet, packet_length, out);
+    }
     if (packet == NULL || packet_length < 8U) {
         out->reject_reason = RADIOTAP_REJECT_SHORT_HEADER;
         return RADIOTAP_INVALID;
     }
-
-    out->version_present = true;
-    out->version = packet[0];
-    out->pad_present = true;
-    out->pad = packet[1];
-    out->declared_header_length_present = true;
-    out->declared_header_length = read_le16(packet + 2U);
-    capture_present_bitmap_bytes(packet, packet_length, out);
     if (out->version != 0U) {
         out->reject_reason = RADIOTAP_REJECT_INVALID_VERSION;
         return RADIOTAP_INVALID;

@@ -9,6 +9,7 @@ are read into process memory only and are never written to disk or printed.
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import os
@@ -141,9 +142,10 @@ def public_get(url: str) -> bytes:
         return response.read()
 
 
-def snapshot_site() -> tuple[dict[str, bytes], dict]:
-    run([sys.executable, str(REFRESH)], cwd=ROOT,
-        env_overrides={"INTELWIRELESS_PAGES_PUBLISHER_ACTIVE": "1"})
+def snapshot_site(*, refresh: bool = True) -> tuple[dict[str, bytes], dict]:
+    if refresh:
+        run([sys.executable, str(REFRESH)], cwd=ROOT,
+            env_overrides={"INTELWIRELESS_PAGES_PUBLISHER_ACTIVE": "1"})
     payload: dict[str, bytes] = {}
     for relative in FILES:
         source = SITE / relative
@@ -256,7 +258,19 @@ def write_site_to_branch(payload: dict[str, bytes], prefix: str, branch_exists: 
 
 
 def main() -> int:
-    payload, data = snapshot_site()
+    global SITE, RESEARCH, STATE_PATH
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--snapshot-dir", type=Path,
+                        help="Publish an already generated snapshot using the same file and privacy checks")
+    parser.add_argument("--state-dir", type=Path,
+                        help="Directory for private publication receipts")
+    args = parser.parse_args()
+    if args.snapshot_dir is not None:
+        SITE = args.snapshot_dir.resolve(strict=True)
+    if args.state_dir is not None:
+        RESEARCH = args.state_dir.resolve()
+        STATE_PATH = RESEARCH / "github-pages-state-private.json"
+    payload, data = snapshot_site(refresh=args.snapshot_dir is None)
     runtime_label = data["runningCandidate"].rsplit("-", 1)[-1]
     next_candidate = data.get("nextCandidate")
     next_label = next_candidate.rsplit("-", 1)[-1] if isinstance(next_candidate, str) else ""

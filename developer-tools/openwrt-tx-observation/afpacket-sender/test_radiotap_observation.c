@@ -81,6 +81,42 @@ static void test_truncated_bitmap_short_header_and_lengths(void) {
     assert(parsed.reject_reason == RADIOTAP_REJECT_INVALID_DECLARED_LENGTH);
 }
 
+static void test_short_header_preserves_only_available_fields(void) {
+    const uint8_t one_byte[] = {0U};
+    const uint8_t three_bytes[] = {0U, 0U, 8U};
+    const uint8_t seven_bytes[] = {0U, 0U, 8U, 0U, 0U, 0U, 0U};
+    const struct {
+        const uint8_t *bytes;
+        size_t length;
+        bool version_present;
+        bool pad_present;
+        bool declared_length_present;
+    } cases[] = {
+        {one_byte, sizeof(one_byte), true, false, false},
+        {three_bytes, sizeof(three_bytes), true, true, false},
+        {seven_bytes, sizeof(seven_bytes), true, true, true},
+    };
+
+    for (size_t index = 0U; index < sizeof(cases) / sizeof(cases[0]); ++index) {
+        struct radiotap_observation parsed;
+        assert(parse_radiotap(cases[index].bytes, cases[index].length,
+                              &parsed) == RADIOTAP_INVALID);
+        assert(parsed.reject_reason == RADIOTAP_REJECT_SHORT_HEADER);
+        assert(parsed.version_present == cases[index].version_present);
+        assert(parsed.pad_present == cases[index].pad_present);
+        assert(parsed.declared_header_length_present ==
+               cases[index].declared_length_present);
+        assert(!parsed.present_bitmap_present);
+        assert(!parsed.present_bitmap_complete);
+        assert(!parsed.present_bitmap_capacity_exceeded);
+        assert(parsed.present_word_count == 0U);
+        if (parsed.version_present) assert(parsed.version == 0U);
+        if (parsed.pad_present) assert(parsed.pad == 0U);
+        if (parsed.declared_header_length_present)
+            assert(parsed.declared_header_length == 8U);
+    }
+}
+
 static void test_field_bounds_and_present_capacity_overflow(void) {
     uint8_t field_missing[8] = {0, 0, 8, 0, 2, 0, 0, 0};
     struct radiotap_observation parsed;
@@ -256,16 +292,86 @@ static int emit_synthetic_failure_result(void) {
     return emit_send_result(&result);
 }
 
+static int emit_synthetic_short_header_results(void) {
+    static const uint8_t one_byte[] = {0U};
+    static const uint8_t three_bytes[] = {0U, 0U, 8U};
+    static const uint8_t seven_bytes[] = {0U, 0U, 8U, 0U, 0U, 0U, 0U};
+    static const struct {
+        const uint8_t *bytes;
+        size_t length;
+    } packets[] = {
+        {one_byte, sizeof(one_byte)},
+        {three_bytes, sizeof(three_bytes)},
+        {seven_bytes, sizeof(seven_bytes)},
+    };
+
+    struct send_result result;
+    memset(&result, 0, sizeof(result));
+    result.frames_requested = 1U;
+    result.frames_attempted = 1U;
+    result.frames_completed = 1U;
+    result.timing_valid = true;
+    result.finished_time_valid = true;
+    result.go_received_ns = UINT64_C(90000);
+    result.started_ns = UINT64_C(100000);
+    result.finished_ns = UINT64_C(131000);
+    result.elapsed_ns = UINT64_C(31000);
+    result.stop_reason = "complete";
+    struct send_sample *send = &result.samples[0];
+    send->ordinal = 0U;
+    send->ieee80211_sequence = WIFI_SEQUENCE_BASE;
+    send->awdl_sequence = AWDL_SEQUENCE_BASE;
+    send->before_time_valid = true;
+    send->after_time_valid = true;
+    send->before_ns = UINT64_C(110000);
+    send->after_ns = UINT64_C(111000);
+    send->return_value = (ssize_t)PACKET_LENGTH;
+    mpdu_sha256_hex(mpdu_base, MPDU_LENGTH, send->mpdu_sha256);
+
+    struct provenance_capture *capture = &result.provenance;
+    capture->available = true;
+    capture->complete = true;
+    capture->capture_started = true;
+    capture->capture_finished = true;
+    capture->synthetic_fixture = true;
+    capture->started_ns = UINT64_C(100000);
+    capture->ended_ns = UINT64_C(131000);
+    capture->actual_finished_ns = UINT64_C(131000);
+    capture->deadline_ns = capture->started_ns + TX_BUDGET_NS;
+    capture->rx_packets = (unsigned)(sizeof(packets) / sizeof(packets[0]));
+    capture->invalid_radiotap = capture->rx_packets;
+    capture->rejected_packets = capture->rx_packets;
+    capture->kernel_stats_available = true;
+    capture->kernel_packets = capture->rx_packets;
+    capture->pre_send_queue_empty = true;
+
+    for (size_t index = 0U; index < sizeof(packets) / sizeof(packets[0]); ++index) {
+        struct radiotap_observation parsed;
+        if (parse_radiotap(packets[index].bytes, packets[index].length,
+                           &parsed) != RADIOTAP_INVALID ||
+            parsed.reject_reason != RADIOTAP_REJECT_SHORT_HEADER)
+            return 1;
+        record_rejected_radiotap(capture, packets[index].bytes,
+            packets[index].length, packets[index].length, 0U, true,
+            PACKET_TYPE_OTHERHOST, true, 7, false,
+            parsed.reject_reason, &parsed);
+    }
+    return emit_send_result(&result);
+}
+
 int main(int argc, char **argv) {
     if (argc == 2 && strcmp(argv[1], "--emit-synthetic") == 0)
         return emit_synthetic_result();
     if (argc == 2 && strcmp(argv[1], "--emit-synthetic-failure") == 0)
         return emit_synthetic_failure_result();
+    if (argc == 2 && strcmp(argv[1], "--emit-short-header-fixtures") == 0)
+        return emit_synthetic_short_header_results();
     if (argc != 1) return 2;
     test_valid_empty_header_boundary();
     test_vendor_namespace_is_preserved_as_reject();
     test_extended_bitmap_valid_and_unknown_namespace();
     test_truncated_bitmap_short_header_and_lengths();
+    test_short_header_preserves_only_available_fields();
     test_field_bounds_and_present_capacity_overflow();
     test_rejected_sample_fields_prefix_hash_and_overflow();
     test_exact_observation_publish_is_atomic_on_clock_failure();
