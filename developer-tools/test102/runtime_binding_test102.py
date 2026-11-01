@@ -47,6 +47,9 @@ METADATA_RELATIVE = Path(
 EXPECTED_SENDER_SCHEMA = "test102-unicast-sender/v1"
 METADATA_SCHEMA = "native-awdl-rx149-controlled-probe-private/v2"
 RUNTIME_BINDING_SCHEMA = "test102-runtime-binding/v1"
+LISTENER_BINDING_SCHEMA = "test102-awdl-unicast-listener-binding/v1"
+LISTENER_SOURCE = TOOL_DIR / "awdl0_unicast_listener_test102.c"
+LISTENER_PROTOCOL_SOURCE = TOOL_DIR / "listener_protocol_test102.py"
 ROUTER_RECEIPT_MAX_AGE_SECONDS = 180
 TARGET_RECEIPT_MAX_AGE_SECONDS = 180
 
@@ -231,6 +234,20 @@ def build_disarmed_metadata(*, iwn_root: Path,
         "sender_observation_binding": binding,
         "packet_template_sha256": packetset.TEMPLATE_SHA256,
         "packet_set_length_bytes": packetset.PACKET_SET_LEN,
+        "listener_binding": {
+            "schema": LISTENER_BINDING_SCHEMA,
+            "listener_source_sha256": _sha(LISTENER_SOURCE.read_bytes()),
+            "listener_protocol_source_sha256": _sha(LISTENER_PROTOCOL_SOURCE.read_bytes()),
+            "destination_contract": "exact_fresh_manifest_ipv6_unicast",
+            "interface": "awdl0",
+            "interface_ifindex_bound": True,
+            "source_port": 49152,
+            "destination_port": 49153,
+            "hop_limit": 1,
+            "payload": "T086RX01",
+            "truncation_rejected": True,
+            "raw_addresses_serialized": False,
+        },
         "receiver_identity": {
             "interface": "awdl0",
             "status": "capture_after_deployment_reboot",
@@ -428,6 +445,20 @@ def validate_disarmed_metadata(metadata: Any, build: dict,
     expected_binding = _sender_observation_binding(sender, sender_raw)
     extension = metadata.get("runtime_binding_test102") if isinstance(metadata, dict) else None
     source_binding = metadata.get("source_binding") if isinstance(metadata, dict) else None
+    expected_listener_binding = {
+        "schema": LISTENER_BINDING_SCHEMA,
+        "listener_source_sha256": _sha(LISTENER_SOURCE.read_bytes()),
+        "listener_protocol_source_sha256": _sha(LISTENER_PROTOCOL_SOURCE.read_bytes()),
+        "destination_contract": "exact_fresh_manifest_ipv6_unicast",
+        "interface": "awdl0",
+        "interface_ifindex_bound": True,
+        "source_port": 49152,
+        "destination_port": 49153,
+        "hop_limit": 1,
+        "payload": "T086RX01",
+        "truncation_rejected": True,
+        "raw_addresses_serialized": False,
+    }
     if (not isinstance(metadata, dict) or
             metadata.get("schema") != METADATA_SCHEMA or
             metadata.get("candidate") != CANDIDATE or
@@ -453,6 +484,7 @@ def validate_disarmed_metadata(metadata: Any, build: dict,
             extension.get("sender_observation_binding") != expected_binding or
             extension.get("packet_template_sha256") != packetset.TEMPLATE_SHA256 or
             extension.get("packet_set_length_bytes") != packetset.PACKET_SET_LEN or
+            extension.get("listener_binding") != expected_listener_binding or
             extension.get("receiver_identity", {}).get("contains_address") is not False or
             extension.get("receiver_identity", {}).get("status") != "capture_after_deployment_reboot" or
             extension.get("router_source_identity", {}).get("contains_address") is not False or
@@ -469,6 +501,9 @@ def validate_test102_tool_contract(metadata: dict, iwn_root: Path) -> None:
         raise RuntimeBindingError("test102_arm_helper_unavailable")
     if metadata.get("expected_arm_helper_source_sha256") != _sha(ARM_HELPER.read_bytes()):
         raise RuntimeBindingError("test102_arm_helper_hash_mismatch")
+    for path in (LISTENER_SOURCE, LISTENER_PROTOCOL_SOURCE):
+        if path.is_symlink() or not path.is_file():
+            raise RuntimeBindingError("test102_unicast_listener_source_unavailable")
     build, deployment, sender, build_raw, deployment_raw, sender_raw = _read_receipt_bundle(iwn_root)
     validate_disarmed_metadata(metadata, build, deployment, sender,
                                build_raw, deployment_raw, sender_raw)

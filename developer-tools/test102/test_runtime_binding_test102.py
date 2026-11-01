@@ -5,7 +5,11 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+from pathlib import Path
+import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest import mock
 
 import runtime_binding_test102 as runtime
 
@@ -107,6 +111,115 @@ IFACE=wlan7
                 self._target_receipt(), expected_boot_epoch=self.boot,
                 expected_uuid=self.uuid, router_receipt_sha256="e" * 64,
                 now=self.now)
+
+    def test_disarmed_metadata_builder_and_prearm_pin_unicast_listener(self):
+        with tempfile.TemporaryDirectory(prefix="test102-metadata-prearm-") as temp:
+            root = Path(temp)
+            build_path = root / "build.json"
+            baseline_path = root / "baseline.json"
+            build_path.write_text("{}", encoding="utf-8")
+            baseline_path.write_text("{}", encoding="utf-8")
+            uuid = "8907BD50-B8B3-32DD-BCC3-82C66CAD7BE1"
+            build = {
+                "candidate": runtime.CANDIDATE, "status": "built_offline",
+                "installed": False, "rf_tested": False,
+                "mach_o_uuid": uuid, "binary_sha256": "a" * 64,
+                "baseline": "Test101", "rx149_data_input_contract": {},
+            }
+            build_raw = json.dumps(build, sort_keys=True).encode()
+            baseline = {"candidate": "Test101"}
+            baseline_raw = json.dumps(baseline, sort_keys=True).encode()
+            deployment = {
+                "candidate": runtime.CANDIDATE,
+                "status": "deployed_waiting_reboot_disarmed",
+                "automatic_reboot": False, "mach_o_uuid": uuid,
+                "binary_sha256": build["binary_sha256"],
+                "build_report_sha256": hashlib.sha256(build_raw).hexdigest(),
+            }
+            deployment_raw = json.dumps(deployment, sort_keys=True).encode()
+            sender = {
+                "candidate": runtime.CANDIDATE, "status": "built_offline",
+                "target": "aarch64-linux-musl",
+                "source_sha256": hashlib.sha256(runtime.SENDER_SOURCE.read_bytes()).hexdigest(),
+                "binary_sha256": "b" * 64,
+            }
+            sender_raw = json.dumps(sender, sort_keys=True).encode()
+            receipts = (build, deployment, sender, build_raw, deployment_raw, sender_raw)
+
+            class CandidateBinding:
+                @staticmethod
+                def default_build_receipt_path(_root, _candidate):
+                    return baseline_path
+
+                @staticmethod
+                def validate_metadata_binding(*_args, **_kwargs):
+                    return []
+
+                @staticmethod
+                def runtime_private_root(iwn_root, _candidate):
+                    return Path(iwn_root) / "runtime-private"
+
+            metadata_seed = {
+                "schema": runtime.METADATA_SCHEMA,
+                "candidate": runtime.CANDIDATE, "baseline": "Test101",
+                "source_ready_kind": "controlled_probe",
+                "requires_phone_ready": False, "armed": False,
+                "status": "prepared_disarmed", "retry_allowed": False,
+                "expected_loaded_uuid": uuid, "profile": runtime.PROFILE,
+                "minimum_boot_epoch_exclusive": 100,
+                "host_management_or_data_tx_allowed": False,
+                "source_binding": {
+                    "expected_binary_sha256": build["binary_sha256"],
+                    "build_receipt_sha256": hashlib.sha256(build_raw).hexdigest(),
+                },
+            }
+
+            finalizer = SimpleNamespace(
+                candidate_binding=CandidateBinding,
+                validate_receipts=lambda **_kwargs: (
+                    build, build_raw, baseline, baseline_raw),
+                _paths=lambda _root, **_kwargs: (
+                    root, build_path, baseline_path, root / "runtime-private"),
+                build_metadata=lambda **_kwargs: dict(metadata_seed),
+            )
+
+            protocol = SimpleNamespace(
+                HELPER_SOURCE=runtime.ARM_HELPER, SENDER_FRAMES=16,
+                SENDER_INTERVAL_MS=80, FROZEN_METADATA_SENDER_INTERVAL_MS=80,
+                SENDER_DEADLINE_SECONDS=2, SENDER_TX_FLAGS="NOACK|NOSEQNO",
+            )
+            metadata_path = root / "runtime-private" / "native-controlled-probe-private.json"
+            metadata_path.parent.mkdir(mode=0o700, parents=True)
+
+            def fake_coordinator(name, _path):
+                if "finalizer" in name:
+                    return finalizer
+                return SimpleNamespace(
+                    IWN_ROOT=None,
+                    _modules=lambda: (protocol, None),
+                    _validate_bundle=lambda path, _uid, _protocol: (
+                        json.loads(Path(path).read_text(encoding="utf-8")),
+                        build, hashlib.sha256(build_raw).hexdigest(), build_path),
+                )
+
+            with mock.patch.object(runtime, "_read_receipt_bundle", return_value=receipts), \
+                 mock.patch.object(runtime, "_load_module", side_effect=fake_coordinator):
+                metadata = runtime.build_disarmed_metadata(
+                    iwn_root=root, minimum_boot_epoch_exclusive=100,
+                    build_path=build_path)
+                self.assertEqual(
+                    metadata["runtime_binding_test102"]["listener_binding"]["schema"],
+                    runtime.LISTENER_BINDING_SCHEMA)
+                metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+                prearm = runtime.validate_prearm_bundle(metadata_path, iwn_root=root)
+                self.assertFalse(prearm["armed"])
+                self.assertFalse(prearm["claim_consumed"])
+                metadata["runtime_binding_test102"]["listener_binding"][
+                    "listener_source_sha256"] = "0" * 64
+                metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+                with self.assertRaisesRegex(runtime.RuntimeBindingError,
+                                            "test102_disarmed_metadata_binding_invalid"):
+                    runtime.validate_prearm_bundle(metadata_path, iwn_root=root)
         with self.assertRaisesRegex(runtime.RuntimeBindingError,
                                     "target_awdl0_receipt_binding_mismatch"):
             runtime.bind_runtime_identities(

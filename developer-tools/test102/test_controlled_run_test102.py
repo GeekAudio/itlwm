@@ -31,7 +31,8 @@ class Test102ControlledRunTests(unittest.TestCase):
                 "DEPLOYMENT_RECEIPT", "SENDER_BUILD_RECEIPT", "SENDER_BINARY",
                 "SENDER_SHA256", "EXPECTED_SENDER_SOURCE_SHA256",
                 "EXPECTED_SENDER_BINARY_SHA256", "ROUTER_SOURCE_RECEIPT",
-                "TARGET_IDENTITY_RECEIPT", "ACTIVE_PACKET_SET")}
+                "TARGET_IDENTITY_RECEIPT", "ACTIVE_PACKET_SET",
+                "ACTIVE_PACKET_MANIFEST", "ACTIVE_LISTENER_EXPECTATION")}
         self.addCleanup(self._restore_globals)
         self.account = pwd.getpwuid(run.REPO.stat().st_uid)
         self.binary = run.REPO / "developer-tools/test102/build/awdl_unicast_sender_test102-aarch64-linux-musl"
@@ -124,10 +125,15 @@ class Test102ControlledRunTests(unittest.TestCase):
         metadata_path.write_text("{}", encoding="utf-8")
 
         router = {"fixture": "router-receipt"}
-        target = {"fixture": "target-receipt"}
+        target = {"fixture": "target-receipt", "ifindex": 31}
         receipt_bytes = json.dumps(router).encode("utf-8")
         observed = []
+        listener_argv_seen = []
         real_read_private_json = run.read_private_json
+
+        def fake_pipe(argv):
+            listener_argv_seen.append(list(argv))
+            return object()
 
         def private_receipt_for_run(path, owner_uid):
             if Path(path) == run.SENDER_BUILD_RECEIPT:
@@ -140,6 +146,16 @@ class Test102ControlledRunTests(unittest.TestCase):
 
         def fake_coordinator(**kwargs):
             self.assertEqual(run.ACTIVE_PACKET_SET, packet_bytes)
+            self.assertEqual(run.ACTIVE_PACKET_MANIFEST, manifest)
+            self.assertEqual(run.BASE.LISTENER_SOURCE, run.LISTENER_SOURCE)
+            run.BASE.ManagedPipe([
+                "/private/tmp/awdl0_udp_probe_listener", "--listen", "T086RX01",
+                "--run-token", "0123456789abcdef0123456789abcdef", "--recv-anyif"])
+            self.assertEqual(listener_argv_seen[-1][-6:], [
+                "--expected-source-ipv6", manifest["identities"]["source"]["ipv6_link_local"],
+                "--expected-destination-ipv6",
+                manifest["identities"]["destination_awdl0"]["ipv6_link_local"],
+                "--expected-ifindex", "31"])
             observed.append("coordinator")
             # Exercise the actual packet-set remote-script adapter without SSH.
             script = run.PROTOCOL.build_remote_monitor_sender_script(
@@ -174,6 +190,7 @@ class Test102ControlledRunTests(unittest.TestCase):
              mock.patch.object(run.START_BARRIER, "compile_reader",
                                side_effect=lambda d: self._fake_reader(d)), \
              mock.patch.object(run, "test102_run_dir", return_value=output_dir), \
+             mock.patch.object(run.BASE, "ManagedPipe", side_effect=fake_pipe), \
              mock.patch.object(run.BASE, "_validate_bundle",
                                return_value=(metadata, build, "c" * 64, Path("build.json"))), \
              mock.patch.object(run.TEST088, "run_test088_once", side_effect=fake_coordinator):
@@ -182,11 +199,16 @@ class Test102ControlledRunTests(unittest.TestCase):
                 metadata_path=metadata_path, ap="wlan7")
 
         self.assertEqual(observed, ["coordinator"])
+        self.assertEqual(len(listener_argv_seen), 1)
         self.assertEqual(actual_output, output_dir)
         self.assertEqual(bind_mock.call_args.kwargs["expected_boot_epoch"], 200)
         self.assertEqual(bind_mock.call_args.kwargs["expected_uuid"], build["mach_o_uuid"])
         self.assertEqual(report["packet_set_binding"]["packet_set_sha256"],
                          hashlib.sha256(packet_bytes).hexdigest())
+        self.assertEqual(report["listener_binding"]["awdl0_ifindex"], 31)
+        self.assertEqual(report["listener_binding"]["schema"],
+                         "test102-awdl-unicast-listener/v1")
+        self.assertFalse(report["listener_binding"]["raw_addresses_serialized"])
         self.assertFalse(report["peer_receipt_proven"])
         self.assertFalse(report["native_awdl_reply_proven"])
         self.assertFalse(report["airdrop_proven"])

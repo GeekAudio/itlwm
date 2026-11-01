@@ -48,6 +48,8 @@ START_READER_SOURCE = TOOL_DIR / "read_rx149_start_test102.swift"
 START_BARRIER_SOURCE = TOOL_DIR / "rx149_start_barrier_test102.py"
 RUNTIME_BINDING_SOURCE = TOOL_DIR / "runtime_binding_test102.py"
 PROVENANCE_SOURCE = TOOL_DIR / "sender_schema_adapter_test102.py"
+LISTENER_SOURCE = TOOL_DIR / "awdl0_unicast_listener_test102.c"
+LISTENER_PROTOCOL_SOURCE = TOOL_DIR / "listener_protocol_test102.py"
 MINIMUM_REMAINING_US = 60_000
 PROFILE_FRAMES = 4
 PROFILE_INTERVAL_MS = 10
@@ -58,6 +60,8 @@ CAPTURE_NAME = "native-controlled-capture-private.json"
 ROUTER_SOURCE_RECEIPT = None
 TARGET_IDENTITY_RECEIPT = None
 ACTIVE_PACKET_SET: bytes | None = None
+ACTIVE_PACKET_MANIFEST: dict | None = None
+ACTIVE_LISTENER_EXPECTATION: dict | None = None
 
 
 class ControlledRunError(RuntimeError):
@@ -97,6 +101,7 @@ PROVENANCE = load_module("test102_sender_schema_adapter", PROVENANCE_SOURCE)
 SENDER_PROTOCOL = load_module("test102_sender_protocol", TOOL_DIR / "sender_protocol_test102.py")
 REMOTE_SENDER = load_module("test102_remote_sender", TOOL_DIR / "remote_sender_test102.py")
 PACKETSET = load_module("test102_packetset", TOOL_DIR / "packetset_test102.py")
+LISTENER_PROTOCOL = load_module("test102_listener_protocol", LISTENER_PROTOCOL_SOURCE)
 
 
 def configure_runtime(iwn_root: Path | str, *, metadata_path: Path | None = None,
@@ -433,12 +438,16 @@ def configure_test102_profile():
         "base_native_argv": BASE._native_argv,
         "base_sender_binary": BASE.DEFAULT_SENDER_BINARY,
         "base_sender_sha256": BASE.DEFAULT_SENDER_SHA256,
+        "base_listener_source": BASE.LISTENER_SOURCE,
+        "base_managed_pipe": BASE.ManagedPipe,
         "test088_binary": TEST088.SENDER_BINARY,
         "test088_sha256": TEST088.SENDER_SHA256,
         "script_builder": PROTOCOL.build_remote_monitor_sender_script,
         "timing_parse": old_timing_parse,
         "timing_correlate": old_timing_correlate,
         "result_parser": old_result_parser,
+        "listener_ready_parser": PROTOCOL.parse_listener_ready,
+        "listener_result_parser": PROTOCOL.parse_listener_result,
     }
     PROTOCOL.SENDER_FRAMES = PROFILE_FRAMES
     PROTOCOL.SENDER_INTERVAL_MS = PROFILE_INTERVAL_MS
@@ -455,6 +464,7 @@ def configure_test102_profile():
     BASE.NATIVE_WORKER = NATIVE_WORKER
     BASE.DEFAULT_SENDER_BINARY = SENDER_BINARY
     BASE.DEFAULT_SENDER_SHA256 = SENDER_SHA256
+    BASE.LISTENER_SOURCE = LISTENER_SOURCE
     TEST088.SENDER_BINARY = SENDER_BINARY
     TEST088.SENDER_SHA256 = SENDER_SHA256
 
@@ -465,6 +475,26 @@ def configure_test102_profile():
                 "--iwn-root", str(IWN_ROOT)]
 
     BASE._native_argv = test102_native_argv
+
+    original_managed_pipe = BASE.ManagedPipe
+
+    def test102_managed_pipe(argv):
+        adapted = list(argv)
+        if (len(adapted) >= 5 and
+                Path(adapted[0]).name == "awdl0_udp_probe_listener" and
+                adapted[1:3] == ["--listen", LISTENER_PROTOCOL.MARKER]):
+            expected = ACTIVE_LISTENER_EXPECTATION
+            if expected is None:
+                raise PROTOCOL.ControlledProbeError(
+                    "TEST102_LISTENER_EXPECTATION_NOT_BOUND")
+            adapted.extend([
+                "--expected-source-ipv6", expected["source_ipv6"],
+                "--expected-destination-ipv6", expected["destination_ipv6"],
+                "--expected-ifindex", str(expected["ifindex"]),
+            ])
+        return original_managed_pipe(adapted)
+
+    BASE.ManagedPipe = test102_managed_pipe
 
     original_remote_builder = PROTOCOL.build_remote_monitor_sender_script
 
@@ -514,6 +544,29 @@ def configure_test102_profile():
 
     PROTOCOL.parse_sender_result = parse_result
 
+    def parse_test102_listener_ready(line, *, run_token):
+        if ACTIVE_LISTENER_EXPECTATION is None:
+            raise PROTOCOL.ControlledProbeError("TEST102_LISTENER_EXPECTATION_NOT_BOUND")
+        try:
+            return LISTENER_PROTOCOL.parse_ready(
+                line, run_token=run_token, expected=ACTIVE_LISTENER_EXPECTATION)
+        except LISTENER_PROTOCOL.ListenerProtocolError as error:
+            raise PROTOCOL.ControlledProbeError(
+                "TEST102_LISTENER_READY_INVALID:" + str(error)) from error
+
+    def parse_test102_listener_result(line, *, run_token):
+        if ACTIVE_LISTENER_EXPECTATION is None:
+            raise PROTOCOL.ControlledProbeError("TEST102_LISTENER_EXPECTATION_NOT_BOUND")
+        try:
+            return LISTENER_PROTOCOL.parse_result(
+                line, run_token=run_token, expected=ACTIVE_LISTENER_EXPECTATION)
+        except LISTENER_PROTOCOL.ListenerProtocolError as error:
+            raise PROTOCOL.ControlledProbeError(
+                "TEST102_LISTENER_RESULT_INVALID:" + str(error)) from error
+
+    PROTOCOL.parse_listener_ready = parse_test102_listener_ready
+    PROTOCOL.parse_listener_result = parse_test102_listener_result
+
     def captured_start(cls, **kwargs):
         session, monitor_ready, sender_ready = old_start(**kwargs)
         token_state["run_token"] = session.run_token
@@ -551,10 +604,14 @@ def configure_test102_profile():
         BASE._native_argv = restore_values["base_native_argv"]
         BASE.DEFAULT_SENDER_BINARY = restore_values["base_sender_binary"]
         BASE.DEFAULT_SENDER_SHA256 = restore_values["base_sender_sha256"]
+        BASE.LISTENER_SOURCE = restore_values["base_listener_source"]
+        BASE.ManagedPipe = restore_values["base_managed_pipe"]
         TEST088.SENDER_BINARY = restore_values["test088_binary"]
         TEST088.SENDER_SHA256 = restore_values["test088_sha256"]
         PROTOCOL.build_remote_monitor_sender_script = restore_values["script_builder"]
         PROTOCOL.parse_sender_result = restore_values["result_parser"]
+        PROTOCOL.parse_listener_ready = restore_values["listener_ready_parser"]
+        PROTOCOL.parse_listener_result = restore_values["listener_result_parser"]
         TEST088.TIMING.parse_sender_timing = restore_values["timing_parse"]
         TEST088.TIMING.correlate_with_mac_events = restore_values["timing_correlate"]
         router_session_cls.start = old_start_descriptor
@@ -595,6 +652,7 @@ def runtime_tool_hashes() -> dict:
              START_READER_SOURCE, START_BARRIER_SOURCE, RUNTIME_BINDING_SOURCE,
              PROVENANCE_SOURCE, TOOL_DIR / "sender_protocol_test102.py",
              TOOL_DIR / "remote_sender_test102.py", TOOL_DIR / "packetset_test102.py",
+             LISTENER_SOURCE, LISTENER_PROTOCOL_SOURCE,
              TOOL_DIR / "hcmd_rx_trace_test102.py",
              SENDER_SOURCE, SENDER_BINARY,
              REPO / "developer-tools/test087/controlled_run_coordinator.py",
@@ -642,6 +700,19 @@ def plan(metadata_path: Path | None = None,
             (Path(iwn_root).expanduser() if iwn_root else Path("<IWN_ROOT>")) /
             "research/test102-preparation-private/sender-build-private.json")),
         "packet_set_template_sha256": PACKETSET.TEMPLATE_SHA256,
+        "listener_contract": {
+            "schema": LISTENER_PROTOCOL.SCHEMA,
+            "source_destination_from_same_fresh_packet_manifest": True,
+            "destination_is_unicast": True,
+            "multicast_group": None,
+            "interface": "awdl0",
+            "interface_ifindex_bound": True,
+            "source_port": LISTENER_PROTOCOL.SOURCE_PORT,
+            "destination_port": LISTENER_PROTOCOL.PORT,
+            "hop_limit": LISTENER_PROTOCOL.HOP_LIMIT,
+            "truncated_datagrams_rejected": True,
+            "raw_addresses_serialized": False,
+        },
         "native_worker": str(NATIVE_WORKER), "arm_helper": str(ARM_HELPER),
         "start_reader": str(START_READER_SOURCE),
         "minimum_ready_remaining_us": MINIMUM_REMAINING_US,
@@ -665,7 +736,7 @@ def plan(metadata_path: Path | None = None,
 
 def run_once(*, host: str, control_path: str, metadata_path: Path,
              ap: str) -> tuple[dict, Path, dict]:
-    global ACTIVE_PACKET_SET
+    global ACTIVE_PACKET_SET, ACTIVE_PACKET_MANIFEST, ACTIVE_LISTENER_EXPECTATION
     account = workspace_account()
     if not re.fullmatch(r"[A-Za-z0-9_.@:-]{1,255}", host) or host.startswith("-"):
         raise ControlledRunError("INVALID_HOST")
@@ -703,6 +774,12 @@ def run_once(*, host: str, control_path: str, metadata_path: Path,
             code = getattr(error, "code", None) or str(error)[:96] or type(error).__name__
             raise ControlledRunError("TEST102_IDENTITY_BINDING_REJECTED:" + code) from error
         ACTIVE_PACKET_SET = packet_set
+        ACTIVE_PACKET_MANIFEST = packet_manifest
+        try:
+            ACTIVE_LISTENER_EXPECTATION = LISTENER_PROTOCOL.expected_binding(
+                packet_manifest, target_receipt.get("ifindex"))
+        except LISTENER_PROTOCOL.ListenerProtocolError as error:
+            raise ControlledRunError("TEST102_LISTENER_BINDING_REJECTED:" + str(error)) from error
 
         # Compile the read-only IOKit START reader before the coordinator can
         # create its run directory, consume a claim, or issue ARM.
@@ -805,6 +882,20 @@ def run_once(*, host: str, control_path: str, metadata_path: Path,
                     "identity_freshness": packet_manifest.get("identity_freshness"),
                     "addresses_in_parent_report": False,
                 },
+                "listener_binding": {
+                    "schema": LISTENER_PROTOCOL.SCHEMA,
+                    "source_identity_tag_fnv1a64":
+                        ACTIVE_LISTENER_EXPECTATION["source_identity_tag_fnv1a64"],
+                    "destination_identity_tag_fnv1a64":
+                        ACTIVE_LISTENER_EXPECTATION["destination_identity_tag_fnv1a64"],
+                    "awdl0_ifindex": ACTIVE_LISTENER_EXPECTATION["ifindex"],
+                    "source_port": ACTIVE_LISTENER_EXPECTATION["source_port"],
+                    "destination_port": ACTIVE_LISTENER_EXPECTATION["destination_port"],
+                    "hop_limit": ACTIVE_LISTENER_EXPECTATION["hop_limit"],
+                    "raw_addresses_serialized": False,
+                },
+                "listener_source_sha256": sha256(LISTENER_SOURCE),
+                "listener_protocol_source_sha256": sha256(LISTENER_PROTOCOL_SOURCE),
                 "start_reader_source_sha256": sha256(START_READER_SOURCE),
                 "start_reader_binary_sha256": reader_sha,
                 "start_barrier_source_sha256": sha256(START_BARRIER_SOURCE),
@@ -828,6 +919,8 @@ def run_once(*, host: str, control_path: str, metadata_path: Path,
             return report, output_dir, prearm
     finally:
         ACTIVE_PACKET_SET = None
+        ACTIVE_PACKET_MANIFEST = None
+        ACTIVE_LISTENER_EXPECTATION = None
         restore_profile()
 
 
