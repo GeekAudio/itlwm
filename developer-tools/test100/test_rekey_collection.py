@@ -99,6 +99,50 @@ class SavedSampleTests(unittest.TestCase):
                          'interval_sidecar_unbound_from_command_header')
         self.assertFalse(parsed['same_slot_descriptor'])
 
+    def test_unique_sidecar_requires_single_reclaim_slot_and_boundary_predecessor(self):
+        scalars = {
+            'NativeStaCompletionSchema': 4,
+            'NativeStaCompletionSnapshotComplete': 1,
+            'NativeStaCompletionSnapshotVersionBegin': 2,
+            'NativeStaCompletionSnapshotVersionEnd': 2,
+            'NativeStaCompletionEvent0Present': 1,
+            'NativeStaCompletionEvent0Kind': 0,
+            'NativeStaCompletionEvent0Serial': 7,
+            'NativeStaCompletionEvent0PresenceFlags': 1 << 30,
+            'NativeStaCompletionEvent0FirmwareQid': 1,
+            'NativeStaCompletionEvent0QueueIndex': 77,
+            'NativeStaCompletionEvent0RingCount': 1024,
+            'NativeStaCompletionEvent0Queued': 2,
+            'NativeStaCompletionEvent0Tail': 75,
+            'NativeStaCompletionEvent0TxCommandScanStatus': 1,
+            'NativeStaCompletionEvent0TxCommandExpectedCount': 1,
+            'NativeStaCompletionEvent0TxCommandScannedCount': 1,
+            'NativeStaCompletionEvent0TxCommandCandidateIndex': 76,
+            'NativeStaCompletionEvent0HostOriginState': 2,
+            'NativeStaCompletionEvent0HostOriginCookie': 11,
+            'NativeStaCompletionEvent0HostOriginSlotGeneration': 19,
+            'NativeStaCompletionEvent0HostOriginContextGeneration': 5,
+            'NativeStaCompletionEvent0HostOriginOutputEpoch': 12,
+            'NativeStaCompletionEvent0HostOriginIdentityEpoch': 3,
+            'NativeStaCompletionEvent0HostOriginAttemptId': 77,
+            'NativeStaCompletionEvent0HostOriginSource': 1,
+            'NativeStaCompletionEvent0HostOriginIndex': 76,
+            'NativeStaCompletionEvent0HostOriginFrameControl': 0x4108,
+            'NativeStaCompletionEvent0HostOriginSequenceControl': 0x04B0,
+            'NativeStaCompletionEvent0HostOriginTid': 6,
+        }
+        parsed = collector.parse_completion_host_origin(scalars)
+        self.assertEqual(parsed['status'], 'invalid_host_origin_binding')
+        self.assertIsNot(parsed.get('same_slot_descriptor'), True)
+
+        # The interval must also reject a candidate that happens to agree
+        # with the sidecar but is not the boundary's modular predecessor.
+        scalars['NativeStaCompletionEvent0TxCommandCandidateIndex'] = 75
+        scalars['NativeStaCompletionEvent0HostOriginIndex'] = 75
+        parsed = collector.parse_completion_host_origin(scalars)
+        self.assertEqual(parsed['status'], 'invalid_host_origin_binding')
+        self.assertIsNot(parsed.get('same_slot_descriptor'), True)
+
     def test_different_candidate_is_rejected_before_serialization(self):
         with self.assertRaises(collector.IdentityMismatch):
             collector.select_allowlisted({'NativeTestBuild': '25G332-Test098'}, '25G332-Test100')

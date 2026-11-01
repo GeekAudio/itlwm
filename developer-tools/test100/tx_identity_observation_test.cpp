@@ -200,6 +200,31 @@ static void testCompletionObservationCarriesIndependentHostOrigin()
     assert(!IwxTxCompletionObservation::validInput(&nonUniqueWithPayload));
 }
 
+static void testUniqueHostOriginRequiresOneSlotToExclusiveBoundary()
+{
+    auto event = singleSlotMismatchEvent();
+    event.presence_flags |= IWX_TX_COMPLETION_HAS_TAIL;
+    event.tail = 137;
+    event.queued = 2;
+    event.txcmd_candidate_index = 138;
+    event.host_origin_state = IWX_TX_COMPLETION_HOST_ORIGIN_UNIQUE;
+    event.host_origin_cookie = 11;
+    event.host_origin_slot_generation = 19;
+    event.host_origin_context_generation = 5;
+    event.host_origin_output_epoch = 11;
+    event.host_origin_identity_epoch = 3;
+    event.host_origin_attempt_id = 77;
+    event.host_origin_source = IWX_GROUP2_TX_SOURCE_RSN;
+    event.host_origin_index = 138; // boundary predecessor, but interval has 2 slots.
+    event.host_origin_frame_control = 0x4108;
+    event.host_origin_sequence_control = 0x04b0;
+    event.host_origin_tid = 6;
+
+    // A single raw header and matching sidecar do not prove a same-slot join
+    // when the reclaim interval contains more than one slot.
+    assert(!IwxTxCompletionObservation::validInput(&event));
+}
+
 static void testBoundedMatcherReturnsHostOriginWithoutRelaxingResponseMatch()
 {
     IwxGroup2TxTrace trace{};
@@ -391,6 +416,7 @@ int main()
     testMultiSlotAndRingWrapDoNotClaimSingleSlotHeader();
     testCompletionObservationKeepsMismatchAndSharedFields();
     testCompletionObservationCarriesIndependentHostOrigin();
+    testUniqueHostOriginRequiresOneSlotToExclusiveBoundary();
     testBoundedMatcherReturnsHostOriginWithoutRelaxingResponseMatch();
     testBoundedMatcherDistinguishesNoneMultipleStaleAndUnavailable();
     testInvalidBoundaryAndMultiSlotNeverExportSingleHeader();

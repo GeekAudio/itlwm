@@ -180,16 +180,16 @@ typedef struct iwx_tx_completion_event_record {
     uint32_t txcmd_offload_assist;
     /* FC in bits 31..16 and SC in bits 15..0 for a single readable slot. */
     uint32_t single_slot_txcmd_header;
-    uint32_t host_origin_state;
+    uint8_t host_origin_state;
     uint32_t host_origin_context_generation;
     uint32_t host_origin_output_epoch;
     uint32_t host_origin_identity_epoch;
     uint32_t host_origin_attempt_id;
-    uint32_t host_origin_source;
-    uint32_t host_origin_index;
-    uint32_t host_origin_frame_control;
-    uint32_t host_origin_sequence_control;
-    uint32_t host_origin_tid;
+    uint8_t host_origin_source;
+    uint16_t host_origin_index;
+    uint16_t host_origin_frame_control;
+    uint16_t host_origin_sequence_control;
+    uint8_t host_origin_tid;
     uint64_t host_origin_cookie;
     uint64_t host_origin_slot_generation;
 } iwx_tx_completion_event_record;
@@ -286,6 +286,8 @@ static constexpr uint32_t kMaxReasonCount =
 
 static_assert(sizeof(iwx_tx_completion_event_record) <= 256,
               "TX completion record must remain fixed and scalar");
+static_assert(sizeof(iwx_tx_completion_event_record) <= 240,
+              "compact TX completion record exceeded the pending-cut budget");
 static_assert(sizeof(iwx_tx_completion_observation_state) <=
                   IWX_TX_COMPLETION_STATE_MAX_BYTES,
               "TX completion observer state exceeded its embedded bound");
@@ -570,6 +572,7 @@ static inline bool validWidths(const iwx_tx_completion_event_input *in)
             in->ring_count == 0 || in->queue_index >= in->ring_count ||
             in->tail >= in->ring_count ||
             in->host_origin_index >= in->ring_count ||
+            in->host_origin_index > UINT16_MAX ||
             in->host_origin_frame_control > UINT16_MAX ||
             in->host_origin_sequence_control > UINT16_MAX ||
             in->host_origin_tid > 15U)
@@ -586,10 +589,14 @@ static inline bool validWidths(const iwx_tx_completion_event_input *in)
             const uint32_t rawRequired =
                 IWX_TX_COMPLETION_HAS_TXCMD_SCAN |
                 IWX_TX_COMPLETION_HAS_SINGLE_SLOT_TXCMD_HEADER;
+            const uint32_t precedingIndex = in->queue_index == 0 ?
+                in->ring_count - 1U : in->queue_index - 1U;
             if ((in->presence_flags & rawRequired) != rawRequired ||
                 in->txcmd_scan_status != 1U ||
                 in->txcmd_expected_count != 1 ||
                 in->txcmd_scanned_count != 1 ||
+                distance != 1 || originOffset != 0 ||
+                in->txcmd_candidate_index != precedingIndex ||
                 in->txcmd_candidate_index != in->host_origin_index)
                 return false;
         }
@@ -774,7 +781,7 @@ static inline void copyInput(const iwx_tx_completion_event_input *in,
     out->txcmd_flags = in->txcmd_flags;
     out->txcmd_offload_assist = in->txcmd_offload_assist;
     out->single_slot_txcmd_header = in->single_slot_txcmd_header;
-    out->host_origin_state = in->host_origin_state;
+    out->host_origin_state = static_cast<uint8_t>(in->host_origin_state);
     out->host_origin_cookie = in->host_origin_cookie;
     out->host_origin_slot_generation = in->host_origin_slot_generation;
     out->host_origin_context_generation =
@@ -782,11 +789,13 @@ static inline void copyInput(const iwx_tx_completion_event_input *in,
     out->host_origin_output_epoch = in->host_origin_output_epoch;
     out->host_origin_identity_epoch = in->host_origin_identity_epoch;
     out->host_origin_attempt_id = in->host_origin_attempt_id;
-    out->host_origin_source = in->host_origin_source;
-    out->host_origin_index = in->host_origin_index;
-    out->host_origin_frame_control = in->host_origin_frame_control;
-    out->host_origin_sequence_control = in->host_origin_sequence_control;
-    out->host_origin_tid = in->host_origin_tid;
+    out->host_origin_source = static_cast<uint8_t>(in->host_origin_source);
+    out->host_origin_index = static_cast<uint16_t>(in->host_origin_index);
+    out->host_origin_frame_control =
+        static_cast<uint16_t>(in->host_origin_frame_control);
+    out->host_origin_sequence_control =
+        static_cast<uint16_t>(in->host_origin_sequence_control);
+    out->host_origin_tid = static_cast<uint8_t>(in->host_origin_tid);
 }
 
 static inline void copySnapshotLocked(

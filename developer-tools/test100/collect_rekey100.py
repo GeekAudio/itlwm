@@ -485,10 +485,13 @@ def parse_completion_host_origin(scalars: dict) -> dict:
         if state == 2:
             presence = get("Event0PresenceFlags")
             raw_candidate = get("Event0TxCommandCandidateIndex")
+            preceding_index = boundary - 1 if boundary else ring_count - 1
             if (type(presence) is not int or not (presence & (1 << 30)) or
                     get("Event0TxCommandScanStatus") != 1 or
                     get("Event0TxCommandExpectedCount") != 1 or
                     get("Event0TxCommandScannedCount") != 1 or
+                    distance != 1 or origin_offset != 0 or
+                    raw_candidate != preceding_index or
                     raw_candidate != values["index"]):
                 return {"status": "invalid_host_origin_binding", "schema": schema,
                         "snapshot_version": begin}

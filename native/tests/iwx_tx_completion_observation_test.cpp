@@ -1,4 +1,5 @@
 #include "native/iwx_tx_completion_observation.hpp"
+#include "native/iwx_tx_completion_publish.hpp"
 
 #include <array>
 #include <atomic>
@@ -23,12 +24,14 @@ static iwx_tx_completion_event_input txRsp(
 
 static void testFixedBoundsFullWidthAndValidZero()
 {
-    static_assert(sizeof(iwx_tx_completion_event_record) <= 256,
-                  "event must have a fixed scalar bound");
+    static_assert(sizeof(iwx_tx_completion_event_record) == 240,
+                  "schema-4 event must stay compact enough for pending cut");
     static_assert(sizeof(iwx_tx_completion_observation_state) <= 1024,
                   "embedded observer exceeds its bound");
     static_assert(sizeof(iwx_tx_completion_observation_snapshot) <= 1024,
                   "snapshot exceeds its copy bound");
+    static_assert(sizeof(IwxTxCompletionPublish::Pending) <= 1024,
+                  "related pending snapshot exceeds its bound");
 
     iwx_tx_completion_observation_state state{};
     auto event = txRsp();
