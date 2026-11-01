@@ -6,14 +6,38 @@ association, and event flow. The separate P2P/AWDL path experiments with action
 frames, peer timing, transmit queues, RX tracing, and the native `awdl0`
 interface lifecycle.
 
-The current development candidate, Test079, targets x86_64 macOS Tahoe 26.7.2
-(build 25G332) and the AX201 device match documented in the main README. It adds
-guarded post-bootstrap pairing and bounded RX observation draining, and has no
-runtime validation yet. Test078 booted with native `awdl0` and passed two short
-Wi-Fi observation windows, but a later disconnect and watchdog remain unresolved.
-Its AWDL run selected a control-only MIF bootstrap and did not submit a data query.
-There is no confirmed peer data return or AirDrop file transfer.
+The current development candidate, Test105, targets x86_64 macOS Tahoe 26.7.2
+(build 25G332) and the AX201 device match documented in the main README. It is
+an offline, disarmed reply-path candidate. Test104 received controlled channel-149
+frames through the driver and delivered a complete eight-byte UDP marker to a
+native `awdl0` listener. That sender was an OpenWrt test tool, not an iPhone.
+Native replies, iPhone data return, and AirDrop file transfers remain unverified;
+key-update disconnects also remain unresolved.
 See [the RX review](../developer-tools/RX-DATA-PATH.md) for the current boundary.
+
+Test105 adds `awdl_reply_shadow.hpp` to the actual BSD input/output bridge.
+It keeps one bounded request/reply record: input is provisional until the real
+`ifnet_input` returns successfully and the current owner is rechecked. A
+synchronous output can be copied before that return, but cannot become a valid
+association on input failure, expiry, cancellation, or interface replacement.
+Output retains the caller's mbuf and returns `EOPNOTSUPP`; no firmware queue is
+enabled. The compile flag `--native-awdl-reply-shadow` requires the existing
+resident RX149 data-input profile and always packages runtime enablement as false.
+There is no automatic arm path or production caller of `configureReplyShadow` yet.
+The resident bridge permits one successful Shadow configuration per kext
+lifetime; disable, expiry, and retirement do not reopen that record. Invalid
+configuration attempts do not consume it. Reusing this record would require a
+new, separately reviewed lifecycle design.
+
+`awdl_directed_tx_contract.hpp` is a separate offline model for future directed
+TX ownership, resource identity, and completion handling. It is not wired to the
+driver or a firmware queue. Its evidence values must eventually come from the
+actual HAL and confirmed input ledger; passing its fixtures does not prove
+channel permission, DMA behavior, or radio transmission. In particular, the
+observed channel-149 PASSIVE/ACTIVE flags are not changed by this candidate.
+The [single-reply UDP tool](../developer-tools/test105/README.md) also defaults
+to a no-socket plan mode. Neighbor resolution and firmware transmission still
+need a separately validated implementation before a useful hardware reply test.
 
 Some early WCL ABI investigation used macOS build 25G241. That is an analysis
 reference, not a claim that all private interfaces are validated across Tahoe

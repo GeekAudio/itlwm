@@ -3,8 +3,10 @@
 
 The input is a stable Test103-format HCTX snapshot plus the same IOKit read's
 STA-auth trace. This module only associates host command metadata and local
-driver events. It never infers firmware key installation, radio transmission,
-peer acceptance, or a causal reason for disconnection.
+driver events. Missing tuples in an old HCTX cut are reported as freshness
+unproven, never as a firmware non-response. It never infers firmware key
+installation, radio transmission, peer acceptance, or a causal reason for
+disconnection.
 """
 from __future__ import annotations
 
@@ -159,6 +161,49 @@ def _decode_key_submit_detail(detail: int) -> tuple[int, int, int]:
     return state, qid, index
 
 
+def _hcmd_cut_freshness(rows: list[dict], anchor_monotonic_us: int,
+                       driver_generation: int) -> dict:
+    """Classify whether the retained HCTX rows reach a local auth anchor.
+
+    HCTX monotonic_ns and STA-auth monotonic_us are produced from the same
+    kernel monotonic clock. A cut whose newest row is more than the existing
+    five-second submit-join bound older than the auth anchor cannot adjudicate
+    that attempt. This is a freshness warning only; it is never evidence that
+    firmware did or did not return a response.
+    """
+    generation_rows = [row for row in rows
+                       if row["driver_generation"] == driver_generation]
+    if not generation_rows:
+        return {"status": "freshness_unknown_no_hcmd_rows_for_generation",
+                "freshness_unproven": True}
+    if any(row["driver_monotonic_ns"] == 0 for row in generation_rows):
+        return {"status": "freshness_unknown_missing_row_timestamps",
+                "freshness_unproven": True}
+    newest_ns = max(row["driver_monotonic_ns"] for row in generation_rows)
+    anchor_ns = anchor_monotonic_us * 1000
+    gap_ns = anchor_ns - newest_ns
+    if gap_ns > 5_000_000_000:
+        return {
+            "status": "cut_predates_submit_join_window",
+            "freshness_unproven": True,
+            "newest_hcmd_monotonic_ns": newest_ns,
+            "auth_anchor_monotonic_us": anchor_monotonic_us,
+            "older_than_anchor_us": gap_ns // 1000,
+            "join_bound_us": 5_000_000,
+        }
+    return {
+        "status": "cut_reaches_submit_join_window",
+        "freshness_unproven": True,
+        "interpretation": (
+            "A retained row reaches the time-join interval; this alone does "
+            "not prove snapshot publication freshness or a matching tuple."),
+        "newest_hcmd_monotonic_ns": newest_ns,
+        "auth_anchor_monotonic_us": anchor_monotonic_us,
+        "older_than_anchor_us": max(0, gap_ns // 1000),
+        "join_bound_us": 5_000_000,
+    }
+
+
 def correlate_key_lifecycle(hcmd_decoded: Any, auth_snapshot: Any) -> dict:
     """Correlate GTK callback -> host command -> RX response -> same-assoc RX deauth.
 
@@ -233,12 +278,31 @@ def correlate_key_lifecycle(hcmd_decoded: Any, auth_snapshot: Any) -> dict:
         })
 
     if not key_submits:
-        return {
+        group1_anchors = [event for event in events
+            if event.get("kind") == AUTH_KIND_GROUP1_BEGIN and
+            _is_uint(event.get("monotonic_us"), 64)]
+        result = {
             "status": "no_eligible_group_key_local_enqueue_in_auth_cut",
             "lifecycles": [],
             "key_install_success_proven": False,
             "peer_ack_proven": False,
+            "auth_cut_scope": "this_bounded_snapshot_only",
+            "interpretation": (
+                "No eligible enqueue is present in this auth snapshot; this "
+                "does not exclude an enqueue that aged out of the bounded cut."),
         }
+        if group1_anchors:
+            latest_anchor = max(group1_anchors, key=lambda event: event["sequence"])
+            result["hcmd_cut_freshness"] = _hcmd_cut_freshness(
+                checked_rows, latest_anchor["monotonic_us"],
+                latest_anchor["driver_generation"])
+            result["auth_anchor_sequence"] = latest_anchor["sequence"]
+        else:
+            result["hcmd_cut_freshness"] = {
+                "status": "freshness_unknown_no_auth_anchor",
+                "freshness_unproven": True,
+            }
+        return result
 
     all_host_submits = [row for row in checked_rows
         if row["source"] == SOURCE_HOST_COMMAND and
@@ -251,6 +315,9 @@ def correlate_key_lifecycle(hcmd_decoded: Any, auth_snapshot: Any) -> dict:
 
     lifecycles: list[dict] = []
     for key_event in key_submits:
+        cut_freshness = _hcmd_cut_freshness(
+            checked_rows, key_event["auth_monotonic_us"],
+            key_event["driver_generation"])
         matches = [row for row in candidate_host_submits
             if _row_identity(row) == (
                 key_event["driver_generation"], key_event["qid"],
@@ -265,10 +332,15 @@ def correlate_key_lifecycle(hcmd_decoded: Any, auth_snapshot: Any) -> dict:
         matches = [row for row in matches if row["driver_monotonic_ns"] > 0 and
                    0 <= key_us - row["driver_monotonic_ns"] // 1000 <= 5_000_000]
         if len(matches) != 1:
+            submit_status = (
+                "cut_predates_submit_freshness_unproven"
+                if cut_freshness["status"] == "cut_predates_submit_join_window"
+                else "missing_or_ambiguous_same_tuple_submit")
             lifecycles.append({
                 **key_event,
-                "hcmd_submit_status": "missing_or_ambiguous_same_tuple_submit",
+                "hcmd_submit_status": submit_status,
                 "hcmd_submit_serial": None,
+                "hcmd_cut_freshness": cut_freshness,
                 "response_status": "unknown",
                 "response_rows": [],
                 "rx_deauth_after_same_association": None,
@@ -366,6 +438,7 @@ def correlate_key_lifecycle(hcmd_decoded: Any, auth_snapshot: Any) -> dict:
             lifecycles.append({
                 **key_event,
                 "hcmd_submit_status": "same_tuple_submit_observed",
+                "hcmd_cut_freshness": cut_freshness,
                 "hcmd_submit_serial": submit["serial"],
                 "hcmd_submit_monotonic_ns": submit["driver_monotonic_ns"],
                 "hcmd_submit_phase": submit["phase"],
@@ -400,6 +473,7 @@ def correlate_key_lifecycle(hcmd_decoded: Any, auth_snapshot: Any) -> dict:
         lifecycles.append({
             **key_event,
             "hcmd_submit_status": "same_tuple_submit_observed",
+            "hcmd_cut_freshness": cut_freshness,
             "hcmd_submit_serial": submit["serial"],
             "hcmd_submit_monotonic_ns": submit["driver_monotonic_ns"],
             "hcmd_submit_phase": submit["phase"],

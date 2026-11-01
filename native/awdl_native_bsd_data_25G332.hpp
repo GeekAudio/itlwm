@@ -7,6 +7,7 @@
 #include "awdl_bsd_attach_trace.hpp"
 #include "p2p_rx149_data_input.hpp"
 #include "rx149_capture_diagnostics.hpp"
+#include "awdl_reply_shadow.hpp"
 namespace NativeAwdlBSD {
 enum Counter : unsigned {
     Attached, Closing, Detached, LinkReady, TxAccepted, TxRejected,
@@ -147,6 +148,13 @@ void captureRx149Diagnostics(Rx149CaptureDiagnostics::Wire *out);
 // fresh owner only while the bridge has no active lease and remains ready.
 bool publishRx149DataInputLease(
           const NativeP2PRx149DataInput::Lease &lease);
+// Shadow-only configuration from the authoritative main-gate caller. This
+// never activates/refreshes a copied lease and never permits firmware TX.
+// One immutable configuration per bridge lifetime, default disabled.
+bool configureReplyShadow(const NativeAwdlReplyShadow::Config &,
+                          const NativeP2PRx149DataInput::Lease &);
+void disableReplyShadow();
+NativeAwdlReplyShadow::Snapshot replyShadowSnapshot();
 // Revoke only if the numeric owner tuple still names the active permit. The
 // unconditional overload is for terminal cancellation/reset paths.
 void revokeRx149DataInput();

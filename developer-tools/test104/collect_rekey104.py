@@ -118,6 +118,31 @@ def _decode_auth_trace(raw: Any) -> dict:
     }
 
 
+def _decode_group2_trace(raw: Any) -> dict:
+    if not isinstance(raw, bytes):
+        return {"snapshot_status": "not_published", "events": [],
+                "peer_ack_proven": False}
+    try:
+        parsed = base.parse_group2_snapshot(raw)
+    except (ValueError, struct.error) as error:
+        return {"snapshot_status": "invalid", "parse_error_class": type(error).__name__,
+                "events": [], "peer_ack_proven": False}
+    fields = ("sequence", "monotonic_us", "cookie", "slot_generation",
+              "attempt_id", "source", "origin_generation", "origin_association",
+              "context_generation", "output_epoch", "queue_id", "index",
+              "ring_count", "frame_control", "sequence_control", "tid",
+              "result", "flags", "stage", "status")
+    events = []
+    for index in range(parsed["event_count"]):
+        values = base.GROUP2_EVENT.unpack_from(
+            raw, base.GROUP2_HEADER.size + index * base.GROUP2_EVENT.size)
+        events.append(dict(zip(fields, values)))
+    return {**parsed, "events": events,
+            "history_may_be_truncated": bool(parsed["dropped_count"] or
+                (events and events[-1]["sequence"] > len(events))),
+            "peer_ack_proven": False}
+
+
 def _decode_link_trace(raw: Any) -> dict:
     if not isinstance(raw, bytes):
         return {"snapshot_status": "not_published", "events": [],
@@ -272,7 +297,11 @@ def sample_once(expected_build: str, identity: dict,
         "numeric_counters": selected.get("numeric_counters", {}),
         "hcmd": hcmd_decoded,
         "auth_trace": auth,
-        # These two fixed diagnostic OSData values contain metadata only. Keep
+        "group2_tx_trace": _decode_group2_trace(service.get(base.GROUP2_PROPERTY)),
+        "completion_scalars": selected.get("completion_scalars", {}),
+        "completion_live_counters": selected.get("completion_live_counters", {}),
+        "completion_host_origin": selected.get("completion_host_origin", {}),
+        # Fixed diagnostic OSData values contain metadata only. Keep
         # their bytes in the same sample cut so an offline reviewer can replay
         # the exact decode without saving the full I/O Registry property list.
         "raw_osdata": {
@@ -282,6 +311,9 @@ def sample_once(expected_build: str, identity: dict,
             AUTH_PROPERTY: _retain_raw_osdata(
                 auth_raw, maximum_length=base.AUTH_SIZE,
                 required_length=base.AUTH_SIZE),
+            base.GROUP2_PROPERTY: _retain_raw_osdata(
+                service.get(base.GROUP2_PROPERTY), maximum_length=base.GROUP2_SIZE,
+                required_length=base.GROUP2_SIZE),
         },
         "link_trace": link_trace,
         "en1": en1,
@@ -494,6 +526,10 @@ def capture(output: Path, *, boot_epoch: int, expected_uuid: str,
                         "numeric_counters": point.get("numeric_counters", {}),
                         "hcmd": _selected_hcmd(decoded_hcmd),
                         "auth_trace": _selected_auth(auth),
+                        "group2_tx_trace": point.get("group2_tx_trace"),
+                        "completion_scalars": point.get("completion_scalars", {}),
+                        "completion_live_counters": point.get("completion_live_counters", {}),
+                        "completion_host_origin": point.get("completion_host_origin", {}),
                         "raw_osdata": point.get("raw_osdata", {}),
                         "link_trace": point.get("link_trace"),
                         "key_lifecycle_correlation": correlation,

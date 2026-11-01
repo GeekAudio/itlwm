@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Actual BSD Ethernet/IPv6 -> Intel MPDU and Intel MPDU -> native awdl0 bridge.
 // A packet is never looped back or counted as radio receipt by this module.
+#if defined(ITL_NATIVE_AWDL_REPLY_SHADOW_25G332) && \
+    (!defined(ITL_NATIVE_AWDL_RESIDENT_25G332) || !defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332))
+#error "Reply Shadow requires the unchanged receive-only RX149 profile"
+#endif
 #if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
 #include "awdl_native_bsd_data_25G332.hpp"
 #include "awdl_bsd_packet_bridge.hpp"
@@ -69,6 +73,24 @@ Rx149InputReceipt rx149Receipt{};
 Rx149InputGateState::Word rx149InputGateState=0;
 Rx149CaptureDiagnostics::Ledger rx149CaptureLedger;
 uint32_t rx149RecoveryPreparedFaultSerial=0;
+#if defined(ITL_NATIVE_AWDL_REPLY_SHADOW_25G332)
+NativeAwdlReplyShadow::Ledger replyShadow;
+uint32_t replyShadowOutputCalls=0;
+NativeAwdlReplyShadow::Authority replyShadowAuthorityLocked() {
+    NativeAwdlReplyShadow::Authority a{};
+    a.lease=activeRx149Lease;a.version=activeRx149Version;
+    a.incarnation=interfaceIncarnation;
+    a.ready=interface&&activeRx149LeaseValid&&!closing&&!detached&&radio&&
+        radioGeneration==a.lease.epochs.power&&
+        __atomic_load_n(&closingRequested,__ATOMIC_ACQUIRE)==0&&
+        __atomic_load_n(&counters[Attached],__ATOMIC_ACQUIRE)!=0&&
+        !Rx149InputGateState::blocked(__atomic_load_n(&rx149InputGateState,__ATOMIC_ACQUIRE));
+    return a;
+}
+void maintainReplyShadowLocked(uint64_t now) {
+    replyShadow.maintain(replyShadowAuthorityLocked(),now);
+}
+#endif
 bool reserveRx149InputTicketFast() {
     return Rx149InputGateState::reserveTicket(&rx149InputGateState);
 }
@@ -452,6 +474,39 @@ int configureLinkLocal(ifnet_t dev,const uint8_t mac[6]) {
     if(result==0){result=sock_ioctl(socket,SIOCAIFADDR_IN6,&request);sock_close(socket);}
     return result==0&&!hasLinkLocal(dev)?EADDRNOTAVAIL:result;
 }
+#if defined(ITL_NATIVE_AWDL_REPLY_SHADOW_25G332)
+void observeReplyShadowOutput(ifnet_t dev,protocol_family_t family,mbuf_t packet) {
+    auto stateLock=bridgeLock();if(!stateLock)return;
+    auto irq=IOSimpleLockLockDisableInterrupt(stateLock);
+    const uint64_t firstNow=nowUs();
+    maintainReplyShadowLocked(firstNow);
+    if(!replyShadow.current(replyShadowAuthorityLocked(),firstNow)) {
+        IOSimpleLockUnlockEnableInterrupt(stateLock,irq);return;
+    }
+    if(dev!=interface||family!=AF_INET6||replyShadowOutputCalls==UINT32_MAX) {
+        replyShadow.rejected(NativeAwdlReplyShadow::Reason::WrongAuthority);
+        IOSimpleLockUnlockEnableInterrupt(stateLock,irq);return;
+    }
+    ++replyShadowOutputCalls; // close pins the ifnet through finalization/copy.
+    IOSimpleLockUnlockEnableInterrupt(stateLock,irq);
+    uint8_t bytes[NativeAwdlReplyShadow::kEthernetLength]{};
+    bool shape=(mbuf_flags(packet)&MBUF_PKTHDR)!=0;
+    size_t length=shape?mbuf_pkthdr_len(packet):0;
+    shape=shape&&length==sizeof(bytes)&&mbuf_copydata(packet,0,length,bytes)==0&&
+        bytes[12]==0x86&&bytes[13]==0xdd;
+    // Never finalize unrelated L2/IPv4 or malformed packet shapes.
+    if(shape) {
+        mbuf_outbound_finalize(packet,AF_INET6,14); // outside spin lock
+        length=mbuf_pkthdr_len(packet);
+        shape=length==sizeof(bytes)&&mbuf_copydata(packet,0,length,bytes)==0;
+    }
+    irq=IOSimpleLockLockDisableInterrupt(stateLock);
+    if(shape)(void)replyShadow.reply(replyShadowAuthorityLocked(),nowUs(),bytes,length);
+    else replyShadow.rejected(NativeAwdlReplyShadow::Reason::FrameShape);
+    --replyShadowOutputCalls;
+    IOSimpleLockUnlockEnableInterrupt(stateLock,irq);
+}
+#endif
 errno_t output(void *,ifnet_t dev,protocol_family_t family,mbuf_t *packet) {
 #if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
     // This isolated profile is receive-only for its entire lifetime. The
@@ -461,8 +516,11 @@ errno_t output(void *,ifnet_t dev,protocol_family_t family,mbuf_t *packet) {
     (void)dev;
     (void)family;
     if(!packet||!*packet)return EINVAL;
+#if defined(ITL_NATIVE_AWDL_REPLY_SHADOW_25G332)
+    observeReplyShadowOutput(dev,family,*packet);
+#endif
     add(TxRejected);
-    return EOPNOTSUPP; // preserve caller ownership; do not queue or finalize
+    return EOPNOTSUPP; // preserve caller ownership; Shadow may finalize checksums, never queue
 #else
     if(!bridgeLock()||!packet||!*packet)return EINVAL;
     if(!(mbuf_flags(*packet)&MBUF_PKTHDR)){add(TxRejected);return EINVAL;}
@@ -676,9 +734,45 @@ bool publishRx149DataInputLease(
             NativeP2PRx149DataInput::validEpochs(lease.epochs))
         discarded=revokeRx149LeaseLocked(lease.ownerSerial,&lease.epochs,
                                          lockedNow);
+#if defined(ITL_NATIVE_AWDL_REPLY_SHADOW_25G332)
+    maintainReplyShadowLocked(lockedNow);
+#endif
     IOSimpleLockUnlockEnableInterrupt(lock,irq);
     for(size_t i=0;i<discarded;++i)add(RxRejected);
     return activated;
+}
+bool configureReplyShadow(const NativeAwdlReplyShadow::Config &config,
+                          const NativeP2PRx149DataInput::Lease &lease) {
+#if defined(ITL_NATIVE_AWDL_REPLY_SHADOW_25G332)
+    if(!bridgeLock())return false;
+    auto irq=IOSimpleLockLockDisableInterrupt(lock);
+    const auto a=replyShadowAuthorityLocked();
+    const bool same=activeRx149LeaseValid&&sameRx149LeaseIdentity(activeRx149Lease,lease)&&
+        NativeP2PRx149DataInput::leaseCurrent(lease,nowUs())&&
+        !memcmp(config.ownMac,own,sizeof(own));
+    const bool result=same&&replyShadow.configure(config,a,nowUs());
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);return result;
+#else
+    (void)config;(void)lease;return false;
+#endif
+}
+void disableReplyShadow() {
+#if defined(ITL_NATIVE_AWDL_REPLY_SHADOW_25G332)
+    if(!bridgeLock())return;
+    auto irq=IOSimpleLockLockDisableInterrupt(lock);
+    replyShadow.retire(NativeAwdlReplyShadow::Reason::Revoked);
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+#endif
+}
+NativeAwdlReplyShadow::Snapshot replyShadowSnapshot() {
+    NativeAwdlReplyShadow::Snapshot result{};
+#if defined(ITL_NATIVE_AWDL_REPLY_SHADOW_25G332)
+    if(!bridgeLock())return result;
+    auto irq=IOSimpleLockLockDisableInterrupt(lock);
+    result=replyShadow.snapshot(replyShadowAuthorityLocked(),nowUs());
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+#endif
+    return result;
 }
 void revokeRx149DataInput(uint64_t ownerSerial,
     const NativeP2PRx149DataInput::Epochs &epochs) {
@@ -686,6 +780,9 @@ void revokeRx149DataInput(uint64_t ownerSerial,
     const uint64_t now=nowUs();
     auto irq=IOSimpleLockLockDisableInterrupt(lock);
     const size_t discarded=revokeRx149LeaseLocked(ownerSerial,&epochs,now);
+#if defined(ITL_NATIVE_AWDL_REPLY_SHADOW_25G332)
+    maintainReplyShadowLocked(now);
+#endif
     IOSimpleLockUnlockEnableInterrupt(lock,irq);
     for(size_t i=0;i<discarded;++i)add(RxRejected);
 }
@@ -702,6 +799,9 @@ void revokeRx149DataInput() {
         discarded=removeRx149ItemsLocked(true,0,0,nullptr,now);
         if(activeRx149Version!=UINT64_MAX)++activeRx149Version;
     }
+#if defined(ITL_NATIVE_AWDL_REPLY_SHADOW_25G332)
+    maintainReplyShadowLocked(now);
+#endif
     IOSimpleLockUnlockEnableInterrupt(lock,irq);
     for(size_t i=0;i<discarded;++i)add(RxRejected);
 }
@@ -850,6 +950,9 @@ void poll(bool ready,uint32_t generation) {
         __atomic_load_n(&closingRequested,__ATOMIC_ACQUIRE)==0&&
         __atomic_load_n(&counters[Attached],__ATOMIC_ACQUIRE)!=0;
     set(LinkReady,radio?1:0);
+#if defined(ITL_NATIVE_AWDL_REPLY_SHADOW_25G332)
+    maintainReplyShadowLocked(nowUs());
+#endif
     if(discardQueued)set(TxPending,tx.count);
     ifnet_t dev=interface;
     if(dev&&!closing&&!detached)++inputCalls;else dev=nullptr;
@@ -1042,6 +1145,14 @@ void poll(bool ready,uint32_t generation,
             // validates the owner/epochs/incarnation. close() waits for both
             // the worker pin and each in-flight DLIL call to retire.
             if(ticketReserved)++inputCalls;
+#if defined(ITL_NATIVE_AWDL_REPLY_SHADOW_25G332)
+            uint64_t shadowRequest=0;
+            if(ticketReserved&&parsed.packetCount==1&&!parsed.qosData&&parsed.frameControl==0x0008)
+                shadowRequest=replyShadow.request(replyShadowAuthorityLocked(),ticketNow,
+                    item.rx149ReceiptSequence,item.rx149Permit.capturedUs,uint16_t(item.bytes[22])|(uint16_t(item.bytes[23])<<8),
+                    packet.awdlSequenceNumber,packet.sourceAddress,packet.destinationAddress,
+                    packet.ipv6Packet,packet.ipv6Length);
+#endif
             IOSimpleLockUnlockEnableInterrupt(lock,irq);
             if(!ticketReserved) {
                 mbuf_freem(m);
@@ -1062,6 +1173,9 @@ void poll(bool ready,uint32_t generation,
                               Rx149ReceiptIfnetInputFailed,
                 ticketNow,uint32_t(parsed.packetCount),true,inputResult);
             irq=IOSimpleLockLockDisableInterrupt(lock);
+#if defined(ITL_NATIVE_AWDL_REPLY_SHADOW_25G332)
+            replyShadow.finishInput(shadowRequest,inputResult,replyShadowAuthorityLocked(),nowUs());
+#endif
             releaseRx149InputTicketFast();
             if(inputCalls)--inputCalls;
             IOSimpleLockUnlockEnableInterrupt(lock,irq);
@@ -1488,7 +1602,11 @@ bool close() {
     cancelQueued();
     for(unsigned i=0;i<2000;++i) {
         irq=IOSimpleLockLockDisableInterrupt(lock);
-        const bool done=(!interface||detached)&&inputCalls==0&&inFlightToken==0;
+        const bool done=(!interface||detached)&&inputCalls==0&&inFlightToken==0
+#if defined(ITL_NATIVE_AWDL_REPLY_SHADOW_25G332)
+            &&replyShadowOutputCalls==0
+#endif
+            ;
         ifnet_t dev=done?interface:nullptr;
         if(done){interface=nullptr;rx.head=rx.tail=rx.count=0;memset(rx.values,0,sizeof(rx.values));set(RxPending,0);}
         IOSimpleLockUnlockEnableInterrupt(lock,irq);
@@ -1501,6 +1619,9 @@ void publishClosing() {
     if(!bridgeLock())return;
     auto irq=IOSimpleLockLockDisableInterrupt(lock);
     closing=true;radio=false;set(Closing,1);set(LinkReady,0);
+#if defined(ITL_NATIVE_AWDL_REPLY_SHADOW_25G332)
+    replyShadow.retire(NativeAwdlReplyShadow::Reason::Closing);
+#endif
     IOSimpleLockUnlockEnableInterrupt(lock,irq);
 }
 Snapshot snapshot(){

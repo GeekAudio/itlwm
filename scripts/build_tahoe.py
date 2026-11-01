@@ -16,6 +16,8 @@ PROJECT = Path(__file__).resolve().parents[1]
 
 def receive149_profile_errors(args):
     data_input = getattr(args, 'native_awdl_rx149_data_input', False)
+    if getattr(args, 'native_awdl_reply_shadow', False) and not data_input:
+        return ['Reply shadow requires the isolated RX149 data-input profile']
     if getattr(args, 'native_rx_preowner_observation', False) and not data_input:
         return ['Pre-owner observation requires the isolated RX149 data-input profile']
     if data_input and not args.native_awdl_rx149_observation_only:
@@ -52,6 +54,8 @@ def resident_build_flags(args):
         flags += ' -DITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332=1'
     if getattr(args, 'native_rx_preowner_observation', False):
         flags += ' -DITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332=1'
+    if getattr(args, 'native_awdl_reply_shadow', False):
+        flags += ' -DITL_NATIVE_AWDL_REPLY_SHADOW_25G332=1'
     return flags
 
 
@@ -74,6 +78,9 @@ def apply_artifact_profile(personality, args):
         'NativeP2PRx149ObservationOnly': bool(args.native_awdl_rx149_observation_only),
         'NativeP2PRx149DataInputExperiment': bool(getattr(args, 'native_awdl_rx149_data_input', False)),
         'NativeRxPreOwnerObservation': bool(getattr(args, 'native_rx_preowner_observation', False)),
+        # Compile availability never arms the shadow or grants firmware TX.
+        'NativeAwdlReplyShadowCompiled': bool(getattr(args, 'native_awdl_reply_shadow', False)),
+        'NativeAwdlReplyShadowEnabled': False,
     })
 
 
@@ -125,6 +132,8 @@ def main():
                         help='Test086: allow bounded channel149 inbound data into native awdl0; host frame TX remains blocked')
     parser.add_argument('--native-rx-preowner-observation', action='store_true',
                         help='Test087: independent bounded numeric RX observation before owner admission; no RX/TX policy changes')
+    parser.add_argument('--native-awdl-reply-shadow', action='store_true',
+                        help='Test105: compile disarmed request/reply association; no firmware TX or automatic runtime enable')
     args = parser.parse_args()
     for error in receive149_profile_errors(args):
         parser.error(error)
@@ -250,6 +259,8 @@ def main():
                           'native_awdl_rx149_observation_only': args.native_awdl_rx149_observation_only,
                           'native_awdl_rx149_data_input': args.native_awdl_rx149_data_input,
                           'native_rx_preowner_observation': args.native_rx_preowner_observation,
+                          'native_awdl_reply_shadow_compiled': args.native_awdl_reply_shadow,
+                          'native_awdl_reply_shadow_enabled': False,
                           'test_build': build_tag, 'mach_o_uuid': match.group(1),
                           'log': str(log_path)}, ensure_ascii=False))
 

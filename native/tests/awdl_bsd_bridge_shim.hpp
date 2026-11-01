@@ -50,7 +50,9 @@ inline void mbuf_pkthdr_setlen(mbuf_t m,size_t n){m->total=n;}
 inline void mbuf_pkthdr_setrcvif(mbuf_t m,ifnet_t dev){m->receiveIf=dev;}
 inline void mbuf_pkthdr_setheader(mbuf_t m,void *p){m->header=p;}
 inline void mbuf_adj(mbuf_t m,int n){m->offset+=n;m->length-=n;if(m->flags&MBUF_PKTHDR)m->total-=n;}
-inline void mbuf_outbound_finalize(mbuf_t,unsigned family,size_t offset){assert(family==AF_INET6&&offset==14);++finalized;}
+using FakeFinalizeObserver=void (*)(mbuf_t);
+inline FakeFinalizeObserver &fakeFinalizeObserver(){static FakeFinalizeObserver value=nullptr;return value;}
+inline void mbuf_outbound_finalize(mbuf_t packet,unsigned family,size_t offset){assert(family==AF_INET6&&offset==14);++finalized;if(fakeFinalizeObserver())fakeFinalizeObserver()(packet);}
 inline int ifnet_reference(ifnet_t p){++p->refs;return 0;}
 inline void ifnet_release(ifnet_t p){assert(p->refs);--p->refs;}
 inline int ifnet_lladdr_copy_bytes(ifnet_t p,void *out,size_t length){if(lladdrFail||!p||length!=sizeof(p->lladdr))return EINVAL;memcpy(out,p->lladdr,length);return 0;}

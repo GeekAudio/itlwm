@@ -223,6 +223,97 @@ class HcmdRekeyCorrelationTests(unittest.TestCase):
         self.assertEqual(result["lifecycles"][0]["hcmd_submit_status"],
                          "missing_or_ambiguous_same_tuple_submit")
 
+    def test_retained_numeric_cut_predates_gtk_anchor_freshness_unproven(self):
+        # Sanitized numeric fixture from Test104's retained HCTX cut: same
+        # 64-row serial window, no key-command tuple, and a newest row almost
+        # 38 minutes older than the auth callback. No payload/address data.
+        rows = []
+        first_ns = 1_084_943_836_439
+        last_ns = 1_085_221_126_472
+        for offset in range(64):
+            row = hcmd_row(
+                128_755 + offset,
+                5 if offset % 2 == 0 else 9,
+                3,
+                index=219,
+                generation=5,
+                fw_generation=5,
+                group=0,
+                mono=first_ns + (last_ns - first_ns) * offset // 63,
+                flags=216,
+                result=0 if offset % 2 == 0 else 1,
+                payload_length=452,
+                command_id=193,
+            )
+            row["qid"] = 160
+            row["header_sequence"] = 41_179
+            row["packet_length"] = 456
+            rows.append(row)
+        decoded = stable_decoded(rows)
+        decoded["header"].update({
+            "version_begin": 128_818,
+            "version_end": 128_818,
+            "window_start_serial": 128_755,
+            "window_end_serial": 128_818,
+            "row_count": 64,
+            "dropped_count": 0,
+            "overwritten_count": 128_754,
+            "gap_count": 0,
+        })
+        result = correlate_key_lifecycle(decoded, stable_auth([
+            gtk_submit(index=75, mono_us=3_372_706_060, association=1,
+                       attempt=1, sequence=6),
+        ]))
+        life = result["lifecycles"][0]
+        self.assertEqual(life["hcmd_submit_status"],
+                         "cut_predates_submit_freshness_unproven")
+        self.assertEqual(life["hcmd_cut_freshness"]["status"],
+                         "cut_predates_submit_join_window")
+        self.assertGreater(life["hcmd_cut_freshness"]["older_than_anchor_us"],
+                           5_000_000)
+        self.assertEqual(life["response_status"], "unknown")
+        self.assertTrue(life["hcmd_cut_freshness"]["freshness_unproven"])
+
+    def test_fresh_nonmatching_cut_does_not_get_stale_label(self):
+        rows = [hcmd_row(
+            200, PHASE_COMMAND_SUBMITTED, SOURCE_HOST_COMMAND,
+            index=90, command_id=0x20, mono=3_372_706_100_000,
+        )]
+        result = correlate_key_lifecycle(stable_decoded(rows), stable_auth([
+            gtk_submit(index=75, mono_us=3_372_706_060, association=1,
+                       attempt=1, sequence=6),
+        ]))
+        life = result["lifecycles"][0]
+        self.assertEqual(life["hcmd_submit_status"],
+                         "missing_or_ambiguous_same_tuple_submit")
+        self.assertEqual(life["hcmd_cut_freshness"]["status"],
+                         "cut_reaches_submit_join_window")
+        self.assertTrue(life["hcmd_cut_freshness"]["freshness_unproven"])
+        self.assertIn("does not prove snapshot publication freshness",
+                      life["hcmd_cut_freshness"]["interpretation"])
+        self.assertEqual(life["response_status"], "unknown")
+
+    def test_deauth_cut_without_enqueue_does_not_erase_older_anchor(self):
+        rows = [hcmd_row(
+            128_818, PHASE_RX_DISPATCH_COMPLETED,
+            SOURCE_COMMAND_RESPONSE_QUEUE, index=219, command_id=193,
+            mono=1_085_221_126_472, result=1,
+        )]
+        result = correlate_key_lifecycle(stable_decoded(rows), stable_auth([
+            auth_event(49, 1, mono_us=3_381_798_510, association=1,
+                       attempt=10, source=1),
+            auth_event(54, AUTH_KIND_RX_DEAUTH, mono_us=3_382_814_203,
+                       association=1, attempt=0, stage=15, source=1,
+                       result=16, detail=192),
+        ]))
+        self.assertEqual(result["status"],
+                         "no_eligible_group_key_local_enqueue_in_auth_cut")
+        self.assertEqual(result["auth_cut_scope"],
+                         "this_bounded_snapshot_only")
+        self.assertEqual(result["hcmd_cut_freshness"]["status"],
+                         "cut_predates_submit_join_window")
+        self.assertIn("does not exclude an enqueue", result["interpretation"])
+
     def test_non_key_command_reusing_slot_ends_old_attribution_window(self):
         rows = [
             hcmd_row(100, PHASE_COMMAND_SUBMITTED, SOURCE_HOST_COMMAND,
