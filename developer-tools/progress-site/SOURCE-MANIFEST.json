@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "99eea0c6babc1d4bfb2998fc4d3ea22d5c9afe24ec675dfdc96cbef868923619"
+      "sha256": "a3018672a268be360a485d33961f371e62fdba405ef936474a0e71aa9472354e"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "93e145ee1a3b9be2cd1c4087842afbe9b514162ac3c10601c53e6962d8e80f24"
+      "sha256": "800acdffb664126dbd7deb7e70c4dd0dbb7f2e674b3a12a0818e4052c0333cb4"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -30,7 +30,7 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "a117b5ac75dd5b6abc1ce26393364291486c6a99fc95eb2c4b0ac3cbca478555"
+      "sha256": "8bb2f7bd785f6f1b1cb4d19dada1bc76ce9d453673b52fde3b46afb8956afcdf"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
@@ -50,8 +50,8 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-01T09:44:19.720197+08:00",
-  "runtime_scope": "Test099本次启动固定40项：4项通过、4项部分通过、1项未通过、15项受限未覆盖、16项未测试。启动初段reason 16链路中断且用户确认此前没有操作；后续W0 300秒窗口通过，但300秒密钥观察没有新锚点，不能抵消启动初段故障，也不代表密钥更新稳定性通过。睡眠按要求跳过。",
+  "updated_at": "2026-11-01T10:20:43.298569+08:00",
+  "runtime_scope": "Test099本次启动固定40项：6项通过、6项部分通过、1项未通过、15项受限未覆盖、12项未测试。启动初段reason 16链路中断且用户确认此前没有操作；后续W0 300秒窗口通过，但300秒密钥观察没有新锚点，不能抵消启动初段故障，也不代表密钥更新稳定性通过。睡眠按要求跳过。",
   "running_candidate": "25G332-Test099",
   "next_candidate": null
 }
