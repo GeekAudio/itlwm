@@ -1,0 +1,50 @@
+{
+  "schema": "awdl-unicast-offline-frozen-template/v1",
+  "source": {
+    "repository": "https://github.com/GeekAudio/itlwm",
+    "commit": "d9f4a8b4cd58cbb2268e61e932c852d6c75f6bfb",
+    "commit_message": "Update Test100 rekey results and development timeline",
+    "commit_time_utc": "2026-11-01T04:11:09Z",
+    "path": "developer-tools/openwrt-tx-observation/afpacket-sender/awdl_probe_sender.c",
+    "blob_sha1": "faed143d57f7cf51149d21849bf2bb644a9fdb7b",
+    "raw_file_sha256": "22eaaac7f9a7b956b730e5abfba66464044843ff4fa3a38cd2e574bde695e5d4",
+    "url": "https://github.com/GeekAudio/itlwm/blob/d9f4a8b4cd58cbb2268e61e932c852d6c75f6bfb/developer-tools/openwrt-tx-observation/afpacket-sender/awdl_probe_sender.c",
+    "relevant_source_symbols": [
+      "MPDU_LENGTH=96U, RADIOTAP_LENGTH=10U, PACKET_LENGTH=106U",
+      "radiotap_base[10]",
+      "mpdu_base[96]",
+      "WIFI_SEQUENCE_BASE=291U, AWDL_SEQUENCE_BASE=34305U",
+      "validate_probe_contract()",
+      "build_packet()"
+    ],
+    "contract_sha256": "e4ce545f425313ad4f444d6d8fa6931bec8b1cae1cd67bb967ff10f7b5a28f27",
+    "scope": "Reviewed earlier immutable C frame-builder template; not claimed identical to later short-RTAP repair or loaded sender. No current device identity read."
+  },
+  "baseline_mpdu_hex": [
+    "08000000333300000001028600000001002500ff94733012aaaa030017f2080003040186000086dd6000000000101101fe80000000000000008600fffe000001ff020000000000000000000000000001c000c001001073d05430383652583031",
+    "08000000333300000001028600000001002500ff94734012aaaa030017f2080003040286000086dd6000000000101101fe80000000000000008600fffe000001ff020000000000000000000000000001c000c001001073d05430383652583031",
+    "08000000333300000001028600000001002500ff94735012aaaa030017f2080003040386000086dd6000000000101101fe80000000000000008600fffe000001ff020000000000000000000000000001c000c001001073d05430383652583031",
+    "08000000333300000001028600000001002500ff94736012aaaa030017f2080003040486000086dd6000000000101101fe80000000000000008600fffe000001ff020000000000000000000000000001c000c001001073d05430383652583031"
+  ],
+  "baseline_mpdu_sha256": [
+    "f491f5e03662572d5ef135c4c4dbb47d60715201fec48f8d62f4189912ad5f7b",
+    "4e7370cc7fea681c1a4745859ff03790833639d74fc320fa7e78222beefd18d7",
+    "c4dc001349a3c00fc99580b83ed061f10c75116dce4eb9dd9503ddf85438c923",
+    "19e8f0d637a591753d8b23b99d1d9e42feb0b3648c9f1f5bb6fe6f6ede9fd7b5"
+  ],
+  "offsets": {
+    "ipv6": 40,
+    "udp": 80,
+    "udp_payload": 88
+  },
+  "mpdu_fcs_bytes_included": 0,
+  "source_mac": "02:86:00:00:00:01",
+  "source_ipv6": "fe80::86:ff:fe00:1",
+  "udp_ports": [
+    49152,
+    49153
+  ],
+  "payload_ascii": "T086RX01",
+  "wifi_sequence_base": 291,
+  "awdl_sequence_base": 34305
+}
