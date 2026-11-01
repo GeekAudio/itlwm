@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "514599db4d19f94583c8f18a12671151a27a929f4e837ea6167ce518094570ed"
+      "sha256": "5ea7d4b997b60272693b5a65eacd30fb8955f4fb09d4119defe9f2f6511c296d"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "922f68312d8bf5fa9e06d5392777ff02f000daf151fc072921825c019556d4e3"
+      "sha256": "d29b0925a35b2f6463950b7aa40f1df930353c6dded30b7833a2a37a64743375"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -50,7 +50,7 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-01T11:38:10.143020+08:00",
+  "updated_at": "2026-11-01T11:40:38.729846+08:00",
   "runtime_scope": "Test100本次启动固定40项截至当前：8项通过、4项部分通过、28项未覆盖、0项明确判为未通过。身份与联网、149频道ROC START/END、MIF来源归属与解析接纳、awdl0常驻及IPv6链路本地状态有本轮证据。Wi-Fi 300.269秒和诊断后60.281秒被动窗口通过；GTK自然密钥观察仍在进行，尚未出现自然更新；睡眠按要求跳过。OpenWrt本地send及PACKET_OUTGOING回显不证明RF；Intel侧没有AWDL数据/ifnet回执，AirDrop仍未验证。0项未通过只表示当前没有被明确判fail，不代表长期稳定或端到端功能已验收。",
   "running_candidate": "25G332-Test100",
   "next_candidate": null
