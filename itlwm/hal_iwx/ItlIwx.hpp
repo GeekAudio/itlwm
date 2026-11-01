@@ -903,7 +903,8 @@ public:
                         uint32_t transportNotificationQid,
                         uint32_t transportNotificationIndex,
                         uint64_t hostRxMonotonicUs,
-                        bool hostRxMonotonicUsPresent
+                        bool hostRxMonotonicUsPresent,
+                        uint32_t rawPacketLenNFlags
 #if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
                         , NativeIwxRocRxCorrelation::Token rocCopyToken,
                         uint32_t rxPacketOffset

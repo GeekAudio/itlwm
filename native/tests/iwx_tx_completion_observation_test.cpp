@@ -23,7 +23,7 @@ static iwx_tx_completion_event_input txRsp(
 
 static void testFixedBoundsFullWidthAndValidZero()
 {
-    static_assert(sizeof(iwx_tx_completion_event_record) <= 192,
+    static_assert(sizeof(iwx_tx_completion_event_record) <= 256,
                   "event must have a fixed scalar bound");
     static_assert(sizeof(iwx_tx_completion_observation_state) <= 1024,
                   "embedded observer exceeds its bound");

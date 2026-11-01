@@ -1152,7 +1152,7 @@ static bool publishCompletionSnapshot(IOEthernetController *controller,
     };
     if (!scalar("SnapshotVersionBegin", finish - 1U))
         return false;
-    bool okay = scalar("Schema", 3) && scalar("SnapshotComplete", 0) &&
+    bool okay = scalar("Schema", 4) && scalar("SnapshotComplete", 0) &&
         scalar("SnapshotAvailable", snapshot.available) &&
         scalar("DroppedCount", snapshot.dropped_count) &&
         scalar("NextSerial", snapshot.next_serial) &&
@@ -1233,6 +1233,25 @@ static bool publishCompletionSnapshot(IOEthernetController *controller,
         PUBLISH_COMPLETION_FIELD("TxCommandOffloadAssist", txcmd_offload_assist);
         PUBLISH_COMPLETION_FIELD("SingleSlotTxCommandHeader",
                                  single_slot_txcmd_header);
+        PUBLISH_COMPLETION_FIELD("HostOriginState", host_origin_state);
+        PUBLISH_COMPLETION_FIELD("HostOriginCookie", host_origin_cookie);
+        PUBLISH_COMPLETION_FIELD("HostOriginSlotGeneration",
+                                 host_origin_slot_generation);
+        PUBLISH_COMPLETION_FIELD("HostOriginContextGeneration",
+                                 host_origin_context_generation);
+        PUBLISH_COMPLETION_FIELD("HostOriginOutputEpoch",
+                                 host_origin_output_epoch);
+        PUBLISH_COMPLETION_FIELD("HostOriginIdentityEpoch",
+                                 host_origin_identity_epoch);
+        PUBLISH_COMPLETION_FIELD("HostOriginAttemptId",
+                                 host_origin_attempt_id);
+        PUBLISH_COMPLETION_FIELD("HostOriginSource", host_origin_source);
+        PUBLISH_COMPLETION_FIELD("HostOriginIndex", host_origin_index);
+        PUBLISH_COMPLETION_FIELD("HostOriginFrameControl",
+                                 host_origin_frame_control);
+        PUBLISH_COMPLETION_FIELD("HostOriginSequenceControl",
+                                 host_origin_sequence_control);
+        PUBLISH_COMPLETION_FIELD("HostOriginTid", host_origin_tid);
 #undef PUBLISH_COMPLETION_FIELD
     }
     return okay && scalar("SnapshotComplete", snapshot.available && snapshot.complete ? 1U : 0U) &&
@@ -8690,7 +8709,8 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
                uint32_t transportNotificationQid,
                uint32_t transportNotificationIndex,
                uint64_t hostRxMonotonicUs,
-               bool hostRxMonotonicUsPresent
+               bool hostRxMonotonicUsPresent,
+               uint32_t rawPacketLenNFlags
 #if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
                , NativeIwxRocRxCorrelation::Token rocCopyToken,
                uint32_t rxPacketOffset
@@ -8818,6 +8838,14 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
             entry.presence = kDescriptorSizePresent | kPacketOffsetPresent;
             entry.descriptorSize = uint16_t(desc_size);
             entry.packetOffset = uint16_t(rxPacketOffset);
+            entry.extensionPresence = kPacketLenNFlagsPresent |
+                kRxQueuePresent | kRssEnabledPresent;
+            entry.rawPacketLenNFlags = rawPacketLenNFlags;
+            entry.rxQueue = static_cast<uint8_t>(
+                (rawPacketLenNFlags & kPacketRxQueueMask) >>
+                kPacketRxQueueShift);
+            entry.rssEnabled =
+                (rawPacketLenNFlags & kPacketRssEnabledMask) ? 1u : 0u;
             entry.qid = uint8_t(transportNotificationQid);
             entry.index = uint8_t(transportNotificationIndex);
             if (hostRxMonotonicUsPresent) {
@@ -8839,6 +8867,27 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
             if (inspection.statusPresent) {
                 entry.presence |= kRawStatusPresent;
                 entry.rawStatus = inspection.status;
+                entry.extensionPresence |= kSourceStaFoundPresent;
+                entry.sourceStaFound =
+                    (inspection.status & kSourceStaFoundMask) ? 1u : 0u;
+                if (entry.sourceStaFound) {
+                    entry.extensionPresence |= kSourceStaIdPresent;
+                    entry.sourceStaId = static_cast<uint8_t>(
+                        (inspection.status & kSourceStaIdMask) >>
+                        kSourceStaIdShift);
+                }
+            }
+            if (inspection.descriptorPresent) {
+                entry.extensionPresence |= kDescriptorVersionPresent;
+                entry.descriptorVersion = inspection.descriptorVersion;
+            }
+            if (inspection.filterMatchPresent) {
+                entry.extensionPresence |= kFilterMatchPresent;
+                entry.rawFilterMatch = inspection.filterMatch;
+            }
+            if (inspection.macContextPresent) {
+                entry.extensionPresence |= kMacContextPresent;
+                entry.macContext = static_cast<uint8_t>(inspection.macContext);
             }
             if (inspection.mpduLengthPresent) {
                 entry.presence |= kMpduLengthPresent;
@@ -10151,9 +10200,12 @@ iwx_rx_tx_cmd(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
             iwx_lookup_cmd_ver(sc, IWX_LONG_GROUP, IWX_TX_CMD));
         auto *group2Trace = &sc->sc_ic.ic_tahoe_auth_trace.group2_tx;
         IwxGroup2TxSlot group2MatchedSlot{};
+        IwxGroup2TxHostOrigin group2HostOrigin{};
         uint32_t group2RelatedSidecar = 0;
+        iwx_tx_completion_event_input &completionEvent =
+            txRspCompletion.event();
         const uint32_t group2CompletionMatch =
-            iwx_group2_tx_trace_match_completion_ex(
+            iwx_group2_tx_trace_match_completion_ex_with_origin(
                 group2Trace, tahoeMonotonicNs() / 1000ULL,
                 responseOldTail, responseOldQueued,
                 static_cast<uint32_t>(checkedIndex), queueId,
@@ -10162,7 +10214,62 @@ iwx_rx_tx_cmd(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
                 le16toh(tx_resp->frame_ctrl), le16toh(tx_resp->seq_ctl),
                 0, // The outer requiredLength check validated status.status.
                 static_cast<int32_t>(le16toh(tx_resp->status.status)),
-                &group2MatchedSlot, &group2RelatedSidecar);
+                (completionEvent.presence_flags &
+                 IWX_TX_COMPLETION_HAS_SINGLE_SLOT_TXCMD_HEADER) != 0 &&
+                    completionEvent.txcmd_scan_status ==
+                        IWX_TXCMD_IDENTITY_SCAN_COMPLETE &&
+                    completionEvent.txcmd_expected_count == 1 &&
+                    completionEvent.txcmd_scanned_count == 1 ? 1U : 0U,
+                completionEvent.txcmd_candidate_index,
+                &group2MatchedSlot, &group2RelatedSidecar,
+                &group2HostOrigin);
+        switch (group2HostOrigin.state) {
+        case IWX_GROUP2_TX_ORIGIN_NONE:
+            completionEvent.host_origin_state =
+                IWX_TX_COMPLETION_HOST_ORIGIN_NONE;
+            break;
+        case IWX_GROUP2_TX_ORIGIN_UNIQUE:
+        case IWX_GROUP2_TX_ORIGIN_UNBOUND:
+            completionEvent.host_origin_state =
+                group2HostOrigin.state == IWX_GROUP2_TX_ORIGIN_UNIQUE ?
+                IWX_TX_COMPLETION_HOST_ORIGIN_UNIQUE :
+                IWX_TX_COMPLETION_HOST_ORIGIN_UNBOUND;
+            completionEvent.host_origin_cookie =
+                group2HostOrigin.slot.cookie;
+            completionEvent.host_origin_slot_generation =
+                group2HostOrigin.slot.slot_generation;
+            completionEvent.host_origin_context_generation =
+                group2HostOrigin.slot.context_generation;
+            completionEvent.host_origin_output_epoch =
+                group2HostOrigin.slot.output_epoch;
+            completionEvent.host_origin_identity_epoch =
+                group2HostOrigin.slot.identity_epoch;
+            completionEvent.host_origin_attempt_id =
+                group2HostOrigin.slot.attempt_id;
+            completionEvent.host_origin_source =
+                group2HostOrigin.slot.source;
+            completionEvent.host_origin_index =
+                group2HostOrigin.slot.index;
+            completionEvent.host_origin_frame_control =
+                group2HostOrigin.slot.frame_control;
+            completionEvent.host_origin_sequence_control =
+                group2HostOrigin.slot.sequence_control;
+            completionEvent.host_origin_tid = group2HostOrigin.slot.tid;
+            break;
+        case IWX_GROUP2_TX_ORIGIN_MULTIPLE:
+            completionEvent.host_origin_state =
+                IWX_TX_COMPLETION_HOST_ORIGIN_MULTIPLE;
+            break;
+        case IWX_GROUP2_TX_ORIGIN_STALE_OR_RESET_AMBIGUOUS:
+            completionEvent.host_origin_state =
+                IWX_TX_COMPLETION_HOST_ORIGIN_STALE_OR_RESET_AMBIGUOUS;
+            break;
+        case IWX_GROUP2_TX_ORIGIN_UNAVAILABLE:
+        default:
+            completionEvent.host_origin_state =
+                IWX_TX_COMPLETION_HOST_ORIGIN_UNAVAILABLE;
+            break;
+        }
         if (group2RelatedSidecar)
             txRspCompletion.markPublicationRelevant();
 #endif
@@ -19193,7 +19300,8 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
                         maxlen, ml, rxRingSlot,
                         static_cast<uint32_t>(pkt->hdr.qid),
                         static_cast<uint32_t>(pkt->hdr.idx),
-                        hostRxMonotonicUs, hostRxMonotonicUsPresent
+                        hostRxMonotonicUs, hostRxMonotonicUsPresent,
+                        le32toh(pkt->len_n_flags)
 #if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
                         , rocCopyToken, offset
 #endif
@@ -19225,7 +19333,8 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
                         maxlen, ml, rxRingSlot,
                         static_cast<uint32_t>(pkt->hdr.qid),
                         static_cast<uint32_t>(pkt->hdr.idx),
-                        hostRxMonotonicUs, hostRxMonotonicUsPresent
+                        hostRxMonotonicUs, hostRxMonotonicUsPresent,
+                        le32toh(pkt->len_n_flags)
 #if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
                         , rocCopyToken, offset
 #endif

@@ -95,6 +95,7 @@ static void testBeaconSlotSurvivesLaterTrafficAndEndFreeze()
     assert(recorder.recordNotification(beacon, notification));
 
     Mpdu mpdu;
+    mpdu.extensionPresence = kSourceStaFoundPresent;
     mpdu.presence = kChannelPresent | kRawMacPhyPresent |
         kDecodeModePresent | kFrameControlPresent |
         kSequenceControlPresent | kRawStatusPresent |
@@ -143,7 +144,7 @@ static void testBeaconSlotSurvivesLaterTrafficAndEndFreeze()
     uint8_t wire[kWireBytes];
     assert(recorder.encode(wire, sizeof(wire)));
     assert(wire[0] == 'I' && wire[7] == '1');
-    assert(get32(wire, 8) == 2);
+    assert(get32(wire, 8) == 3);
     assert(get32(wire, 12) == kHeaderBytes);
     assert(get32(wire, 16) == kRecordBytes);
     assert(get32(wire, 20) == kCapacity);

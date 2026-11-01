@@ -10,8 +10,10 @@
  * an ordered packet ledger. They contain no packet bytes, addresses, nodes,
  * or pointers. Schema 2 records a bounded read-only scan of live host TX_CMD
  * headers in the response's reclaim interval. Schema 3 may additionally
- * retain one raw TX_CMD header from a complete one-entry interval. Neither
- * changes ring ownership or claims firmware acceptance or peer receipt.
+ * retain one raw TX_CMD header from a complete one-entry interval. Schema 4
+ * adds unique current Group2 host-side slot provenance observed during the
+ * existing matcher traversal. None changes ring ownership or claims firmware
+ * acceptance or peer receipt.
  *
  * Producers make one CAS attempt only. Invalid input, a saturated counter,
  * or contention increments dropped_count where possible; any such loss makes
@@ -76,6 +78,17 @@ enum iwx_tx_completion_rx_parse_stop_reason {
     IWX_TX_COMPLETION_RX_DESCRIPTOR_INVALID = 0,
     IWX_TX_COMPLETION_RX_PACKET_LENGTH_INVALID = 1,
     IWX_TX_COMPLETION_RX_UNCLASSIFIED_STOP = 2
+};
+
+/* Host-origin evidence is independent of strict response tuple matching.
+ * UNIQUE identifies only a current host-side Group2 slot. */
+enum iwx_tx_completion_host_origin_state {
+    IWX_TX_COMPLETION_HOST_ORIGIN_UNAVAILABLE = 0,
+    IWX_TX_COMPLETION_HOST_ORIGIN_NONE = 1,
+    IWX_TX_COMPLETION_HOST_ORIGIN_UNIQUE = 2,
+    IWX_TX_COMPLETION_HOST_ORIGIN_MULTIPLE = 3,
+    IWX_TX_COMPLETION_HOST_ORIGIN_STALE_OR_RESET_AMBIGUOUS = 4,
+    IWX_TX_COMPLETION_HOST_ORIGIN_UNBOUND = 5
 };
 
 /* Only caller-supplied facts use these flags. SERIAL is observer-owned.
@@ -167,6 +180,18 @@ typedef struct iwx_tx_completion_event_record {
     uint32_t txcmd_offload_assist;
     /* FC in bits 31..16 and SC in bits 15..0 for a single readable slot. */
     uint32_t single_slot_txcmd_header;
+    uint32_t host_origin_state;
+    uint32_t host_origin_context_generation;
+    uint32_t host_origin_output_epoch;
+    uint32_t host_origin_identity_epoch;
+    uint32_t host_origin_attempt_id;
+    uint32_t host_origin_source;
+    uint32_t host_origin_index;
+    uint32_t host_origin_frame_control;
+    uint32_t host_origin_sequence_control;
+    uint32_t host_origin_tid;
+    uint64_t host_origin_cookie;
+    uint64_t host_origin_slot_generation;
 } iwx_tx_completion_event_record;
 
 typedef struct iwx_tx_completion_event_input {
@@ -213,6 +238,18 @@ typedef struct iwx_tx_completion_event_input {
     uint32_t txcmd_flags;
     uint32_t txcmd_offload_assist;
     uint32_t single_slot_txcmd_header;
+    uint32_t host_origin_state;
+    uint32_t host_origin_context_generation;
+    uint32_t host_origin_output_epoch;
+    uint32_t host_origin_identity_epoch;
+    uint32_t host_origin_attempt_id;
+    uint32_t host_origin_source;
+    uint32_t host_origin_index;
+    uint32_t host_origin_frame_control;
+    uint32_t host_origin_sequence_control;
+    uint32_t host_origin_tid;
+    uint64_t host_origin_cookie;
+    uint64_t host_origin_slot_generation;
 } iwx_tx_completion_event_input;
 
 typedef struct iwx_tx_completion_observation_state {
@@ -247,7 +284,7 @@ static constexpr uint32_t kKindCount = IWX_TX_COMPLETION_KIND_COUNT;
 static constexpr uint32_t kMaxReasonCount =
     IWX_TX_COMPLETION_MAX_REASON_COUNT;
 
-static_assert(sizeof(iwx_tx_completion_event_record) <= 192,
+static_assert(sizeof(iwx_tx_completion_event_record) <= 256,
               "TX completion record must remain fixed and scalar");
 static_assert(sizeof(iwx_tx_completion_observation_state) <=
                   IWX_TX_COMPLETION_STATE_MAX_BYTES,
@@ -493,12 +530,70 @@ static inline bool absentValuesAreZero(
             txcmd_offload_assist) &&
         IWX_TX_COMPLETION_ABSENT_ZERO(
             IWX_TX_COMPLETION_HAS_SINGLE_SLOT_TXCMD_HEADER,
-            single_slot_txcmd_header);
+            single_slot_txcmd_header) &&
+        ((in->host_origin_state == IWX_TX_COMPLETION_HOST_ORIGIN_UNIQUE ||
+          in->host_origin_state == IWX_TX_COMPLETION_HOST_ORIGIN_UNBOUND) ||
+         (in->host_origin_cookie == 0 &&
+          in->host_origin_slot_generation == 0 &&
+          in->host_origin_context_generation == 0 &&
+          in->host_origin_output_epoch == 0 &&
+          in->host_origin_identity_epoch == 0 &&
+          in->host_origin_attempt_id == 0 &&
+          in->host_origin_source == 0 && in->host_origin_index == 0 &&
+          in->host_origin_frame_control == 0 &&
+          in->host_origin_sequence_control == 0 &&
+          in->host_origin_tid == 0));
 #undef IWX_TX_COMPLETION_ABSENT_ZERO
 }
 
 static inline bool validWidths(const iwx_tx_completion_event_input *in)
 {
+    if (in->host_origin_state >
+        IWX_TX_COMPLETION_HOST_ORIGIN_UNBOUND)
+        return false;
+    if (in->host_origin_state != IWX_TX_COMPLETION_HOST_ORIGIN_UNAVAILABLE &&
+        in->kind != IWX_TX_COMPLETION_TX_RSP)
+        return false;
+    if (in->host_origin_state == IWX_TX_COMPLETION_HOST_ORIGIN_UNIQUE ||
+        in->host_origin_state == IWX_TX_COMPLETION_HOST_ORIGIN_UNBOUND) {
+        const uint32_t required = IWX_TX_COMPLETION_HAS_FIRMWARE_QID |
+            IWX_TX_COMPLETION_HAS_QUEUE_INDEX |
+            IWX_TX_COMPLETION_HAS_RING_COUNT |
+            IWX_TX_COMPLETION_HAS_QUEUED |
+            IWX_TX_COMPLETION_HAS_TAIL |
+            IWX_TX_COMPLETION_HAS_OUTPUT_EPOCH;
+        if ((in->presence_flags & required) != required ||
+            in->host_origin_cookie == 0 ||
+            in->host_origin_slot_generation == 0 ||
+            in->host_origin_attempt_id == 0 ||
+            (in->host_origin_source != 1 && in->host_origin_source != 2) ||
+            in->ring_count == 0 || in->queue_index >= in->ring_count ||
+            in->tail >= in->ring_count ||
+            in->host_origin_index >= in->ring_count ||
+            in->host_origin_frame_control > UINT16_MAX ||
+            in->host_origin_sequence_control > UINT16_MAX ||
+            in->host_origin_tid > 15U)
+            return false;
+        const uint32_t distance = (in->queue_index + in->ring_count -
+            in->tail) % in->ring_count;
+        const uint32_t originOffset = (in->host_origin_index +
+            in->ring_count - in->tail) % in->ring_count;
+        if (distance == 0 || distance > in->queued ||
+            originOffset >= distance)
+            return false;
+        if (in->host_origin_state ==
+            IWX_TX_COMPLETION_HOST_ORIGIN_UNIQUE) {
+            const uint32_t rawRequired =
+                IWX_TX_COMPLETION_HAS_TXCMD_SCAN |
+                IWX_TX_COMPLETION_HAS_SINGLE_SLOT_TXCMD_HEADER;
+            if ((in->presence_flags & rawRequired) != rawRequired ||
+                in->txcmd_scan_status != 1U ||
+                in->txcmd_expected_count != 1 ||
+                in->txcmd_scanned_count != 1 ||
+                in->txcmd_candidate_index != in->host_origin_index)
+                return false;
+        }
+    }
     if ((in->presence_flags & IWX_TX_COMPLETION_HAS_RX_GROUP) &&
         in->rx_group > UINT8_MAX)
         return false;
@@ -679,6 +774,19 @@ static inline void copyInput(const iwx_tx_completion_event_input *in,
     out->txcmd_flags = in->txcmd_flags;
     out->txcmd_offload_assist = in->txcmd_offload_assist;
     out->single_slot_txcmd_header = in->single_slot_txcmd_header;
+    out->host_origin_state = in->host_origin_state;
+    out->host_origin_cookie = in->host_origin_cookie;
+    out->host_origin_slot_generation = in->host_origin_slot_generation;
+    out->host_origin_context_generation =
+        in->host_origin_context_generation;
+    out->host_origin_output_epoch = in->host_origin_output_epoch;
+    out->host_origin_identity_epoch = in->host_origin_identity_epoch;
+    out->host_origin_attempt_id = in->host_origin_attempt_id;
+    out->host_origin_source = in->host_origin_source;
+    out->host_origin_index = in->host_origin_index;
+    out->host_origin_frame_control = in->host_origin_frame_control;
+    out->host_origin_sequence_control = in->host_origin_sequence_control;
+    out->host_origin_tid = in->host_origin_tid;
 }
 
 static inline void copySnapshotLocked(

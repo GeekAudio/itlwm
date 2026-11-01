@@ -136,6 +136,20 @@ struct IwxGroup2TxSlot {
     uint32_t valid;
 };
 
+enum iwx_group2_tx_host_origin_state {
+    IWX_GROUP2_TX_ORIGIN_UNAVAILABLE = 0,
+    IWX_GROUP2_TX_ORIGIN_NONE = 1,
+    IWX_GROUP2_TX_ORIGIN_UNIQUE = 2,
+    IWX_GROUP2_TX_ORIGIN_MULTIPLE = 3,
+    IWX_GROUP2_TX_ORIGIN_STALE_OR_RESET_AMBIGUOUS = 4,
+    IWX_GROUP2_TX_ORIGIN_UNBOUND = 5
+};
+
+struct IwxGroup2TxHostOrigin {
+    uint32_t state;
+    struct IwxGroup2TxSlot slot;
+};
+
 struct IwxGroup2TxTrace {
     uint32_t writer;
     uint32_t dropped_count;
@@ -674,21 +688,64 @@ static inline int iwx_group2_tx_interval_has_sidecar_sparse(
     return 0;
 }
 
-static inline uint32_t iwx_group2_tx_match_completion_sparse(
+/* In one bounded pass, retain the pre-existing strict response matcher and
+ * independently observe the host-origin sidecar(s) in the same exclusive
+ * reclaim interval. The second result is provenance only; it cannot promote
+ * the strict match or establish firmware acknowledgement. */
+static inline uint32_t iwx_group2_tx_match_completion_sparse_with_origin(
     const struct IwxGroup2TxSlot *slots, uint32_t slot_capacity,
     uint32_t ring_count, uint32_t old_tail, uint32_t old_queued,
     uint32_t checked_index, uint32_t queue_id,
     uint32_t context_generation, uint32_t output_epoch,
     uint32_t frame_control, uint32_t sequence_control,
     uint32_t reset_ambiguous, uint32_t identity_epoch,
-    struct IwxGroup2TxSlot *matched_out)
+    uint32_t raw_single_header_valid, uint32_t raw_single_header_index,
+    struct IwxGroup2TxSlot *matched_out,
+    struct IwxGroup2TxHostOrigin *host_origin_out,
+    uint32_t *related_sidecar_out)
 {
     if (matched_out != NULL)
         __builtin_memset(matched_out, 0, sizeof(*matched_out));
-    if (reset_ambiguous)
-        return IWX_GROUP2_TX_MATCH_RESET_AMBIGUOUS;
-    if (identity_epoch == UINT32_MAX)
-        return IWX_GROUP2_TX_MATCH_UNKNOWN;
+    if (host_origin_out != NULL) {
+        __builtin_memset(host_origin_out, 0, sizeof(*host_origin_out));
+        host_origin_out->state = IWX_GROUP2_TX_ORIGIN_UNAVAILABLE;
+    }
+    if (related_sidecar_out != NULL)
+        *related_sidecar_out = 0;
+    /* Preserve the old strict matcher return priority. For a valid range,
+     * still collect the old interval-sidecar predicate in this same bounded
+     * traversal so the caller can publish the same related cut. */
+    if (reset_ambiguous || identity_epoch == UINT32_MAX) {
+        if (host_origin_out != NULL)
+            host_origin_out->state =
+                IWX_GROUP2_TX_ORIGIN_STALE_OR_RESET_AMBIGUOUS;
+        if (slots != NULL && slot_capacity > 0 && slot_capacity <= 256 &&
+            ring_count > 0 &&
+            ring_count <= IWX_GROUP2_TX_RING_COUNT_MAX &&
+            old_tail < ring_count && checked_index < ring_count &&
+            old_queued <= ring_count) {
+            const uint32_t distance =
+                (checked_index + ring_count - old_tail) % ring_count;
+            if (distance > 0 && distance <= old_queued) {
+                for (uint32_t i = 0; i < slot_capacity; ++i) {
+                    const struct IwxGroup2TxSlot *slot = &slots[i];
+                    if (!slot->valid || slot->queue_id != queue_id ||
+                        slot->ring_count != ring_count ||
+                        slot->index >= ring_count)
+                        continue;
+                    const uint32_t offset =
+                        (slot->index + ring_count - old_tail) % ring_count;
+                    if (offset < distance) {
+                        if (related_sidecar_out != NULL)
+                            *related_sidecar_out = 1;
+                        break;
+                    }
+                }
+            }
+        }
+        return reset_ambiguous ? IWX_GROUP2_TX_MATCH_RESET_AMBIGUOUS :
+            IWX_GROUP2_TX_MATCH_UNKNOWN;
+    }
     if (slots == NULL || slot_capacity == 0 || slot_capacity > 256 ||
         ring_count == 0 ||
         ring_count > IWX_GROUP2_TX_RING_COUNT_MAX || old_tail >= ring_count ||
@@ -701,15 +758,38 @@ static inline uint32_t iwx_group2_tx_match_completion_sparse(
     uint32_t candidates = 0;
     uint32_t generation_mismatch = 0;
     uint32_t stale_candidate = 0;
+    uint32_t origin_candidates = 0;
+    uint32_t origin_stale = 0;
+    uint32_t has_relevant_sidecar = 0;
     struct IwxGroup2TxSlot candidate = IWX_GROUP2_TX_ZERO_INITIALIZER;
+    struct IwxGroup2TxSlot origin_candidate = IWX_GROUP2_TX_ZERO_INITIALIZER;
     for (uint32_t i = 0; i < slot_capacity; ++i) {
         const struct IwxGroup2TxSlot *slot = &slots[i];
-        if (!slot->valid || slot->cookie == 0 || slot->queue_id != queue_id ||
+        if (!slot->valid || slot->queue_id != queue_id ||
             slot->ring_count != ring_count || slot->index >= ring_count)
             continue;
         const uint32_t offset =
             (slot->index + ring_count - old_tail) % ring_count;
         if (offset >= distance)
+            continue;
+
+        has_relevant_sidecar = 1;
+        const int sourceValid =
+            slot->source == IWX_GROUP2_TX_SOURCE_RSN ||
+            slot->source == IWX_GROUP2_TX_SOURCE_WPA;
+        if (reset_ambiguous || identity_epoch == UINT32_MAX ||
+            slot->identity_epoch != identity_epoch ||
+            slot->context_generation != context_generation ||
+            slot->output_epoch != output_epoch || slot->cookie == 0 ||
+            slot->slot_generation == 0 || slot->attempt_id == 0 ||
+            !sourceValid) {
+            origin_stale = 1;
+        } else {
+            ++origin_candidates;
+            origin_candidate = *slot;
+        }
+
+        if (slot->cookie == 0)
             continue;
         if (slot->identity_epoch != identity_epoch) {
             stale_candidate = 1;
@@ -726,6 +806,23 @@ static inline uint32_t iwx_group2_tx_match_completion_sparse(
         ++candidates;
         candidate = *slot;
     }
+    if (related_sidecar_out != NULL)
+        *related_sidecar_out = has_relevant_sidecar;
+    if (host_origin_out != NULL) {
+        if (reset_ambiguous || identity_epoch == UINT32_MAX || origin_stale) {
+            host_origin_out->state =
+                IWX_GROUP2_TX_ORIGIN_STALE_OR_RESET_AMBIGUOUS;
+        } else if (origin_candidates > 1) {
+            host_origin_out->state = IWX_GROUP2_TX_ORIGIN_MULTIPLE;
+        } else if (origin_candidates == 1) {
+            host_origin_out->state = raw_single_header_valid &&
+                raw_single_header_index == origin_candidate.index ?
+                IWX_GROUP2_TX_ORIGIN_UNIQUE : IWX_GROUP2_TX_ORIGIN_UNBOUND;
+            host_origin_out->slot = origin_candidate;
+        } else {
+            host_origin_out->state = IWX_GROUP2_TX_ORIGIN_NONE;
+        }
+    }
     if (stale_candidate)
         return IWX_GROUP2_TX_MATCH_UNKNOWN;
     if (candidates == 1) {
@@ -740,20 +837,43 @@ static inline uint32_t iwx_group2_tx_match_completion_sparse(
     return IWX_GROUP2_TX_MATCH_NONE;
 }
 
-static inline uint32_t iwx_group2_tx_trace_match_completion_ex(
+static inline uint32_t iwx_group2_tx_match_completion_sparse(
+    const struct IwxGroup2TxSlot *slots, uint32_t slot_capacity,
+    uint32_t ring_count, uint32_t old_tail, uint32_t old_queued,
+    uint32_t checked_index, uint32_t queue_id,
+    uint32_t context_generation, uint32_t output_epoch,
+    uint32_t frame_control, uint32_t sequence_control,
+    uint32_t reset_ambiguous, uint32_t identity_epoch,
+    struct IwxGroup2TxSlot *matched_out)
+{
+    return iwx_group2_tx_match_completion_sparse_with_origin(
+        slots, slot_capacity, ring_count, old_tail, old_queued,
+        checked_index, queue_id, context_generation, output_epoch,
+        frame_control, sequence_control, reset_ambiguous, identity_epoch,
+        0, UINT32_MAX, matched_out, NULL, NULL);
+}
+
+static inline uint32_t iwx_group2_tx_trace_match_completion_ex_with_origin(
     struct IwxGroup2TxTrace *trace, uint64_t monotonic_us,
     uint32_t old_tail, uint32_t old_queued, uint32_t checked_index,
     uint32_t queue_id, uint32_t ring_count, uint32_t context_generation,
     uint32_t output_epoch, uint32_t frame_control,
     uint32_t sequence_control, uint32_t reset_ambiguous,
     int32_t firmware_status,
+    uint32_t raw_single_header_valid,
+    uint32_t raw_single_header_index,
     struct IwxGroup2TxSlot *matched_out,
-    uint32_t *related_sidecar_out)
+    uint32_t *related_sidecar_out,
+    struct IwxGroup2TxHostOrigin *host_origin_out)
 {
     if (matched_out != NULL)
         __builtin_memset(matched_out, 0, sizeof(*matched_out));
     if (related_sidecar_out != NULL)
         *related_sidecar_out = 0;
+    if (host_origin_out != NULL) {
+        __builtin_memset(host_origin_out, 0, sizeof(*host_origin_out));
+        host_origin_out->state = IWX_GROUP2_TX_ORIGIN_UNAVAILABLE;
+    }
     if (trace == NULL || !iwx_group2_tx_trace_try_lock(trace)) {
         if (trace != NULL)
             iwx_group2_tx_trace_note_lost(trace);
@@ -761,11 +881,19 @@ static inline uint32_t iwx_group2_tx_trace_match_completion_ex(
     }
     struct IwxGroup2TxSlot matched = IWX_GROUP2_TX_ZERO_INITIALIZER;
     uint32_t result = IWX_GROUP2_TX_MATCH_UNKNOWN;
+    struct IwxGroup2TxHostOrigin hostOrigin =
+        IWX_GROUP2_TX_ZERO_INITIALIZER;
+    uint32_t hasRelevantSidecar = 0;
     const uint32_t identityEpoch =
         iwx_group2_tx_trace_identity_epoch(trace);
-    const int hasRelevantSidecar = iwx_group2_tx_interval_has_sidecar_sparse(
+    result = iwx_group2_tx_match_completion_sparse_with_origin(
         trace->slots, IWX_GROUP2_TX_SLOT_CAPACITY, ring_count, old_tail,
-        old_queued, checked_index, queue_id);
+        old_queued, checked_index, queue_id, context_generation,
+        output_epoch, frame_control, sequence_control, reset_ambiguous,
+        identityEpoch, raw_single_header_valid, raw_single_header_index,
+        &matched, &hostOrigin, &hasRelevantSidecar);
+    if (host_origin_out != NULL)
+        *host_origin_out = hostOrigin;
     if (!hasRelevantSidecar) {
         iwx_group2_tx_trace_unlock(trace);
         return reset_ambiguous ? IWX_GROUP2_TX_MATCH_RESET_AMBIGUOUS :
@@ -776,12 +904,6 @@ static inline uint32_t iwx_group2_tx_trace_match_completion_ex(
     // and all descriptor/FC/SC decisions remain unchanged.
     if (related_sidecar_out != NULL)
         *related_sidecar_out = 1;
-    if (identityEpoch != UINT32_MAX)
-        result = iwx_group2_tx_match_completion_sparse(
-            trace->slots, IWX_GROUP2_TX_SLOT_CAPACITY, ring_count, old_tail,
-            old_queued, checked_index, queue_id, context_generation,
-            output_epoch, frame_control, sequence_control, reset_ambiguous,
-            identityEpoch, &matched);
     struct IwxGroup2TxEvent event = IWX_GROUP2_TX_ZERO_INITIALIZER;
     event.monotonic_us = monotonic_us;
     event.stage = result == IWX_GROUP2_TX_MATCH_UNIQUE ?
@@ -822,10 +944,18 @@ static inline uint32_t iwx_group2_tx_trace_match_completion_ex(
             event.flags |= IWX_GROUP2_TX_HAS_ORIGIN_ASSOCIATION;
     }
     const int appended = iwx_group2_tx_trace_append_locked(trace, &event);
-    if (!appended ||
-        iwx_group2_tx_trace_identity_epoch(trace) != identityEpoch) {
+    const uint32_t finalIdentityEpoch =
+        iwx_group2_tx_trace_identity_epoch(trace);
+    if (!appended || finalIdentityEpoch != identityEpoch) {
         result = IWX_GROUP2_TX_MATCH_UNKNOWN;
         __builtin_memset(&matched, 0, sizeof(matched));
+        if (host_origin_out != NULL) {
+            __builtin_memset(host_origin_out, 0, sizeof(*host_origin_out));
+            host_origin_out->state =
+                finalIdentityEpoch != identityEpoch || reset_ambiguous ?
+                IWX_GROUP2_TX_ORIGIN_STALE_OR_RESET_AMBIGUOUS :
+                IWX_GROUP2_TX_ORIGIN_UNAVAILABLE;
+        }
         if (appended) {
             event.stage = IWX_GROUP2_TX_STAGE_TX_RSP_UNKNOWN;
             event.status = IWX_GROUP2_TX_MATCH_UNKNOWN;
@@ -838,6 +968,24 @@ static inline uint32_t iwx_group2_tx_trace_match_completion_ex(
     iwx_group2_tx_trace_bump_revision_locked(trace);
     iwx_group2_tx_trace_unlock(trace);
     return result;
+}
+
+/* Backward-compatible completion API without host-origin output. */
+static inline uint32_t iwx_group2_tx_trace_match_completion_ex(
+    struct IwxGroup2TxTrace *trace, uint64_t monotonic_us,
+    uint32_t old_tail, uint32_t old_queued, uint32_t checked_index,
+    uint32_t queue_id, uint32_t ring_count, uint32_t context_generation,
+    uint32_t output_epoch, uint32_t frame_control,
+    uint32_t sequence_control, uint32_t reset_ambiguous,
+    int32_t firmware_status,
+    struct IwxGroup2TxSlot *matched_out,
+    uint32_t *related_sidecar_out)
+{
+    return iwx_group2_tx_trace_match_completion_ex_with_origin(
+        trace, monotonic_us, old_tail, old_queued, checked_index, queue_id,
+        ring_count, context_generation, output_epoch, frame_control,
+        sequence_control, reset_ambiguous, firmware_status, 0, UINT32_MAX,
+        matched_out, related_sidecar_out, NULL);
 }
 
 /* Backward-compatible API for existing C and C++ callers. */

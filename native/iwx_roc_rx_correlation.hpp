@@ -17,7 +17,7 @@ static const uint32_t kNotificationsPerSlot = 4;
 static const size_t kHeaderBytes = 192;
 static const size_t kRecordBytes = 192;
 static const size_t kWireBytes = kHeaderBytes + kCapacity * kRecordBytes;
-static const uint32_t kSchemaVersion = 2;
+static const uint32_t kSchemaVersion = 3;
 static const uint32_t kNotificationOverflowFlag = 1u << 2;
 static const uint32_t kMpduPresentFlag = 1u << 3;
 
@@ -107,6 +107,28 @@ enum MpduPresenceFlag : uint32_t {
     kHostTimePresent = 1u << 9
 };
 
+// Schema-3 extension fields occupy the previously reserved record tail.
+// These are presence bits, not boolean values: an absent source station ID is
+// unknown, while sourceStaFound=0 is a recorded negative descriptor bit.
+enum MpduExtensionPresenceFlag : uint32_t {
+    kPacketLenNFlagsPresent = 1u << 0,
+    kRxQueuePresent = 1u << 1,
+    kRssEnabledPresent = 1u << 2,
+    kDescriptorVersionPresent = 1u << 3,
+    kFilterMatchPresent = 1u << 4,
+    kMacContextPresent = 1u << 5,
+    kSourceStaFoundPresent = 1u << 6,
+    kSourceStaIdPresent = 1u << 7
+};
+
+static const uint32_t kPacketRxQueueMask = 0x003f0000u;
+static const uint32_t kPacketRxQueueShift = 16;
+static const uint32_t kPacketRssEnabledMask = 1u << 23;
+static const uint32_t kPacketRpaEnabledMask = 1u << 25;
+static const uint32_t kSourceStaFoundMask = 1u << 2;
+static const uint32_t kSourceStaIdMask = 0x1f000000u;
+static const uint32_t kSourceStaIdShift = 24;
+
 struct RocEpoch {
     uint32_t contextGeneration;
     uint32_t powerGeneration;
@@ -145,7 +167,10 @@ struct Notification {
 
 struct Mpdu {
     uint32_t presence;
+    uint32_t extensionPresence;
     uint32_t rawStatus;
+    uint32_t rawPacketLenNFlags;
+    uint32_t rawFilterMatch;
     uint64_t hostRxMonotonicUs;
     uint16_t sequenceControl;
     uint16_t mpduLength;
@@ -155,14 +180,22 @@ struct Mpdu {
     uint8_t rawMacPhyIndex;
     uint8_t decodeMode;
     uint16_t frameControl;
+    uint32_t descriptorVersion;
+    uint8_t rxQueue;
+    uint8_t rssEnabled;
+    uint8_t macContext;
+    uint8_t sourceStaFound;
+    uint8_t sourceStaId;
     uint8_t qid;
     uint8_t index;
 
     Mpdu()
-        : presence(0), rawStatus(0), hostRxMonotonicUs(0),
+        : presence(0), extensionPresence(0), rawStatus(0),
+          rawPacketLenNFlags(0), rawFilterMatch(0), hostRxMonotonicUs(0),
           sequenceControl(0), mpduLength(0), descriptorSize(0),
           packetOffset(0), channel(0), rawMacPhyIndex(0), decodeMode(0),
-          frameControl(0), qid(0), index(0) {}
+          frameControl(0), descriptorVersion(0), rxQueue(0), rssEnabled(0),
+          macContext(0), sourceStaFound(0), sourceStaId(0), qid(0), index(0) {}
 };
 
 struct SlotInput {
@@ -911,9 +944,18 @@ private:
             out[139] = mpdu.index;
             put32(out, 140, mpdu.rawStatus);
             put64(out, 144, mpdu.hostRxMonotonicUs);
+            put32(out, 156, mpdu.extensionPresence);
+            put32(out, 160, mpdu.rawPacketLenNFlags);
+            put32(out, 164, mpdu.rawFilterMatch);
+            put32(out, 168, mpdu.descriptorVersion);
+            out[172] = mpdu.rxQueue;
+            out[173] = mpdu.rssEnabled;
+            out[174] = mpdu.macContext;
+            out[175] = mpdu.sourceStaFound;
+            out[176] = mpdu.sourceStaId;
         }
         put32(out, 152, record.copySequence);
-        // Bytes 156..191 remain zero for versioned future use.
+        // Bytes 177..191 remain zero for versioned future use.
     }
 
     State state_;

@@ -11,8 +11,10 @@ from typing import Any
 
 
 MAGIC = b"IRXROC01"
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
+RX_SUMMARY_SCHEMA_VERSION = 2
 LEGACY_SCHEMA_VERSION = 1
+PREVIOUS_SCHEMA_VERSION = 2
 LEGACY_HEADER_BYTES = 128
 HEADER_BYTES = 192
 RECORD_BYTES = 192
@@ -63,6 +65,23 @@ MPDU_DESCRIPTOR_LENGTH_PRESENT = 1 << 7
 MPDU_PACKET_OFFSET_PRESENT = 1 << 8
 MPDU_TIME_PRESENT = 1 << 9
 KNOWN_MPDU_FLAGS = (1 << 10) - 1
+
+MPDU_PACKET_LEN_N_FLAGS_PRESENT = 1 << 0
+MPDU_RX_QUEUE_PRESENT = 1 << 1
+MPDU_RSS_ENABLED_PRESENT = 1 << 2
+MPDU_DESCRIPTOR_VERSION_PRESENT = 1 << 3
+MPDU_FILTER_MATCH_PRESENT = 1 << 4
+MPDU_MAC_CONTEXT_PRESENT = 1 << 5
+MPDU_SOURCE_STA_FOUND_PRESENT = 1 << 6
+MPDU_SOURCE_STA_ID_PRESENT = 1 << 7
+KNOWN_MPDU_EXTENSION_FLAGS = (1 << 8) - 1
+PACKET_RX_QUEUE_MASK = 0x003F0000
+PACKET_RX_QUEUE_SHIFT = 16
+PACKET_RSS_ENABLED_MASK = 1 << 23
+PACKET_RPA_ENABLED_MASK = 1 << 25
+SOURCE_STA_FOUND_MASK = 1 << 2
+SOURCE_STA_ID_MASK = 0x1F000000
+SOURCE_STA_ID_SHIFT = 24
 NOTIFICATION_OUTCOMES = {
     1: "seen", 2: "header_rejected", 3: "length_rejected",
     4: "validated", 5: "mpdu_dispatch", 6: "non_mpdu",
@@ -90,9 +109,11 @@ def _decode_header(blob: bytes) -> dict[str, Any]:
     header_bytes = _read_u32(blob, 12)
     record_bytes = _read_u32(blob, 16)
     capacity = _read_u32(blob, 20)
-    if schema not in (LEGACY_SCHEMA_VERSION, SCHEMA_VERSION):
+    if schema not in (LEGACY_SCHEMA_VERSION, PREVIOUS_SCHEMA_VERSION,
+                      SCHEMA_VERSION):
         raise DecodeError(f"unsupported schema version {schema}")
-    expected_header = LEGACY_HEADER_BYTES if schema == LEGACY_SCHEMA_VERSION else HEADER_BYTES
+    expected_header = (LEGACY_HEADER_BYTES if schema == LEGACY_SCHEMA_VERSION
+                       else HEADER_BYTES)
     if len(blob) < expected_header:
         raise DecodeError("snapshot is shorter than its declared header")
     if (header_bytes, record_bytes, capacity) != (
@@ -129,7 +150,7 @@ def _decode_header(blob: bytes) -> dict[str, Any]:
         "coverageComplete": _read_u32(blob, 120),
         "recordCount": _read_u32(blob, 124),
     }
-    if schema == SCHEMA_VERSION:
+    if schema >= RX_SUMMARY_SCHEMA_VERSION:
         values.update({
             "rxWindowFlags": _read_u32(blob, 128),
             "rxWindowStage": _read_u32(blob, 132),
@@ -185,7 +206,7 @@ def _decode_header(blob: bytes) -> dict[str, Any]:
             state != STATE_CLOSED or values["overflow"] or values["copySkips"] or
             values["invalid"] or values["unfinished"]):
         raise DecodeError("coverage is marked complete despite missing observations")
-    if schema == SCHEMA_VERSION:
+    if schema >= RX_SUMMARY_SCHEMA_VERSION:
         flags = values["rxWindowFlags"]
         stage = values["rxWindowStage"]
         if flags & ~0x1f or stage not in RX_WINDOW_STAGES:
@@ -300,7 +321,8 @@ def _decode_header(blob: bytes) -> dict[str, Any]:
     return values
 
 
-def _decode_record(blob: bytes, index: int, header_bytes: int) -> dict[str, Any]:
+def _decode_record(blob: bytes, index: int, header_bytes: int,
+                   schema: int) -> dict[str, Any]:
     base = header_bytes + index * RECORD_BYTES
     (sequence, copy_us, mapping_incarnation, capture_serial, driver_generation,
      ring, slot, head, flags, copy_status, completion, notification_count,
@@ -348,8 +370,150 @@ def _decode_record(blob: bytes, index: int, header_bytes: int) -> dict[str, Any]
         raise DecodeError(f"record {index} MPDU presence flags disagree")
     if mpdu_present and not flags & RECORD_FINALIZED:
         raise DecodeError(f"record {index} MPDU metadata was not finalized")
-    if any(blob[base + 156:base + RECORD_BYTES]):
-        raise DecodeError(f"record {index} extension bytes are nonzero")
+    extension = blob[base + 156:base + RECORD_BYTES]
+    packet_metadata: dict[str, Any] | None = None
+    if schema < SCHEMA_VERSION:
+        if any(extension):
+            raise DecodeError(f"record {index} legacy extension bytes are nonzero")
+        packet_metadata = {
+            "fieldFlags": None,
+            "rawPacketLenNFlagsPresent": None,
+            "rawPacketLenNFlags": None,
+            "rxQueuePresent": None,
+            "rxQueueRaw": None,
+            "rssEnabledPresent": None,
+            "rssEnabled": None,
+            "descriptorVersionPresent": None,
+            "descriptorVersion": None,
+            "rawFilterMatchPresent": None,
+            "rawFilterMatch": None,
+            "rawMacContextPresent": None,
+            "rawMacContext": None,
+            "sourceStaFoundPresent": None,
+            "sourceStaFound": None,
+            "sourceStaIdPresent": None,
+            "sourceStaId": None,
+        }
+    else:
+        (extension_flags, raw_len_n_flags, raw_filter_match,
+         descriptor_version) = struct.unpack_from("<4I", blob, base + 156)
+        rx_queue, rss_enabled, mac_context, source_sta_found, source_sta_id = \
+            struct.unpack_from("<5B", blob, base + 172)
+        reserved = blob[base + 177:base + RECORD_BYTES]
+        if extension_flags & ~KNOWN_MPDU_EXTENSION_FLAGS:
+            raise DecodeError(f"record {index} has unknown MPDU extension flags")
+        if any(reserved):
+            raise DecodeError(f"record {index} reserved extension bytes are nonzero")
+
+        def ext_present(flag: int) -> bool:
+            return bool(extension_flags & flag)
+
+        ext_fields = (
+            (MPDU_PACKET_LEN_N_FLAGS_PRESENT, raw_len_n_flags, "packetLenNFlags"),
+            (MPDU_RX_QUEUE_PRESENT, rx_queue, "rxQueue"),
+            (MPDU_RSS_ENABLED_PRESENT, rss_enabled, "rssEnabled"),
+            (MPDU_DESCRIPTOR_VERSION_PRESENT, descriptor_version,
+             "descriptorVersion"),
+            (MPDU_FILTER_MATCH_PRESENT, raw_filter_match, "filterMatch"),
+            (MPDU_MAC_CONTEXT_PRESENT, mac_context, "macContext"),
+            (MPDU_SOURCE_STA_FOUND_PRESENT, source_sta_found,
+             "sourceStaFound"),
+            (MPDU_SOURCE_STA_ID_PRESENT, source_sta_id, "sourceStaId"),
+        )
+        for flag, value, name in ext_fields:
+            if not ext_present(flag) and value != 0:
+                raise DecodeError(
+                    f"record {index} has {name} value without presence")
+        if ext_present(MPDU_PACKET_LEN_N_FLAGS_PRESENT):
+            if not ext_present(MPDU_RX_QUEUE_PRESENT) or not ext_present(
+                    MPDU_RSS_ENABLED_PRESENT):
+                raise DecodeError(
+                    f"record {index} packet header lacks RXQ/RSS fields")
+            expected_rx_queue = (raw_len_n_flags & PACKET_RX_QUEUE_MASK) >> \
+                PACKET_RX_QUEUE_SHIFT
+            expected_rss = int(bool(raw_len_n_flags & PACKET_RSS_ENABLED_MASK))
+            if rx_queue != expected_rx_queue or rss_enabled != expected_rss:
+                raise DecodeError(
+                    f"record {index} RXQ/RSS fields disagree with raw packet header")
+        elif ext_present(MPDU_RX_QUEUE_PRESENT) or ext_present(
+                MPDU_RSS_ENABLED_PRESENT):
+            raise DecodeError(
+                f"record {index} RXQ/RSS fields lack raw packet header")
+        if ext_present(MPDU_RSS_ENABLED_PRESENT) and rss_enabled not in (0, 1):
+            raise DecodeError(f"record {index} RSS enabled value is not boolean")
+        if ext_present(MPDU_DESCRIPTOR_VERSION_PRESENT):
+            expected_length = {1: 48, 3: 64}.get(descriptor_version)
+            if expected_length is None or descriptor_length != expected_length:
+                raise DecodeError(
+                    f"record {index} descriptor version/length mismatch")
+        elif ext_present(MPDU_FILTER_MATCH_PRESENT) or ext_present(
+                MPDU_MAC_CONTEXT_PRESENT):
+            raise DecodeError(
+                f"record {index} descriptor fields lack descriptor version")
+        if ext_present(MPDU_FILTER_MATCH_PRESENT):
+            if not ext_present(MPDU_PACKET_LEN_N_FLAGS_PRESENT) or not (
+                    raw_len_n_flags & PACKET_RPA_ENABLED_MASK):
+                raise DecodeError(
+                    f"record {index} filter_match is present without RPA-enabled packet")
+        if ext_present(MPDU_MAC_CONTEXT_PRESENT) and not ext_present(
+                MPDU_DESCRIPTOR_VERSION_PRESENT):
+            raise DecodeError(
+                f"record {index} mac_context lacks descriptor version")
+        if ext_present(MPDU_SOURCE_STA_FOUND_PRESENT):
+            if not mpdu_flags & MPDU_RAW_STATUS_PRESENT:
+                raise DecodeError(
+                    f"record {index} source STA flag lacks raw status")
+            if source_sta_found not in (0, 1):
+                raise DecodeError(
+                    f"record {index} source STA found value is not boolean")
+            if source_sta_found != int(bool(raw_status & SOURCE_STA_FOUND_MASK)):
+                raise DecodeError(
+                    f"record {index} source STA found disagrees with raw status")
+        elif ext_present(MPDU_SOURCE_STA_ID_PRESENT):
+            raise DecodeError(
+                f"record {index} source STA ID lacks found status")
+        if bool(mpdu_flags & MPDU_RAW_STATUS_PRESENT) != ext_present(
+                MPDU_SOURCE_STA_FOUND_PRESENT):
+            raise DecodeError(
+                f"record {index} source STA presence disagrees with raw status availability")
+        if ext_present(MPDU_SOURCE_STA_ID_PRESENT):
+            expected_source_sta_id = (raw_status & SOURCE_STA_ID_MASK) >> \
+                SOURCE_STA_ID_SHIFT
+            if not source_sta_found or source_sta_id != expected_source_sta_id:
+                raise DecodeError(
+                    f"record {index} source STA ID disagrees with raw status")
+        elif source_sta_found:
+            raise DecodeError(
+                f"record {index} source STA ID omitted despite found status")
+        packet_metadata = {
+            "fieldFlags": extension_flags,
+            "rawPacketLenNFlagsPresent": ext_present(
+                MPDU_PACKET_LEN_N_FLAGS_PRESENT),
+            "rawPacketLenNFlags": raw_len_n_flags if ext_present(
+                MPDU_PACKET_LEN_N_FLAGS_PRESENT) else None,
+            "rxQueuePresent": ext_present(MPDU_RX_QUEUE_PRESENT),
+            "rxQueueRaw": rx_queue if ext_present(MPDU_RX_QUEUE_PRESENT) else None,
+            "rssEnabledPresent": ext_present(MPDU_RSS_ENABLED_PRESENT),
+            "rssEnabled": rss_enabled if ext_present(
+                MPDU_RSS_ENABLED_PRESENT) else None,
+            "descriptorVersionPresent": ext_present(
+                MPDU_DESCRIPTOR_VERSION_PRESENT),
+            "descriptorVersion": descriptor_version if ext_present(
+                MPDU_DESCRIPTOR_VERSION_PRESENT) else None,
+            "rawFilterMatchPresent": ext_present(MPDU_FILTER_MATCH_PRESENT),
+            "rawFilterMatch": raw_filter_match if ext_present(
+                MPDU_FILTER_MATCH_PRESENT) else None,
+            "rawMacContextPresent": ext_present(MPDU_MAC_CONTEXT_PRESENT),
+            "rawMacContext": mac_context if ext_present(
+                MPDU_MAC_CONTEXT_PRESENT) else None,
+            "sourceStaFoundPresent": ext_present(
+                MPDU_SOURCE_STA_FOUND_PRESENT),
+            "sourceStaFound": source_sta_found if ext_present(
+                MPDU_SOURCE_STA_FOUND_PRESENT) else None,
+            "sourceStaIdPresent": ext_present(MPDU_SOURCE_STA_ID_PRESENT),
+            "sourceStaId": source_sta_id if ext_present(
+                MPDU_SOURCE_STA_ID_PRESENT) else None,
+        }
 
     result: dict[str, Any] = {
         "sequence": sequence,
@@ -385,7 +549,10 @@ def _decode_record(blob: bytes, index: int, header_bytes: int) -> dict[str, Any]
             "index": packet_index,
             "rawStatus": raw_status,
             "hostRxUs": mpdu_host_us,
+            "packetMetadata": packet_metadata,
         }
+    elif schema == SCHEMA_VERSION and any(extension):
+        raise DecodeError(f"record {index} has metadata without an MPDU")
     return result
 
 
@@ -398,7 +565,8 @@ def decode(blob: bytes, *, expected_identity: dict[str, int] | None = None,
     expected_bytes = header["headerBytes"] + RECORD_BYTES * CAPACITY
     if len(blob) != expected_bytes:
         raise DecodeError(f"expected exactly {expected_bytes} bytes, got {len(blob)}")
-    records = [_decode_record(blob, i, header["headerBytes"])
+    records = [_decode_record(blob, i, header["headerBytes"],
+                              header["schemaVersion"])
                for i in range(header["recordCount"])]
     if header["state"] == STATE_CLOSED:
         if any(not record["recordFlags"] & RECORD_FINALIZED for record in records):

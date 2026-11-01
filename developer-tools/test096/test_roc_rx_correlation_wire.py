@@ -70,6 +70,7 @@ int main() {
     if (!recorder.recordNotification(token, note)) return 4;
 
     Mpdu mpdu;
+    mpdu.extensionPresence = kSourceStaFoundPresent;
     mpdu.presence = kChannelPresent | kRawMacPhyPresent |
         kDecodeModePresent | kFrameControlPresent | kSequenceControlPresent |
         kRawStatusPresent | kMpduLengthPresent | kDescriptorSizePresent |
