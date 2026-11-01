@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "cdd7105868bbc3cb1535d348e27a0e78cd52edb39535bbbe6a84fedff8116c3d"
+      "sha256": "13166a4048a54ec5fd4c00cb1dfe32d84a6d5b63d9fd42d71d2e352afbf5404e"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "b9190aee9859dd574462041c50aa4870de89de8642550803714c99801d4c536f"
+      "sha256": "e038018e7b5972c63e12700195ff330fbfa5500d1479976f68d7dc431e44310c"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -50,7 +50,7 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-01T07:56:02.251261+08:00",
+  "updated_at": "2026-11-01T08:08:50.738783+08:00",
   "runtime_scope": "Test098本轮：6项通过、3项部分、1项未通过、30项未覆盖。手动Wi-Fi开关后已恢复；独立GTK观察期间用户确认没有操作，密钥更新后出现约6秒链路中断并恢复，稳定性未通过。149接收发布通过但仅见Beacon管理帧，awdl0真实数据回包和AirDrop仍未通过。",
   "running_candidate": "25G332-Test098",
   "next_candidate": "25G332-Test099"
