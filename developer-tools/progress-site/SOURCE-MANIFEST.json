@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "c75db18835a6c536d4e530389273f2477ae01bfc53f7c7e7a5d008cd1b6a64b7"
+      "sha256": "514599db4d19f94583c8f18a12671151a27a929f4e837ea6167ce518094570ed"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "2189dd9b8b8c54b9053a0f3958c874b2a380d04b2bf0c821404ecda5062de512"
+      "sha256": "922f68312d8bf5fa9e06d5392777ff02f000daf151fc072921825c019556d4e3"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -30,7 +30,7 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "8bb2f7bd785f6f1b1cb4d19dada1bc76ce9d453673b52fde3b46afb8956afcdf"
+      "sha256": "1b15f6003a2e84fe649dc2306a8f1a5e613f6f4debe21ef8c76746ad86ef3bb2"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
@@ -50,8 +50,8 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-01T11:08:34.810434+08:00",
-  "runtime_scope": "Test099本次启动固定40项：6项通过、6项部分通过、1项未通过、15项受限未覆盖、12项未测试。启动初段reason 16链路中断且用户确认此前没有操作；后续W0 300秒窗口通过，但300秒密钥观察没有新锚点，不能抵消启动初段故障，也不代表密钥更新稳定性通过。睡眠按要求跳过。",
-  "running_candidate": "25G332-Test099",
-  "next_candidate": "25G332-Test100"
+  "updated_at": "2026-11-01T11:38:10.143020+08:00",
+  "runtime_scope": "Test100本次启动固定40项截至当前：8项通过、4项部分通过、28项未覆盖、0项明确判为未通过。身份与联网、149频道ROC START/END、MIF来源归属与解析接纳、awdl0常驻及IPv6链路本地状态有本轮证据。Wi-Fi 300.269秒和诊断后60.281秒被动窗口通过；GTK自然密钥观察仍在进行，尚未出现自然更新；睡眠按要求跳过。OpenWrt本地send及PACKET_OUTGOING回显不证明RF；Intel侧没有AWDL数据/ifnet回执，AirDrop仍未验证。0项未通过只表示当前没有被明确判fail，不代表长期稳定或端到端功能已验收。",
+  "running_candidate": "25G332-Test100",
+  "next_candidate": null
 }

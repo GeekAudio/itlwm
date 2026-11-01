@@ -1,1 +1,29 @@
-window.TEST_RECORDS = [{"id":"record-test099-runtime-1793494778","version":"25G332-Test099","label":"Test099本轮实测","tone":"warning","date":"2026-11-01","state":"40项：6通过、6部分、1未通过、15受限、12未测试","summary":"Test099本次启动固定40项：6项通过、6项部分通过、1项未通过、15项受限未覆盖、12项未测试。启动初段reason 16链路中断且用户确认此前没有操作；后续W0 300秒窗口通过，但300秒密钥观察没有新锚点，不能抵消启动初段故障，也不代表密钥更新稳定性通过。睡眠按要求跳过。","evidence":["启动初段reason 16断链，用户确认此前没有操作；根因未知。W0 300.281s、W7 300.617s只读窗口通过，诊断后另有60.275s无异常计数增量。","初始300s密钥观察无新锚点；后续快照为attempt 11，新增7条Group2记录，未见新的断链但时钟未跨域校准。","149频道请求100ms ROC，实测关闭前持续99.316ms；live START门禁后GO写入余量92.890ms。","ROC内记录3条通知（1 MPDU、2 non-MPDU）；当前唯一MPDU是Beacon管理帧，数据帧计数为0。","OpenWrt完成4次本地send/30ms；GO→send→RESULT因果包络位于ROC内，但host TX关闭且这不证明空口发射。","native awdl0 RX captured/decoded/delivered/input-failed=0/0/0/0；listener=0 datagrams；没有文件收件。","睡眠/唤醒按要求跳过；下一步离线复核 RX filter/owner 归属与 TX 身份，不需要新部署或重启。"],"blockers":["Wi-Fi启动初段稳定性仍未通过。","原生awdl0数据交付和双向AirDrop只按端到端收件证据判定。"],"next":["离线复核 Beacon RX filter/owner 归属和 TX descriptor 身份。","继续定位启动初段 reason 16 断链；现有证据不足以归因到 GTK。"]}];
+window.TEST_RECORDS = [
+  {
+    "id": "record-test100-runtime-1793502966",
+    "version": "25G332-Test100",
+    "label": "Test100本轮实测",
+    "tone": "warning",
+    "date": "2026-11-01",
+    "state": "40项：8通过、4部分、28未覆盖、0项明确判为未通过",
+    "summary": "Test100本次启动固定40项截至当前：8项通过、4项部分通过、28项未覆盖、0项明确判为未通过。身份与联网、149频道ROC START/END、MIF来源归属与解析接纳、awdl0常驻及IPv6链路本地状态有本轮证据。Wi-Fi 300.269秒和诊断后60.281秒被动窗口通过；GTK自然密钥观察仍在进行，尚未出现自然更新；睡眠按要求跳过。OpenWrt本地send及PACKET_OUTGOING回显不证明RF；Intel侧没有AWDL数据/ifnet回执，AirDrop仍未验证。0项未通过只表示当前没有被明确判fail，不代表长期稳定或端到端功能已验收。",
+    "evidence": [
+      "候选与PCI识别匹配；认证、IPv4、网关、DNS、en1 HTTPS通过。",
+      "W0 300.269秒和诊断后60.281秒被动Wi-Fi窗口通过，计数无增量；自然GTK周期未出现，睡眠按要求跳过。",
+      "149频道同owner ROC START/END通过；MIF Action来源归属、解析和队列接纳通过，未验证具体外部iPhone身份。",
+      "OpenWrt 4次本地send与4个精确PACKET_OUTGOING回显；无PID/cookie TXS、ACK或RF证明，跨时钟映射未校准。",
+      "同一RX descriptor含host/GP2/TSF时钟值，但缺该硬件样本的误差界。awdl0 30.480秒/7次快照保持UP/RUNNING并有IPv6路由；无AWDL数据/ifnet回执。",
+      "纯被动GTK观察仍在运行，尚未出现自然密钥更新；睡眠按要求跳过。"
+    ],
+    "blockers": [
+      "AWDL数据帧进入原生ifnet仍无直接证据。",
+      "本地send和PACKET_OUTGOING回显不能证明真实无线发射；没有TXS/ACK/peer收件。",
+      "GTK自然密钥周期正在观察，尚未完成；睡眠恢复按要求跳过。",
+      "没有完成任何方向的AirDrop文件收件和哈希校验。"
+    ],
+    "next": [
+      "继续核对Intel真实数据RX到ifnet入口及OpenWrt硬件TX状态来源。",
+      "用独立纯被动窗口验证自然GTK周期；睡眠继续跳过。"
+    ]
+  }
+];
