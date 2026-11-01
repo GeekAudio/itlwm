@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "aae7d6b1689f584aca9369bddb30a94dce55e71e09c6b3bf48a90b002985a54b"
+      "sha256": "74db2eeaa916210181765016aaccb7808a86a98cf448b4c0e8c35d7df2165dc1"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "2ac8f31fdfd52a0daae4abe2ffd1a5490f2b2a6f80f992de41a2083a645c268f"
+      "sha256": "173c9f1b86062c8ebc8fbfae99520a3b1fd621f4fd92a2bb44ba972e52390632"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -30,7 +30,7 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "a634a6664a0eae132d4ea0bc8ce7bedd76c626598b971187936ab7ced08a0e57"
+      "sha256": "4ffe1fee1e5d2435bea0c5b1ccd6c9bbdb477ab9f728d5ef5943305841c1336f"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
@@ -50,8 +50,8 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-01T17:20:21.668388+08:00",
-  "runtime_scope": "Test102本次启动固定40项：4通过、7部分、28未覆盖、1项回归。Test103已部署待重启，不计入当前实测；睡眠测试跳过。",
-  "running_candidate": "25G332-Test102",
-  "next_candidate": "25G332-Test103"
+  "updated_at": "2026-11-01T18:17:04+08:00",
+  "runtime_scope": "Test103本次启动固定40项：6通过、5部分、1未通过、28未覆盖；睡眠按要求跳过。",
+  "running_candidate": "25G332-Test103",
+  "next_candidate": null
 }
