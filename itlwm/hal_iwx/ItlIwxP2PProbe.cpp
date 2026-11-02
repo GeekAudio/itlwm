@@ -6483,6 +6483,8 @@ static bool rx149PostCleanupOwnerEpochTokenMatches(
     ItlIwx *owner = probe->owner;
     auto &sc = owner->com;
     const auto &roc = sc.sc_p2p_roc;
+    const NativeP2PProbe::Snapshot halSnapshot =
+        owner->nativeP2pProbe_.snapshot();
     const uint32_t stationEpoch = __atomic_load_n(
         &sc.sc_tx_rate_generation, __ATOMIC_ACQUIRE);
     const bool currentOwner = owner->nativeP2pBusy() && !probe->canceled &&
@@ -6495,8 +6497,10 @@ static bool rx149PostCleanupOwnerEpochTokenMatches(
         (sc.sc_flags & (IWX_FLAG_SHUTDOWN | IWX_FLAG_HW_ERR |
                         IWX_FLAG_RFKILL)) != 0 ||
         sc.sc_ic.ic_bss == nullptr ||
+        halSnapshot.contextGeneration != probe->contextGeneration ||
+        halSnapshot.powerGeneration != probe->powerGeneration ||
+        halSnapshot.stationGeneration != probe->stationGeneration ||
         uint32_t(sc.sc_generation) != probe->powerGeneration ||
-        owner->nativeP2pPowerGeneration_ != probe->powerGeneration ||
         stationEpoch != probe->stationGeneration ||
         roc.fw_generation != probe->powerGeneration ||
         roc.station_epoch != probe->stationGeneration ||

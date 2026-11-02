@@ -118,7 +118,6 @@ struct ItlIwx {
  TahoeP2PRxLease tahoe_p2p_rx_lease_{};
  void *nativeP2pProbeOwner_=nullptr;
  uint32_t nativeP2pProbeGeneration_=0;
- uint32_t nativeP2pPowerGeneration_=0;
  uint32_t nativeP2pRocStage_=0,nativeP2pRocChannel_=0;
  uint32_t nativeP2pRocDurationMs_=0,nativeP2pRocConfiguration_=0;
  uint32_t nativeP2pRocResult_=0,nativeP2pRocGeneration_=0;

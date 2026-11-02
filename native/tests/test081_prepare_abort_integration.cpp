@@ -215,7 +215,6 @@ static void setupFixture(Fixture &fixture)
     owner.probeBusy_ = true;
     owner.onMainGate_ = true;
     owner.txHistoryQuiescent_ = true;
-    owner.nativeP2pPowerGeneration_ = fixture.run.powerGeneration;
     owner.nativeP2pProbeGeneration_ = fixture.run.contextGeneration;
     owner.nativeP2pProbeOwner_ = &fixture.run;
     owner.fixtureRunPowerGeneration_ = &fixture.run.powerGeneration;
@@ -282,7 +281,7 @@ static BlockedReason revalidate(void *opaque, uint32_t powerGeneration,
     auto run = static_cast<P2PProbeRun *>(opaque);
     if (!run || !run->owner || powerGeneration != run->powerGeneration ||
         stationGeneration != run->stationGeneration ||
-        run->owner->nativeP2pPowerGeneration_ != powerGeneration ||
+        static_cast<uint32_t>(run->owner->com.sc_generation) != powerGeneration ||
         run->owner->com.sc_tx_rate_generation != stationGeneration)
         return NativeP2PProbe::kGenerationChanged;
     return NativeP2PProbe::kNotBlocked;
