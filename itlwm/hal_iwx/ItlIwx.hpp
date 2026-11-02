@@ -226,7 +226,9 @@ struct TahoeAwdlRxStageCounters {
         kDataTapPermitRejected = 14,
         kDataTapCaptureRejected = 15,
         kDataTapQueueFull = 16,
-        kDataStageCount = 17
+        kDataPreDuplicateQueueAccepted = 17,
+        kDataPreDuplicateRetrySuppressed = 18,
+        kDataStageCount = 19
     };
 
     struct Snapshot {
@@ -563,6 +565,10 @@ public:
                            const NativeP2PRx149DataInput::OriginalDescriptor * = nullptr,
                            uint32_t diagnosticCandidateGeneration = 0);
     bool tahoeP2pRx149DataLease(NativeP2PRx149DataInput::Lease *);
+    NativeP2PRx149DataInput::EarlyRoute
+    tahoeP2pCaptureAwdlDataBeforeStaDedup(
+        struct iwx_softc *, const uint8_t *, size_t, uint8_t, uint32_t,
+        const NativeP2PRx149DataInput::OriginalDescriptor *);
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
     bool tahoeP2pDirectedDataRxLease(
         NativeP2PDirectedDataRxInput::Lease *, uint32_t *rejectMask = nullptr);

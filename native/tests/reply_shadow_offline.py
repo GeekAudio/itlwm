@@ -47,14 +47,14 @@ def main():
         direct=out/'rx149-feature-on-asan'
         direct_src=['native/awdl_native_bsd_data_25G332.cpp','native/awdl_data_frame.cpp','native/tests/awdl_native_rx149_data_input_test.cpp']
         run(common+[flag,'-fsanitize=address,undefined']+direct_src+['-o',str(direct)],'compile-rx149-feature-on.log',300)
-        for c in range(1,22):run([str(direct),str(c)],'rx149-feature-on-'+str(c)+'.log')
+        for c in range(1,24):run([str(direct),str(c)],'rx149-feature-on-'+str(c)+'.log')
         old_tsan=out/'test104-feature-on-tsan'
         run(common+[flag,'-fsanitize=thread']+old_src+['-o',str(old_tsan)],'compile-test104-feature-on-tsan.log',300)
         for c in ('pending_vs_revoke','close_after_ticket'):run([str(old_tsan),c],'test104-feature-on-tsan-'+c+'.log')
         stress=out/'rx149-feature-on-tsan'
         run(common+[flag,'-fsanitize=thread']+direct_src[:-1]+['native/tests/awdl_native_rx149_data_input_tsan_test.cpp','-o',str(stress)],'compile-rx149-feature-on-tsan.log',300)
         run([str(stress)],'rx149-feature-on-tsan.log')
-        legacy_count=len(legacy_cases)+21
+        legacy_count=len(legacy_cases)+23
     report={'schema':'directed-reply-shadow-host-validation/v1','feature_on_legacy_asan_cases_passed':legacy_count,'feature_on_legacy_tsan_races_passed':2 if args.with_regressions else 0,'feature_on_legacy_tsan_stress_passed':args.with_regressions,'cases_passed':len(results),'cases':results,'compiled_off_passed':True,'tsan_cases_passed':2,'actual_bridge_compiled':True,'actual_getter_sha256':hashlib.sha256(getter.read_bytes()).hexdigest(),'clock_kpi_and_native_stack_are_fakes':True,'real_socket_or_rf_actions':False,'full_kext_built':False,'commands':commands}
     (out/'validation.json').write_text(json.dumps(report,indent=2)+'\n');print(json.dumps({k:v for k,v in report.items() if k not in ('cases','commands')},indent=2))
 if __name__=='__main__':main()

@@ -181,14 +181,17 @@ private:
     void cancelDeferredJoin();
     void retryDeferredJoin();
     void advanceControlRevision();
+    bool postAvailability(bool ready, uint64_t revision);
     Operations operations_ {};
     bool stopped_ {true}, ready_ {}, addressChanging_ {};
     bool scanPending_ {}, scanQueued_ {}, scanDraining_ {}, scanAbortNotification_ {}, joinPending_ {}, deferred_ {};
     bool associated_ {}, firstBeacon_ {}, authorized_ {}, bssValid_ {};
     bool linkPublished_ {};
+    bool readyAvailabilityPublished_ {}, readyAvailabilityOwed_ {};
     // Invalidates work that resumes after synchronous emit/control reentry.
     // This local revision is not attached to firmware or association events.
     uint64_t controlRevision_ {};
+    uint64_t readyAvailabilityDebtRevision_ {};
     uint8_t linkedAddress_[6] {};
     uint32_t associatedBeacons_ {};
     uint32_t reportedBeacons_ {};

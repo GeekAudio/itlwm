@@ -1090,6 +1090,79 @@ bool ItlIwx::tahoeP2pRx149DataLease(
     return false;
 }
 
+// Split a strictly authorized RX149 AWDL data MPDU before the shared STA
+// duplicate/reorder state can discard or delay it. The bridge copies the
+// complete MPDU into its bounded permit-carrying queue; only a successful
+// queue copy or an owner-scoped duplicate Retry transfers this packet out of
+// the ordinary STA path. Every other result falls through, while the permit
+// remains fail-closed for stale/unknown owners, protected frames, and A-MSDU.
+NativeP2PRx149DataInput::EarlyRoute
+ItlIwx::tahoeP2pCaptureAwdlDataBeforeStaDedup(
+    struct iwx_softc *sc, const uint8_t *frame, size_t length,
+    uint8_t channelIndex, uint32_t macPhyIndex,
+    const NativeP2PRx149DataInput::OriginalDescriptor *originalData)
+{
+#if defined(ITL_NATIVE_AWDL_RESIDENT_25G332) && \
+    defined(ITL_NATIVE_AWDL_RX149_OBSERVATION_25G332) && \
+    defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+    if (!sc || !frame || length > UINT32_MAX || !originalData ||
+        !originalData->present ||
+        !NativeAwdlData::isAwdlDataCandidate(frame, length) ||
+        channelIndex >= nitems(sc->sc_ic.ic_channels))
+        return NativeP2PRx149DataInput::EarlyRoute::PassToSta;
+
+    NativeAwdlData::DecodedFrame decoded{};
+    if (NativeAwdlData::decodeIpv6DataMpdu(frame, length, &decoded) !=
+            NativeAwdlData::Status::Ok || decoded.amsdu ||
+        decoded.packetCount != 1)
+        return NativeP2PRx149DataInput::EarlyRoute::PassToSta;
+
+    NativeP2PRx149DataInput::Lease inputLease{};
+    if (!tahoeP2pRx149DataLease(&inputLease))
+        return NativeP2PRx149DataInput::EarlyRoute::PassToSta;
+
+    NativeP2PRx149DataInput::Descriptor descriptor{};
+    descriptor.channelPresent = true;
+    descriptor.ieeeChannel = ieee80211_chan2ieee(
+        &sc->sc_ic, &sc->sc_ic.ic_channels[channelIndex]);
+    descriptor.macPhyIndexPresent = true;
+    descriptor.macPhyIndex = static_cast<uint8_t>(macPhyIndex);
+    descriptor.decodeModePresent = true;
+    descriptor.decodeMode = isset(sc->sc_ucode_api,
+        IWX_UCODE_TLV_API_BAND_IN_RX_DATA) ?
+        NativeAwdlRxEntry::MacPhyDecodeBandInRx :
+        NativeAwdlRxEntry::MacPhyDecodeLegacy;
+    descriptor.protectedFrame = originalData->protectedFrame ||
+        (length >= 2 && (frame[1] & IEEE80211_FC1_PROTECTED) != 0);
+    descriptor.awdlDataCandidate = true;
+    descriptor.originalDescriptorPresent = originalData->present;
+    descriptor.hardwareDeaggregated = originalData->hardwareDeaggregated;
+    descriptor.originalRawStatus = originalData->rawStatus;
+
+    NativeP2PRx149DataInput::Permit permit{};
+    if (!NativeP2PRx149DataInput::makePermit(
+            inputLease, descriptor, &permit))
+        return NativeP2PRx149DataInput::EarlyRoute::PassToSta;
+
+    const auto result = NativeAwdlBSD::captureRx149Data(
+        frame, length, descriptor.protectedFrame, inputLease, permit,
+        uint32_t(sc->sc_generation));
+    if (result == NativeAwdlBSD::CaptureResult::Captured)
+        return NativeP2PRx149DataInput::EarlyRoute::QueuedForNative;
+    if (result == NativeAwdlBSD::CaptureResult::Duplicate)
+        return NativeP2PRx149DataInput::EarlyRoute::DuplicateRetry;
+    return NativeP2PRx149DataInput::EarlyRoute::PassToSta;
+#else
+    (void)sc;
+    (void)frame;
+    (void)length;
+    (void)channelIndex;
+    (void)macPhyIndex;
+    (void)originalData;
+    return NativeP2PRx149DataInput::EarlyRoute::PassToSta;
+#endif
+}
+
 void ItlIwx::tahoeP2pTapAction(struct iwx_softc *sc, const uint8_t *frame,
                              size_t length, bool wasProtected, uint16_t channel,
                              uint32_t gp2TimestampUs, bool gp2TimestampPresent,
@@ -2008,7 +2081,9 @@ void ItlIwx::tahoeP2pPublishRxStageCounters(IOEthernetController *controller)
         "NativeP2PRxDataStageTapInputInvalidAwdlBssidCandidate",
         "NativeP2PRxDataStageTapPermitRejectedAwdlBssidCandidate",
         "NativeP2PRxDataStageTapCaptureRejectedAwdlBssidCandidate",
-        "NativeP2PRxDataStageTapQueueFullAwdlBssidCandidate"
+        "NativeP2PRxDataStageTapQueueFullAwdlBssidCandidate",
+        "NativeP2PRxDataStagePreDuplicateBridgeQueueAcceptedAwdlBssidCandidate",
+        "NativeP2PRxDataStagePreDuplicateRetrySuppressedAfterBridgeAcceptance"
     };
     for (unsigned stage = 0; stage < TahoeAwdlRxStageCounters::kDataStageCount;
          ++stage)

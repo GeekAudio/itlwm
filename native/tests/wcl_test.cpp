@@ -19,6 +19,11 @@ struct Fixture {
     unsigned reentrantScanOnCall {};
     std::vector<uint8_t> reentrantScanWire;
     Status reentrantScanResult {Status::Failed};
+    bool reenterAddressOnResetReady {}, reenterAddressOnResetOff {};
+    bool queueJoinAfterReentrantAddress {}, stopOnResetReady {};
+    bool offlineOnReadyAvailability {}, addressOnReadyAvailability {};
+    std::vector<uint8_t> reentrantJoinWire;
+    Status reentrantJoinResult {Status::Failed};
     bool privateReady {true};
     Status joinStatus {Status::Ok};
     Status scanStatus {Status::Ok};
@@ -59,6 +64,36 @@ struct Fixture {
     static void emit(void *x, uint32_t k, const void *p, size_t n) {
         auto f = static_cast<Fixture *>(x);
         if (k == ScanFinished) f->nowNs += f->finishedEmitAdvanceNs;
+        if (k == DriverReset && p && n == 4) {
+            const bool resetReady = read32(static_cast<const uint8_t *>(p)) != 0;
+            if (resetReady && f->stopOnResetReady) {
+                f->stopOnResetReady = false;
+                f->backend.stop();
+            } else if ((resetReady && f->reenterAddressOnResetReady) ||
+                       (!resetReady && f->reenterAddressOnResetOff)) {
+                if (resetReady) f->reenterAddressOnResetReady = false;
+                else f->reenterAddressOnResetOff = false;
+                f->backend.beginAddressChange();
+                if (f->queueJoinAfterReentrantAddress) {
+                    f->queueJoinAfterReentrantAddress = false;
+                    assert(f->reentrantJoinWire.size() == JoinWireSize);
+                    f->reentrantJoinResult = f->backend.joinRequest(
+                        f->reentrantJoinWire.data(), f->reentrantJoinWire.size());
+                }
+            }
+        }
+        if (k == DriverAvailability && p && n == 0xf8 &&
+            read32(static_cast<const uint8_t *>(p) + 8) == 1) {
+            if (f->offlineOnReadyAvailability) {
+                f->offlineOnReadyAvailability = false;
+                f->backend.driverState(false);
+            } else if (f->addressOnReadyAvailability) {
+                f->addressOnReadyAvailability = false;
+                f->backend.beginAddressChange();
+                f->backend.driverState(false);
+                f->backend.driverState(true);
+            }
+        }
         if (k == Link) {
             assert(p && n == 16);
             auto bytes = static_cast<const uint8_t *>(p);
@@ -74,8 +109,19 @@ struct Fixture {
         if (n) e.body.assign(static_cast<const uint8_t *>(p), static_cast<const uint8_t *>(p) + n);
         f->messages.push_back(e);
     }
-    Fixture() { backend.initialize({this, scan, join, leave, emit, privacy, cancel, monotonic, busyDetail}); backend.driverState(true); messages.clear(); }
+    explicit Fixture(bool initialReady = true) {
+        backend.initialize({this, scan, join, leave, emit, privacy, cancel, monotonic, busyDetail});
+        if (initialReady) backend.driverState(true);
+        messages.clear();
+    }
     unsigned count(uint32_t k) const { unsigned n = 0; for (auto &e : messages) if (e.kind == k) ++n; return n; }
+    unsigned countReadyAvailability() const {
+        unsigned n = 0;
+        for (const auto &e : messages)
+            if (e.kind == DriverAvailability && e.body.size() == 0xf8 &&
+                read32(e.body.data() + 8) == 1) ++n;
+        return n;
+    }
 };
 std::vector<uint8_t> scanWire() {
     std::vector<uint8_t> p(ScanWireSize);
@@ -813,5 +859,134 @@ int main() {
         f.backend.tick(30000); assert(f.count(Connection) == 1);
         assert(f.messages.back().body[0] == 1 && f.leaves == 1);
         assert(!f.count(Link));
+    }
+    {
+        // A synchronous DriverReset consumer can begin the address-change
+        // transaction and accept a new Join before the old Off callback
+        // returns. The previously published Ready must not be duplicated, and
+        // the stale Off must not fail the accepted Join.
+        Fixture f;
+        f.reentrantJoinWire = joinWire();
+        f.reenterAddressOnResetOff = true;
+        f.queueJoinAfterReentrantAddress = true;
+        f.backend.driverState(false);
+        assert(f.backend.changingAddress());
+        assert(f.reentrantJoinResult == Status::Ok && f.backend.joining());
+        assert(f.joins == 0 && f.count(DriverAvailability) == 0 && !f.count(Connection));
+
+        f.backend.driverState(false); // Duplicate down while address is changing.
+        assert(f.backend.joining() && f.joins == 0 && !f.count(Connection));
+        f.backend.driverState(true);
+        assert(!f.backend.changingAddress());
+        assert(f.backend.joining() && f.joins == 1 && !f.count(Connection));
+        assert(f.countReadyAvailability() == 0 && f.count(DriverAvailability) == 0);
+
+        f.backend.observeAssociation(0, f.reentrantJoinWire.data() + 0x21c);
+        uint8_t frame[38] = {0x80}, ies[2] = {0,0}, ssid[1] = {'x'};
+        Beacon b {ssid, f.reentrantJoinWire.data() + 0x21c, ies, frame, 1, 2,
+                  sizeof(frame), 0x1006, 100, 0, 6, -45, -95, 50};
+        f.backend.observeBeacon(b);
+        f.backend.observeAuthorization(true);
+        assert(f.count(Connection) == 1 && f.messages.back().body[0] == 0);
+        assert(f.countReadyAvailability() == 0);
+    }
+    {
+        // Real startup can publish Ready first, synchronously enter an address
+        // transaction from DriverReset, then report Off/Ready during adapter
+        // restart. The recovered Ready must publish availability exactly once
+        // and must not let the superseded Off terminate the newly queued Join.
+        Fixture f(false);
+        f.reentrantJoinWire = joinWire();
+        f.reenterAddressOnResetReady = true;
+        f.queueJoinAfterReentrantAddress = true;
+        f.backend.driverState(true);
+        assert(f.backend.changingAddress() && f.backend.joining());
+        assert(f.reentrantJoinResult == Status::Ok && f.joins == 0);
+        assert(f.count(DriverAvailability) == 0 && !f.count(Connection));
+
+        f.backend.beginAddressChange(); // A second address notification is harmless.
+        f.backend.driverState(false);
+        assert(f.backend.changingAddress() && f.backend.joining());
+        assert(f.joins == 0 && !f.count(Connection));
+        f.backend.driverState(true);
+        assert(!f.backend.changingAddress() && f.backend.joining());
+        assert(f.joins == 1 && f.count(DriverAvailability) == 1);
+        assert(f.countReadyAvailability() == 1 && !f.count(Connection));
+
+        f.backend.observeAssociation(0, f.reentrantJoinWire.data() + 0x21c);
+        uint8_t frame[38] = {0x80}, ies[2] = {0,0}, ssid[1] = {'x'};
+        Beacon b {ssid, f.reentrantJoinWire.data() + 0x21c, ies, frame, 1, 2,
+                  sizeof(frame), 0x1006, 100, 0, 6, -45, -95, 50};
+        f.backend.observeBeacon(b);
+        f.backend.observeAuthorization(true);
+        assert(f.count(Connection) == 1 && f.messages.back().body[0] == 0);
+        assert(f.countReadyAvailability() == 1);
+    }
+    {
+        // A synchronous stop from the Ready reset callback invalidates the
+        // old publication; it must not leak a stale availability notification.
+        Fixture f(false);
+        f.stopOnResetReady = true;
+        f.backend.driverState(true);
+        assert(!f.backend.ready() && f.count(DriverAvailability) == 0);
+    }
+    {
+        // The availability debt is consumed before synchronous emit. A nested
+        // Off owns the final state and a later Ready publishes one fresh edge.
+        Fixture f(false);
+        f.backend.beginAddressChange();
+        f.offlineOnReadyAvailability = true;
+        f.backend.driverState(true);
+        assert(!f.backend.ready());
+        assert(f.countReadyAvailability() == 1 && f.count(DriverAvailability) == 2);
+        f.backend.driverState(true);
+        assert(f.backend.ready());
+        assert(f.countReadyAvailability() == 2 && f.count(DriverAvailability) == 3);
+    }
+    {
+        // A second address transaction entered from Availability has already
+        // received the first Ready edge; its nested completion must not replay
+        // the same debt or create an event loop.
+        Fixture f(false);
+        f.backend.beginAddressChange();
+        f.addressOnReadyAvailability = true;
+        f.backend.driverState(true);
+        assert(f.backend.ready() && !f.backend.changingAddress());
+        assert(f.countReadyAvailability() == 1 && f.count(DriverAvailability) == 1);
+    }
+    {
+        // Failed/cancelled address setup and an enable that remains Off do not
+        // synthesize a Ready availability event.
+        Fixture f(false);
+        f.backend.beginAddressChange();
+        f.backend.driverState(false);
+        assert(f.backend.changingAddress() && f.countReadyAvailability() == 0);
+        f.backend.cancelAddressChange();
+        assert(!f.backend.ready() && f.countReadyAvailability() == 0);
+        f.backend.beginAddressChange();
+        f.backend.driverState(false);
+        assert(f.backend.changingAddress() && f.countReadyAvailability() == 0);
+    }
+    {
+        // When the first Ready publication is interrupted by an address change
+        // and HAL cancels that change as Busy, there is no later Ready callback
+        // to discharge the debt. Cancellation may flush only that restored,
+        // still-current Ready state.
+        Fixture f(false);
+        f.reenterAddressOnResetReady = true;
+        f.backend.driverState(true);
+        assert(f.backend.changingAddress() && f.countReadyAvailability() == 0);
+        f.backend.cancelAddressChange();
+        assert(f.backend.ready() && !f.backend.changingAddress());
+        assert(f.countReadyAvailability() == 1 && f.count(DriverAvailability) == 1);
+    }
+    {
+        // A normal address-change cancellation after Ready was already
+        // published restores the old state without inventing another edge.
+        Fixture f;
+        f.backend.beginAddressChange();
+        f.backend.cancelAddressChange();
+        assert(f.backend.ready() && !f.backend.changingAddress());
+        assert(f.countReadyAvailability() == 0 && f.count(DriverAvailability) == 0);
     }
 }

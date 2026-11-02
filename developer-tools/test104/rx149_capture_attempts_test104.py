@@ -38,7 +38,8 @@ RECORD_FIELDS = (
 )
 WORD_COUNT = len(HEADER_FIELDS) + CAPACITY * len(RECORD_FIELDS)
 WIRE_BYTES = WORD_COUNT * WORD_BYTES
-CHECK_MASK = (1 << 25) - 1
+LEGACY_CHECK_MASK = (1 << 25) - 1
+CHECK_MASK = (1 << 26) - 1
 CHECK_NAMES = (
     "BridgeLock", "Unprotected", "LengthWithinLimit", "PermitValid",
     "PowerGenerationMatches", "FirstGateClear", "PermitCurrent",
@@ -47,13 +48,14 @@ CHECK_NAMES = (
     "ActivePermitCurrent", "InterfaceIncarnationNonzero", "InterfacePresent",
     "NotClosing", "NotDetached", "RadioReady", "ClosingNotRequested",
     "RadioGenerationMatches", "Attached", "SequenceAvailable",
-    "RevisionAvailable", "QueueSpaceAvailable",
+    "RevisionAvailable", "QueueSpaceAvailable", "RetryWindowSlotAvailable",
 )
 OUTCOME_NAMES = {
     0: "not_awdl_data_candidate",
     1: "captured_to_bounded_queue",
     2: "rejected",
     3: "queue_full",
+    4: "duplicate_retry_not_queued",
 }
 
 
@@ -101,7 +103,7 @@ def decode_capture_attempts(value: Any) -> dict:
         failure = row["FailureCheck"]
         outcome = row["Outcome"]
         if (evaluated & ~CHECK_MASK or passed & ~CHECK_MASK or
-                passed & ~evaluated or failure > 25 or
+                passed & ~evaluated or failure > len(CHECK_NAMES) or
                 (failure and (not (evaluated & (1 << (failure - 1))) or
                               (passed & (1 << (failure - 1)))))):
             raise CaptureLedgerError("capture_record_check_masks_invalid")
@@ -110,8 +112,10 @@ def decode_capture_attempts(value: Any) -> dict:
             # Non-candidates return before the production ledger append.
             raise CaptureLedgerError("capture_record_non_candidate_impossible")
         if outcome == 1:
-            if (failure != 0 or evaluated != CHECK_MASK or
-                    passed != CHECK_MASK or failed_mask != 0):
+            # Schema 1 was first deployed with 25 checks. Keep accepting those
+            # immutable snapshots alongside the 26-check form.
+            if (failure != 0 or evaluated not in (LEGACY_CHECK_MASK, CHECK_MASK) or
+                    passed != evaluated or failed_mask != 0):
                 raise CaptureLedgerError("capture_outcome_captured_failure_contradiction")
         elif outcome == 2:
             expected_evaluated = (1 << failure) - 1 if failure else 0
@@ -122,10 +126,18 @@ def decode_capture_attempts(value: Any) -> dict:
                 raise CaptureLedgerError("capture_outcome_rejected_failure_contradiction")
         elif outcome == 3:
             queue_space_bit = 1 << 24
-            if (failure != 25 or evaluated != CHECK_MASK or
-                    passed != (CHECK_MASK & ~queue_space_bit) or
+            # QueueSpaceAvailable precedes RetryWindowSlotAvailable, so a full
+            # queue terminates with the legacy 25-check prefix.
+            if (failure != 25 or evaluated != LEGACY_CHECK_MASK or
+                    passed != (LEGACY_CHECK_MASK & ~queue_space_bit) or
                     failed_mask != queue_space_bit):
                 raise CaptureLedgerError("capture_outcome_queue_full_failure_contradiction")
+        elif outcome == 4:
+            # A retry duplicate has passed the retry-window check but is not
+            # admitted to the bounded capture queue.
+            if (failure != 0 or evaluated != CHECK_MASK or
+                    passed != CHECK_MASK or failed_mask != 0):
+                raise CaptureLedgerError("capture_outcome_duplicate_failure_contradiction")
         else:
             raise CaptureLedgerError("capture_record_outcome_unknown")
         records.append({

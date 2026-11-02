@@ -21,7 +21,7 @@ enum Check : uint32_t {
     ActivePermitCurrent, InterfaceIncarnationNonzero, InterfacePresent,
     NotClosing, NotDetached, RadioReady, ClosingNotRequested,
     RadioGenerationMatches, Attached, SequenceAvailable,
-    RevisionAvailable, QueueSpaceAvailable
+    RevisionAvailable, QueueSpaceAvailable, RetryWindowSlotAvailable
 };
 enum Field : size_t {
     Outcome, FailureCheck, EvaluatedMask, PassedMask,

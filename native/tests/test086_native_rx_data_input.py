@@ -65,7 +65,7 @@ def main() -> None:
         functional = compile_binary(temp, FUNCTIONAL, "asan-ubsan",
                                     "address,undefined")
         cases = 0
-        for case in range(1, 22):
+        for case in range(1, 24):
             run([str(functional), str(case)])
             cases += 1
 

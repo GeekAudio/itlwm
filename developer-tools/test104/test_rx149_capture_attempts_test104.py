@@ -2,8 +2,9 @@ import struct
 import unittest
 
 from rx149_capture_attempts_test104 import (
-    CAPACITY, HEADER_FIELDS, MAGIC, RECORD_FIELDS, WIRE_BYTES, WORD_COUNT,
-    SCHEMA, CaptureLedgerError, decode_capture_attempts,
+    CAPACITY, CHECK_MASK, HEADER_FIELDS, LEGACY_CHECK_MASK, MAGIC,
+    RECORD_FIELDS, WIRE_BYTES, WIRE_SCHEMA, WORD_COUNT, SCHEMA,
+    CaptureLedgerError, decode_capture_attempts,
     summarize_capture_samples,
 )
 
@@ -34,6 +35,13 @@ def make_wire(*, complete=True, overflow=0, commit_mask=None, reserved_begin=1,
 
 
 class Rx149CaptureAttemptTests(unittest.TestCase):
+    def test_schema1_wire_layout_remains_unchanged(self):
+        self.assertEqual(WIRE_SCHEMA, 1)
+        self.assertEqual(len(HEADER_FIELDS), 9)
+        self.assertEqual(len(RECORD_FIELDS), 52)
+        self.assertEqual(WORD_COUNT, 425)
+        self.assertEqual(WIRE_BYTES, 3400)
+
     def test_decodes_numeric_attempt_without_promoting_it_to_delivery(self):
         decoded = decode_capture_attempts(make_wire())
         self.assertEqual(decoded["status"], "stable_complete_cut")
@@ -86,10 +94,18 @@ class Rx149CaptureAttemptTests(unittest.TestCase):
         captured = decode_capture_attempts(make_wire(record_overrides={
             "Outcome": 1,
             "FailureCheck": 0,
-            "EvaluatedMask": (1 << 25) - 1,
-            "PassedMask": (1 << 25) - 1,
+            "EvaluatedMask": LEGACY_CHECK_MASK,
+            "PassedMask": LEGACY_CHECK_MASK,
         }))
         self.assertEqual(captured["records"][0]["outcome_name"],
+                         "captured_to_bounded_queue")
+        current_captured = decode_capture_attempts(make_wire(record_overrides={
+            "Outcome": 1,
+            "FailureCheck": 0,
+            "EvaluatedMask": CHECK_MASK,
+            "PassedMask": CHECK_MASK,
+        }))
+        self.assertEqual(current_captured["records"][0]["outcome_name"],
                          "captured_to_bounded_queue")
         with self.assertRaisesRegex(CaptureLedgerError, "captured_failure"):
             decode_capture_attempts(make_wire(record_overrides={
@@ -107,7 +123,7 @@ class Rx149CaptureAttemptTests(unittest.TestCase):
             }))
 
     def test_queue_full_and_rejected_outcomes_match_first_failed_check(self):
-        full_mask = (1 << 25) - 1
+        full_mask = LEGACY_CHECK_MASK
         queue_full = decode_capture_attempts(make_wire(record_overrides={
             "Outcome": 3,
             "FailureCheck": 25,
@@ -132,11 +148,49 @@ class Rx149CaptureAttemptTests(unittest.TestCase):
             }))
         with self.assertRaisesRegex(CaptureLedgerError, "unknown"):
             decode_capture_attempts(make_wire(record_overrides={
-                "Outcome": 4,
+                "Outcome": 5,
                 "FailureCheck": 3,
                 "EvaluatedMask": 0b111,
                 "PassedMask": 0b011,
             }))
+
+    def test_retry_window_rejection_and_duplicate_are_distinct_from_capture(self):
+        rejected = decode_capture_attempts(make_wire(record_overrides={
+            "Outcome": 2,
+            "FailureCheck": 26,
+            "EvaluatedMask": CHECK_MASK,
+            "PassedMask": CHECK_MASK & ~(1 << 25),
+        }))
+        self.assertEqual(rejected["records"][0]["failure_check_name"],
+                         "RetryWindowSlotAvailable")
+
+        duplicate = decode_capture_attempts(make_wire(record_overrides={
+            "Outcome": 4,
+            "FailureCheck": 0,
+            "EvaluatedMask": CHECK_MASK,
+            "PassedMask": CHECK_MASK,
+        }))
+        self.assertEqual(duplicate["record_count"], 1)
+        self.assertEqual(duplicate["records"][0]["outcome_name"],
+                         "duplicate_retry_not_queued")
+        self.assertNotEqual(duplicate["records"][0]["outcome_name"],
+                            "captured_to_bounded_queue")
+        self.assertFalse(duplicate["capture_delivery_proven"])
+        self.assertFalse(duplicate["ifnet_delivery_proven"])
+
+    def test_duplicate_requires_all_26_checks_and_no_failure(self):
+        malformed = (
+            {"FailureCheck": 26, "EvaluatedMask": CHECK_MASK,
+             "PassedMask": CHECK_MASK & ~(1 << 25)},
+            {"FailureCheck": 0, "EvaluatedMask": LEGACY_CHECK_MASK,
+             "PassedMask": LEGACY_CHECK_MASK},
+        )
+        for overrides in malformed:
+            with self.subTest(overrides=overrides):
+                with self.assertRaisesRegex(CaptureLedgerError, "duplicate_failure"):
+                    decode_capture_attempts(make_wire(record_overrides={
+                        "Outcome": 4, **overrides,
+                    }))
 
     def test_uncommitted_slot_is_not_read_and_complete_cut_is_strict(self):
         partial = decode_capture_attempts(make_wire(

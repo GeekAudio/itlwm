@@ -31,9 +31,14 @@ bool validAddress(const uint8_t *p) {
 void Backend::initialize(const Operations &operations) {
     operations_ = operations;
     stopped_ = false;
+    readyAvailabilityPublished_ = false;
+    readyAvailabilityOwed_ = false;
+    readyAvailabilityDebtRevision_ = 0;
 }
 void Backend::advanceControlRevision() {
     if (!++controlRevision_) ++controlRevision_;
+    if (readyAvailabilityOwed_ && addressChanging_)
+        readyAvailabilityDebtRevision_ = controlRevision_;
 }
 void Backend::post(uint32_t kind, const void *bytes, size_t n, uint32_t scanTraceSerial) {
     if (!stopped_ && operations_.emit) {
@@ -48,6 +53,25 @@ void Backend::post(uint32_t kind, const void *bytes, size_t n, uint32_t scanTrac
         }
         operations_.emit(operations_.context, kind, bytes, n);
     }
+}
+bool Backend::postAvailability(bool isReady, uint64_t revision) {
+    if (stopped_ || !operations_.emit || controlRevision_ != revision || ready_ != isReady)
+        return false;
+    uint8_t availability[0xf8] {};
+    write32(availability, 3); write32(availability + 8, isReady ? 1 : 0);
+    write32(availability + 16, isReady ? 0xe0821803 : 0xe0821804);
+
+    // Consume the outstanding edge before emit(). The event consumer is
+    // synchronous and may start another address transaction from inside this
+    // call; leaving the debt set across emit would let that nested Ready replay
+    // the same notification.
+    readyAvailabilityOwed_ = false;
+    readyAvailabilityDebtRevision_ = 0;
+    readyAvailabilityPublished_ = isReady;
+    post(DriverAvailability, availability, sizeof(availability));
+    if (stopped_ || controlRevision_ != revision || ready_ != isReady)
+        return false; // A nested control operation now owns the publication state.
+    return true;
 }
 uint64_t Backend::monotonicNowNanoseconds() {
     uint64_t now = scanTraceFallbackClockNs_;
@@ -431,6 +455,8 @@ void Backend::beginAddressChange() {
     addressPreviousAuthorized_ = authorized_;
     addressChanging_ = true; ready_ = false;
     authorized_ = false;
+    if (readyAvailabilityOwed_)
+        readyAvailabilityDebtRevision_ = controlRevision_;
 }
 void Backend::cancelAddressChange() {
     if (stopped_ || !addressChanging_) return;
@@ -440,6 +466,10 @@ void Backend::cancelAddressChange() {
     addressChanging_ = false;
     ready_ = addressPreviousReady_;
     authorized_ = addressPreviousAuthorized_;
+    if (ready_ && readyAvailabilityOwed_ &&
+        readyAvailabilityDebtRevision_ == controlRevision_ &&
+        !readyAvailabilityPublished_)
+        postAvailability(true, controlRevision_);
 }
 void Backend::driverState(bool isReady) {
     if (stopped_) return;
@@ -451,19 +481,41 @@ void Backend::driverState(bool isReady) {
         return; // A nested readiness transition superseded this callback.
     if (addressChanging_) {
         if (!isReady) return; // Address reconfiguration is not a new native reset.
+        if (!readyAvailabilityPublished_ && !readyAvailabilityOwed_) {
+            readyAvailabilityOwed_ = true;
+            readyAvailabilityDebtRevision_ = controlRevision_;
+        }
+        const uint64_t addressReadyRevision = controlRevision_;
+        if (readyAvailabilityOwed_ &&
+            readyAvailabilityDebtRevision_ != addressReadyRevision)
+            return; // Do not discharge debt from a superseded address epoch.
         addressChanging_ = false;
         retryDeferredJoin();
+        if (stopped_ || !ready_ || addressChanging_) return;
+        if (readyAvailabilityOwed_ &&
+            readyAvailabilityDebtRevision_ == addressReadyRevision &&
+            !readyAvailabilityPublished_) {
+            // Retrying an already accepted deferred Join may advance the same
+            // control revision. It is part of this recovery; only retarget a
+            // debt that was still current immediately before the retry.
+            readyAvailabilityDebtRevision_ = controlRevision_;
+            postAvailability(true, controlRevision_);
+        }
         return;
+    }
+    if (!isReady) {
+        readyAvailabilityOwed_ = false;
+        readyAvailabilityDebtRevision_ = 0;
+    } else if (!readyAvailabilityPublished_) {
+        readyAvailabilityOwed_ = true;
+        readyAvailabilityDebtRevision_ = controlRevision_;
     }
     uint8_t reset[4]; write32(reset, isReady ? 1 : 0);
     const uint64_t publishRevision = controlRevision_;
     post(DriverReset, reset, sizeof(reset));
     if (stopped_ || controlRevision_ != publishRevision || ready_ != isReady)
         return; // A nested control/readiness change superseded this publication.
-    uint8_t availability[0xf8] {};
-    write32(availability, 3); write32(availability + 8, isReady ? 1 : 0);
-    write32(availability + 16, isReady ? 0xe0821803 : 0xe0821804);
-    post(DriverAvailability, availability, sizeof(availability));
+    postAvailability(isReady, publishRevision);
     if (stopped_ || controlRevision_ != publishRevision || ready_ != isReady)
         return; // Do not finish a different Join from this old state callback.
     if (!isReady) {
@@ -767,6 +819,11 @@ void Backend::tick(uint32_t elapsed) {
 void Backend::stop() {
     advanceControlRevision();
     stopped_ = true; ready_ = false;
+    addressChanging_ = false;
+    addressPreviousReady_ = addressPreviousAuthorized_ = false;
+    readyAvailabilityPublished_ = false;
+    readyAvailabilityOwed_ = false;
+    readyAvailabilityDebtRevision_ = 0;
     linkPublished_ = false;
     erase(linkedAddress_, sizeof(linkedAddress_));
     erase(&deferredJoin_, sizeof(deferredJoin_));

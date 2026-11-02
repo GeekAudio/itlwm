@@ -220,7 +220,7 @@ void makeFrame(uint8_t *out,size_t capacity,size_t *written,
         memcpy(ipv6+36,destination+2,4);
         if(wrongMapping)ipv6[39]^=1u;
     } else {
-        makeLinkLocal(ipv6+24,own);
+        makeLinkLocal(ipv6+24,destination);
     }
     NativeAwdlData::EncodeInput input{};
     memcpy(input.destinationAddress,destination,6);
@@ -231,6 +231,28 @@ void makeFrame(uint8_t *out,size_t capacity,size_t *written,
     input.ipv6Length=sizeof(ipv6);
     assert(NativeAwdlData::encodeIpv6DataMpdu(
         &input,out,capacity,written)==NativeAwdlData::Status::Ok);
+}
+
+void makeRetryFrame(uint8_t *out,size_t capacity,size_t *written,
+                    const uint8_t source[6],uint16_t sequence,
+                    bool retry,uint8_t tid=0,bool qos=false,
+                    const uint8_t destination[6]=own) {
+    makeFrame(out,capacity,written,destination);
+    memcpy(out+10,source,6);
+    out[22]=uint8_t((sequence&0x0fffu)<<4);
+    out[23]=uint8_t((sequence&0x0fffu)>>4);
+    if(retry)out[1]|=0x08u;
+    if(qos) {
+        memmove(out+26,out+24,*written-24);
+        *written+=2;
+        out[0]=0x88; // QoS data, no DS/fragment/protection flags.
+        out[24]=uint8_t(tid&0x0fu);
+        out[25]=0;
+    }
+    NativeAwdlData::DecodedFrame decoded{};
+    assert(NativeAwdlData::decodeIpv6DataMpdu(
+        out,*written,&decoded)==NativeAwdlData::Status::Ok);
+    assert(decoded.wifiSequenceNumber==(sequence&0x0fffu));
 }
 
 void prepare(FakeIf &dev) {
@@ -278,6 +300,16 @@ CaptureResult captureFrameResult(const Lease &lease,Permit *captured,
     if(!makePermit(lease,descriptor,&permit))
         return CaptureResult::Rejected;
     if(captured)*captured=permit;
+    return captureRx149Data(bytes,length,false,lease,permit,
+                            lease.epochs.power);
+}
+
+CaptureResult captureRawFrameResult(const Lease &lease,const uint8_t *bytes,
+                                    size_t length) {
+    auto descriptor=validDescriptor();
+    Permit permit{};
+    if(!makePermit(lease,descriptor,&permit))
+        return CaptureResult::Rejected;
     return captureRx149Data(bytes,length,false,lease,permit,
                             lease.epochs.power);
 }
@@ -803,6 +835,134 @@ int receiptPublication() {
     assert(properties.complete());
     return 0;
 }
+
+int retryDomainIsolation() {
+    FakeIf dev;
+    prepare(dev);
+    auto lease=validLease();
+    assert(publishRx149DataInputLease(lease));
+    uint8_t frame[256]{};size_t length=0;
+
+    // A Retry that AP-wide duplicate state could reject is first-seen for
+    // this AWDL peer/TID and therefore enters the native bridge queue.
+    makeRetryFrame(frame,sizeof(frame),&length,peer,42,true);
+    assert(captureRawFrameResult(lease,frame,length)==CaptureResult::Captured);
+    assert(snapshot().value[RxPending]==1);
+    assert(captureRawFrameResult(lease,frame,length)==CaptureResult::Duplicate);
+    assert(snapshot().value[RxPending]==1);
+
+    // Destination is part of the retry identity too; the same source/TID/SC
+    // sent to another AWDL unicast peer is an independent frame.
+    const uint8_t otherDestination[6]={0x02,0x44,0x55,0x66,0x77,0x88};
+    makeRetryFrame(frame,sizeof(frame),&length,peer,42,true,0,false,
+                   otherDestination);
+    assert(captureRawFrameResult(lease,frame,length)==CaptureResult::Captured);
+    assert(captureRawFrameResult(lease,frame,length)==CaptureResult::Duplicate);
+
+    // Another peer and another QoS TID have independent replay state.
+    makeRetryFrame(frame,sizeof(frame),&length,other,42,true);
+    assert(captureRawFrameResult(lease,frame,length)==CaptureResult::Captured);
+    makeRetryFrame(frame,sizeof(frame),&length,peer,42,true,3,true);
+    assert(captureRawFrameResult(lease,frame,length)==CaptureResult::Captured);
+    assert(captureRawFrameResult(lease,frame,length)==CaptureResult::Duplicate);
+    makeRetryFrame(frame,sizeof(frame),&length,peer,42,true,4,true);
+    assert(captureRawFrameResult(lease,frame,length)==CaptureResult::Captured);
+
+    // The 12-bit sequence wrap is a new frame; only an equal Retry is dropped.
+    makeRetryFrame(frame,sizeof(frame),&length,peer,4095,false,3,true);
+    assert(captureRawFrameResult(lease,frame,length)==CaptureResult::Captured);
+    makeRetryFrame(frame,sizeof(frame),&length,peer,0,true,3,true);
+    assert(captureRawFrameResult(lease,frame,length)==CaptureResult::Captured);
+    assert(captureRawFrameResult(lease,frame,length)==CaptureResult::Duplicate);
+
+    // A new owner/epoch clears the retry domain.
+    revokeRx149DataInput(lease.ownerSerial,lease.epochs);
+    auto next=lease;
+    ++next.ownerSerial;
+    ++next.epochs.context;
+    ++next.epochs.roc;
+    next.startUs=2000;
+    next.nowUs=2001;
+    fakeTime=2001;
+    assert(publishRx149DataInputLease(next));
+    makeRetryFrame(frame,sizeof(frame),&length,peer,0,true,3,true);
+    assert(captureRawFrameResult(next,frame,length)==CaptureResult::Captured);
+    // A slot from another incarnation cannot suppress the same retry, even
+    // when the test leaves stale storage in place.
+    advanceRx149InterfaceIncarnationForTests();
+    assert(captureRawFrameResult(next,frame,length)==CaptureResult::Captured);
+    assert(captureRawFrameResult(next,frame,length)==CaptureResult::Duplicate);
+    assert(close()&&allocated==freed);
+    return 0;
+}
+
+int retryWindowCapacityAndQueueFull() {
+    FakeIf dev;
+    prepare(dev);
+    auto lease=validLease();
+    assert(publishRx149DataInputLease(lease));
+    uint8_t frame[256]{};size_t length=0;
+    uint8_t source[6]={0x02,0x20,0,0,0,1};
+
+    // Queue-full does not commit retry state. After draining the queue, the
+    // same first Retry can be accepted.
+    unsigned queuedFrames=0;
+    for(;;) {
+        source[2]=0; // one retry slot, while filling the packet ring
+        makeRetryFrame(frame,sizeof(frame),&length,source,
+                       uint16_t(queuedFrames),false);
+        const auto result=captureRawFrameResult(lease,frame,length);
+        if(result==CaptureResult::QueueFull)break;
+        assert(result==CaptureResult::Captured);
+        ++queuedFrames;
+    }
+    assert(queuedFrames==32);
+    const uint8_t queueFullSource[6]={0x02,0x21,0,0,0,1};
+    makeRetryFrame(frame,sizeof(frame),&length,queueFullSource,500,true);
+    assert(captureRawFrameResult(lease,frame,length)==CaptureResult::QueueFull);
+    poll(true,lease.epochs.power,&lease);
+    assert(snapshot().value[RxPending]==0);
+    assert(captureRawFrameResult(lease,frame,length)==CaptureResult::Captured);
+    poll(true,lease.epochs.power,&lease);
+    assert(snapshot().value[RxPending]==0);
+    assert(captureRawFrameResult(lease,frame,length)==CaptureResult::Duplicate);
+
+    auto capacityLease=lease;
+    ++capacityLease.ownerSerial;
+    ++capacityLease.epochs.context;
+    ++capacityLease.epochs.roc;
+    capacityLease.startUs=3000;
+    capacityLease.nowUs=3001;
+    fakeTime=3001;
+    assert(publishRx149DataInputLease(capacityLease));
+
+    // Fill all 32 live source/TID/destination slots while draining the packet
+    // queue after each accepted frame. The next peer is rejected for fallback
+    // instead of evicting an active peer, whose Retry must still be detected.
+    source[1]=0x23;
+    unsigned trackedPeers=0;
+    for(unsigned index=0;index<33;++index) {
+        source[2]=uint8_t(index);
+        makeRetryFrame(frame,sizeof(frame),&length,source,
+                       uint16_t(index),true);
+        const auto result=captureRawFrameResult(capacityLease,frame,length);
+        if(result==CaptureResult::Rejected)break;
+        assert(result==CaptureResult::Captured);
+        ++trackedPeers;
+        poll(true,capacityLease.epochs.power,&capacityLease);
+    }
+    assert(trackedPeers==32);
+    assert(snapshot().value[RxPending]==0);
+    const uint8_t overflowSource[6]={0x02,0x22,0xee,0,0,1};
+    makeRetryFrame(frame,sizeof(frame),&length,overflowSource,77,true);
+    assert(captureRawFrameResult(capacityLease,frame,length)==CaptureResult::Rejected);
+    assert(snapshot().value[RxPending]==0);
+    source[1]=0x23;source[2]=0;
+    makeRetryFrame(frame,sizeof(frame),&length,source,0,true);
+    assert(captureRawFrameResult(capacityLease,frame,length)==CaptureResult::Duplicate);
+    assert(close()&&allocated==freed);
+    return 0;
+}
 }
 
 int main(int argc,char **argv) {
@@ -831,6 +991,8 @@ int main(int argc,char **argv) {
         case 19:return recoveryPreservesCurrentOwner();
         case 20:return recoveryWaitsForAdmittedInputTicket();
         case 21:return recoveryCannotOverrideCloseTimeout();
+        case 22:return retryDomainIsolation();
+        case 23:return retryWindowCapacityAndQueueFull();
         default:return 2;
     }
 }

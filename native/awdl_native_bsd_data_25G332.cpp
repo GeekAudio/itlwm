@@ -30,6 +30,7 @@
 #include <sys/kpi_socket.h>
 #include <netinet/in.h>
 #include <netinet6/in6_var.h>
+#include <string.h>
 
 namespace NativeAwdlBSD {
 namespace {
@@ -74,6 +75,22 @@ uint64_t interfaceIncarnation=0;
 AttachTraceLedger attachTrace;
 Ring<Tx,QueueDepth> tx;
 Ring<Rx,QueueDepth> rx;
+// Separate RX149 duplicate state from the AP's shared STA duplicate window.
+// Entries are fixed-size and only touched under `lock`; a full current-owner
+// table rejects/falls back instead of evicting an active peer.
+constexpr size_t Rx149RetryWindowCapacity = 32;
+struct Rx149RetryEntry {
+    bool valid=false;
+    uint8_t source[6]{};
+    uint8_t destination[6]{};
+    uint8_t tid=0;
+    uint16_t sequence=0;
+    uint64_t ownerSerial=0;
+    uint64_t startUs=0;
+    uint64_t interfaceIncarnation=0;
+    NativeP2PRx149DataInput::Epochs epochs{};
+};
+Rx149RetryEntry rx149RetryWindow[Rx149RetryWindowCapacity]{};
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
 Ring<DirectedRx,QueueDepth> directedRx;
 #endif
@@ -468,6 +485,62 @@ bool sameRx149PermitIdentity(
         lease.startUs==permit.startUs&&
         NativeP2PRx149DataInput::sameEpochs(lease.epochs,permit.epochs);
 }
+bool sameRx149RetryOwner(const Rx149RetryEntry &entry,
+    const NativeP2PRx149DataInput::Permit &permit,
+    uint64_t incarnation) {
+    return entry.valid&&entry.ownerSerial==permit.ownerSerial&&
+        entry.startUs==permit.startUs&&
+        entry.interfaceIncarnation==incarnation&&
+        NativeP2PRx149DataInput::sameEpochs(entry.epochs,permit.epochs);
+}
+void clearRx149RetryWindowLocked() {
+    memset(rx149RetryWindow,0,sizeof(rx149RetryWindow));
+}
+int findRx149RetrySlotLocked(
+    const NativeP2PRx149DataInput::Permit &permit,uint64_t incarnation,
+    const uint8_t source[6],const uint8_t destination[6],uint8_t tid,
+    uint16_t sequence,bool retry,
+    bool *duplicate) {
+    if(duplicate)*duplicate=false;
+    int freeOrStale=-1;
+    for(size_t index=0;index<Rx149RetryWindowCapacity;++index) {
+        const auto &entry=rx149RetryWindow[index];
+        if(!entry.valid) {
+            if(freeOrStale<0)freeOrStale=int(index);
+            continue;
+        }
+        if(!sameRx149RetryOwner(entry,permit,incarnation)) {
+            if(freeOrStale<0)freeOrStale=int(index);
+            continue;
+        }
+        if(entry.tid==tid&&memcmp(entry.source,source,6)==0&&
+           memcmp(entry.destination,destination,6)==0) {
+            if(retry&&entry.sequence==sequence) {
+                if(duplicate)*duplicate=true;
+                return int(index);
+            }
+            return int(index);
+        }
+    }
+    return freeOrStale;
+}
+void commitRx149RetrySlotLocked(size_t slot,
+    const NativeP2PRx149DataInput::Permit &permit,uint64_t incarnation,
+    const uint8_t source[6],const uint8_t destination[6],uint8_t tid,
+    uint16_t sequence) {
+    if(slot>=Rx149RetryWindowCapacity)return;
+    auto &entry=rx149RetryWindow[slot];
+    entry=Rx149RetryEntry{};
+    entry.valid=true;
+    memcpy(entry.source,source,sizeof(entry.source));
+    memcpy(entry.destination,destination,sizeof(entry.destination));
+    entry.tid=tid;
+    entry.sequence=sequence;
+    entry.ownerSerial=permit.ownerSerial;
+    entry.startUs=permit.startUs;
+    entry.interfaceIncarnation=incarnation;
+    entry.epochs=permit.epochs;
+}
 void recordRx149ReceiptLocked(const Rx &,uint32_t,uint64_t,uint32_t,bool,int);
 size_t removeRx149ItemsLocked(bool all,uint64_t version,
                               uint64_t ownerSerial,
@@ -525,6 +598,7 @@ bool activateRx149LeaseLocked(
             return false;
         if(activeRx149Version==UINT64_MAX) {
             activeRx149LeaseValid=false;
+            clearRx149RetryWindowLocked();
             if(discardedCount)
                 *discardedCount=removeRx149ItemsLocked(true,0,0,nullptr,nowUsValue);
             else
@@ -536,6 +610,7 @@ bool activateRx149LeaseLocked(
             *discardedCount=removeRx149ItemsLocked(true,0,0,nullptr,nowUsValue);
         else
             (void)removeRx149ItemsLocked(true,0,0,nullptr,nowUsValue);
+        clearRx149RetryWindowLocked();
         activeRx149Lease=lease;
         activeRx149LeaseValid=true;
         rx149OwnerSerialHighWater=lease.ownerSerial;
@@ -563,6 +638,7 @@ size_t revokeRx149LeaseLocked(
         if(activeRx149Lease.ownerSerial==ownerSerial) {
             activeRx149LeaseValid=false;
             activeRx149Lease=NativeP2PRx149DataInput::Lease{};
+            clearRx149RetryWindowLocked();
             if(ownerSerial>rx149OwnerSerialHighWater)
                 rx149OwnerSerialHighWater=ownerSerial;
             if(activeRx149Version==UINT64_MAX)
@@ -574,6 +650,7 @@ size_t revokeRx149LeaseLocked(
 
         // A newer terminal owner supersedes the older active receive lease.
         discarded=removeRx149ItemsLocked(true,0,0,nullptr,nowUsValue);
+        clearRx149RetryWindowLocked();
         activeRx149LeaseValid=false;
         activeRx149Lease=NativeP2PRx149DataInput::Lease{};
     }
@@ -582,6 +659,7 @@ size_t revokeRx149LeaseLocked(
     // lease was never published (for example, MCC revokes before any frame).
     if(ownerSerial<=rx149OwnerSerialHighWater)
         return discarded;
+    clearRx149RetryWindowLocked();
     rx149OwnerSerialHighWater=ownerSerial;
     if(activeRx149Version!=UINT64_MAX)
         ++activeRx149Version;
@@ -956,6 +1034,7 @@ void detachedCallback(void *,ifnet_t) {
     auto stateLock=bridgeLock();if(!stateLock)return;
     auto irq=IOSimpleLockLockDisableInterrupt(stateLock);
     detached=true;filter=nullptr;set(Detached,1);
+    clearRx149RetryWindowLocked();
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
     activeDirectedRxLeaseValid=false;
     activeDirectedRxLease=NativeP2PDirectedDataRxInput::Lease{};
@@ -1031,6 +1110,7 @@ bool attach(ifnet_t dev,const uint8_t mac[6]) {
     if(canAttach) {
         interface=dev;
         ++interfaceIncarnation;
+        clearRx149RetryWindowLocked();
     }
     IOSimpleLockUnlockEnableInterrupt(lock,irq);
     attachTrace.recordCanAttach(canAttach);
@@ -1988,6 +2068,17 @@ CaptureResult captureRx149Data(
     const NativeP2PRx149DataInput::Permit &permit,uint32_t generation) {
     if(!bytes||!NativeAwdlData::isAwdlDataCandidate(bytes,length))
         return CaptureResult::NotAwdlDataCandidate;
+    NativeAwdlData::DecodedFrame retryDecoded{};
+    const bool retryDecodedValid=length<=2048&&
+        NativeAwdlData::decodeIpv6DataMpdu(
+            bytes,length,&retryDecoded)==NativeAwdlData::Status::Ok&&
+        !retryDecoded.amsdu&&retryDecoded.packetCount==1;
+    const bool retryTrackable=retryDecodedValid&&
+        (retryDecoded.packets[0].destinationAddress[0]&1u)==0;
+    const bool retryBit=(bytes[1]&0x08u)!=0;
+    const uint8_t retryTid=retryDecoded.qosData?
+        uint8_t(retryDecoded.qosControl&0x0fu):uint8_t(16);
+    const uint16_t retrySequence=retryDecoded.wifiSequenceNumber;
     namespace D = Rx149CaptureDiagnostics;
     D::Record diagnostic{};
     auto &v=diagnostic.value;
@@ -2135,16 +2226,59 @@ CaptureResult captureRx149Data(
     const bool revisionAvailable=rx149ReceiptContentRevision!=UINT64_MAX;
     const bool spaceAvailable=rx.count<QueueDepth;
     v[D::QueueCountAtDecision]=rx.count;
-    const bool accepted=current&&
+    bool accepted=current&&
         diagnostic.test(D::SequenceAvailable,sequenceAvailable)&&
         diagnostic.test(D::RevisionAvailable,revisionAvailable)&&
         diagnostic.test(D::QueueSpaceAvailable,spaceAvailable);
+    int retrySlot=-1;
+    bool retryDuplicate=false;
+    bool retryWindowFull=false;
+    if(accepted&&retryTrackable) {
+        retrySlot=findRx149RetrySlotLocked(
+            permit,interfaceIncarnation,
+            retryDecoded.packets[0].sourceAddress,
+            retryDecoded.packets[0].destinationAddress,retryTid,
+            retrySequence,retryBit,&retryDuplicate);
+        const bool retrySlotAvailable=diagnostic.test(
+            D::RetryWindowSlotAvailable,retrySlot>=0);
+        if(!retrySlotAvailable) {
+            accepted=false;
+            retryWindowFull=true;
+        } else if(retryDuplicate) {
+            // This exact source/TID/SC Retry already had a permit-current,
+            // successfully queued copy for this owner and interface. It may
+            // be consumed as a duplicate; no sequence state is changed.
+            set(RxPending,rx.count);
+            v[D::AssignedReceiptSequence]=0;
+            IOSimpleLockUnlockEnableInterrupt(lock,irq);
+            for(size_t index=0;index<expired;++index)add(RxRejected);
+            add(RxRejected);
+            return finish(CaptureResult::Duplicate);
+        }
+    }
+    bool queuePushFailed=false;
     if(accepted) {
-        item.rx149ReceiptSequence=++rx149ReceiptSequence;
-        rx149Receipt=makeRx149Receipt(
-            item,item.rx149ReceiptSequence,Rx149ReceiptCaptured);
-        rx149Receipt.contentRevision=++rx149ReceiptContentRevision;
-        (void)rx.push(item); // spaceAvailable was checked under this same lock
+        item.rx149ReceiptSequence=rx149ReceiptSequence+1;
+        const bool pushed=rx.push(item); // space checked under this same lock
+        if(pushed) {
+            ++rx149ReceiptSequence;
+            rx149Receipt=makeRx149Receipt(
+                item,item.rx149ReceiptSequence,Rx149ReceiptCaptured);
+            rx149Receipt.contentRevision=++rx149ReceiptContentRevision;
+            if(retryTrackable)
+                commitRx149RetrySlotLocked(
+                    size_t(retrySlot),permit,interfaceIncarnation,
+                    retryDecoded.packets[0].sourceAddress,
+                    retryDecoded.packets[0].destinationAddress,retryTid,
+                    retrySequence);
+        } else {
+            accepted=false;
+            queuePushFailed=true;
+        }
+    } else if(current&&sequenceAvailable&&revisionAvailable&&
+              spaceAvailable&&retryWindowFull) {
+        // A full retry table is an explicit fallback, never an eviction of an
+        // active peer. No receipt or duplicate state is committed.
     } else if(current&&sequenceAvailable&&revisionAvailable) {
         item.rx149ReceiptSequence=++rx149ReceiptSequence;
         rx149Receipt=makeRx149Receipt(
@@ -2162,6 +2296,10 @@ CaptureResult captureRx149Data(
     if(accepted) {
         add(RxCaptured);
         return finish(CaptureResult::Captured);
+    }
+    if(retryWindowFull||queuePushFailed) {
+        add(RxRejected);
+        return finish(CaptureResult::Rejected);
     }
     if(!current) {
         add(RxRejected);
@@ -2599,11 +2737,20 @@ bool close() {
     }
     return false; // no unsafe free while callbacks or DMA completion can arrive
 }
+#if defined(ITL_NATIVE_AWDL_RX149_TEST_HOOKS)
+void advanceRx149InterfaceIncarnationForTests() {
+    if(!bridgeLock())return;
+    auto irq=IOSimpleLockLockDisableInterrupt(lock);
+    if(interfaceIncarnation!=UINT64_MAX)++interfaceIncarnation;
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+}
+#endif
 void publishClosing() {
     __atomic_store_n(&closingRequested,1u,__ATOMIC_RELEASE);
     if(!bridgeLock())return;
     auto irq=IOSimpleLockLockDisableInterrupt(lock);
     closing=true;radio=false;set(Closing,1);set(LinkReady,0);
+    clearRx149RetryWindowLocked();
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
     activeDirectedRxLeaseValid=false;
     activeDirectedRxLease=NativeP2PDirectedDataRxInput::Lease{};

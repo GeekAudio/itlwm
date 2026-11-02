@@ -127,7 +127,8 @@ enum class CaptureResult : uint8_t {
     NotAwdlDataCandidate,
     Captured,
     Rejected,
-    QueueFull
+    QueueFull,
+    Duplicate
 };
 bool attach(ifnet_t,const uint8_t address[6]);
 AttachTraceSnapshot attachSnapshot();
@@ -165,6 +166,10 @@ CaptureResult captureRx149Data(const uint8_t *,size_t,bool protectedFrame,
 // Immutable first-eight-attempt numeric diagnostics. This does not return
 // permission, alter a lease/gate, or claim packet/input completion.
 void captureRx149Diagnostics(Rx149CaptureDiagnostics::Wire *out);
+#if defined(ITL_NATIVE_AWDL_RX149_TEST_HOOKS)
+// Host-only seam changes incarnation without clearing slots to test identity.
+void advanceRx149InterfaceIncarnationForTests();
+#endif
 // Only the main-gate lease publisher may activate/refresh a lease. Worker
 // drains validate this authority and can never reopen it from a copied guard.
 // True means activation/refresh succeeded at the locked authorization point;

@@ -18,11 +18,21 @@ def sha(path):
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def extract_function(source,signature):
+    start=source.index(signature)
+    brace=source.index('{',start)
+    depth=1
+    end=brace+1
+    while depth:
+        if source[end]=='{':depth+=1
+        elif source[end]=='}':depth-=1
+        end+=1
+    return source[start:end].strip()+'\n'
+
+
 def extract_getter(tree):
     source=(tree/GETTER).read_text()
-    start=source.index('bool ItlIwx::tahoeP2pRx149DataLease(')
-    end=source.index('\nvoid ItlIwx::tahoeP2pTapAction(',start)
-    return source[start:end].strip()+'\n'
+    return extract_function(source,'bool ItlIwx::tahoeP2pRx149DataLease(')
 
 
 def main():
@@ -80,7 +90,7 @@ def main():
                 frame,'native/tests/awdl_native_rx149_data_input_test.cpp','-o',str(legacy)],
         'compile-existing-rx149-asan.log',300)
     legacy.chmod(0o700)
-    for case in range(1,22):
+    for case in range(1,24):
         run([str(legacy),str(case)],'existing-rx149-'+str(case)+'.log')
 
     tsan=out/'test104-tsan'
@@ -131,7 +141,7 @@ int main(int argc,char **argv) {
             baseline_results.append(case)
 
     report={'schema':'test104-start-wait-host-validation/v1','new_cases_passed':len(results),
-            'new_cases':results,'existing_asan_cases_passed':21,
+            'new_cases':results,'existing_asan_cases_passed':23,
             'tsan_new_races_passed':2,'existing_tsan_stress_passed':True,
             'baseline_original_bugs_reproduced':baseline_results,
             'actual_hal_getter_body_extracted':True,'getter_body_sha256':sha(getter),

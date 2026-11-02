@@ -9511,6 +9511,40 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
             rxStageOwnerGeneration,
             TahoeAwdlRxStageCounters::kDataAfterDecryptCandidate);
 #endif
+
+    // Decode the descriptor channel before STA duplicate detection. A narrowly
+    // authorized, unprotected RX149 AWDL data MPDU may be copied into the
+    // native bridge queue before the shared ic_bss duplicate/reorder state.
+    // The original descriptor and its protection/A-MSDU bits remain intact.
+    phy_info = le16toh(desc->phy_info);
+    if (sc->sc_device_family >= IWX_DEVICE_FAMILY_AX210) {
+        rate_n_flags = le32toh(desc->v3.rate_n_flags);
+        chanidx = desc->v3.channel;
+        device_timestamp = le32toh(desc->v3.gp2_on_air_rise);
+        rxi.rxi_tstamp = (uint32_t)le64toh(desc->v3.tsf_on_air_rise);
+    } else {
+        rate_n_flags = le32toh(desc->v1.rate_n_flags);
+        chanidx = desc->v1.channel;
+        device_timestamp = le32toh(desc->v1.gp2_on_air_rise);
+        rxi.rxi_tstamp = (uint32_t)le64toh(desc->v1.tsf_on_air_rise);
+    }
+    rxi.rxi_chan = chanidx;
+#ifdef AIRPORT_TAHOE
+    if (rxStageAwdlDataCandidate) {
+        const auto earlyRoute = tahoeP2pCaptureAwdlDataBeforeStaDedup(
+            sc, mtod(m, const uint8_t *), mbuf_len(m), chanidx,
+            uint32_t(desc->mac_phy_idx), &originalData);
+        if (earlyRoute != NativeP2PRx149DataInput::EarlyRoute::PassToSta) {
+            tahoe_awdl_rx_stage_counters_.recordData(
+                rxStageOwnerGeneration,
+                earlyRoute == NativeP2PRx149DataInput::EarlyRoute::QueuedForNative ?
+                    TahoeAwdlRxStageCounters::kDataPreDuplicateQueueAccepted :
+                    TahoeAwdlRxStageCounters::kDataPreDuplicateRetrySuppressed);
+            mbuf_freem(m);
+            return;
+        }
+    }
+#endif
     
     if (iwx_detect_duplicate(sc, m, desc, &rxi)) {
 #ifdef AIRPORT_TAHOE
@@ -9549,20 +9583,6 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
     rssi = MIN(rssi, ic->ic_max_rssi);    /* clip to max. 100% */
     
     rxi.rxi_rssi = rssi;
-    
-    phy_info = le16toh(desc->phy_info);
-    if (sc->sc_device_family >= IWX_DEVICE_FAMILY_AX210) {
-        rate_n_flags = le32toh(desc->v3.rate_n_flags);
-        chanidx = desc->v3.channel;
-        device_timestamp = le32toh(desc->v3.gp2_on_air_rise);
-        rxi.rxi_tstamp = (uint32_t)le64toh(desc->v3.tsf_on_air_rise);
-    } else {
-        rate_n_flags = le32toh(desc->v1.rate_n_flags);
-        chanidx = desc->v1.channel;
-        device_timestamp = le32toh(desc->v1.gp2_on_air_rise);
-        rxi.rxi_tstamp = (uint32_t)le64toh(desc->v1.tsf_on_air_rise);
-    }
-    rxi.rxi_chan = chanidx;
     
     if (iwx_rx_reorder(sc, m, chanidx, desc,
                        (phy_info & IWX_RX_MPDU_PHY_SHORT_PREAMBLE),

@@ -12,6 +12,17 @@ constexpr uint64_t kMaximumQueuedAgeUs = 100000ULL;
 constexpr uint32_t kMacPhyDecodeLegacy = 1;
 constexpr uint32_t kMacPhyDecodeBandInRx = 2;
 
+// HAL ownership decision after the bridge validates the same current RX149
+// lease used for queue admission. DuplicateRetry suppresses only a Retry MPDU
+// already copied for the identical AWDL source/destination/TID/sequence in
+// that owner, epoch and interface incarnation. This is a last-sequence retry
+// filter, not a complete replay window.
+enum class EarlyRoute : uint8_t {
+    PassToSta,
+    QueuedForNative,
+    DuplicateRetry
+};
+
 struct Epochs {
     uint32_t context;
     uint32_t power;
