@@ -13,6 +13,27 @@ from pathlib import Path
 
 PROJECT = Path(__file__).resolve().parents[1]
 
+PROJECT_SYMBOL_MARKERS = (
+    'NativeWifi', 'NativeAwdl', 'NativeRxPreOwner', 'NativeP2PProbe', 'IntelP2PRx',
+    'IntelAwdl', 'IntelAwdlElection', 'IntelROCEvent', 'IntelP2PTx', 'IntelP2PAction',
+    'IntelP2PFirmware', 'IntelGp2Clock', 'iwx_tahoe_p2p', 'IwxTxRate',
+    'IwxResetTrace', 'AirportItlwm', 'ItlIwx', 'ItlHalService', 'ItlAwdl'
+)
+
+
+def unresolved_project_symbols(undefined: str) -> list[str]:
+    """Reject unresolved project and anonymous-namespace implementations.
+
+    Private Apple/kernel imports are intentionally unresolved for kext dynamic
+    lookup. Symbols from a C++ anonymous namespace are translation-unit local
+    and can never be supplied by the kernel or another kext.
+    """
+    return [
+        line.strip() for line in undefined.splitlines()
+        if any(marker in line for marker in PROJECT_SYMBOL_MARKERS) or
+        'GLOBAL__N_' in line or '(anonymous namespace)' in line
+    ]
+
 
 def receive149_profile_errors(args):
     data_input = getattr(args, 'native_awdl_rx149_data_input', False)
@@ -250,13 +271,7 @@ def main():
         undefined = subprocess.check_output(
             ['xcrun', 'nm', '-u', str(bundle / 'Contents/MacOS/AirportItlwm')],
             text=True)
-        own_names = ('NativeWifi', 'NativeAwdl', 'NativeRxPreOwner', 'NativeP2PProbe', 'IntelP2PRx',
-                     'IntelAwdl', 'IntelAwdlElection', 'IntelROCEvent', 'IntelP2PTx', 'IntelP2PAction',
-                     'IntelP2PFirmware', 'IntelGp2Clock',
-                     'iwx_tahoe_p2p', 'IwxTxRate', 'IwxResetTrace', 'AirportItlwm',
-                     'ItlIwx', 'ItlHalService', 'ItlAwdl')
-        missing = [line.strip() for line in undefined.splitlines()
-                   if any(name in line for name in own_names)]
+        missing = unresolved_project_symbols(undefined)
         if missing:
             raise RuntimeError('Unresolved project symbols: ' + ', '.join(missing))
         uuid_output = subprocess.check_output(

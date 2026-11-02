@@ -8109,7 +8109,24 @@ static bool directedDataStationQueueDataAbsent(ItlIwx *owner)
 }
 
 static void drainDirectedDataRxOutsideMainGate(
-    P2PProbeRun *probe,const RocEventRun &event);
+    P2PProbeRun *probe,const RocEventRun &event)
+{
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    auto *owner=probe?probe->owner:nullptr;
+    if(!owner||owner->tahoeP2pOnMainGate())
+        return;
+    const auto &sc=owner->com;
+    const bool radioReady=sc.sc_ic.ic_state==IEEE80211_S_RUN&&
+        !(sc.sc_flags&(IWX_FLAG_HW_ERR|IWX_FLAG_SHUTDOWN|IWX_FLAG_RFKILL));
+    // The kernel bridge independently rechecks its current owner, MAC,
+    // epoch, descriptor permit, and hard kernel-uptime deadline before DLIL.
+    NativeAwdlBSD::poll(radioReady,uint32_t(sc.sc_generation),
+                        &event.directedDataRxLease);
+#else
+    (void)probe;
+    (void)event;
+#endif
+}
 
 static bool directedDataInnerResourcesAbsent(ItlIwx *owner)
 {
@@ -9595,26 +9612,6 @@ static void drainRx149NativeDataOutsideMainGate(
     // queue independently checks this permit and its current clock at input.
     NativeAwdlBSD::poll(radioReady, uint32_t(sc.sc_generation),
                         &event.rx149DataLease);
-#else
-    (void)probe;
-    (void)event;
-#endif
-}
-
-static void drainDirectedDataRxOutsideMainGate(
-    P2PProbeRun *probe,const RocEventRun &event)
-{
-#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
-    auto *owner=probe?probe->owner:nullptr;
-    if(!owner||owner->tahoeP2pOnMainGate())
-        return;
-    const auto &sc=owner->com;
-    const bool radioReady=sc.sc_ic.ic_state==IEEE80211_S_RUN&&
-        !(sc.sc_flags&(IWX_FLAG_HW_ERR|IWX_FLAG_SHUTDOWN|IWX_FLAG_RFKILL));
-    // The kernel bridge independently rechecks its current owner, MAC,
-    // epoch, descriptor permit, and hard kernel-uptime deadline before DLIL.
-    NativeAwdlBSD::poll(radioReady,uint32_t(sc.sc_generation),
-                        &event.directedDataRxLease);
 #else
     (void)probe;
     (void)event;
