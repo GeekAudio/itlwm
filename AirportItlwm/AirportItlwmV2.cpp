@@ -1827,52 +1827,126 @@ IOReturn AirportItlwm::
 getPOWER(OSObject *object,
                          struct apple80211_power_data *pd)
 {
-    if (!pd)
+    if (!pd) {
+#ifdef AIRPORT_TAHOE
+        NativeWifiStateTrace::Observation observation {};
+        observation.kind = uint32_t(NativeWifiStateTrace::Kind::kPowerGet);
+        observation.result = kIOReturnError;
+        recordNativeWifiStateObservation(observation);
+#endif
         return kIOReturnError;
+    }
 #ifdef AIRPORT_TAHOE
     __atomic_fetch_add(&nativePowerGetCount, 1U, __ATOMIC_RELAXED);
     // Keep explicit Off and system sleep visible immediately. A missing READY
     // bit is held On only while one validated private-address restart token is
     // active and within its bounded window. This does not alter HAL READY.
     uint32_t powerFlags = 0;
+    uint32_t powerEpoch = 0;
+    uint64_t transitionRevision = 0;
     uint64_t restartDeadline = 0;
+    uint64_t restartId = 0;
+    uint64_t restartStartRevision = 0;
+    uint32_t restartPowerEpoch = 0;
+    uint32_t restartFaultSerial = 0;
+    uint32_t faultSerial = 0;
+    bool restartActive = false;
+    bool restartCommitted = false;
+    bool faultSerialValid = false;
+    bool faultSerialMatches = false;
+    bool restartIdentityMatches = false;
+    bool restartEpochMatches = false;
+    bool restartRevisionMatches = false;
+    bool restartValidationEvaluated = false;
+    bool stateLockMissing = false;
     bool addressRestartGrace = false;
     IOSimpleLock *lock = nativePowerStateLock;
     if (lock) {
         const IOInterruptState irq = IOSimpleLockLockDisableInterrupt(lock);
         powerFlags = __atomic_load_n(&nativePowerFlags, __ATOMIC_RELAXED);
-        const uint32_t powerEpoch = __atomic_load_n(&nativePowerEpoch, __ATOMIC_RELAXED);
-        if ((powerFlags & 1U) && !(powerFlags & 2U) &&
-            fHalService && nativeAddressRestartNotification.active()) {
-            const uint64_t restartId = nativeAddressRestartNotification.id();
-            uint32_t faultSerial = 0;
-            const bool faultSerialValid =
-                fHalService->readNativePowerFaultSerial(&faultSerial);
-            addressRestartGrace = restartId != 0 &&
-                restartId == nativeAddressRestartPublishedId &&
-                nativeAddressRestartNotification.powerEpoch() == powerEpoch &&
-                nativeAddressRestartPublishedEpoch == powerEpoch &&
-                nativeAddressRestartNotification.startRevision() ==
-                    nativeAddressRestartStartRevision &&
-                faultSerialValid && faultSerial ==
-                    nativeAddressRestartNotification.faultSerial();
+        powerEpoch = __atomic_load_n(&nativePowerEpoch, __ATOMIC_RELAXED);
+        transitionRevision = __atomic_load_n(&nativePowerTransitionRevision,
+                                               __ATOMIC_RELAXED);
+        restartActive = nativeAddressRestartNotification.active();
+        if (restartActive) {
+            restartId = nativeAddressRestartNotification.id();
+            restartPowerEpoch = nativeAddressRestartNotification.powerEpoch();
+            restartStartRevision = nativeAddressRestartNotification.startRevision();
+            restartFaultSerial = nativeAddressRestartNotification.faultSerial();
+            restartCommitted = nativeAddressRestartNotification.committed();
             restartDeadline = nativeAddressRestartNotification.deadlineNanoseconds();
+        }
+        if ((powerFlags & 1U) && !(powerFlags & 2U) &&
+            fHalService && restartActive) {
+            restartValidationEvaluated = true;
+            faultSerialValid =
+                fHalService->readNativePowerFaultSerial(&faultSerial);
+            faultSerialMatches = faultSerialValid &&
+                faultSerial == restartFaultSerial;
+            restartIdentityMatches = restartId != 0 &&
+                restartId == nativeAddressRestartPublishedId;
+            restartEpochMatches = restartPowerEpoch == powerEpoch &&
+                nativeAddressRestartPublishedEpoch == powerEpoch;
+            restartRevisionMatches = restartStartRevision ==
+                nativeAddressRestartStartRevision;
+            addressRestartGrace = restartId != 0 &&
+                restartIdentityMatches && restartEpochMatches &&
+                restartRevisionMatches && faultSerialValid &&
+                faultSerial == restartFaultSerial;
         }
         IOSimpleLockUnlockEnableInterrupt(lock, irq);
     } else {
         // Missing the lifecycle lock fails closed: do not preserve transient
         // On intent without a coherent restart/fault snapshot.
         powerFlags = __atomic_load_n(&nativePowerFlags, __ATOMIC_ACQUIRE);
+        powerEpoch = __atomic_load_n(&nativePowerEpoch, __ATOMIC_ACQUIRE);
+        transitionRevision = __atomic_load_n(&nativePowerTransitionRevision,
+                                               __ATOMIC_ACQUIRE);
+        stateLockMissing = true;
     }
+    const uint64_t queryNowNs = nativePowerUptimeNanoseconds();
     const bool restartStillInWindow = addressRestartGrace &&
-        nativePowerUptimeNanoseconds() < restartDeadline;
-    const bool systemPowerOn = __atomic_load_n(&pmPowerState, __ATOMIC_ACQUIRE) !=
-        kPowerStateOff;
+        queryNowNs < restartDeadline;
+    const uint64_t restartRemainingNs = restartDeadline > queryNowNs
+        ? restartDeadline - queryNowNs : 0;
+    const uint32_t pmState = __atomic_load_n(&pmPowerState, __ATOMIC_ACQUIRE);
+    const bool systemPowerOn = pmState != kPowerStateOff;
     const uint8_t state = systemPowerOn && (powerFlags & 1U) &&
         ((powerFlags & 2U) || restartStillInWindow) ? 1 : 0;
     pd->version = APPLE80211_VERSION;
     pd->num_radios = APPLE80211_MAX_RADIO;
     for (unsigned i = 0; i < APPLE80211_MAX_RADIO; ++i) pd->power_state[i] = state;
+
+    // Capture the exact inputs and output already used above. No second
+    // lifecycle snapshot is taken, so a record cannot pair a new epoch with
+    // this GET_POWER result. The fixed ring is published later by nativeIngress.
+    NativeWifiStateTrace::Observation observation {};
+    observation.monotonicNs = queryNowNs;
+    observation.transitionRevision = transitionRevision;
+    observation.restartId = restartId;
+    observation.restartRemainingNs = restartRemainingNs;
+    observation.kind = uint32_t(NativeWifiStateTrace::Kind::kPowerGet);
+    observation.powerEpoch = powerEpoch;
+    observation.powerFlags = powerFlags;
+    observation.faultSerial = faultSerialValid ? faultSerial : 0;
+    observation.result = kIOReturnSuccess;
+    observation.value = state;
+    observation.auxiliary = pd->num_radios;
+    observation.flags = NativeWifiStateTrace::kValueValid;
+    if (powerFlags & 1U) observation.flags |= NativeWifiStateTrace::kPMRequestedOn;
+    if (powerFlags & 2U) observation.flags |= NativeWifiStateTrace::kHALReady;
+    if (systemPowerOn) observation.flags |= NativeWifiStateTrace::kSystemPMOn;
+    if (stateLockMissing) observation.flags |= NativeWifiStateTrace::kStateLockMissing;
+    if (restartActive) observation.flags |= NativeWifiStateTrace::kRestartActive;
+    if (restartCommitted) observation.flags |= NativeWifiStateTrace::kRestartCommitted;
+    if (faultSerialValid) observation.flags |= NativeWifiStateTrace::kFaultSerialValid;
+    if (faultSerialMatches) observation.flags |= NativeWifiStateTrace::kFaultSerialMatches;
+    if (restartIdentityMatches) observation.flags |= NativeWifiStateTrace::kRestartIdentityMatch;
+    if (restartEpochMatches) observation.flags |= NativeWifiStateTrace::kRestartEpochMatch;
+    if (restartRevisionMatches) observation.flags |= NativeWifiStateTrace::kRestartRevisionMatch;
+    if (restartValidationEvaluated)
+        observation.flags |= NativeWifiStateTrace::kRestartValidationEvaluated;
+    recordNativeWifiStateObservation(observation);
     publishNativePowerState();
     return kIOReturnSuccess;
 #else
@@ -2360,6 +2434,58 @@ void AirportItlwm::publishNativePowerTrace()
         setProperty("NativePowerTraceSchema", NativePowerTrace::kSchemaVersion, 32);
         setProperty("NativePowerTraceSequence", sequence, 32);
         __atomic_store_n(&nativePowerTracePublishedSequence, sequence, __ATOMIC_RELEASE);
+    }
+    data->release();
+}
+
+bool AirportItlwm::recordNativeWifiStateObservation(
+    const NativeWifiStateTrace::Observation &input, bool forceAppend)
+{
+    if (ml_at_interrupt_context()) return false;
+    IOSimpleLock *traceLock = nativePowerTraceLock;
+    if (!traceLock) return false;
+
+    NativeWifiStateTrace::Observation observation = input;
+    if (!observation.monotonicNs)
+        observation.monotonicNs = nativePowerUptimeNanoseconds();
+    const IOInterruptState irq = IOSimpleLockLockDisableInterrupt(traceLock);
+    const bool appended = nativeWifiStateTrace.observe(observation, forceAppend);
+    IOSimpleLockUnlockEnableInterrupt(traceLock, irq);
+    return appended;
+}
+
+void AirportItlwm::publishNativeWifiStateTrace()
+{
+    if (ml_at_interrupt_context()) return;
+    IOSimpleLock *traceLock = nativePowerTraceLock;
+    if (!traceLock) return;
+
+    NativeWifiStateTrace::Snapshot snapshot {};
+    uint32_t sequence = 0;
+    const IOInterruptState irq = IOSimpleLockLockDisableInterrupt(traceLock);
+    nativeWifiStateTrace.snapshot(&snapshot);
+    sequence = snapshot.newestSequence;
+    const bool callsChanged = memcmp(snapshot.callCounts,
+        nativeWifiStateTracePublishedCallCounts,
+        sizeof(nativeWifiStateTracePublishedCallCounts)) != 0;
+    if (nativeWifiStateTracePublished && !callsChanged &&
+        sequence == __atomic_load_n(&nativeWifiStateTracePublishedSequence,
+                                    __ATOMIC_RELAXED)) {
+        IOSimpleLockUnlockEnableInterrupt(traceLock, irq);
+        return;
+    }
+    IOSimpleLockUnlockEnableInterrupt(traceLock, irq);
+
+    OSData *data = OSData::withBytes(&snapshot, sizeof(snapshot));
+    if (!data) return;
+    if (setProperty("NativeWifiStateTrace", data)) {
+        setProperty("NativeWifiStateTraceSchema", NativeWifiStateTrace::kSchemaVersion, 32);
+        setProperty("NativeWifiStateTraceSequence", sequence, 32);
+        __atomic_store_n(&nativeWifiStateTracePublishedSequence, sequence,
+                         __ATOMIC_RELEASE);
+        memcpy(nativeWifiStateTracePublishedCallCounts, snapshot.callCounts,
+               sizeof(nativeWifiStateTracePublishedCallCounts));
+        nativeWifiStateTracePublished = true;
     }
     data->release();
 }

@@ -435,21 +435,55 @@ IOReturn AirportItlwmSkywalkInterface::
 getSSID(struct apple80211_ssid_data *sd)
 {
 #ifdef AIRPORT_TAHOE
-    if (!sd) return kIOReturnBadArgument;
-    auto ic = fHalService->get80211Controller();
-    bzero(sd, sizeof(*sd)); sd->version = APPLE80211_VERSION;
-    if (ic->ic_state == IEEE80211_S_RUN && ic->ic_bss) {
-        if (ic->ic_bss->ni_esslen > sizeof(sd->ssid_bytes)) return kIOReturnBadArgument;
-        sd->ssid_len = ic->ic_bss->ni_esslen;
-        memcpy(sd->ssid_bytes, ic->ic_bss->ni_essid, sd->ssid_len);
-        return kIOReturnSuccess;
-    }
-    if (ic->ic_des_esslen < 0 || size_t(ic->ic_des_esslen) > sizeof(sd->ssid_bytes))
+    if (!sd) {
+        NativeWifiStateTrace::Observation observation {};
+        observation.kind = uint32_t(NativeWifiStateTrace::Kind::kSSIDQuery);
+        observation.result = kIOReturnBadArgument;
+        if (instance) instance->recordNativeWifiStateObservation(observation);
         return kIOReturnBadArgument;
-    if (!ic->ic_des_esslen) return kIOReturnNotReady;
-    sd->ssid_len = uint32_t(ic->ic_des_esslen);
-    memcpy(sd->ssid_bytes, ic->ic_des_essid, sd->ssid_len);
-    return kIOReturnSuccess;
+    }
+    auto ic = fHalService->get80211Controller();
+    const uint32_t controllerState = ic->ic_state;
+    auto bss = ic->ic_bss;
+    bzero(sd, sizeof(*sd)); sd->version = APPLE80211_VERSION;
+    IOReturn result = kIOReturnSuccess;
+    uint32_t returnedLength = 0;
+    uint32_t source = 0; // 1=current BSS, 2=desired SSID, 0=none
+    if (controllerState == IEEE80211_S_RUN && bss) {
+        if (bss->ni_esslen > sizeof(sd->ssid_bytes)) {
+            result = kIOReturnBadArgument;
+        } else {
+            returnedLength = bss->ni_esslen;
+            sd->ssid_len = returnedLength;
+            memcpy(sd->ssid_bytes, bss->ni_essid, returnedLength);
+            source = 1;
+        }
+    } else if (ic->ic_des_esslen < 0 ||
+               size_t(ic->ic_des_esslen) > sizeof(sd->ssid_bytes)) {
+        result = kIOReturnBadArgument;
+    } else if (!ic->ic_des_esslen) {
+        result = kIOReturnNotReady;
+    } else {
+        returnedLength = uint32_t(ic->ic_des_esslen);
+        sd->ssid_len = returnedLength;
+        memcpy(sd->ssid_bytes, ic->ic_des_essid, returnedLength);
+        source = 2;
+    }
+
+    NativeWifiStateTrace::Observation observation {};
+    observation.kind = uint32_t(NativeWifiStateTrace::Kind::kSSIDQuery);
+    observation.result = result;
+    observation.value = returnedLength;
+    observation.auxiliary = source;
+    if (controllerState == IEEE80211_S_RUN)
+        observation.flags |= NativeWifiStateTrace::kControllerRun;
+    if (bss) observation.flags |= NativeWifiStateTrace::kBSSPresent;
+    if (source == 1) observation.flags |= NativeWifiStateTrace::kCurrentBSSSource;
+    if (source == 2) observation.flags |= NativeWifiStateTrace::kDesiredSSIDSource;
+    if (result == kIOReturnSuccess)
+        observation.flags |= NativeWifiStateTrace::kValueValid;
+    if (instance) instance->recordNativeWifiStateObservation(observation);
+    return result;
 #else
 
     struct ieee80211com * ic = fHalService->get80211Controller();
@@ -817,6 +851,43 @@ getRATE(struct apple80211_rate_data *rd)
 IOReturn AirportItlwmSkywalkInterface::
 getBSSID(struct apple80211_bssid_data *bd)
 {
+#ifdef AIRPORT_TAHOE
+    struct ieee80211com *ic = fHalService->get80211Controller();
+    const uint32_t controllerState = ic->ic_state;
+    auto bss = ic->ic_bss;
+    IOReturn result = 6;
+    bool desiredAddressComparisonValid = false;
+    bool addressMatchesDesired = false;
+    if (controllerState == IEEE80211_S_RUN) {
+        memset(bd, 0, sizeof(*bd));
+        bd->version = APPLE80211_VERSION;
+        uint8_t returnedBssid[APPLE80211_ADDR_LEN] {};
+        memcpy(returnedBssid, bss->ni_bssid, sizeof(returnedBssid));
+        memcpy(bd->bssid.octet, returnedBssid, sizeof(returnedBssid));
+        if (ic->ic_flags & IEEE80211_F_DESBSSID) {
+            desiredAddressComparisonValid = true;
+            addressMatchesDesired = memcmp(returnedBssid, ic->ic_des_bssid,
+                                           sizeof(returnedBssid)) == 0;
+        }
+        result = kIOReturnSuccess;
+    }
+    NativeWifiStateTrace::Observation observation {};
+    observation.kind = uint32_t(NativeWifiStateTrace::Kind::kBSSIDQuery);
+    observation.result = result;
+    observation.value = result == kIOReturnSuccess ? APPLE80211_ADDR_LEN : 0;
+    if (controllerState == IEEE80211_S_RUN)
+        observation.flags |= NativeWifiStateTrace::kControllerRun;
+    if (bss) observation.flags |= NativeWifiStateTrace::kBSSPresent;
+    if (result == kIOReturnSuccess) {
+        observation.flags |= NativeWifiStateTrace::kValueValid;
+        if (desiredAddressComparisonValid)
+            observation.flags |= NativeWifiStateTrace::kAddressComparisonValid;
+        if (addressMatchesDesired)
+            observation.flags |= NativeWifiStateTrace::kAddressMatchesDesired;
+    }
+    if (instance) instance->recordNativeWifiStateObservation(observation);
+    return result;
+#else
     struct ieee80211com *ic = fHalService->get80211Controller();
     if (ic->ic_state == IEEE80211_S_RUN) {
         memset(bd, 0, sizeof(*bd));
@@ -825,6 +896,7 @@ getBSSID(struct apple80211_bssid_data *bd)
         return kIOReturnSuccess;
     }
     return 6;
+#endif
 }
 
 IOReturn AirportItlwmSkywalkInterface::
@@ -1776,12 +1848,14 @@ void AirportItlwmSkywalkInterface::emitNative(void *context, uint32_t event,
     const void *payload, size_t size) {
     auto self = static_cast<AirportItlwmSkywalkInterface *>(context);
     uint8_t link[NativeWifi::LinkEventSize] {};
+    bool isLinkEvent = false;
     if (event == NativeWifi::Link) {
         if (!payload || size != sizeof(link)) return;
         memcpy(link, payload, sizeof(link));
         link[7] = self->isDebounceOnGoing() ? 1 : 0;
         payload = link;
         self->setProperty("NativeLastLinkEventUp", uint32_t(link[6]), 32);
+        isLinkEvent = true;
     }
     if (event == NativeWifi::BeaconLqm) {
         if (!payload || size != NativeWifi::BeaconLqmSize) return;
@@ -1793,6 +1867,19 @@ void AirportItlwmSkywalkInterface::emitNative(void *context, uint32_t event,
     }
     // The native WCL queue owns a copy, including this driver's measured LQM.
     self->postMessage(event, const_cast<void *>(payload), size, true);
+    if (isLinkEvent) {
+        NativeWifiStateTrace::Observation observation {};
+        observation.kind = uint32_t(NativeWifiStateTrace::Kind::kWclLinkEvent);
+        observation.result = kIOReturnSuccess;
+        observation.value = link[6];
+        observation.auxiliary = event; // NativeWifi::Link == WCL event 216
+        observation.flags = NativeWifiStateTrace::kEmitCallOnly |
+            NativeWifiStateTrace::kValueValid;
+        if (link[6]) observation.flags |= NativeWifiStateTrace::kLinkUp;
+        if (link[7]) observation.flags |= NativeWifiStateTrace::kDebounceActive;
+        if (self->instance)
+            self->instance->recordNativeWifiStateObservation(observation, true);
+    }
 }
 NativeWifi::Status AirportItlwmSkywalkInterface::radioScan(void *context,
     const NativeWifi::ScanPlan &plan) {
@@ -2202,6 +2289,7 @@ void AirportItlwmSkywalkInterface::consumeNative(void *context, const NativeWifi
         self->publishNativeScanTrace();
         self->publishNativeScanDispatchTrace();
         self->instance->publishNativePowerTrace();
+        self->instance->publishNativeWifiStateTrace();
         // These are emit-call counts, not acknowledgements from the native
         // WCL cache. Publish only on this owned consumer, never on RX/IRQ.
         const auto emitted201 = backend->event201EmitCalls();

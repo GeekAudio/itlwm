@@ -32,6 +32,7 @@
 #include "AirportItlwmEthernetInterface.hpp"
 #ifdef AIRPORT_TAHOE
 #include "../native/native_power_trace.hpp"
+#include "../native/native_wifi_state_trace.hpp"
 #endif
 
 enum
@@ -297,6 +298,9 @@ public:
     bool nativePowerPMRequestValid {false};
     uint64_t nativePowerTransitionRevision {0}; // Atomic accesses, serialized with nativePowerStateLock when available.
     uint32_t nativePowerTracePublishedSequence {0};
+    uint32_t nativeWifiStateTracePublishedSequence {0};
+    bool nativeWifiStateTracePublished {false};
+    uint32_t nativeWifiStateTracePublishedCallCounts[NativeWifiStateTrace::kKindCount] {};
     NativePowerTrace::NotificationState nativePowerNotificationState {};
     NativePowerTrace::AddressRestartNotification nativeAddressRestartNotification {};
     // The following producer-visible tuple is copied under nativePowerStateLock
@@ -313,6 +317,7 @@ public:
     IOSimpleLock *nativePowerStateLock {nullptr};
     IOSimpleLock *nativePowerTraceLock {nullptr};
     NativePowerTrace::Ledger nativePowerTrace {};
+    NativeWifiStateTrace::Ledger nativeWifiStateTrace {};
     uint32_t nativePowerOffAttempts {0};
     uint32_t nativePowerOffRetries {0};
     uint32_t nativePowerOffResult {uint32_t(kIOReturnNotReady)};
@@ -360,6 +365,9 @@ public:
         NativePowerTrace::Operation, NativePowerTrace::Phase,
         uint32_t detail, int32_t result, uint32_t auxiliary = 0);
     void publishNativePowerTrace();
+    bool recordNativeWifiStateObservation(
+        const NativeWifiStateTrace::Observation &, bool forceAppend = false);
+    void publishNativeWifiStateTrace();
     CCStream *nativeLogger {nullptr};
     OSObject *nativeFaultReporter {nullptr};
     uint32_t nativeCaptureStarted {0};
