@@ -38,6 +38,8 @@ FILES = (
     "assets/site.css",
     "assets/site.js",
     "assets/test-records.js",
+    "assets/freshness.js",
+    "site-version.json",
 )
 RESTRICTED_PATTERNS = (
     re.compile(r"(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?![\w.])"),
@@ -159,6 +161,19 @@ def snapshot_site(*, refresh: bool = True) -> tuple[dict[str, bytes], dict]:
             if pattern.search(text):
                 raise PublishError(f"Public safety filter rejected {relative}")
         payload[relative] = data
+
+    manifest = json.loads(payload["site-version.json"])
+    version = manifest.get("version", "")
+    expected_files = set(FILES) - {"site-version.json"}
+    if (manifest.get("schema") != 1 or not re.fullmatch(r"[a-f0-9]{64}", version)
+            or set(manifest.get("files", {})) != expected_files):
+        raise PublishError("Invalid website version manifest")
+    for name in expected_files:
+        if sha256(payload[name]) != manifest["files"][name]:
+            raise PublishError(f"Website snapshot mixes versions: {name}")
+    for name in ("index.html", "milestones.html"):
+        if f'<meta name="iw-site-version" content="{version}">'.encode() not in payload[name]:
+            raise PublishError(f"Website entry has a stale version: {name}")
 
     js = payload["data.js"].decode("utf-8")
     prefix = "window.PROGRESS_DATA = "

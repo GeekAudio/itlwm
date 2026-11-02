@@ -13,6 +13,7 @@ from datetime import datetime
 from pathlib import Path
 
 
+
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "research" / "milestones-current.json"
 TARGET = ROOT / "progress-site" / "dist" / "data.js"
@@ -244,19 +245,8 @@ def main() -> None:
         + ";\n",
         encoding="utf-8",
     )
-    # Keep a self-contained copy that can be opened directly after a reboot.
-    dist = TARGET.parent
-    page = (dist / "index.html").read_text(encoding="utf-8")
-    css = (dist / "assets/site.css").read_text(encoding="utf-8")
-    page = page.replace('<link rel="stylesheet" href="./assets/site.css">',
-                        "<style>\n" + css + "\n</style>")
-    scripts = []
-    for asset in ("data.js", "assets/test-records.js", "assets/site.js"):
-        page = page.replace(f'<script src="./{asset}" defer></script>', "")
-        script = (dist / asset).read_text(encoding="utf-8")
-        scripts.append("<script>\n" + script.replace("</script", "<\\/script") + "\n</script>")
-    page = page.replace("</body>", "\n".join(scripts) + "\n</body>")
-    (dist / "milestones.html").write_text(page, encoding="utf-8")
+    from render_site import render_site
+    render_site(ROOT / "progress-site", updated_at)
     print("Updated project data and standalone milestones.html")
     if os.environ.get("INTELWIRELESS_PAGES_PUBLISHER_ACTIVE") != "1":
         publisher = ROOT / "progress-site" / "tools" / "publish_github_pages.py"

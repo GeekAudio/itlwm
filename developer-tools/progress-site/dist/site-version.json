@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "version": "346413659d72f6476f6278f8561ae91f5d7cc11c02ff214eee7c07c8a6f73a5c",
+  "updatedAt": "2026-11-02T16:07:26.655093+08:00",
+  "files": {
+    "index.html": "bc79acc9b15c9e6c415a270a5d9f88315a9203fc63e4be106d207cea0a39a090",
+    "milestones.html": "bc79acc9b15c9e6c415a270a5d9f88315a9203fc63e4be106d207cea0a39a090",
+    "assets/site.css": "615c33ae7e9ffc93a3b4b1d29ff1186f839c04b4af579916942ceec6ebb983d0",
+    "data.js": "3c80a746d67a3a2a226cbe231dbef63a31b7dec6cd851da3026c7f1a228f6cd6",
+    "assets/test-records.js": "ec3f3fbdac2ad9eda4d59e10b78322ec1595d3cd9ecb577d563c550e0f28aae2",
+    "assets/site.js": "232e25ac82dfcfcb1b469b5fb9003481ce8a237f8613144f0ed2db65f5643bdd",
+    "assets/freshness.js": "3dc23459451a94a47ea24941e4087f9dda2b6ed8315959634c420dc9008ca10c"
+  }
+}

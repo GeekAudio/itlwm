@@ -45,9 +45,12 @@ class RefreshDataCLITests(unittest.TestCase):
         self.tool_dir.mkdir(parents=True)
         self.assets.mkdir(parents=True)
         self.research.mkdir()
+        self.templates = self.root / "progress-site" / "templates"
+        self.templates.mkdir()
 
         self.script = self.tool_dir / "refresh_data.py"
         shutil.copy2(SOURCE_SCRIPT, self.script)
+        shutil.copy2(SOURCE_SCRIPT.with_name("render_site.py"), self.tool_dir / "render_site.py")
         (self.research / "milestones-current.json").write_text(
             json.dumps(
                 {
@@ -58,8 +61,9 @@ class RefreshDataCLITests(unittest.TestCase):
             ),
             encoding="utf-8",
         )
-        (self.dist / "index.html").write_text(
-            '<html><head><link rel="stylesheet" href="./assets/site.css"></head>'
+        (self.templates / "index.html").write_text(
+            '<html><head><!-- site-version --><!-- site-freshness -->'
+            '<link rel="stylesheet" href="./assets/site.css"></head>'
             '<body><script src="./data.js" defer></script>'
             '<script src="./assets/test-records.js" defer></script>'
             '<script src="./assets/site.js" defer></script></body></html>',
@@ -70,6 +74,7 @@ class RefreshDataCLITests(unittest.TestCase):
             "window.TEST_RECORDS = [];", encoding="utf-8"
         )
         (self.assets / "site.js").write_text("window.siteLoaded = true;", encoding="utf-8")
+        (self.assets / "freshness.js").write_text("window.checked = true;", encoding="utf-8")
         # A harmless publisher spy proves whether generation reaches the publish step.
         (self.tool_dir / "publish_github_pages.py").write_text(
             "from pathlib import Path\n"
@@ -79,6 +84,8 @@ class RefreshDataCLITests(unittest.TestCase):
 
         self.environment = os.environ.copy()
         self.environment.pop("INTELWIRELESS_PAGES_PUBLISHER_ACTIVE", None)
+        # Even Python's import-cache writes must not occur on --help/errors.
+        self.environment.pop("PYTHONDONTWRITEBYTECODE", None)
 
     def run_script(self, *arguments: str) -> subprocess.CompletedProcess[str]:
         return subprocess.run(
