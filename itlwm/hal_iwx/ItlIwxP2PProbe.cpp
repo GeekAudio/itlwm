@@ -12145,7 +12145,11 @@ void ItlIwx::tahoeP2pProbeTask(void *opaque)
             owner->getController()->getProperty("NativeP2PRocProbe") ==
                 kOSBooleanTrue)
             operations.exercise = tahoeP2pExerciseRoc;
-        if (run.rx149ObservationOnly)
+        if (run.rx149ObservationOnly
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+            || run.directedDataOnly
+#endif
+            )
             operations.exerciseRecovery = tahoeP2pExerciseRecovery;
         owner->nativeP2pProbe_.executeOnce(operations);
         owner->tahoeP2pObserveGp2(run.contextGeneration, run.powerGeneration,

@@ -79,7 +79,7 @@ let requiredOptions: Set<String> = ["--expect-build", "--expect-uuid", "--peer-m
 guard optionIndex == optionArguments.count,
       Set(options.keys).isSuperset(of: requiredOptions),
       let build = options["--expect-build"],
-      ["25G332-Test107", "25G332-Test108", "25G332-Test109", "25G332-Test110", "25G332-Test111", "25G332-Test112", "25G332-Test113", "25G332-Test114", "25G332-Test115"].contains(build),
+      ["25G332-Test107", "25G332-Test108", "25G332-Test109", "25G332-Test110", "25G332-Test111", "25G332-Test112", "25G332-Test113", "25G332-Test114", "25G332-Test115", "25G332-Test116"].contains(build),
       let expectedUUID = options["--expect-uuid"],
       matches(expectedUUID, "^[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}$"),
       let peerMACText = options["--peer-mac"],
@@ -89,13 +89,13 @@ guard optionIndex == optionArguments.count,
       nonceText.contains(where: { $0 != "0" }),
       let runToken = options["--run-token"], matches(runToken, "^[0-9a-f]{32}$"),
       runToken.contains(where: { $0 != "0" }) else {
-    stop("Usage: --expect-build 25G332-Test107|25G332-Test108|25G332-Test109|25G332-Test110|25G332-Test111|25G332-Test112|25G332-Test113|25G332-Test114|25G332-Test115 --expect-uuid UUID --peer-mac MAC --local-ipv6 fe80::ADDRESS --nonce 16hex --run-token 32hex [--peer-ipv6 fe80::ADDRESS --peer-ready-file PRIVATE_JSON] [--run]")
+    stop("Usage: --expect-build 25G332-Test107|25G332-Test108|25G332-Test109|25G332-Test110|25G332-Test111|25G332-Test112|25G332-Test113|25G332-Test114|25G332-Test115|25G332-Test116 --expect-uuid UUID --peer-mac MAC --local-ipv6 fe80::ADDRESS --nonce 16hex --run-token 32hex [--peer-ipv6 fe80::ADDRESS --peer-ready-file PRIVATE_JSON] [--run]")
 }
-let matchedReturnBuild = ["25G332-Test110", "25G332-Test111", "25G332-Test112", "25G332-Test113", "25G332-Test114", "25G332-Test115"].contains(build)
-let rxLeasePollingBuild = ["25G332-Test114", "25G332-Test115"].contains(build)
+let matchedReturnBuild = ["25G332-Test110", "25G332-Test111", "25G332-Test112", "25G332-Test113", "25G332-Test114", "25G332-Test115", "25G332-Test116"].contains(build)
+let rxLeasePollingBuild = ["25G332-Test114", "25G332-Test115", "25G332-Test116"].contains(build)
 guard matchedReturnBuild == (options["--peer-ipv6"] != nil),
       matchedReturnBuild == (options["--peer-ready-file"] != nil) else {
-    stop("Test110-Test115 require peer IPv6 and fresh peer READY file; older identities do not accept them")
+    stop("Test110-Test116 require peer IPv6 and fresh peer READY file; older identities do not accept them")
 }
 let peer = peerMACText.split(separator: ":").compactMap { UInt8($0, radix: 16) }
 guard peer.count == 6, peer[0] & 1 == 0, peer.contains(where: { $0 != 0 }) else {
