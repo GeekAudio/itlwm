@@ -14,6 +14,7 @@ import tempfile
 ROOT = Path(__file__).resolve().parents[2]
 PROBE_PATH = ROOT / "itlwm/hal_iwx/ItlIwxP2PProbe.cpp"
 SOURCE = PROBE_PATH.read_text()
+ACTION_SOURCE = (ROOT / "itlwm/hal_iwx/ItlIwxP2PAction.cpp").read_text()
 
 
 def extract(source: str, marker: str) -> str:
@@ -77,6 +78,8 @@ with tempfile.TemporaryDirectory(prefix="test107-data-worker-") as tmp:
 
 worker = extract(SOURCE, "static int exerciseDirectedDataTx(P2PProbeRun *probe)")
 worker_flat = " ".join(worker.split())
+roc_action = extract(SOURCE, "IOReturn ItlIwx::tahoeP2pRocEventAction(")
+roc_action_flat = " ".join(roc_action.split())
 failure_path = extract(
     worker, "auto recordFailure = [&](int error, uint32_t stage) {")
 assert "directedDataInnerResourcesAbsent(owner)" in failure_path
@@ -136,6 +139,47 @@ for helper_marker in (
     helper = extract(SOURCE, helper_marker)
     assert "iwx_tahoe_p2p_directed_data_snapshot(" in helper
     assert "nativeP2pDirectedDataTx_.completion.snapshot()" not in helper
+
+# Ready's window witness reads the canonical HAL binding inside the ROC main
+# gate. The arm-time probe copy remains useful only for the original identity.
+assert "readyOriginWindowCurrent( originWindow)" in roc_action_flat
+assert "originWindow.canonicalBinding.rocStartUs=canonical.rocStartUs" in roc_action_flat
+assert "originWindow.armBinding.rocStartUs= probe->directedDataBinding.rocStartUs" in roc_action_flat
+assert "probe->directedDataBinding.rocStartUs==rxLease.startUs" not in roc_action_flat
+assert "originWindow.contextTicket=&halData.originTicket" in roc_action_flat
+assert "originWindow.probeTicket=&probe->directedDataOriginTicket" in roc_action_flat
+arm_callback = extract(SOURCE, "static bool tahoeP2pArmDirectedDataRoc(")
+hal_arm = extract(ACTION_SOURCE, "int iwx_tahoe_p2p_directed_data_arm(")
+window_bind = extract(
+    ACTION_SOURCE, "static IOReturn directedDataBindOriginWindowAction(")
+ticket_bind = extract(
+    ACTION_SOURCE, "static IOReturn directedDataBindOriginTicketAction(")
+assert "probe->directedDataBinding = run.binding;" in arm_callback
+assert "*bindingOut = context->binding;" in hal_arm
+assert "rocStartUs" not in hal_arm
+assert "context->binding.rocStartUs = action->rocStartUs;" in window_bind
+assert "context->binding.deadlineUs = action->deadlineUs;" in window_bind
+assert "context->originWindowBound = true;" in window_bind
+assert "probe->directedDataBinding" not in window_bind
+assert "context->state = TahoeP2PDirectedDataState::kTicketBound;" in ticket_bind
+assert "context->ticketBound = true;" in ticket_bind
+assert "context->originClosed = false;" in ticket_bind
+
+# A confirmed END with no published Ready must enter the same gated cleanup as
+# other started-session failures, not fall through to the pre-session label.
+not_ready_end = extract(worker, "if (!started) {")
+assert "directedDataSessionEndConfirmed(event.snapshot" in not_ready_end
+assert "return failStartedSessionCleanly(failure," in not_ready_end
+assert "FailureSite::EndWait" in not_ready_end
+assert "sessionEnded = true;" not in not_ready_end
+assert worker.index("return failStartedSessionCleanly(failure,") < worker.index(
+    "cleanup_before_session:")
+started_cleanup = extract(
+    worker, "auto failStartedSessionCleanly = [&](\n")
+assert "directedDataCleanupCheckAction" in started_cleanup
+assert "directedDataHasNoDoorbell(owner,&noDoorbellCheck)" in started_cleanup
+assert "iwx_tahoe_p2p_tvqm_abort_idle_after_end(" in started_cleanup
+assert "iwx_tahoe_p2p_tvqm_abort_idle_no_session(" not in started_cleanup
 
 assert "iwx_tahoe_p2p_directed_data_never_armed( owner," in worker_flat
 

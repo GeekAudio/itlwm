@@ -3992,7 +3992,7 @@ static bool directedDataCaptureSnapshot(
     value.stopProofMask = __atomic_load_n(&context->stopProofMask,
                                           __ATOMIC_ACQUIRE);
     value.originWindowBound = context->originWindowBound;
-    value.originTicketBound = context->ticketBound;
+    value.originTicketBound = context->ticketBound && !context->originClosed;
     value.originClosed = context->originClosed;
     value.completionArmed = completion.armed;
     value.sequenceReservationValid = context->sequenceReservationValid;

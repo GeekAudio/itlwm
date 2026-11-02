@@ -9020,7 +9020,9 @@ static int exerciseDirectedDataTx(P2PProbeRun *probe)
             if (!directedDataSessionEndConfirmed(event.snapshot,
                                                  probe->contextGeneration))
                 return recordFailure(EPROTO, kDirectedDataQuarantined);
-            sessionEnded = true;
+            return failStartedSessionCleanly(failure,
+                NativeP2PDirectedDataControl::FailureSite::EndWait,
+                event);
         } else {
             NativeAwdlDirectedOriginTx::Snapshot origin{};
             while (p2pProbeMonotonicNanoseconds() / 1000ULL <
@@ -9994,12 +9996,6 @@ IOReturn ItlIwx::tahoeP2pRocEventAction(OSObject *, void *opaque,
             if(action->directedDataReadyHandshakeRequested) {
                 NativeP2PDirectedDataControl::ReadyHandshakeEvidence evidence{};
                 evidence.ownerCurrent=currentOwner;
-                evidence.originWindowBound=
-                    probe->directedDataBinding.rocToken==
-                        probe->contextGeneration&&
-                    probe->directedDataBinding.rocStartUs==rxLease.startUs&&
-                    probe->directedDataBinding.deadlineUs==
-                        rxLease.deadlineUs;
                 evidence.originTicketBound=probe->directedDataTicketBound;
                 const uint64_t nowUs=
                     p2pProbeMonotonicNanoseconds()/1000ULL;
@@ -10035,6 +10031,66 @@ IOReturn ItlIwx::tahoeP2pRocEventAction(OSObject *, void *opaque,
                     !action->snapshot.outcomeUnknown&&
                     rxLease.startUs==
                         action->snapshot.startObservedMonotonicUs;
+                const auto &halData=owner->nativeP2pDirectedDataTx_;
+                const auto &canonical=halData.binding;
+                NativeP2PDirectedDataControl::ReadyOriginWindowWitness
+                    originWindow{};
+                originWindow.onMainGate=owner->tahoeP2pOnMainGate();
+                originWindow.contextTicketBoundState=halData.state==
+                    TahoeP2PDirectedDataState::kTicketBound;
+                originWindow.originWindowBound=halData.originWindowBound;
+                originWindow.contextTicketBound=halData.ticketBound;
+                originWindow.probeTicketBound=
+                    probe->directedDataTicketBound;
+                originWindow.originClosed=halData.originClosed;
+                originWindow.rocSessionCurrent=evidence.rocSessionCurrent;
+                originWindow.armBinding.ownerSerial=
+                    probe->directedDataBinding.ownerSerial;
+                originWindow.armBinding.runSerial=
+                    probe->directedDataBinding.runSerial;
+                originWindow.armBinding.epochs=
+                    probe->directedDataBinding.epochs;
+                originWindow.armBinding.generation=
+                    probe->directedDataBinding.generation;
+                originWindow.armBinding.p2pFirmwareGeneration=
+                    probe->directedDataBinding.p2pFirmwareGeneration;
+                originWindow.armBinding.rocToken=
+                    probe->directedDataBinding.rocToken;
+                originWindow.armBinding.rocStartUs=
+                    probe->directedDataBinding.rocStartUs;
+                originWindow.armBinding.deadlineUs=
+                    probe->directedDataBinding.deadlineUs;
+                originWindow.canonicalBinding.ownerSerial=
+                    canonical.ownerSerial;
+                originWindow.canonicalBinding.runSerial=canonical.runSerial;
+                originWindow.canonicalBinding.epochs=canonical.epochs;
+                originWindow.canonicalBinding.generation=canonical.generation;
+                originWindow.canonicalBinding.p2pFirmwareGeneration=
+                    canonical.p2pFirmwareGeneration;
+                originWindow.canonicalBinding.rocToken=canonical.rocToken;
+                originWindow.canonicalBinding.rocStartUs=canonical.rocStartUs;
+                originWindow.canonicalBinding.deadlineUs=canonical.deadlineUs;
+                originWindow.currentEpochs={probe->contextGeneration,
+                    probe->powerGeneration,probe->stationGeneration,
+                    action->snapshot.generation};
+                originWindow.currentPowerGeneration=
+                    uint32_t(owner->com.sc_generation);
+                originWindow.currentFirmwareGeneration=
+                    owner->com.sc_p2p.fw_generation;
+                originWindow.currentOwnerSerial=
+                    owner->nativeAwdlRxEventOwnerSerial_;
+                originWindow.currentRocToken=owner->com.sc_p2p_roc.token;
+                originWindow.sessionRocToken=action->snapshot.generation;
+                originWindow.sessionStartUs=
+                    action->snapshot.startObservedMonotonicUs;
+                originWindow.rxLeaseStartUs=rxLease.startUs;
+                originWindow.rxLeaseDeadlineUs=rxLease.deadlineUs;
+                originWindow.nowUs=nowUs;
+                originWindow.contextTicket=&halData.originTicket;
+                originWindow.probeTicket=&probe->directedDataOriginTicket;
+                evidence.originWindowBound=
+                    NativeP2PDirectedDataControl::readyOriginWindowCurrent(
+                        originWindow);
                 uint32_t actualChannel=0;
                 const bool rocMirrorPublished=leaseReady&&bridgeReady&&
                     propertiesReady&&publishDirectedDataRocMirror(

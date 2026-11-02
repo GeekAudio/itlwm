@@ -140,6 +140,8 @@ struct TahoeP2PDirectedDataSnapshot {
     uint16_t firmwareStatus;
     uint32_t stopProofMask;
     bool originWindowBound;
+    // Live BSD-origin ticket ownership: true only while the exact ticket has
+    // not been committed closed. The context retains the historical ticket.
     bool originTicketBound;
     bool originClosed;
     bool completionArmed;
@@ -204,6 +206,9 @@ struct TahoeP2PDirectedDataContext {
     uint16_t expectedNextSsn;
     uint16_t firmwareStatus;
     uint32_t stopProofMask;
+    // Historical exact-run ticket association. Keep this and originTicket
+    // after close for replay/audit identity; snapshots derive live ownership
+    // from ticketBound && !originClosed.
     bool ticketBound;
     bool originWindowBound;
     bool originClosed;

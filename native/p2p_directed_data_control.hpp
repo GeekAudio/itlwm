@@ -336,6 +336,109 @@ enum ReadyHandshakeReject : uint32_t {
     kReadyRejectStagePublication = 1u << 10
 };
 
+// A probe retains the immutable identity copied at arm time, while HAL owns
+// the canonical origin window written after ROC START. Compare their identity
+// fields, but read window/ticket state only from the canonical HAL context.
+struct ReadyBindingView {
+    uint64_t ownerSerial = 0;
+    uint64_t runSerial = 0;
+    NativeAwdlDirectedOriginTx::Epochs epochs{};
+    uint32_t generation = 0;
+    uint32_t p2pFirmwareGeneration = 0;
+    uint64_t rocToken = 0;
+    uint64_t rocStartUs = 0;
+    uint64_t deadlineUs = 0;
+};
+
+struct ReadyOriginWindowWitness {
+    bool onMainGate = false;
+    bool contextTicketBoundState = false;
+    bool originWindowBound = false;
+    bool contextTicketBound = false;
+    bool probeTicketBound = false;
+    bool originClosed = true;
+    bool rocSessionCurrent = false;
+    ReadyBindingView armBinding{};
+    ReadyBindingView canonicalBinding{};
+    NativeAwdlDirectedOriginTx::Epochs currentEpochs{};
+    uint32_t currentPowerGeneration = 0;
+    uint32_t currentFirmwareGeneration = 0;
+    uint64_t currentOwnerSerial = 0;
+    uint64_t currentRocToken = 0;
+    uint64_t sessionRocToken = 0;
+    uint64_t sessionStartUs = 0;
+    uint64_t rxLeaseStartUs = 0;
+    uint64_t rxLeaseDeadlineUs = 0;
+    uint64_t nowUs = 0;
+    const NativeAwdlDirectedOriginTx::Ticket *contextTicket = nullptr;
+    const NativeAwdlDirectedOriginTx::Ticket *probeTicket = nullptr;
+};
+
+inline bool readyOriginTicketMatchesBinding(
+    const NativeAwdlDirectedOriginTx::Ticket &ticket,
+    const ReadyBindingView &binding)
+{
+    return ticket.ticketSerial != 0 && ticket.interfaceIncarnation != 0 &&
+        ticket.ifindex != 0 && binding.ownerSerial != 0 &&
+        binding.runSerial != 0 &&
+        ticket.ownerSerial == binding.ownerSerial &&
+        ticket.runSerial == binding.runSerial &&
+        NativeAwdlDirectedOriginTx::sameEpochs(
+            ticket.epochs, binding.epochs) &&
+        ticket.rocStartUs == binding.rocStartUs &&
+        ticket.deadlineUs == binding.deadlineUs &&
+        NativeAwdlDirectedOriginTx::validUnicastMac(ticket.sourceMac);
+}
+
+// Called only by the main-gate ROC producer. The probe copy is intentionally
+// not required to contain START/deadline: it predates HAL's post-START bind.
+// It contributes only the original run identity; the canonical context,
+// current ROC session, exact ticket pair, and fresh clock own window proof.
+inline bool readyOriginWindowCurrent(
+    const ReadyOriginWindowWitness &witness)
+{
+    using NativeAwdlDirectedOriginTx::validEpochs;
+    using NativeAwdlDirectedOriginTx::sameEpochs;
+    const auto &arm = witness.armBinding;
+    const auto &canonical = witness.canonicalBinding;
+    if (!witness.onMainGate || !witness.contextTicketBoundState ||
+        !witness.originWindowBound || !witness.contextTicketBound ||
+        !witness.probeTicketBound || witness.originClosed ||
+        !witness.rocSessionCurrent || !arm.ownerSerial || !arm.runSerial ||
+        arm.ownerSerial != canonical.ownerSerial ||
+        arm.runSerial != canonical.runSerial ||
+        !validEpochs(arm.epochs) || !validEpochs(canonical.epochs) ||
+        !validEpochs(witness.currentEpochs) ||
+        !sameEpochs(arm.epochs, canonical.epochs) ||
+        !sameEpochs(canonical.epochs, witness.currentEpochs) ||
+        !arm.generation || arm.generation != canonical.generation ||
+        arm.generation != witness.currentPowerGeneration ||
+        !arm.p2pFirmwareGeneration ||
+        arm.p2pFirmwareGeneration != canonical.p2pFirmwareGeneration ||
+        arm.p2pFirmwareGeneration != witness.currentFirmwareGeneration ||
+        witness.currentOwnerSerial != canonical.ownerSerial ||
+        !canonical.rocToken ||
+        canonical.rocToken != witness.currentRocToken ||
+        canonical.rocToken != witness.sessionRocToken ||
+        !canonical.rocStartUs ||
+        canonical.rocStartUs > UINT64_MAX -
+            NativeAwdlDirectedOriginTx::kMaximumWindowUs ||
+        canonical.deadlineUs != canonical.rocStartUs +
+            NativeAwdlDirectedOriginTx::kMaximumWindowUs ||
+        witness.sessionStartUs != canonical.rocStartUs ||
+        witness.rxLeaseStartUs != canonical.rocStartUs ||
+        witness.rxLeaseDeadlineUs != canonical.deadlineUs ||
+        witness.nowUs < canonical.rocStartUs ||
+        witness.nowUs >= canonical.deadlineUs ||
+        !witness.contextTicket || !witness.probeTicket ||
+        !NativeAwdlDirectedOriginTx::sameTicket(
+            *witness.contextTicket, *witness.probeTicket) ||
+        !readyOriginTicketMatchesBinding(
+            *witness.contextTicket, canonical))
+        return false;
+    return true;
+}
+
 struct ReadyHandshakeEvidence {
     bool ownerCurrent = false;
     bool originWindowBound = false;

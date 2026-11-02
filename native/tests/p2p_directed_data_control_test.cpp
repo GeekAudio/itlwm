@@ -386,6 +386,124 @@ static void testReadyRequiresSameOwnerLeaseAndCurrentRocMirror()
       reject(e, kReadyRejectWindow); }
 }
 
+struct ReadyOriginPathModel {
+    ReadyBindingView halBinding{};
+    ReadyBindingView probeArmCopy{};
+    NativeAwdlDirectedOriginTx::Ticket halTicket{};
+    NativeAwdlDirectedOriginTx::Ticket probeTicket{};
+    bool contextTicketBoundState = false;
+    bool originWindowBound = false;
+    bool contextTicketBound = false;
+    bool probeTicketBound = false;
+    bool originClosed = true;
+};
+
+static ReadyOriginPathModel armBindReadyOriginPath()
+{
+    ReadyOriginPathModel path{};
+    path.halBinding.ownerSerial = 22;
+    path.halBinding.runSerial = 32;
+    path.halBinding.epochs = {37, 8, 19, 37};
+    path.halBinding.generation = 8;
+    path.halBinding.p2pFirmwareGeneration = 9;
+    // Arm returns a copy before ROC START. Both window fields remain zero.
+    path.probeArmCopy = path.halBinding;
+    assert(path.probeArmCopy.rocToken == 0);
+    assert(path.probeArmCopy.rocStartUs == 0);
+    assert(path.probeArmCopy.deadlineUs == 0);
+
+    // Mirror the HAL bind_origin_window write: only the canonical context is
+    // updated after the matching START, never the probe's arm-time copy.
+    path.halBinding.rocToken = 37;
+    path.halBinding.rocStartUs = 100000;
+    path.halBinding.deadlineUs = 200000;
+    path.contextTicketBoundState = true;
+    path.originWindowBound = true;
+    path.contextTicketBound = true;
+    path.probeTicketBound = true;
+    path.originClosed = false;
+
+    auto &ticket = path.halTicket;
+    ticket.ticketSerial = 12;
+    ticket.ownerSerial = 22;
+    ticket.runSerial = 32;
+    ticket.interfaceIncarnation = 4;
+    ticket.rocStartUs = 100000;
+    ticket.deadlineUs = 200000;
+    ticket.ifindex = 7;
+    ticket.sourceMac[0] = 2;
+    ticket.sourceMac[5] = 1;
+    ticket.epochs = {37, 8, 19, 37};
+    path.probeTicket = path.halTicket;
+    return path;
+}
+
+static ReadyOriginWindowWitness readyOriginWitness(
+    const ReadyOriginPathModel &path)
+{
+    ReadyOriginWindowWitness witness{};
+    witness.onMainGate = true;
+    witness.contextTicketBoundState = path.contextTicketBoundState;
+    witness.originWindowBound = path.originWindowBound;
+    witness.contextTicketBound = path.contextTicketBound;
+    witness.probeTicketBound = path.probeTicketBound;
+    witness.originClosed = path.originClosed;
+    witness.rocSessionCurrent = true;
+    witness.armBinding = path.probeArmCopy;
+    witness.canonicalBinding = path.halBinding;
+    witness.currentEpochs = {37, 8, 19, 37};
+    witness.currentPowerGeneration = 8;
+    witness.currentFirmwareGeneration = 9;
+    witness.currentOwnerSerial = 22;
+    witness.currentRocToken = 37;
+    witness.sessionRocToken = 37;
+    witness.sessionStartUs = 100000;
+    witness.rxLeaseStartUs = 100000;
+    witness.rxLeaseDeadlineUs = 200000;
+    witness.nowUs = 199999;
+    witness.contextTicket = &path.halTicket;
+    witness.probeTicket = &path.probeTicket;
+    return witness;
+}
+
+static void testReadyProducerUsesCanonicalPostStartBinding()
+{
+    auto path = armBindReadyOriginPath();
+    auto witness = readyOriginWitness(path);
+    // The old producer expression read this immutable, pre-START copy and
+    // therefore rejected even though HAL had bound the exact live RX window.
+    assert(path.probeArmCopy.rocToken == 0);
+    assert(path.probeArmCopy.rocStartUs != witness.rxLeaseStartUs);
+    assert(path.probeArmCopy.deadlineUs != witness.rxLeaseDeadlineUs);
+    assert(readyOriginWindowCurrent(witness));
+    auto handshake = readyHandshake();
+    handshake.originWindowBound = path.probeArmCopy.rocToken ==
+            witness.sessionRocToken &&
+        path.probeArmCopy.rocStartUs == witness.rxLeaseStartUs &&
+        path.probeArmCopy.deadlineUs == witness.rxLeaseDeadlineUs;
+    assert(readyHandshakeRejectMask(handshake) ==
+           kReadyRejectOriginWindow);
+    handshake.originWindowBound = readyOriginWindowCurrent(witness);
+    assert(readyHandshakeRejectMask(handshake) == 0);
+
+    const auto reject = [](ReadyOriginWindowWitness changed) {
+        assert(!readyOriginWindowCurrent(changed));
+    };
+    { auto e = witness; e.currentOwnerSerial++; reject(e); }
+    { auto e = witness; ++e.canonicalBinding.epochs.power; reject(e); }
+    { auto e = witness; auto ticket = *e.probeTicket;
+      ++ticket.runSerial; e.probeTicket = &ticket; reject(e); }
+    { auto e = witness; e.nowUs = e.canonicalBinding.deadlineUs; reject(e); }
+    { auto e = witness; e.nowUs = e.canonicalBinding.rocStartUs - 1; reject(e); }
+    { auto e = witness; e.contextTicketBoundState = false; reject(e); }
+    { auto e = witness; e.originWindowBound = false; reject(e); }
+    { auto e = witness; e.contextTicketBound = false; reject(e); }
+    { auto e = witness; e.originClosed = true; reject(e); }
+    { auto e = witness; ++e.canonicalBinding.deadlineUs; reject(e); }
+    { auto e = witness; ++e.currentRocToken; reject(e); }
+    { auto e = witness; e.rocSessionCurrent = false; reject(e); }
+}
+
 static void testNoDoorbellProofReportsUnknownAndOwnershipBits()
 {
     using namespace NativeP2PDirectedDataControl;
@@ -426,5 +544,6 @@ int main()
     testRxLeasePropertiesPublishOnlyOnIdentityChanges();
     testRxLeaseRejectMaskNamesOnlyFailedGates();
     testReadyRequiresSameOwnerLeaseAndCurrentRocMirror();
+    testReadyProducerUsesCanonicalPostStartBinding();
     testNoDoorbellProofReportsUnknownAndOwnershipBits();
 }
