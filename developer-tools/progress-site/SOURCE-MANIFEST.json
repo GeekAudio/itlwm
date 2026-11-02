@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.css",
       "snapshot_path": "dist/assets/site.css",
-      "sha256": "615c33ae7e9ffc93a3b4b1d29ff1186f839c04b4af579916942ceec6ebb983d0"
+      "sha256": "ffda2ec71f7e0a11ebca435434092a9bd7277772d657c0a9293a631e8b07facc"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
       "snapshot_path": "dist/assets/site.js",
-      "sha256": "232e25ac82dfcfcb1b469b5fb9003481ce8a237f8613144f0ed2db65f5643bdd"
+      "sha256": "cd577911508c2315e1b942864f7f5e9a9b83487b299a3edb2ee39d01da8a0c80"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
@@ -30,22 +30,22 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "aad4f0f2b2a43b9bde9dd7ed19ebb66fc9d563a83b05a66a1a0c8b740265dc93"
+      "sha256": "0ee589d7c07bf55423381ad2fe1fdf7c0edecc97f92b30223df062c3e66af67b"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "aad4f0f2b2a43b9bde9dd7ed19ebb66fc9d563a83b05a66a1a0c8b740265dc93"
+      "sha256": "0ee589d7c07bf55423381ad2fe1fdf7c0edecc97f92b30223df062c3e66af67b"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "622397c25addff3d05d01956ad883a47d893ee573abf804adc435d955868c759"
+      "sha256": "7732bcc9753c7a2df18dd5378f7064f5042d720dfa0e6ea4c237ca35ff0e4550"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
       "snapshot_path": "templates/index.html",
-      "sha256": "873d40ef6a317b6b4bda6c33e31f6114ced76b9dd3d503acf9de73e1e820f74d"
+      "sha256": "f7a17360cbc6c11f92ffc0a78a64268040e4cc278ddac3a5cb6b1be40a04a1b9"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tests/test_refresh_data_cli.py",
@@ -85,11 +85,11 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-03T06:37:23.160798+08:00",
+  "updated_at": "2026-11-03T06:56:20.028602+08:00",
   "runtime_scope": "Test120 measured; Test121 deployed, awaiting reboot; no AirDrop proof",
-  "running_candidate": "25G332-Test119",
-  "next_candidate": null,
-  "website_delivery": "reviewed public-safe snapshot",
-  "deployment_state": "Test119 loaded; no additional EFI write this turn",
+  "running_candidate": "25G332-Test120",
+  "next_candidate": "25G332-Test121",
+  "website_delivery": "Current-development redesign; runtime evidence unchanged",
+  "deployment_state": "test121_deployed_waiting_manual_reboot",
   "site_preparation": "Public-safe current runtime projection; private evidence excluded"
 }
