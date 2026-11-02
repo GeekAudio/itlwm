@@ -20,27 +20,27 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "a926900f2fb33312341966f6817eece3292c87b39bfa801f69bb28f9196b5611"
+      "sha256": "78706610784357f941dc286bf1db0319cf23629bd7fba4548a4efd364ec78a11"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "e88c1fd0d7cac961825b751ba923f8416e3dd96fcc6c01773add70ca530abeef"
+      "sha256": "3a59a0006e951cd238fbe9410bec7f17be9e7cc1f2c018dc303a08b741ae4941"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "13627e1eb9434cce1d7169d18569d74ea09d409ee9c6fcec08fc6e696244494c"
+      "sha256": "50e02b9fea19a32fbd3b59c04cb74bdadcaa90597baca456bbdae04db846d16a"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "13627e1eb9434cce1d7169d18569d74ea09d409ee9c6fcec08fc6e696244494c"
+      "sha256": "50e02b9fea19a32fbd3b59c04cb74bdadcaa90597baca456bbdae04db846d16a"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "847dca3a77d615a6cb054f653189d4e5afa6ed6533cb576daa39e20bf21443b6"
+      "sha256": "b9b359cdaabd5a7be396a9ad899cce0e385e431adc864dc5d6744b04fa042ff6"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
@@ -85,11 +85,11 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-02T20:23:55+08:00",
+  "updated_at": "2026-11-02T21:50:41+08:00",
   "runtime_scope": "Wi-Fi only",
   "running_candidate": "25G332-Test116",
-  "next_candidate": null,
+  "next_candidate": "25G332-Test117",
   "website_delivery": "private staging; not installed or published",
-  "deployment_state": "test116_wifi_only_runtime_validation",
-  "site_preparation": "Private offline site render only; no publication. EFI Test116 write/readback verified; current runtime Test114; waiting reboot for Wi-Fi-only validation; no Test116 runtime networking evidence; AWDL RF and sleep paused."
+  "deployment_state": "test117_deployed_waiting_reboot_wifi_only",
+  "site_preparation": "Private offline site snapshot. Test117 kext was written and read back; config unchanged. Current runtime remains Test116, awaiting reboot for Wi-Fi-only validation. AWDL RF and sleep remain paused."
 }
