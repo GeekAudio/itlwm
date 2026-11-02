@@ -1,10 +1,9 @@
 #ifndef ITL_NATIVE_SCAN_DISPATCH_TRACE_HPP
 #define ITL_NATIVE_SCAN_DISPATCH_TRACE_HPP
 
-#include <algorithm>
-#include <climits>
-#include <cstddef>
-#include <cstdint>
+#include <limits.h>
+#include <stddef.h>
+#include <stdint.h>
 
 // Bounded metadata-only trace for Tahoe's native scan dispatch stubs.
 // Opaque Apple arguments are deliberately absent from this type.
@@ -180,7 +179,8 @@ public:
             candidate.homeAwayReturnHits = __atomic_load_n(&hits_[7], __ATOMIC_RELAXED);
 
             const bool beganEven = (candidate.versionBegin & 1U) == 0;
-            const uint64_t count = std::min<uint64_t>(candidate.nextSequence, kCapacity);
+            const uint64_t count = candidate.nextSequence < kCapacity
+                ? candidate.nextSequence : uint64_t(kCapacity);
             bool recordsMatch = beganEven;
             if (recordsMatch) {
                 const uint64_t firstSequence = candidate.nextSequence - count + 1U;
