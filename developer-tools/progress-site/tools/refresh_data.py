@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
@@ -37,6 +38,12 @@ def safe_summary(value: object, stage: object, field: str) -> str:
 
 
 def main() -> None:
+    # Parse before reading or writing project files.  This keeps --help and
+    # rejected arguments side-effect-free even though the no-argument path
+    # continues to generate the page and invoke the publisher as before.
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.parse_args()
+
     raw = json.loads(SOURCE.read_text(encoding="utf-8"))
     updated_at = raw.get("updated_at")
     if not isinstance(updated_at, str):
