@@ -269,8 +269,16 @@ public:
     bool commit(uint64_t id, uint32_t powerEpoch, uint32_t faultSerial,
                 bool faultSerialValid, bool commitSucceeded,
                 bool enableSucceeded) {
-        if (!matches(id, powerEpoch, faultSerial, faultSerialValid))
+        if (!active_ || !id || id != id_)
             return false;
+        if (powerEpoch != powerEpoch_) {
+            retire(AddressRestartOutcome::kCancelledEpochOrOff);
+            return false;
+        }
+        if (!faultSerialValid || faultSerial != faultSerial_) {
+            retire(AddressRestartOutcome::kCancelledFaultSerial);
+            return false;
+        }
         if (!commitSucceeded || !enableSucceeded) {
             retire(AddressRestartOutcome::kCancelledCommitOrEnable);
             return false;
@@ -393,12 +401,6 @@ public:
     AddressRestartOutcome lastOutcome() const { return lastOutcome_; }
 
 private:
-    bool matches(uint64_t id, uint32_t powerEpoch, uint32_t faultSerial,
-                 bool faultSerialValid) const {
-        return active_ && id != 0 && id == id_ &&
-            powerEpoch == powerEpoch_ && faultSerialValid &&
-            faultSerial == faultSerial_;
-    }
     void retire(AddressRestartOutcome outcome) {
         active_ = false;
         committed_ = false;

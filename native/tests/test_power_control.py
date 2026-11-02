@@ -559,6 +559,124 @@ int main(){unsigned scenarios=0;
   assert(f.a.commitNativeAddressRestartNotification(id,true,true));
   f.a.updateNativePowerFlags(2U,0);
   assert(f.a.nativePowerFlags==1U&&f.state()==1);++scenarios;}
+ {g_uptimeNanoseconds=1000000ULL;Fixture f;f.a.nativePowerFlags=3;
+  f.a.nativePowerEpoch=5;f.hal.faultSerial=11;uint64_t id=0;
+  assert(f.a.beginNativeAddressRestartNotification(&id)==0&&id);
+  NativePowerTrace::PowerIngressContext reset{};
+  f.a.observeNativePowerEvent(ITL_TAHOE_EVT_RESET_BEGIN,&reset);
+  assert(reset.addressRestartId==id&&f.a.nativeAddressRestartNotification.active()&&
+   !f.a.nativeAddressRestartNotification.committed()&&f.a.nativePowerFlags==1U);
+  // A real private-address restart has begun, but HAL enable has not yet
+  // returned. GET_POWER may coalesce only this token's bounded READY dip.
+  assert(f.state()==1&&f.a.nativePowerFlags==1U);
+  assert(f.a.commitNativeAddressRestartNotification(id,true,true));
+  assert(f.state()==1&&f.a.nativePowerFlags==1U);++scenarios;}
+ {struct RestartQueryContext {Fixture *f;std::atomic<bool> resetSeen{false},queryDone{false};
+   bool gateOwned=false;unsigned queryState=99;uint64_t id=0;};
+  g_uptimeNanoseconds=1500000ULL;Fixture f;f.a.nativePowerFlags=3;
+  f.a.nativePowerEpoch=5;f.hal.faultSerial=11;RestartQueryContext c{&f};
+  const auto gatedRestart=+[](OSObject*,void*raw,void*,void*,void*)->IOReturn {
+   auto *c=static_cast<RestartQueryContext*>(raw);
+   assert(c->f->a.beginNativeAddressRestartNotification(&c->id)==0&&c->id);
+   NativePowerTrace::PowerIngressContext reset{};
+   c->f->a.observeNativePowerEvent(ITL_TAHOE_EVT_RESET_BEGIN,&reset);
+   c->gateOwned=c->f->q.gated;
+   c->resetSeen.store(true,std::memory_order_release);
+   while(!c->queryDone.load(std::memory_order_acquire)) std::this_thread::yield();
+   assert(c->f->a.commitNativeAddressRestartNotification(c->id,true,true));
+   return kIOReturnSuccess;
+  };
+  std::thread address([&]{assert(f.gate.runAction(gatedRestart,&c)==0);});
+  std::thread powerQuery([&]{while(!c.resetSeen.load(std::memory_order_acquire))
+      std::this_thread::yield();
+    c.queryState=f.state();c.queryDone.store(true,std::memory_order_release);});
+  address.join();powerQuery.join();
+  assert(c.gateOwned&&c.queryState==1&&f.a.nativePowerFlags==1U&&f.state()==1);
+  ++scenarios;}
+ {g_uptimeNanoseconds=2000000ULL;Fixture f;f.a.nativePowerFlags=3;
+  f.a.nativePowerEpoch=5;f.hal.faultSerial=11;uint64_t id=0;
+  assert(f.a.beginNativeAddressRestartNotification(&id)==0&&id);
+  f.a.observeNativePowerEvent(ITL_TAHOE_EVT_RESET_BEGIN);
+  assert(f.state()==1);
+  assert(!f.a.commitNativeAddressRestartNotification(id,true,false));
+  assert(!f.a.nativeAddressRestartNotification.active()&&f.state()==0&&
+   f.a.nativePowerFlags==1U&&f.a.nativeAddressRestartLastOutcome==uint32_t(
+    NativePowerTrace::AddressRestartOutcome::kCancelledCommitOrEnable));++scenarios;}
+ {g_uptimeNanoseconds=3000000ULL;Fixture f;f.a.nativePowerFlags=3;
+  f.a.nativePowerEpoch=5;f.hal.faultSerial=11;uint64_t id=0;
+  assert(f.a.beginNativeAddressRestartNotification(&id)==0&&id);
+  f.a.observeNativePowerEvent(ITL_TAHOE_EVT_RESET_BEGIN);
+  ++f.hal.faultSerial;
+  assert(f.state()==0);
+  assert(!f.a.commitNativeAddressRestartNotification(id,true,true));
+  assert(!f.a.nativeAddressRestartNotification.active()&&f.state()==0&&
+   f.a.nativeAddressRestartLastOutcome==uint32_t(
+    NativePowerTrace::AddressRestartOutcome::kCancelledFaultSerial));++scenarios;}
+ {g_uptimeNanoseconds=3500000ULL;Fixture f;f.a.nativePowerFlags=3;
+  f.a.nativePowerEpoch=5;f.hal.faultSerial=11;uint64_t id=0;
+  assert(f.a.beginNativeAddressRestartNotification(&id)==0&&id);
+  f.a.observeNativePowerEvent(ITL_TAHOE_EVT_RESET_BEGIN);
+  __atomic_store_n(&f.a.nativePowerEpoch,6U,__ATOMIC_RELEASE);
+  assert(!f.a.commitNativeAddressRestartNotification(id,true,true));
+  assert(!f.a.nativeAddressRestartNotification.active()&&f.state()==0&&
+   f.a.nativeAddressRestartLastOutcome==uint32_t(
+    NativePowerTrace::AddressRestartOutcome::kCancelledEpochOrOff));++scenarios;}
+ {g_uptimeNanoseconds=4000000ULL;Fixture f;f.a.nativePowerFlags=3;
+  f.a.nativePowerEpoch=5;f.hal.faultSerial=11;uint64_t id=0;
+  assert(f.a.beginNativeAddressRestartNotification(&id)==0&&id);
+  f.a.observeNativePowerEvent(ITL_TAHOE_EVT_RESET_BEGIN);
+  f.a.updateNativePowerFlags(1U,0);(void)f.a.advanceNativePowerEpoch(false);
+  assert(!f.a.nativeAddressRestartNotification.active()&&f.state()==0&&
+   f.a.nativePowerFlags==0U&&f.a.nativeAddressRestartLastOutcome==uint32_t(
+    NativePowerTrace::AddressRestartOutcome::kCancelledEpochOrOff));++scenarios;}
+ {g_uptimeNanoseconds=5000000ULL;Fixture f;f.a.nativePowerFlags=3;
+  f.a.nativePowerEpoch=5;f.hal.faultSerial=11;uint64_t id=0;
+  assert(f.a.beginNativeAddressRestartNotification(&id)==0&&id);
+  f.a.observeNativePowerEvent(ITL_TAHOE_EVT_RESET_BEGIN);
+  f.a.nativeAddressRestartPublishedId=id+1;
+  assert(f.state()==0);++scenarios;}
+ {g_uptimeNanoseconds=5500000ULL;Fixture f;f.a.nativePowerFlags=3;
+  f.a.nativePowerEpoch=5;f.hal.faultSerial=11;uint64_t id=0;
+  assert(f.a.beginNativeAddressRestartNotification(&id)==0&&id);
+  f.a.observeNativePowerEvent(ITL_TAHOE_EVT_RESET_BEGIN);
+  __atomic_store_n(&f.a.nativePowerEpoch,6U,__ATOMIC_RELEASE);
+  assert(f.a.nativeAddressRestartNotification.active()&&f.state()==0);++scenarios;}
+ {g_uptimeNanoseconds=5600000ULL;Fixture f;f.a.nativePowerFlags=3;
+  f.a.nativePowerEpoch=5;f.hal.faultSerial=11;uint64_t id=0;
+  assert(f.a.beginNativeAddressRestartNotification(&id)==0&&id);
+  f.a.observeNativePowerEvent(ITL_TAHOE_EVT_RESET_BEGIN);
+  f.a.nativeAddressRestartPublishedEpoch=6;
+  assert(f.state()==0);++scenarios;}
+ {g_uptimeNanoseconds=5700000ULL;Fixture f;f.a.nativePowerFlags=3;
+  f.a.nativePowerEpoch=5;f.hal.faultSerial=11;uint64_t id=0;
+  assert(f.a.beginNativeAddressRestartNotification(&id)==0&&id);
+  f.a.observeNativePowerEvent(ITL_TAHOE_EVT_RESET_BEGIN);
+  ++f.a.nativeAddressRestartStartRevision;
+  assert(f.state()==0);++scenarios;}
+ {g_uptimeNanoseconds=5800000ULL;Fixture f;f.a.nativePowerFlags=3;
+  f.a.nativePowerEpoch=5;f.hal.faultSerial=11;uint64_t id=0;
+  assert(f.a.beginNativeAddressRestartNotification(&id)==0&&id);
+  f.a.observeNativePowerEvent(ITL_TAHOE_EVT_RESET_BEGIN);
+  f.hal.faultSerialAvailable=false;
+  assert(f.state()==0);++scenarios;}
+ {g_uptimeNanoseconds=5900000ULL;Fixture f;f.a.nativePowerFlags=3;
+  f.a.nativePowerEpoch=5;f.hal.faultSerial=11;uint64_t id=0;
+  assert(f.a.beginNativeAddressRestartNotification(&id)==0&&id);
+  f.a.observeNativePowerEvent(ITL_TAHOE_EVT_RESET_BEGIN);
+  f.a.updateNativePowerFlags(1U,0);
+  assert(f.a.nativeAddressRestartNotification.active()&&f.state()==0);++scenarios;}
+ {g_uptimeNanoseconds=6000000ULL;Fixture f;f.a.nativePowerFlags=3;
+  f.a.nativePowerEpoch=5;f.hal.faultSerial=11;uint64_t id=0;
+  assert(f.a.beginNativeAddressRestartNotification(&id)==0&&id);
+  f.a.observeNativePowerEvent(ITL_TAHOE_EVT_RESET_BEGIN);
+  g_uptimeNanoseconds=f.a.nativeAddressRestartNotification.deadlineNanoseconds();
+  assert(f.state()==0);++scenarios;}
+ {g_uptimeNanoseconds=7000000ULL;Fixture f;f.a.nativePowerFlags=3;
+  f.a.nativePowerEpoch=5;f.hal.faultSerial=11;uint64_t id=0;
+  assert(f.a.beginNativeAddressRestartNotification(&id)==0&&id);
+  f.a.observeNativePowerEvent(ITL_TAHOE_EVT_RESET_BEGIN);
+  __atomic_store_n(&f.a.pmPowerState,kPowerStateOff,__ATOMIC_RELEASE);
+  assert(f.state()==0);++scenarios;}
  {Fixture f;f.a.nativePowerFlags=3;f.a.nativePowerEpoch=5;f.hal.faultSerial=11;
   uint64_t id=0;assert(f.a.beginNativeAddressRestartNotification(&id)==0&&id);
   assert(f.a.commitNativeAddressRestartNotification(id,true,true));
@@ -894,7 +1012,9 @@ int main(){unsigned scenarios=0;
   assert(stopped.addressRestartId==id&&f.a.observeNativeAddressRestartEvent(
    NativePowerTrace::AddressRestartEvent::kDriverStopped,stopped)==
    NativePowerTrace::AddressRestartDecision::kSuppress);
-  assert(f.net.messages==1&&f.state()==0);
+  // GET_POWER may hide only this active address-restart READY dip; the HAL
+  // flags and deferred native notification remain unchanged until commit.
+  assert(f.net.messages==1&&f.state()==1&&f.a.nativePowerFlags==1U);
   assert(f.a.commitNativeAddressRestartNotification(id,true,true));
   NativePowerTrace::PowerIngressContext ready{};
   f.a.observeNativePowerEvent(ITL_TAHOE_EVT_DRIVER_READY,&ready);

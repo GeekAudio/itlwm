@@ -12581,7 +12581,11 @@ iwx_flush_sta(struct iwx_softc *sc, struct iwx_node *in)
     
     err = iwx_drain_sta(sc, in, 1);
     
+#ifdef AIRPORT_TAHOE
+    if (err)
+#else
     if (err == ENXIO)
+#endif
         goto done;
     
     err = iwx_flush_sta_tids(sc, IWX_STATION_ID, 0xffff);
@@ -12592,10 +12596,12 @@ iwx_flush_sta(struct iwx_softc *sc, struct iwx_node *in)
     }
     
     err = iwx_drain_sta(sc, in, 0);
+#ifndef AIRPORT_TAHOE
     if (err == ENXIO)
         goto done;
     else
         err = 0;
+#endif
 done:
     sc->sc_flags &= ~IWX_FLAG_TXFLUSH;
     return err;

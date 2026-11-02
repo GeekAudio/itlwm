@@ -1782,24 +1782,23 @@ getPOWER(OSObject *object,
 #ifdef AIRPORT_TAHOE
     __atomic_fetch_add(&nativePowerGetCount, 1U, __ATOMIC_RELAXED);
     // Keep explicit Off and system sleep visible immediately. A missing READY
-    // bit is held On only for the bounded dip of one committed address restart;
-    // the HAL READY bit itself remains unchanged for diagnostics and waiters.
+    // bit is held On only while one validated private-address restart token is
+    // active and within its bounded window. This does not alter HAL READY.
     uint32_t powerFlags = 0;
     uint64_t restartDeadline = 0;
-    bool committedRestartGrace = false;
+    bool addressRestartGrace = false;
     IOSimpleLock *lock = nativePowerStateLock;
     if (lock) {
         const IOInterruptState irq = IOSimpleLockLockDisableInterrupt(lock);
         powerFlags = __atomic_load_n(&nativePowerFlags, __ATOMIC_RELAXED);
         const uint32_t powerEpoch = __atomic_load_n(&nativePowerEpoch, __ATOMIC_RELAXED);
         if ((powerFlags & 1U) && !(powerFlags & 2U) &&
-            fHalService && nativeAddressRestartNotification.active() &&
-            nativeAddressRestartNotification.committed()) {
+            fHalService && nativeAddressRestartNotification.active()) {
             const uint64_t restartId = nativeAddressRestartNotification.id();
             uint32_t faultSerial = 0;
             const bool faultSerialValid =
                 fHalService->readNativePowerFaultSerial(&faultSerial);
-            committedRestartGrace = restartId != 0 &&
+            addressRestartGrace = restartId != 0 &&
                 restartId == nativeAddressRestartPublishedId &&
                 nativeAddressRestartNotification.powerEpoch() == powerEpoch &&
                 nativeAddressRestartPublishedEpoch == powerEpoch &&
@@ -1815,7 +1814,7 @@ getPOWER(OSObject *object,
         // On intent without a coherent restart/fault snapshot.
         powerFlags = __atomic_load_n(&nativePowerFlags, __ATOMIC_ACQUIRE);
     }
-    const bool restartStillInWindow = committedRestartGrace &&
+    const bool restartStillInWindow = addressRestartGrace &&
         nativePowerUptimeNanoseconds() < restartDeadline;
     const bool systemPowerOn = __atomic_load_n(&pmPowerState, __ATOMIC_ACQUIRE) !=
         kPowerStateOff;
