@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "b1c530482e736ae3b65b7c1b0f1ebeff9f2dab650d4679390f22b92fa40c1ff7"
+      "sha256": "c5a50fee233cfb7670af2aec47eda008e83a7eeea840fe5b14a2198443f36e0d"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "9306957265e865c4b62de532da889651e0f1af669c2249ae02ddbfce75466886"
+      "sha256": "e4171309ddb78313c6ee414fffaf721ea8b215f0bc0c801c45b8d7ebfdc07ae2"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -30,17 +30,22 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "b2721fa14f6df6437545b8bad1244b88b052e8227f3b0ca071427bf9e0dfc53a"
+      "sha256": "ec3f3fbdac2ad9eda4d59e10b78322ec1595d3cd9ecb577d563c550e0f28aae2"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
       "snapshot_path": "tools/refresh_data.py",
-      "sha256": "b00856ca206585daba1883e08fb6ecc4738dada058635c559dd6b62ac9f9feef"
+      "sha256": "641304340b6549b8b4d0af0dd1a318b8237a39dba5554e184c215dfef716b62c"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/publish_github_pages.py",
       "snapshot_path": "tools/publish_github_pages.py",
       "sha256": "0be409af245f73af293b50c9b52e57d5f180d22ad0ef3626aa3d2b3d32f3c9a6"
+    },
+    {
+      "source_relative_path": "IntelWirelessNative/progress-site/tests/test_refresh_data_cli.py",
+      "snapshot_path": "tests/test_refresh_data_cli.py",
+      "sha256": "310d5cb30bd3a51a47bfab4464029eb17c6d5dc5299a64028662501c741077a8"
     }
   ],
   "excluded": [
@@ -50,8 +55,8 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-02T13:54:15+08:00",
-  "runtime_scope": "Test110注入失败：40项中1项未通过、39项未覆盖；Test111已部署待重启。GTK/AWDL/AirDrop未测。",
-  "running_candidate": "25G332-Test110",
-  "next_candidate": "25G332-Test111"
+  "updated_at": "2026-11-02T15:46:35.351647+08:00",
+  "runtime_scope": "Test111本轮8通过、2部分、1未通过、29未覆盖。GTK后短暂断链仍复现；P2P资源命令ACK与channel6 START/END已确认；native UDP前进入隔离，AWDL回包和AirDrop未证明。",
+  "running_candidate": "25G332-Test111",
+  "next_candidate": null
 }
