@@ -20,27 +20,27 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "71849e3ac6e2c430850b5c8df2f166a729368291d4f4358fbbd5478ff81d66d7"
+      "sha256": "7a454dd7e443861c7c9541ad2cb80039f0febed62c26f4e606581b4eabc3896b"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "7ec06a4dd9b0f6b708ba8c9a22288292467c845cd08c21983bf0b19de725e739"
+      "sha256": "56e2c15d08cd930e9de471d03421dbae6cca474d1a7d80f5363500bb3cf7f337"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "aa31fd3d1fef24799db6838e883f50523790a10342f47e72a1e5f7ea80776292"
+      "sha256": "666d63052fc5f43697c632971d0530a37aed900773c36561baaa9c999c233209"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "aa31fd3d1fef24799db6838e883f50523790a10342f47e72a1e5f7ea80776292"
+      "sha256": "666d63052fc5f43697c632971d0530a37aed900773c36561baaa9c999c233209"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "379864ed56bc256d2cc51876739d8afcb96efba4f6730447242695e8540f58ec"
+      "sha256": "60d51608391ba62227207cde3e6b1aab2e2d6da2e91759577b8be47e62ad097d"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
@@ -85,8 +85,8 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-02T18:18:51+08:00",
-  "runtime_scope": "Test113仍在运行：8通过、3部分通过、0未通过、29未覆盖；LiveKEY phase14/15同origin元数据已核对，key-install/peer ACK未证；Test114已部署待重启。",
+  "updated_at": "2026-11-02T18:20:24+08:00",
+  "runtime_scope": "Test113仍运行：8通过、3部分通过、0未通过、29未覆盖；Test114已部署待重启，公共快照只含当前Test113记录。",
   "running_candidate": "25G332-Test113",
   "next_candidate": "25G332-Test114",
   "website_delivery": "Version manifest per visit; self-contained snapshot; publication and public readback hashes",
