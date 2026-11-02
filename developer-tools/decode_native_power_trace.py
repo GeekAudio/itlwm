@@ -29,6 +29,7 @@ OPERATIONS = {
     5: "wcl_abort_join",
     6: "hal_event",
     7: "system_power",
+    8: "wcl_join",
 }
 PHASES = {
     0: "unknown",
@@ -70,6 +71,14 @@ SYSTEM_POWER_DETAILS = {
     10: "sleep_stopping",
     11: "wake_superseded_by_newer_off",
     12: "sleep_superseded_by_newer_on",
+}
+
+JOIN_ADMISSION_DETAILS = {
+    1: "backend_unavailable",
+    2: "p2p_busy",
+    3: "runtime_not_ready",
+    4: "address_quarantined",
+    5: "backend_result",
 }
 
 
@@ -132,7 +141,8 @@ def decode(data: bytes) -> dict[str, Any]:
          auxiliary) = fields
         operation_label = _label(OPERATIONS, operation)
         phase_label = _label(PHASES, phase)
-        detail_map = SYSTEM_POWER_DETAILS if operation == 7 else {}
+        detail_map = (SYSTEM_POWER_DETAILS if operation == 7 else
+                      JOIN_ADMISSION_DETAILS if operation == 8 else {})
         entries.append({
             "monotonicNs": monotonic_ns,
             "transitionRevision": transition_revision,

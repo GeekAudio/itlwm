@@ -109,8 +109,11 @@ static_assert(offsetof(ScanTraceSnapshot, records) == 40, "scan trace array offs
 
 // All entry points require the same real driver serial gate. This component
 // neither claims a gate nor dereferences a private IO80211 object. emit() must
-// synchronously copy the supplied bytes before returning. RX views are borrowed
-// only for observeBeacon's dynamic extent. stop() precedes provider destruction.
+// synchronously copy the supplied bytes before returning and may synchronously
+// re-enter through an event consumer. The local control revision only rejects
+// continuations invalidated by such control changes; it is not event provenance.
+// RX views are borrowed only for observeBeacon's dynamic extent. stop() precedes
+// provider destruction.
 class Backend {
 public:
     void initialize(const Operations &);
@@ -124,7 +127,9 @@ public:
     void observeScanComplete(uint32_t generation, uint32_t firmwareStatus);
     void observeScanReset(uint32_t generation);
     void addressHardwareStopped();
-    void observeAssociation(uint16_t status, const uint8_t *bssid);
+    // Returns true only when this event was accepted by the current pending
+    // Join. It is a routing/result signal, not an RF or firmware origin epoch.
+    bool observeAssociation(uint16_t status, const uint8_t *bssid);
     void observeAuthorization(bool);
     void observeBeacon(const Beacon &);
     void tick(uint32_t elapsedMilliseconds);
@@ -175,11 +180,15 @@ private:
     void clearDeferredJoin();
     void cancelDeferredJoin();
     void retryDeferredJoin();
+    void advanceControlRevision();
     Operations operations_ {};
     bool stopped_ {true}, ready_ {}, addressChanging_ {};
     bool scanPending_ {}, scanQueued_ {}, scanDraining_ {}, scanAbortNotification_ {}, joinPending_ {}, deferred_ {};
     bool associated_ {}, firstBeacon_ {}, authorized_ {}, bssValid_ {};
     bool linkPublished_ {};
+    // Invalidates work that resumes after synchronous emit/control reentry.
+    // This local revision is not attached to firmware or association events.
+    uint64_t controlRevision_ {};
     uint8_t linkedAddress_[6] {};
     uint32_t associatedBeacons_ {};
     uint32_t reportedBeacons_ {};

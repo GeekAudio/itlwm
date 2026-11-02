@@ -23,6 +23,7 @@ enum class Operation : uint32_t {
     kWclAbortJoin = 5,
     kHalEvent = 6,
     kSystemPower = 7,
+    kWclJoin = 8,
 };
 
 enum class Phase : uint32_t {

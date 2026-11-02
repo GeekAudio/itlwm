@@ -32,6 +32,9 @@ void Backend::initialize(const Operations &operations) {
     operations_ = operations;
     stopped_ = false;
 }
+void Backend::advanceControlRevision() {
+    if (!++controlRevision_) ++controlRevision_;
+}
 void Backend::post(uint32_t kind, const void *bytes, size_t n, uint32_t scanTraceSerial) {
     if (!stopped_ && operations_.emit) {
         if (kind == ScanBeacon) {
@@ -314,6 +317,7 @@ Status Backend::submitJoin(const JoinPlan &plan) {
     // Ok means the radio accepted this attempt. Failed can follow RSN/key or
     // desired-network mutation in radioJoin(), so retain the previous failure
     // cleanup behavior instead of claiming its cached association is intact.
+    advanceControlRevision();
     copyBytes(target_, plan.bssid, sizeof(target_));
     associated_ = firstBeacon_ = authorized_ = bssValid_ = false;
     associatedBeacons_ = 0;
@@ -327,6 +331,7 @@ Status Backend::submitJoin(const JoinPlan &plan) {
 }
 void Backend::deferJoin(const JoinPlan &plan) {
     clearDeferredJoin();
+    advanceControlRevision();
     if (!++nextJoinGeneration_) ++nextJoinGeneration_;
     deferredJoinGeneration_ = nextJoinGeneration_;
     deferredJoin_ = plan;
@@ -340,6 +345,7 @@ void Backend::clearDeferredJoin() {
 }
 void Backend::cancelDeferredJoin() {
     if (!deferred_) return;
+    advanceControlRevision();
     clearDeferredJoin();
     joinPending_ = false;
     joinRemaining_ = 0;
@@ -407,6 +413,7 @@ Status Backend::leave(bool abortJoin) {
         cancelDeferredJoin();
         return Status::Ok;
     }
+    advanceControlRevision();
     joinPending_ = deferred_ = associated_ = firstBeacon_ = authorized_ = bssValid_ = false;
     joinRemaining_ = 0;
     deferredJoinGeneration_ = 0;
@@ -419,6 +426,7 @@ Status Backend::leave(bool abortJoin) {
 }
 void Backend::beginAddressChange() {
     if (stopped_) return;
+    advanceControlRevision();
     addressPreviousReady_ = ready_;
     addressPreviousAuthorized_ = authorized_;
     addressChanging_ = true; ready_ = false;
@@ -428,14 +436,19 @@ void Backend::cancelAddressChange() {
     if (stopped_ || !addressChanging_) return;
     // A zero-wait HAL quiesce can reject Busy without stopping hardware.
     // No layer has changed, so preserve that real pre-request state.
+    advanceControlRevision();
     addressChanging_ = false;
     ready_ = addressPreviousReady_;
     authorized_ = addressPreviousAuthorized_;
 }
 void Backend::driverState(bool isReady) {
     if (stopped_) return;
+    if (ready_ != isReady) advanceControlRevision();
     ready_ = isReady;
+    const uint64_t controlRevision = controlRevision_;
     if (!isReady) observeAuthorization(false);
+    if (stopped_ || (controlRevision_ != controlRevision && ready_ != isReady))
+        return; // A nested readiness transition superseded this callback.
     if (addressChanging_) {
         if (!isReady) return; // Address reconfiguration is not a new native reset.
         addressChanging_ = false;
@@ -443,11 +456,16 @@ void Backend::driverState(bool isReady) {
         return;
     }
     uint8_t reset[4]; write32(reset, isReady ? 1 : 0);
+    const uint64_t publishRevision = controlRevision_;
     post(DriverReset, reset, sizeof(reset));
+    if (stopped_ || controlRevision_ != publishRevision || ready_ != isReady)
+        return; // A nested control/readiness change superseded this publication.
     uint8_t availability[0xf8] {};
     write32(availability, 3); write32(availability + 8, isReady ? 1 : 0);
     write32(availability + 16, isReady ? 0xe0821803 : 0xe0821804);
     post(DriverAvailability, availability, sizeof(availability));
+    if (stopped_ || controlRevision_ != publishRevision || ready_ != isReady)
+        return; // Do not finish a different Join from this old state callback.
     if (!isReady) {
         if (scanPending_) {
             if (scanQueued_) {
@@ -553,14 +571,28 @@ void Backend::addressHardwareStopped() {
     // quiesce. This also retires a native scan queued before HAL admission.
     if (!stopped_ && addressChanging_) observeScanReset(scanGeneration_);
 }
-void Backend::observeAssociation(uint16_t status, const uint8_t *bssid) {
-    if (stopped_ || !joinPending_ || deferred_ || !equalAddress(target_, bssid)) return;
+bool Backend::observeAssociation(uint16_t status, const uint8_t *bssid) {
+    if (stopped_ || !joinPending_ || deferred_ || !equalAddress(target_, bssid))
+        return false;
+    uint8_t eventTarget[sizeof(target_)];
+    copyBytes(eventTarget, target_, sizeof(eventTarget));
+    const uint64_t controlRevision = controlRevision_;
     uint8_t payload[AssociationEventSize] {};
-    write16(payload, status); copyBytes(payload + 5, target_, 6);
+    write16(payload, status); copyBytes(payload + 5, eventTarget, sizeof(eventTarget));
     write32(payload + 0x14, status ? NativeFailed : 0);
     post(Association, payload, sizeof(payload));
+    // emit() is synchronous and its owner may re-enter control methods. Never
+    // apply this old callback's result to a request accepted during that emit.
+    if (controlRevision_ != controlRevision || stopped_ || !joinPending_ ||
+        deferred_ || !equalAddress(target_, eventTarget)) {
+        erase(eventTarget, sizeof(eventTarget));
+        return false;
+    }
     associated_ = status == 0;
     if (status) finishJoin(status, NativeFailed);
+    const bool accepted = controlRevision_ == controlRevision && !stopped_;
+    erase(eventTarget, sizeof(eventTarget));
+    return accepted;
 }
 void Backend::observeAuthorization(bool up) {
     if (stopped_) return;
@@ -569,13 +601,33 @@ void Backend::observeAuthorization(bool up) {
     if (deferred_ && up) return;
     authorized_ = up;
     if (!up && linkPublished_) {
+        const uint64_t controlRevision = controlRevision_;
         publishLink(false);
+        // A WCL consumer may have accepted a new Join from the synchronous
+        // Link-down emit. Its association state belongs to that new request.
+        if (controlRevision_ != controlRevision || stopped_) return;
         associated_ = firstBeacon_ = bssValid_ = false;
     }
     maybeConnected();
 }
 void Backend::publishLink(bool up) {
-    if (linkPublished_ == up) return;
+    if (up) {
+        // A Join can be accepted while the old native link is still published.
+        // Keep the existing AP until real association, beacon, authorization,
+        // and BSS evidence for the new target has reached maybeConnected(); at
+        // that point publish an ordered old-target down/new-target up pair.
+        // Collapsing this state to a boolean silently drops the new LINK_UP.
+        if (linkPublished_ && equalAddress(linkedAddress_, target_)) return;
+        if (linkPublished_) {
+            const uint64_t controlRevision = controlRevision_;
+            publishLink(false);
+            if (controlRevision_ != controlRevision || stopped_ || !ready() ||
+                !joinPending_ || deferred_ || !associated_ || !firstBeacon_ ||
+                !authorized_ || !bssValid_) return;
+        }
+    } else if (!linkPublished_) {
+        return;
+    }
     // Native 25G241 event216: AP[6], link-up byte, debounce byte, reason32,
     // optional beacon timestamp32. WCLNetManager reads byte6 to select LINK_UP.
     // The adapter supplies the native owner's current debounce state at emit.
@@ -585,8 +637,10 @@ void Backend::publishLink(bool up) {
     payload[6] = up ? 1 : 0;
     write32(payload + 8, 255); // Unspecified; do not invent a radio reason.
     linkPublished_ = up;
-    post(Link, payload, sizeof(payload));
     if (!up) erase(linkedAddress_, sizeof(linkedAddress_));
+    // payload owns the old address now. Clear before emit(), because a
+    // synchronous Link consumer may publish a new address before returning.
+    post(Link, payload, sizeof(payload));
 }
 void Backend::observeBeacon(const Beacon &b) {
     if (stopped_ || !b.ssid || !validAddress(b.bssid) || b.ssidLength > 32 ||
@@ -633,7 +687,18 @@ void Backend::maybeConnected() {
         firstBeacon_ && authorized_ && bssValid_) {
         // Real prerequisites first. Native NET_MANAGER must see LINK_UP before
         // JOIN_MANAGER's CONNECT_COMPLETE, or it remains in LINK_DOWN.
+        uint8_t connectedTarget[sizeof(target_)];
+        copyBytes(connectedTarget, target_, sizeof(connectedTarget));
+        const uint64_t controlRevision = controlRevision_;
         publishLink(true);
+        if (controlRevision_ != controlRevision || stopped_ || !ready() ||
+            !joinPending_ || deferred_ || !associated_ || !firstBeacon_ ||
+            !authorized_ || !bssValid_ ||
+            !equalAddress(connectedTarget, target_)) {
+            erase(connectedTarget, sizeof(connectedTarget));
+            return;
+        }
+        erase(connectedTarget, sizeof(connectedTarget));
         finishJoin(0, 0);
     }
 }
@@ -697,6 +762,7 @@ void Backend::tick(uint32_t elapsed) {
     }
 }
 void Backend::stop() {
+    advanceControlRevision();
     stopped_ = true; ready_ = false;
     linkPublished_ = false;
     erase(linkedAddress_, sizeof(linkedAddress_));

@@ -1380,27 +1380,37 @@ enum NativeRequest { Scan = 1, Join = 2, AbortScan = 3, AbortJoin = 4,
 IOReturn AirportItlwmSkywalkInterface::nativeRequest(OSObject *, void *object,
     void *operation, void *data, void *length) {
     auto self = static_cast<AirportItlwmSkywalkInterface *>(object);
-    if (self->instance && (uintptr_t(operation) == Leave || uintptr_t(operation) == AbortJoin))
-        self->instance->recordNativeControlTrace(uint32_t(uintptr_t(length)),
-            uintptr_t(operation) == Leave ? NativePowerTrace::Operation::kWclLeave :
-                                           NativePowerTrace::Operation::kWclAbortJoin,
-            NativePowerTrace::Phase::kNativeActionBegin, 0, -1);
-    auto backend = self->nativeBackend;
-    if (!backend) return kIOReturnNotReady;
     const uintptr_t op = uintptr_t(operation);
+    if (self->instance && (op == Leave || op == AbortJoin || op == Join))
+        self->instance->recordNativeControlTrace(uint32_t(uintptr_t(length)),
+            op == Leave ? NativePowerTrace::Operation::kWclLeave :
+            op == AbortJoin ? NativePowerTrace::Operation::kWclAbortJoin :
+                              NativePowerTrace::Operation::kWclJoin,
+            NativePowerTrace::Phase::kNativeActionBegin, 0, -1);
+    // Admission timing only. These details distinguish an early guard from
+    // an actual Backend result without storing the requested network or key.
+    const auto finishJoinAdmission = [self, op, length](IOReturn result, uint32_t detail) {
+        if (op == Join && self->instance)
+            self->instance->recordNativeControlTrace(uint32_t(uintptr_t(length)),
+                NativePowerTrace::Operation::kWclJoin,
+                NativePowerTrace::Phase::kNativeActionEnd, detail, int32_t(result));
+        return result;
+    };
+    auto backend = self->nativeBackend;
+    if (!backend) return finishJoinAdmission(kIOReturnNotReady, 1);
     // The experimental MAC-only probe owns a short command window. Read-only
     // state queries stay available; a new control operation is retried after
     // the worker releases it, rather than racing the firmware command ring.
     if (self->fHalService && self->fHalService->nativeP2pBusy() &&
         (op == Scan || op == Join || op == AbortScan || op == AbortJoin ||
          op == Leave || op == Address || op == Cipher))
-        return kIOReturnBusy;
+        return finishJoinAdmission(kIOReturnBusy, 2);
     if (uintptr_t(operation) == Scan || uintptr_t(operation) == Join) {
         // The userland build property can appear after the controller starts.
         // Recheck each request so an early NotReady remains recoverable.
         const bool runtimeReady = NativeWifi::verifyTahoeRuntime(true);
         self->setProperty("NativeRuntimeReady", runtimeReady ? 1U : 0U, 32);
-        if (!runtimeReady) return kIOReturnNotReady;
+        if (!runtimeReady) return finishJoinAdmission(kIOReturnNotReady, 3);
     }
     switch (uintptr_t(operation)) {
         case Scan:
@@ -1421,7 +1431,7 @@ IOReturn AirportItlwmSkywalkInterface::nativeRequest(OSObject *, void *object,
                 return result;
             }
         case Join:
-            if (self->addressQuarantined) return kIOReturnNotPermitted;
+            if (self->addressQuarantined) return finishJoinAdmission(kIOReturnNotPermitted, 4);
             if (data) {
                 const auto raw=static_cast<const uint8_t *>(data);
                 self->setProperty("NativeJoinLowerAuth",NativeWifi::read32(raw+0x10),32);
@@ -1437,7 +1447,7 @@ IOReturn AirportItlwmSkywalkInterface::nativeRequest(OSObject *, void *object,
                 const IOReturn result=nativeStatus(backend->joinRequest(data,NativeWifi::JoinWireSize));
                 self->setProperty("NativeJoinRejectField",backend->joinRejectField(),32);
                 self->setProperty("NativeJoinResult",uint32_t(result),32);
-                return result;
+                return finishJoinAdmission(result, 5);
             }
         case AbortScan: return nativeStatus(backend->abortScan());
         case AbortJoin:
@@ -1474,8 +1484,46 @@ IOReturn AirportItlwmSkywalkInterface::nativeRequest(OSObject *, void *object,
     }
     return kIOReturnUnsupported;
 }
+IOReturn AirportItlwmSkywalkInterface::getWCL_BGSCAN_CACHE_RESULT(
+    apple80211_bgscan_cached_network_data_list *list) {
+    using namespace NativeWifi::ScanDispatchTrace;
+    const uint64_t callSerial = recordNativeScanDispatch(
+        Selector::WclBgscanCacheResult, Phase::Entry, IOReturn(kNoResult), list);
+    // Tahoe's argument layout is undocumented here. Never inspect list.
+    const IOReturn result = kIOReturnUnsupported;
+    recordNativeScanDispatch(Selector::WclBgscanCacheResult, Phase::Return,
+        result, list, callSerial);
+    return result;
+}
 IOReturn AirportItlwmSkywalkInterface::setWCL_SCAN_REQ(apple80211ScanRequest *request) {
-    return _fCommandGate->runAction(nativeRequest, this, reinterpret_cast<void *>(Scan), request);
+    using namespace NativeWifi::ScanDispatchTrace;
+    const uint64_t callSerial = recordNativeScanDispatch(
+        Selector::WclScanRequest, Phase::Entry, IOReturn(kNoResult), request);
+    const IOReturn result = _fCommandGate->runAction(nativeRequest, this,
+        reinterpret_cast<void *>(Scan), request);
+    recordNativeScanDispatch(Selector::WclScanRequest, Phase::Return,
+        result, request, callSerial);
+    return result;
+}
+IOReturn AirportItlwmSkywalkInterface::setWCL_CONFIG_BGSCAN(
+    apple80211_bg_scan *request) {
+    using namespace NativeWifi::ScanDispatchTrace;
+    const uint64_t callSerial = recordNativeScanDispatch(
+        Selector::WclConfigBgscan, Phase::Entry, IOReturn(kNoResult), request);
+    const IOReturn result = kIOReturnUnsupported;
+    recordNativeScanDispatch(Selector::WclConfigBgscan, Phase::Return,
+        result, request, callSerial);
+    return result;
+}
+IOReturn AirportItlwmSkywalkInterface::setWCL_SET_SCAN_HOME_AWAY_TIME(
+    scanHomeAndAwayTime *request) {
+    using namespace NativeWifi::ScanDispatchTrace;
+    const uint64_t callSerial = recordNativeScanDispatch(
+        Selector::WclSetScanHomeAwayTime, Phase::Entry, IOReturn(kNoResult), request);
+    const IOReturn result = kIOReturnUnsupported;
+    recordNativeScanDispatch(Selector::WclSetScanHomeAwayTime, Phase::Return,
+        result, request, callSerial);
+    return result;
 }
 IOReturn AirportItlwmSkywalkInterface::getWCL_LOW_LATENCY_INFO(apple80211_low_latency_info *out) {
     if (!out) return kIOReturnBadArgument;
@@ -1487,7 +1535,11 @@ IOReturn AirportItlwmSkywalkInterface::getWCL_LOW_LATENCY_INFO(apple80211_low_la
     return kIOReturnSuccess;
 }
 IOReturn AirportItlwmSkywalkInterface::setWCL_ASSOCIATE(apple80211AssocCandidates *request) {
-    return _fCommandGate->runAction(nativeRequest, this, reinterpret_cast<void *>(Join), request);
+    NativeControlTraceScope trace(instance, NativePowerTrace::Operation::kWclJoin);
+    const IOReturn result = _fCommandGate->runAction(nativeRequest, this,
+        reinterpret_cast<void *>(Join), request,
+        reinterpret_cast<void *>(uintptr_t(trace.callId())));
+    return trace.finish(result);
 }
 IOReturn AirportItlwmSkywalkInterface::setWCL_SCAN_ABORT(void *) {
     return _fCommandGate->runAction(nativeRequest, this, reinterpret_cast<void *>(AbortScan));
@@ -1828,6 +1880,38 @@ void AirportItlwmSkywalkInterface::publishNativeScanTrace() {
         }
     }
 }
+uint64_t AirportItlwmSkywalkInterface::recordNativeScanDispatch(
+    NativeWifi::ScanDispatchTrace::Selector selector,
+    NativeWifi::ScanDispatchTrace::Phase phase, IOReturn result,
+    const void *argument, uint64_t callSerial) {
+    using namespace NativeWifi::ScanDispatchTrace;
+    if (phase == Phase::Entry) callSerial = nativeScanDispatchTrace.beginCall();
+    Input input {};
+    input.callSerial = callSerial;
+    input.selector = uint32_t(selector);
+    input.phase = uint32_t(phase);
+    input.result = int32_t(result);
+    input.context |= GateContextUnknown;
+    if (!argument) input.context |= NullArgument;
+    nativeScanDispatchTrace.record(input, scanMonotonicNanoseconds, nullptr);
+    return callSerial;
+}
+void AirportItlwmSkywalkInterface::publishNativeScanDispatchTrace() {
+    if (!nativeBackend || !_fCommandGate || !_fCommandGate->getWorkLoop() ||
+        !_fCommandGate->getWorkLoop()->inGate() || ml_at_interrupt_context()) return;
+    NativeWifi::ScanDispatchTrace::Snapshot snapshot {};
+    nativeScanDispatchTrace.snapshot(&snapshot);
+    snapshot.publishFailures = nativeScanDispatchPublishFailures;
+    if (!nativeScanDispatchTracePublished || memcmp(&snapshot,
+            &publishedNativeScanDispatchTrace, sizeof(snapshot))) {
+        if (setProperty("NativeScanDispatchTraceSnapshot", &snapshot, sizeof(snapshot))) {
+            memcpy(&publishedNativeScanDispatchTrace, &snapshot, sizeof(snapshot));
+            nativeScanDispatchTracePublished = true;
+        } else if (nativeScanDispatchPublishFailures != UINT32_MAX) {
+            ++nativeScanDispatchPublishFailures;
+        }
+    }
+}
 NativeWifi::Status AirportItlwmSkywalkInterface::radioCancelScan(void *context) {
     auto self = static_cast<AirportItlwmSkywalkInterface *>(context);
     if (self->fHalService->nativeP2pBusy()) return NativeWifi::Status::Busy;
@@ -1940,8 +2024,11 @@ void AirportItlwmSkywalkInterface::consumeNative(void *context, const NativeWifi
     if (!backend) return;
     switch (entry.kind) {
         case IEEE80211_EVT_STA_ASSOC_DONE:
-            backend->observeAssociation(uint16_t(entry.value), entry.bssid);
-            self->fHalService->get80211Controller()->ic_tahoe_join_requested = false;
+            // A rejected/old target notification must not cancel the current
+            // radio join's BSS-selection flag. Backend also rejects an event
+            // whose synchronous emission was superseded by a new control call.
+            if (backend->observeAssociation(uint16_t(entry.value), entry.bssid))
+                self->fHalService->get80211Controller()->ic_tahoe_join_requested = false;
             break;
         case IEEE80211_EVT_STA_DEAUTH: backend->observeAuthorization(false); break;
         case IEEE80211_EVT_SCAN_DONE:
@@ -2031,6 +2118,7 @@ void AirportItlwmSkywalkInterface::consumeNative(void *context, const NativeWifi
     // never performs IORegistry allocation on its producer dynamic stack.
     if (entry.kind != ITL_TAHOE_EVT_BEACON) {
         self->publishNativeScanTrace();
+        self->publishNativeScanDispatchTrace();
         self->instance->publishNativePowerTrace();
         // These are emit-call counts, not acknowledgements from the native
         // WCL cache. Publish only on this owned consumer, never on RX/IRQ.

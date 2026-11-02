@@ -14,6 +14,7 @@
 #include "../native/wcl_backend.hpp"
 #include "../native/wcl_ingress.hpp"
 #include "../native/registration.hpp"
+#include "../native/scan_dispatch_trace.hpp"
 #define ITL_NATIVE_OVERRIDE
 #else
 #define ITL_NATIVE_OVERRIDE override
@@ -174,7 +175,11 @@ public:
     virtual IOReturn getWCL_EXTENDED_BSS_INFO(apple80211_extended_bss_info *) ITL_NATIVE_OVERRIDE { return kIOReturnUnsupported; }
 #endif
     virtual IOReturn getWCL_LOW_LATENCY_INFO_STATS(apple80211_wcl_low_latency_stats *) ITL_NATIVE_OVERRIDE { return kIOReturnUnsupported; }
+#ifdef AIRPORT_TAHOE
+    virtual IOReturn getWCL_BGSCAN_CACHE_RESULT(apple80211_bgscan_cached_network_data_list *) ITL_NATIVE_OVERRIDE;
+#else
     virtual IOReturn getWCL_BGSCAN_CACHE_RESULT(apple80211_bgscan_cached_network_data_list *) ITL_NATIVE_OVERRIDE { return kIOReturnUnsupported; }
+#endif
     virtual IOReturn getWIFI_NOISE_PER_ANT(apple80211_noise_per_ant_t *) ITL_NATIVE_OVERRIDE { return kIOReturnUnsupported; }
     virtual IOReturn getBLOCKED_BANDS(apple80211_blocked_bands *) ITL_NATIVE_OVERRIDE { return kIOReturnUnsupported; }
     virtual IOReturn setSSID(apple80211_ssid_data *) ITL_NATIVE_OVERRIDE { return kIOReturnUnsupported; }
@@ -295,7 +300,11 @@ public:
 #endif
     virtual IOReturn setWCL_PROTECT_IP(apple80211_wcl_protect_ip_mode *) ITL_NATIVE_OVERRIDE { return kIOReturnUnsupported; }
     virtual IOReturn setWCL_LINK_UP_DONE(void *) ITL_NATIVE_OVERRIDE { return kIOReturnUnsupported; }
+#ifdef AIRPORT_TAHOE
+    virtual IOReturn setWCL_SET_SCAN_HOME_AWAY_TIME(scanHomeAndAwayTime *) ITL_NATIVE_OVERRIDE;
+#else
     virtual IOReturn setWCL_SET_SCAN_HOME_AWAY_TIME(scanHomeAndAwayTime *) ITL_NATIVE_OVERRIDE { return kIOReturnUnsupported; }
+#endif
     virtual IOReturn setWCL_VOLUNTARY_NETWORK_DISCONNECT(apple80211_wcl_voluntary_network_disconnect *) ITL_NATIVE_OVERRIDE { return kIOReturnUnsupported; }
 #ifdef AIRPORT_TAHOE
     IOReturn setWCL_LINK_STATE_UPDATE(apple80211_wcl_update_link_state *) override;
@@ -315,7 +324,11 @@ public:
     virtual IOReturn setMIMO_CONFIG(apple80211_mimo_config *) ITL_NATIVE_OVERRIDE { return kIOReturnUnsupported; }
     virtual IOReturn setWCL_CONFIG_BG_MOTIONPROFILE(apple80211_bg_motion_profile *) ITL_NATIVE_OVERRIDE { return kIOReturnUnsupported; }
     virtual IOReturn setWCL_CONFIG_BG_NETWORK(apple80211_bg_network *) ITL_NATIVE_OVERRIDE { return kIOReturnUnsupported; }
+#ifdef AIRPORT_TAHOE
+    virtual IOReturn setWCL_CONFIG_BGSCAN(apple80211_bg_scan *) ITL_NATIVE_OVERRIDE;
+#else
     virtual IOReturn setWCL_CONFIG_BGSCAN(apple80211_bg_scan *) ITL_NATIVE_OVERRIDE { return kIOReturnUnsupported; }
+#endif
     virtual IOReturn setWCL_CONFIG_BG_PARAMS(apple80211_bg_params *) ITL_NATIVE_OVERRIDE { return kIOReturnUnsupported; }
     virtual IOReturn setBLOCKED_BANDS(apple80211_blocked_bands *) ITL_NATIVE_OVERRIDE { return kIOReturnUnsupported; }
     
@@ -417,6 +430,9 @@ private:
     static uint64_t scanMonotonicNanoseconds(void *);
     static NativeWifi::ScanBusyDetail scanBusyDetail(void *);
     void publishNativeScanTrace();
+    uint64_t recordNativeScanDispatch(NativeWifi::ScanDispatchTrace::Selector,
+        NativeWifi::ScanDispatchTrace::Phase, IOReturn, const void *, uint64_t = 0);
+    void publishNativeScanDispatchTrace();
     static NativeWifi::Status radioCancelScan(void *);
     static NativeWifi::Status radioJoin(void *, const NativeWifi::JoinPlan &);
     static void radioLeave(void *);
@@ -434,6 +450,10 @@ private:
     bool nativeScanTracePublished {};
     NativeWifi::ScanTraceSnapshot nativeScanTraceSnapshot {};
     NativeWifi::ScanTraceSnapshot publishedNativeScanTrace {};
+    NativeWifi::ScanDispatchTrace::Trace nativeScanDispatchTrace {};
+    NativeWifi::ScanDispatchTrace::Snapshot publishedNativeScanDispatchTrace {};
+    bool nativeScanDispatchTracePublished {};
+    uint32_t nativeScanDispatchPublishFailures {};
     bool addressWasRequested {}, addressQuarantined {}, nativeLease {};
     uint64_t publishedScanCount {}, publishedJoinCount {}, publishedBeaconCount {};
     uint64_t beaconLqmEmitCalls {};
