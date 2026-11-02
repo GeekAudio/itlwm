@@ -20,27 +20,27 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "b5f31bcdfc43337da51fa63d2e055b3455c0da290ea363af8737f9235e4f4fb4"
+      "sha256": "b0d00614ea9be003b9971cb08071994bd976c3e487484f4ac9801eacda6dffd5"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "9823367b5dbf6ee2648bab2d5e06a8965fee7bfa65902c8dbb4cb36c1b7b24f6"
+      "sha256": "0e65ef06ecb2aef9e1399ed54c5b2054332c5b5efd0d819c990c6a391834a191"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "1f430102bdd24070b9bcb8382c6301a6846c28b88ba89139e245783cf3914ca9"
+      "sha256": "9e92047215268760d7d25751243b2b81dd6e24f5defcf8725b4302a21be593e5"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "1f430102bdd24070b9bcb8382c6301a6846c28b88ba89139e245783cf3914ca9"
+      "sha256": "9e92047215268760d7d25751243b2b81dd6e24f5defcf8725b4302a21be593e5"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "b015b69367fb99df538b160e721d437f488c84b3e16e23d7550315c6de949de0"
+      "sha256": "a9b49a8ef7e81ee51ed6473ef24eee08e8784a922a7c027fb687f83766dcff3f"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
@@ -85,8 +85,8 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-03T01:11:55.234842+08:00",
-  "runtime_scope": "Test119 loaded, five-minute Wi-Fi baseline passed, one controlled A-to-B association failed; AWDL active RF not yet triggered",
+  "updated_at": "2026-11-03T01:53:31.667459+08:00",
+  "runtime_scope": "Test119 controlled OpenWrt-to-awdl0 UDP input verified; native cleanup quarantined; Wi-Fi switch UI and scan count under investigation",
   "running_candidate": "25G332-Test119",
   "next_candidate": null,
   "website_delivery": "reviewed public-safe snapshot",
