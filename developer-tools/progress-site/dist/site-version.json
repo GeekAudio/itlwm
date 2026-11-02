@@ -1,13 +1,13 @@
 {
   "schema": 1,
-  "version": "ed52187e4df8a2d69265c496e6e42ae230b658b01113f6ef456dcbe014e0141c",
-  "updatedAt": "2026-11-02T21:48:39+08:00",
+  "version": "6a20f3b0ee18ceb099695b7e5fa623b3a9f7f8cad80da880bdf04902983b5892",
+  "updatedAt": "2026-11-02T22:58:12.832457+08:00",
   "files": {
-    "index.html": "50e02b9fea19a32fbd3b59c04cb74bdadcaa90597baca456bbdae04db846d16a",
-    "milestones.html": "50e02b9fea19a32fbd3b59c04cb74bdadcaa90597baca456bbdae04db846d16a",
+    "index.html": "1c4fdf880ba1af9a5e2c45ea8098c09fed274c81ba8258f51e9f7c59b55076c0",
+    "milestones.html": "1c4fdf880ba1af9a5e2c45ea8098c09fed274c81ba8258f51e9f7c59b55076c0",
     "assets/site.css": "615c33ae7e9ffc93a3b4b1d29ff1186f839c04b4af579916942ceec6ebb983d0",
-    "data.js": "3a59a0006e951cd238fbe9410bec7f17be9e7cc1f2c018dc303a08b741ae4941",
-    "assets/test-records.js": "78706610784357f941dc286bf1db0319cf23629bd7fba4548a4efd364ec78a11",
+    "data.js": "11ea0cb63ef23d1721622d84d35c32190ef694e8987c01faa49b7ca931d5b563",
+    "assets/test-records.js": "13dedf3e3a249a0b5088d4e409ba786c8946a423875b705b3a9f79c816388c79",
     "assets/site.js": "232e25ac82dfcfcb1b469b5fb9003481ce8a237f8613144f0ed2db65f5643bdd",
     "assets/freshness.js": "3dc23459451a94a47ea24941e4087f9dda2b6ed8315959634c420dc9008ca10c"
   }
