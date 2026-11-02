@@ -20,27 +20,27 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "b0d5a652c46b0499f4caafe45be41c53c53a4441c5c78445e95d4cddc34f6466"
+      "sha256": "71849e3ac6e2c430850b5c8df2f166a729368291d4f4358fbbd5478ff81d66d7"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "41dbef67fe9f0be033e5d5cb149532c2762627700faaf799cf86378ea5d74d36"
+      "sha256": "7ec06a4dd9b0f6b708ba8c9a22288292467c845cd08c21983bf0b19de725e739"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "a4adef5541394a557086b8d5797eb9e6f49e4bf60770d81c61d41714cc4c9923"
+      "sha256": "aa31fd3d1fef24799db6838e883f50523790a10342f47e72a1e5f7ea80776292"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "a4adef5541394a557086b8d5797eb9e6f49e4bf60770d81c61d41714cc4c9923"
+      "sha256": "aa31fd3d1fef24799db6838e883f50523790a10342f47e72a1e5f7ea80776292"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "eae2fa96d44aeb052c9ea705d5a33ac4268b8f15d6fbc8dcd1d8b9b84a778bcc"
+      "sha256": "379864ed56bc256d2cc51876739d8afcb96efba4f6730447242695e8540f58ec"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
@@ -85,10 +85,10 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-02T17:14:47.536988+08:00",
-  "runtime_scope": "Test112本轮8通过、2部分、1未通过、29未覆盖。GTK断链约6秒后恢复；BindOrigin在START后326微秒拒绝，已定位锁内/锁外检查矛盾。AWDL回包和AirDrop未证明。",
-  "running_candidate": "25G332-Test112",
-  "next_candidate": "25G332-Test113",
+  "updated_at": "2026-11-02T18:18:51+08:00",
+  "runtime_scope": "Test113仍在运行：8通过、3部分通过、0未通过、29未覆盖；LiveKEY phase14/15同origin元数据已核对，key-install/peer ACK未证；Test114已部署待重启。",
+  "running_candidate": "25G332-Test113",
+  "next_candidate": "25G332-Test114",
   "website_delivery": "Version manifest per visit; self-contained snapshot; publication and public readback hashes",
-  "deployment_state": "test113_deployed_waiting_reboot"
+  "deployment_state": "test114_deployed_waiting_reboot"
 }
