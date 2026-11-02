@@ -196,6 +196,9 @@ static void testCommandGuardKeepsQueuedProbeInert()
     assert(!genericCommandBlocked(true, worker, worker, false, false));
     assert(genericCommandBlocked(true, worker, worker, true, false));
     assert(genericCommandBlocked(true, worker, worker, false, true));
+    // The directed-data main-gate owner validator is read-only. The existing
+    // production command guard must still reject even its exact worker there.
+    assert(!commandOwnerAllowed(true, worker, worker, true, true));
 }
 
 static void testAdmissionIsDefaultOffAndDeferrable()

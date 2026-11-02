@@ -64,6 +64,70 @@ struct StartGateState {
     bool mccReady = false;
 };
 
+// Read-only owner proof for predicates sampled while executing on the main
+// command gate. This is deliberately separate from commandOwnerAllowed(): a
+// gate callback may validate the worker that owns a run, but it must never be
+// treated as permission to submit a blocking firmware command from that gate.
+struct MainGateOwnerState {
+    bool executingOnMainGate = false;
+    bool probeBusy = false;
+    bool cancelRequested = true;
+    const void *currentWorkerThread = nullptr;
+    const void *armedWorkerThread = nullptr;
+    uint32_t currentContextGeneration = 0;
+    uint32_t bindingContextGeneration = 0;
+    uint32_t currentPowerGeneration = 0;
+    uint32_t bindingPowerGeneration = 0;
+    uint32_t currentStationGeneration = 0;
+    uint32_t bindingStationGeneration = 0;
+};
+
+inline bool mainGateOwnerCurrent(const MainGateOwnerState &state)
+{
+    return state.executingOnMainGate && state.probeBusy &&
+        !state.cancelRequested &&
+        state.currentWorkerThread != nullptr &&
+        state.currentWorkerThread == state.armedWorkerThread &&
+        state.currentContextGeneration != 0 &&
+        state.currentContextGeneration == state.bindingContextGeneration &&
+        state.currentPowerGeneration != 0 &&
+        state.currentPowerGeneration == state.bindingPowerGeneration &&
+        state.currentStationGeneration != 0 &&
+        state.currentStationGeneration == state.bindingStationGeneration;
+}
+
+// Arming establishes the worker identity used by later read-only gate
+// checks, so the thread executing the arm callback must itself be that
+// already-published worker. Keep this stronger admission rule separate from
+// mainGateOwnerCurrent(), whose callbacks may run on another gate caller.
+struct MainGateArmOwnerState {
+    bool executingOnMainGate = false;
+    bool probeBusy = false;
+    bool cancelRequested = true;
+    const void *executingThread = nullptr;
+    const void *currentWorkerThread = nullptr;
+    uint32_t currentContextGeneration = 0;
+    uint32_t bindingContextGeneration = 0;
+    uint32_t currentPowerGeneration = 0;
+    uint32_t bindingPowerGeneration = 0;
+    uint32_t currentStationGeneration = 0;
+    uint32_t bindingStationGeneration = 0;
+};
+
+inline bool mainGateArmOwnerCurrent(const MainGateArmOwnerState &state)
+{
+    return state.executingOnMainGate && state.probeBusy &&
+        !state.cancelRequested && state.executingThread != nullptr &&
+        state.currentWorkerThread != nullptr &&
+        state.executingThread == state.currentWorkerThread &&
+        state.currentContextGeneration != 0 &&
+        state.currentContextGeneration == state.bindingContextGeneration &&
+        state.currentPowerGeneration != 0 &&
+        state.currentPowerGeneration == state.bindingPowerGeneration &&
+        state.currentStationGeneration != 0 &&
+        state.currentStationGeneration == state.bindingStationGeneration;
+}
+
 // Call only after sampling nowUs on the same main gate which reads the current
 // owner, epochs, ROC event, station, queue, and channel state. A worker-side
 // timestamp is not a substitute: runAction may have queued past the ROC END.

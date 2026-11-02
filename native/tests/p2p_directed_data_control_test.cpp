@@ -40,6 +40,88 @@ static void testGateSamplesTimeAfterQueueDelay()
            StartGateResult::SessionMismatch);
 }
 
+static void testMainGateValidatesExactWorkerWithoutAllowingCommands()
+{
+    static const int workerToken = 1;
+    static const int otherWorkerToken = 2;
+    MainGateOwnerState state{};
+    state.executingOnMainGate = true;
+    state.probeBusy = true;
+    state.cancelRequested = false;
+    state.currentWorkerThread = &workerToken;
+    state.armedWorkerThread = &workerToken;
+    state.currentContextGeneration = 37;
+    state.bindingContextGeneration = 37;
+    state.currentPowerGeneration = 8;
+    state.bindingPowerGeneration = 8;
+    state.currentStationGeneration = 19;
+    state.bindingStationGeneration = 19;
+    assert(mainGateOwnerCurrent(state));
+
+    auto stale = state;
+    stale.executingOnMainGate = false;
+    assert(!mainGateOwnerCurrent(stale));
+    stale = state;
+    stale.currentWorkerThread = &otherWorkerToken;
+    assert(!mainGateOwnerCurrent(stale));
+    stale = state;
+    stale.cancelRequested = true;
+    assert(!mainGateOwnerCurrent(stale));
+    stale = state;
+    stale.probeBusy = false;
+    assert(!mainGateOwnerCurrent(stale));
+    stale = state;
+    ++stale.currentContextGeneration;
+    assert(!mainGateOwnerCurrent(stale));
+    stale = state;
+    ++stale.currentPowerGeneration;
+    assert(!mainGateOwnerCurrent(stale));
+    stale = state;
+    ++stale.currentStationGeneration;
+    assert(!mainGateOwnerCurrent(stale));
+}
+
+static void testMainGateArmRequiresExecutingWorker()
+{
+    static const int workerToken = 1;
+    static const int otherThreadToken = 2;
+    MainGateArmOwnerState state{};
+    state.executingOnMainGate = true;
+    state.probeBusy = true;
+    state.cancelRequested = false;
+    state.executingThread = &workerToken;
+    state.currentWorkerThread = &workerToken;
+    state.currentContextGeneration = 37;
+    state.bindingContextGeneration = 37;
+    state.currentPowerGeneration = 8;
+    state.bindingPowerGeneration = 8;
+    state.currentStationGeneration = 19;
+    state.bindingStationGeneration = 19;
+    assert(mainGateArmOwnerCurrent(state));
+
+    auto rejected = state;
+    rejected.executingThread = &otherThreadToken;
+    assert(!mainGateArmOwnerCurrent(rejected));
+    rejected = state;
+    rejected.executingOnMainGate = false;
+    assert(!mainGateArmOwnerCurrent(rejected));
+    rejected = state;
+    rejected.cancelRequested = true;
+    assert(!mainGateArmOwnerCurrent(rejected));
+    rejected = state;
+    rejected.probeBusy = false;
+    assert(!mainGateArmOwnerCurrent(rejected));
+    rejected = state;
+    ++rejected.currentContextGeneration;
+    assert(!mainGateArmOwnerCurrent(rejected));
+    rejected = state;
+    ++rejected.currentPowerGeneration;
+    assert(!mainGateArmOwnerCurrent(rejected));
+    rejected = state;
+    ++rejected.currentStationGeneration;
+    assert(!mainGateArmOwnerCurrent(rejected));
+}
+
 static void testFirstFailureIsWriteOnce()
 {
     FirstFailure first{};
@@ -172,6 +254,8 @@ static void testRxLeasePropertiesPublishOnlyOnIdentityChanges()
 int main()
 {
     testGateSamplesTimeAfterQueueDelay();
+    testMainGateValidatesExactWorkerWithoutAllowingCommands();
+    testMainGateArmRequiresExecutingWorker();
     testFirstFailureIsWriteOnce();
     testOnlyHelperHandshakeIsFastPublished();
     testCleanupIsAllowedOnlyAfterKnownEndWithoutDma();

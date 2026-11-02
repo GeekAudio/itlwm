@@ -11,6 +11,7 @@
 #include "../../native/awdl_mif_encode.hpp"
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
 #include "ItlIwxP2PData.hpp"
+#include "../../native/p2p_directed_data_control.hpp"
 #include "../../native/awdl_native_bsd_data_25G332.hpp"
 #include "../../native/awdl_data_frame.hpp"
 #endif
@@ -2400,17 +2401,29 @@ static bool directedDataSameEpochs(
 static bool directedDataCurrent(ItlIwx *owner, struct iwx_softc *sc,
     const TahoeP2PDirectedDataContext *context, bool requireRoc)
 {
-    if (!owner || !sc || sc != &owner->com || !context ||
-        !owner->nativeP2pCommandAllowed())
+    if (!owner || !sc || sc != &owner->com || !context)
         return false;
     const auto &binding = context->binding;
+    NativeP2PDirectedDataControl::MainGateOwnerState ownerState{};
+    ownerState.executingOnMainGate = owner->tahoeP2pOnMainGate();
+    ownerState.probeBusy = owner->nativeP2pBusy();
+    ownerState.cancelRequested = __atomic_load_n(
+        &owner->nativeP2pCancelRequested_, __ATOMIC_ACQUIRE) != 0;
+    ownerState.currentWorkerThread = __atomic_load_n(
+        &owner->nativeP2pProbeOwner_, __ATOMIC_ACQUIRE);
+    ownerState.armedWorkerThread = context->workerThread;
+    ownerState.currentContextGeneration = owner->nativeP2pProbeGeneration_;
+    ownerState.bindingContextGeneration = binding.epochs.context;
+    ownerState.currentPowerGeneration = static_cast<uint32_t>(sc->sc_generation);
+    ownerState.bindingPowerGeneration = binding.epochs.power;
+    ownerState.currentStationGeneration = __atomic_load_n(
+        &sc->sc_tx_rate_generation, __ATOMIC_ACQUIRE);
+    ownerState.bindingStationGeneration = binding.epochs.station;
+    if (!NativeP2PDirectedDataControl::mainGateOwnerCurrent(ownerState))
+        return false;
     if (!binding.ownerSerial || !binding.runSerial ||
         !NativeAwdlDirectedOriginTx::validEpochs(binding.epochs) ||
         binding.generation != binding.epochs.power ||
-        binding.epochs.context != owner->nativeP2pProbeGeneration_ ||
-        binding.epochs.power != static_cast<uint32_t>(sc->sc_generation) ||
-        binding.epochs.station != __atomic_load_n(
-            &sc->sc_tx_rate_generation, __ATOMIC_ACQUIRE) ||
         !binding.p2pFirmwareGeneration ||
         sc->sc_p2p.fw_generation != binding.p2pFirmwareGeneration ||
         !sc->sc_p2p.initialized ||
@@ -2782,12 +2795,33 @@ int iwx_tahoe_p2p_directed_data_arm(
         (context->completion.snapshot().armed &&
          !context->completion.snapshot().completed))
         return EINVAL;
+    const uint32_t currentGeneration = static_cast<uint32_t>(sc->sc_generation);
+    const uint32_t currentStationGeneration = __atomic_load_n(
+        &sc->sc_tx_rate_generation, __ATOMIC_ACQUIRE);
+    void *workerThread = __atomic_load_n(&owner->nativeP2pProbeOwner_,
+                                         __ATOMIC_ACQUIRE);
+    NativeP2PDirectedDataControl::MainGateArmOwnerState armOwnerState{};
+    armOwnerState.executingOnMainGate = owner->tahoeP2pOnMainGate();
+    armOwnerState.probeBusy = owner->nativeP2pBusy();
+    armOwnerState.cancelRequested = __atomic_load_n(
+        &owner->nativeP2pCancelRequested_, __ATOMIC_ACQUIRE) != 0;
+    armOwnerState.executingThread =
+        reinterpret_cast<const void *>(current_thread());
+    armOwnerState.currentWorkerThread = workerThread;
+    armOwnerState.currentContextGeneration = owner->nativeP2pProbeGeneration_;
+    armOwnerState.bindingContextGeneration = epochs->context;
+    armOwnerState.currentPowerGeneration = currentGeneration;
+    armOwnerState.bindingPowerGeneration = epochs->power;
+    armOwnerState.currentStationGeneration = currentStationGeneration;
+    armOwnerState.bindingStationGeneration = epochs->station;
+    if (!NativeP2PDirectedDataControl::mainGateArmOwnerCurrent(
+            armOwnerState))
+        return ESTALE;
     if (context->armSerialHighWater == UINT64_MAX)
         return EOVERFLOW;
-    const uint32_t currentGeneration = static_cast<uint32_t>(sc->sc_generation);
     if (generation != currentGeneration || epochs->context !=
             owner->nativeP2pProbeGeneration_ || epochs->station !=
-            __atomic_load_n(&sc->sc_tx_rate_generation, __ATOMIC_ACQUIRE) ||
+            currentStationGeneration ||
         ownerSerial != owner->nativeAwdlRxEventOwnerSerial_ ||
         stationLease->state != TahoeP2PResourceState::kActive ||
         stationLease->generation != generation ||
@@ -2828,6 +2862,7 @@ int iwx_tahoe_p2p_directed_data_arm(
     memset(&context->arm, 0, sizeof(context->arm));
     memcpy(&context->arm, arm, sizeof(context->arm));
     memset(&context->binding, 0, sizeof(context->binding));
+    context->workerThread = workerThread;
     context->binding.ownerSerial = ownerSerial;
     context->binding.runSerial = context->armSerialHighWater;
     context->binding.epochs = *epochs;

@@ -37,9 +37,11 @@ READY_FIXED = _ready_module.FIXED
 
 BUILD_ID = "25G332-Test111"
 TEST112_BUILD_ID = "25G332-Test112"
+TEST113_BUILD_ID = "25G332-Test113"
 COORDINATOR_SCHEMAS = {
     BUILD_ID: "test111-local-coordinator/v1",
     TEST112_BUILD_ID: "test112-local-coordinator/v1",
+    TEST113_BUILD_ID: "test113-local-coordinator/v1",
 }
 BUNDLE_ID = "org.geekaudio.AirportItlwm"
 REMOTE_SCRIPT_NAME = "monitor_window111.sh"

@@ -169,6 +169,9 @@ struct TahoeP2PDirectedDataContext {
     IntelP2PActionTx::CompletionTracker completion;
     TahoeP2PDirectedDataArm arm;
     TahoeP2PDirectedDataBinding binding;
+    // The main-gate validator compares this exact worker token with the live
+    // probe owner. It is not permission to submit commands from the gate.
+    void *workerThread;
     TahoeP2PDirectedDataOriginTicket originTicket;
     TahoeP2PDirectedDataPermit permit;
     TahoeP2PDirectedDataState state;
@@ -212,7 +215,8 @@ struct TahoeP2PDirectedDataContext {
     bool hardStopDrained;
 
     TahoeP2PDirectedDataContext()
-        : completion(), arm{}, binding{}, originTicket{}, permit{},
+        : completion(), arm{}, binding{}, workerThread(nullptr),
+          originTicket{}, permit{},
           state(TahoeP2PDirectedDataState::kIdle),
           reason(TahoeP2PDirectedDataReason::kNone), mayOwnResource(0),
           armSerialHighWater(0),
