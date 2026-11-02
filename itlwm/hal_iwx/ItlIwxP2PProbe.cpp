@@ -8017,8 +8017,17 @@ static int exerciseDirectedDataTx(P2PProbeRun *probe)
             }
         } else if (dataTicketWasOpened) {
             if (NativeAwdlBSD::closeDirectedOriginTx(
-                    probe->directedDataOriginTicket))
+                    probe->directedDataOriginTicket)) {
                 dataTicketWasOpened = false;
+                // The BSD ticket opened successfully but its identity did
+                // not bind into the HAL context. Only after the exact BSD
+                // close succeeds may HAL record an unbound, no-doorbell
+                // retirement; a failed gate action keeps mayOwn set.
+                if (probe->directedDataHalArmed)
+                    (void)iwx_tahoe_p2p_directed_data_close(
+                        owner, &owner->nativeP2pDirectedDataTx_,
+                        TahoeP2PDirectedDataReason::kOwnerClosed);
+            }
         } else if (probe->directedDataHalArmed) {
             (void)iwx_tahoe_p2p_directed_data_close(
                 owner, &owner->nativeP2pDirectedDataTx_,

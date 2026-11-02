@@ -173,6 +173,11 @@ struct TahoeP2PDirectedDataContext {
     TahoeP2PDirectedDataPermit permit;
     TahoeP2PDirectedDataState state;
     TahoeP2PDirectedDataReason reason;
+    // Atomic gate-independent summary for lifecycle guards. Zero means this
+    // context has never entered a resource-owning state (or has a verified
+    // safe retirement); one means an owner may still exist or be uncertain.
+    // All accesses after construction must use __atomic_load/store builtins.
+    uint32_t mayOwnResource;
     uint64_t armSerialHighWater;
     uint64_t permitSerialHighWater;
     uint64_t allocationSerialHighWater;
@@ -209,7 +214,8 @@ struct TahoeP2PDirectedDataContext {
     TahoeP2PDirectedDataContext()
         : completion(), arm{}, binding{}, originTicket{}, permit{},
           state(TahoeP2PDirectedDataState::kIdle),
-          reason(TahoeP2PDirectedDataReason::kNone), armSerialHighWater(0),
+          reason(TahoeP2PDirectedDataReason::kNone), mayOwnResource(0),
+          armSerialHighWater(0),
           permitSerialHighWater(0), allocationSerialHighWater(0),
           wifiSequenceHighWater(0), awdlSequenceHighWater(0),
           reservedWifiSequence(0), reservedAwdlSequence(0),
@@ -306,6 +312,7 @@ int iwx_tahoe_p2p_directed_data_drain_after_hardstop(
     TahoeP2PDirectedDataContext *context);
 bool iwx_tahoe_p2p_directed_data_snapshot(
     ItlIwx *owner, const TahoeP2PDirectedDataContext *context,
-    TahoeP2PDirectedDataSnapshot *snapshot, bool tryOnly = false);
+    TahoeP2PDirectedDataSnapshot *snapshot, bool tryOnly = false,
+    int *gateResultOut = nullptr);
 
 #endif // AIRPORT_TAHOE && ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332

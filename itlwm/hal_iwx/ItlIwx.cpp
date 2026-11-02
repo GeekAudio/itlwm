@@ -1840,9 +1840,14 @@ bool ItlIwx::nativeP2pResourcesRetained()
     uint32_t phyLeased = UINT32_MAX, firmwareGeneration = UINT32_MAX;
     uint32_t queuePending = UINT32_MAX;
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    const uint32_t directedDataMayOwn = __atomic_load_n(
+        &nativeP2pDirectedDataTx_.mayOwnResource, __ATOMIC_ACQUIRE);
+    uint32_t directedDataSnapshotAttempted = 0;
+    uint32_t directedDataSnapshotValidValue = 0;
     uint32_t directedDataState = UINT32_MAX;
     uint32_t directedDataReason = UINT32_MAX;
     uint32_t directedDataFlags = UINT32_MAX;
+    int directedDataSnapshotGateResult = 0; // No attempt when mayOwn is clear.
 #endif
 
     if (!workerBusy) {
@@ -1895,35 +1900,42 @@ bool ItlIwx::nativeP2pResourcesRetained()
         if (com.sc_p2p.phy_leased)
             reason |= kStopBlockedByPhy;
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
-        TahoeP2PDirectedDataSnapshot data{};
-        const bool dataSnapshotValid = iwx_tahoe_p2p_directed_data_snapshot(
-            this, &nativeP2pDirectedDataTx_, &data, true);
-        const bool dataRetained = !dataSnapshotValid ||
-            data.state == TahoeP2PDirectedDataState::kArmed ||
-            data.state == TahoeP2PDirectedDataState::kTicketBound ||
-            data.state == TahoeP2PDirectedDataState::kPermitIssued ||
-            data.state == TahoeP2PDirectedDataState::kInFlight ||
-            data.state == TahoeP2PDirectedDataState::kQuarantined ||
-            (data.originTicketBound && !data.originClosed) ||
-            (!data.hardStopDrained && data.doorbellIssued &&
-             !data.completionObserved) ||
-            (data.completionArmed && !data.completionObserved) ||
-            data.mbufHeldByRing;
-        directedDataState = dataSnapshotValid ?
-            static_cast<uint32_t>(data.state) :
-            static_cast<uint32_t>(TahoeP2PDirectedDataState::kQuarantined);
-        directedDataReason = dataSnapshotValid ?
-            static_cast<uint32_t>(data.reason) :
-            static_cast<uint32_t>(TahoeP2PDirectedDataReason::kDrainMismatch);
-        directedDataFlags = (dataSnapshotValid && data.originTicketBound ? 1u : 0u) |
-            (dataSnapshotValid && data.originClosed ? 1u << 1 : 0u) |
-            (dataSnapshotValid && data.doorbellIssued ? 1u << 2 : 0u) |
-            (dataSnapshotValid && data.completionObserved ? 1u << 3 : 0u) |
-            (dataSnapshotValid && data.mbufHeldByRing ? 1u << 4 : 0u) |
-            (dataSnapshotValid && data.completionArmed ? 1u << 5 : 0u) |
-            (dataSnapshotValid && data.completionObserved ? 1u << 6 : 0u) |
-            (dataSnapshotValid && data.hardStopDrained ? 1u << 7 : 0u) |
-            (!dataSnapshotValid ? 1u << 31 : 0u);
+        bool dataRetained = false;
+        if (directedDataMayOwn != 0) {
+            directedDataSnapshotAttempted = 1;
+            TahoeP2PDirectedDataSnapshot data{};
+            const bool dataSnapshotValid =
+                iwx_tahoe_p2p_directed_data_snapshot(this,
+                    &nativeP2pDirectedDataTx_, &data, true,
+                    &directedDataSnapshotGateResult);
+            directedDataSnapshotValidValue = dataSnapshotValid ? 1u : 0u;
+            dataRetained = !dataSnapshotValid ||
+                data.state == TahoeP2PDirectedDataState::kArmed ||
+                data.state == TahoeP2PDirectedDataState::kTicketBound ||
+                data.state == TahoeP2PDirectedDataState::kPermitIssued ||
+                data.state == TahoeP2PDirectedDataState::kInFlight ||
+                data.state == TahoeP2PDirectedDataState::kQuarantined ||
+                (data.originTicketBound && !data.originClosed) ||
+                (!data.hardStopDrained && data.doorbellIssued &&
+                 !data.completionObserved) ||
+                (data.completionArmed && !data.completionObserved) ||
+                data.mbufHeldByRing;
+            if (dataSnapshotValid) {
+                directedDataState = static_cast<uint32_t>(data.state);
+                directedDataReason = static_cast<uint32_t>(data.reason);
+                directedDataFlags =
+                    (data.originTicketBound ? 1u : 0u) |
+                    (data.originClosed ? 1u << 1 : 0u) |
+                    (data.doorbellIssued ? 1u << 2 : 0u) |
+                    (data.completionObserved ? 1u << 3 : 0u) |
+                    (data.mbufHeldByRing ? 1u << 4 : 0u) |
+                    (data.completionArmed ? 1u << 5 : 0u) |
+                    (data.completionObserved ? 1u << 6 : 0u) |
+                    (data.hardStopDrained ? 1u << 7 : 0u);
+            } else {
+                directedDataFlags = 1u << 31;
+            }
+        }
         if (dataRetained)
             reason |= kStopBlockedByDirectedData;
 #endif
@@ -1951,6 +1963,10 @@ bool ItlIwx::nativeP2pResourcesRetained()
     mix(phyLeased);
     mix(firmwareGeneration);
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    mix(directedDataMayOwn);
+    mix(directedDataSnapshotAttempted);
+    mix(directedDataSnapshotValidValue);
+    mix(static_cast<uint32_t>(directedDataSnapshotGateResult));
     mix(directedDataState);
     mix(directedDataReason);
     mix(directedDataFlags);
@@ -1989,11 +2005,37 @@ bool ItlIwx::nativeP2pResourcesRetained()
             controller->setProperty("NativeP2PStopPhyLeased", phyLeased, 32);
             controller->setProperty("NativeP2PStopFirmwareGeneration",
                                     firmwareGeneration, 32);
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+            controller->setProperty("NativeP2PStopDataMayOwnResource",
+                                    directedDataMayOwn, 32);
+            controller->setProperty("NativeP2PStopDataSnapshotAttempted",
+                                    directedDataSnapshotAttempted, 32);
+            controller->setProperty("NativeP2PStopDataSnapshotValid",
+                                    directedDataSnapshotValidValue, 32);
+            controller->setProperty("NativeP2PStopDataSnapshotGateResult",
+                static_cast<uint32_t>(directedDataSnapshotGateResult), 32);
+            controller->setProperty("NativeP2PStopDataContextState",
+                                    directedDataState, 32);
+            controller->setProperty("NativeP2PStopDataContextReason",
+                                    directedDataReason, 32);
+            controller->setProperty("NativeP2PStopDataContextFlags",
+                                    directedDataFlags, 32);
+#endif
         }
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+        IOLog("AirportItlwm[Tahoe] stop blocked by P2P generation=%u reason=0x%x queue=%u/%u pending=%u station=%u/%u mac=%u binding=%u phy=%u fwgen=%u dataOwn=%u dataSnapshot=%u/%u dataGate=%d dataState=%u dataReason=%u dataFlags=0x%x\n",
+            generation, reason, queueState, queueId, queuePending,
+            stationState, stationId, macState, bindingState, phyLeased,
+            firmwareGeneration, directedDataMayOwn,
+            directedDataSnapshotAttempted, directedDataSnapshotValidValue,
+            directedDataSnapshotGateResult, directedDataState,
+            directedDataReason, directedDataFlags);
+#else
         IOLog("AirportItlwm[Tahoe] stop blocked by P2P generation=%u reason=0x%x queue=%u/%u pending=%u station=%u/%u mac=%u binding=%u phy=%u fwgen=%u\n",
             generation, reason, queueState, queueId, queuePending,
             stationState, stationId, macState, bindingState, phyLeased,
             firmwareGeneration);
+#endif
     }
     return retained;
 }

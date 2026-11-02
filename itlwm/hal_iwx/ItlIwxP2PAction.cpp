@@ -2643,6 +2643,33 @@ static void directedDataMarkCompletedClosed(
         context->state = TahoeP2PDirectedDataState::kClosed;
 }
 
+static void directedDataSetMayOwnResource(
+    TahoeP2PDirectedDataContext *context, bool mayOwn)
+{
+    if (context)
+        __atomic_store_n(&context->mayOwnResource, mayOwn ? 1u : 0u,
+                         __ATOMIC_RELEASE);
+}
+
+// Called only while the main command gate owns the context. A completed
+// response is safe only after the ring relinquished its mbuf; a no-doorbell
+// run is safe only after any armed completion ticket was canceled.
+static bool directedDataCanClearMayOwnResource(
+    const TahoeP2PDirectedDataContext *context)
+{
+    if (!context || context->state == TahoeP2PDirectedDataState::kQuarantined ||
+        !context->originClosed || context->mbufHeldByRing)
+        return false;
+    const auto completion = context->completion.snapshot();
+    if (completion.armed && !completion.completed)
+        return false;
+    const bool notSubmitted = !context->doorbellIssued &&
+        (!completion.armed || completion.completed);
+    const bool completed = context->doorbellIssued &&
+        context->completionObserved && completion.completed;
+    return context->hardStopDrained || notSubmitted || completed;
+}
+
 static void directedDataClearSlot(struct iwx_tx_ring *ring, uint16_t index)
 {
     if (!ring || index >= ring->ring_count)
@@ -2829,6 +2856,9 @@ int iwx_tahoe_p2p_directed_data_arm(
     context->sequenceReservationValid = false;
     context->reservedWifiSequence = 0;
     context->reservedAwdlSequence = 0;
+    // Publish before the context becomes Armed. Lifecycle guards may read
+    // this atomic without entering the command gate during cold start.
+    directedDataSetMayOwnResource(context, true);
     context->state = TahoeP2PDirectedDataState::kArmed;
     *bindingOut = context->binding;
     return 0;
@@ -3201,6 +3231,7 @@ static int directedDataTxSubmitOnMainGate(
         mbuf_freem(encodedMpdu);
         if (cancelError) {
             context->reason = TahoeP2PDirectedDataReason::kDrainMismatch;
+            directedDataSetMayOwnResource(context, true);
             context->state = TahoeP2PDirectedDataState::kQuarantined;
             context->mbufHeldByRing = false;
             return cancelError;
@@ -3325,6 +3356,7 @@ static int directedDataTxSubmitOnMainGate(
             generation, static_cast<uint16_t>(ring->qid), index);
         if (cancelled != IntelP2PActionTx::Result::kCancelled) {
             context->mbufHeldByRing = true;
+            directedDataSetMayOwnResource(context, true);
             context->state = TahoeP2PDirectedDataState::kQuarantined;
             context->reason = TahoeP2PDirectedDataReason::kDrainMismatch;
             return ESTALE;
@@ -3341,6 +3373,7 @@ static int directedDataTxSubmitOnMainGate(
             generation, static_cast<uint16_t>(ring->qid), index);
         if (cancelled != IntelP2PActionTx::Result::kCancelled) {
             context->mbufHeldByRing = true;
+            directedDataSetMayOwnResource(context, true);
             context->state = TahoeP2PDirectedDataState::kQuarantined;
             context->reason = TahoeP2PDirectedDataReason::kDrainMismatch;
             return error;
@@ -3355,6 +3388,7 @@ static int directedDataTxSubmitOnMainGate(
     context->ringSize = static_cast<uint16_t>(ring->ring_count);
     context->expectedNextSsn = static_cast<uint16_t>(
         (index + 1) & (ring->ring_count - 1));
+    directedDataSetMayOwnResource(context, true);
     context->doorbellIssued = true;
     context->mbufHeldByRing = true;
     context->sequenceReservationValid = false;
@@ -3363,6 +3397,7 @@ static int directedDataTxSubmitOnMainGate(
     IWX_WRITE(sc, IWX_HBUS_TARG_WRPTR, ring->qid << 16 | ring->cur);
     error = iwx_tahoe_p2p_tvqm_finish_tx_submit(queueLease);
     if (error) {
+        directedDataSetMayOwnResource(context, true);
         context->state = TahoeP2PDirectedDataState::kQuarantined;
         context->reason = TahoeP2PDirectedDataReason::kDoorbellUnknown;
         return error;
@@ -3583,6 +3618,7 @@ void iwx_tahoe_p2p_directed_data_quarantine(
 {
     if (!context)
         return;
+    directedDataSetMayOwnResource(context, true);
     context->reason = reason;
     context->state = TahoeP2PDirectedDataState::kQuarantined;
 }
@@ -3666,6 +3702,8 @@ static IOReturn directedDataCommitCloseAction(
         context->state != TahoeP2PDirectedDataState::kQuarantined)
         context->state = TahoeP2PDirectedDataState::kClosed;
     directedDataMarkCompletedClosed(context);
+    if (directedDataCanClearMayOwnResource(context))
+        directedDataSetMayOwnResource(context, false);
     commit->result = 0;
     return kIOReturnSuccess;
 }
@@ -3835,6 +3873,8 @@ static IOReturn directedDataHardStopFinalizeAction(
         context->firmwareStatus != 0xffff;
     context->state = TahoeP2PDirectedDataState::kClosed;
     context->hardStopDrained = finalize->queueReleased;
+    if (directedDataCanClearMayOwnResource(context))
+        directedDataSetMayOwnResource(context, false);
     finalize->result = 0;
     return kIOReturnSuccess;
 }
@@ -3945,13 +3985,19 @@ static IOReturn directedDataSnapshotAction(
 
 bool iwx_tahoe_p2p_directed_data_snapshot(
     ItlIwx *owner, const TahoeP2PDirectedDataContext *context,
-    TahoeP2PDirectedDataSnapshot *snapshot, bool tryOnly)
+    TahoeP2PDirectedDataSnapshot *snapshot, bool tryOnly,
+    int *gateResultOut)
 {
+    if (gateResultOut)
+        *gateResultOut = static_cast<int>(kIOReturnBadArgument);
     if (!owner || !context || !snapshot)
         return false;
     DirectedDataSnapshotAction action{context, snapshot, false};
-    return directedDataRunMainGateAction(owner, directedDataSnapshotAction,
-        &action, tryOnly) == kIOReturnSuccess && action.valid;
+    const IOReturn gateResult = directedDataRunMainGateAction(owner,
+        directedDataSnapshotAction, &action, tryOnly);
+    if (gateResultOut)
+        *gateResultOut = static_cast<int>(gateResult);
+    return gateResult == kIOReturnSuccess && action.valid;
 }
 
 #endif // ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332

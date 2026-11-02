@@ -101,6 +101,10 @@ session_helpers = "\n\n".join((
     extract(PROBE, "static NativeAwdlProbe::MifBurstRepeatState mifBurstRepeatState("),
     extract(PROBE, "static NativeAwdlProbe::MifBurstRepeatPlan mifBurstDoorbellPlan("),
     extract(PROBE, "static void reconcileP2PTxSubmitFrame("),
+    # Compile the source's real feature-selected predicate with the directed
+    # data profile enabled. The old worker cases keep the fixture flag false,
+    # so they still exercise the legacy TX-snapshot requirement.
+    extract(PROBE, "static bool directedDataRunSelected("),
     extract(PROBE, "static int readRocState("),
     extract(PROBE, "static bool psfQueueProvenUnused("),
     # This function contains mutually exclusive feature-macro branches with
@@ -115,6 +119,8 @@ session_shim = r"""
 #include <cerrno>
 #include <cstdint>
 #include <vector>
+
+#define ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332 1
 
 using mbuf_t = void *;
 using IOReturn = int;
@@ -181,6 +187,7 @@ struct TestPsfCandidate { uint8_t bytes[4]{}; size_t length = 0; uint32_t blocke
 struct P2PProbeRun {
     ItlIwx *owner = nullptr;
     bool rx149ObservationOnly = false;
+    bool directedDataOnly = false;
     uint32_t contextGeneration = 77;
     uint32_t powerGeneration = 88;
     uint32_t stationGeneration = 99;
@@ -626,6 +633,17 @@ static void resetMocks() {
 }
 
 int main() {
+    // These are the real source-helper outcomes for the feature-enabled
+    // profile: legacy runs remain unselected; only the explicit per-run flag
+    // selects the newer mode.
+    assert(!directedDataRunSelected(nullptr));
+    {
+        P2PProbeRun legacy{};
+        assert(!directedDataRunSelected(&legacy));
+        legacy.directedDataOnly = true;
+        assert(directedDataRunSelected(&legacy));
+    }
+
     {
         P2PProbeRun probe{}; probe.awdlPsfProbeEnabled = true;
         probe.actionTxAttempted = true;

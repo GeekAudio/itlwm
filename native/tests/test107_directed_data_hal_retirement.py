@@ -40,8 +40,9 @@ assert close.index("directedDataCaptureCloseIdentityAction") < \
        close.index("NativeAwdlBSD::closeDirectedOriginTx") < \
        close.index("directedDataCommitCloseAction")
 assert "owner->tahoeP2pOnMainGate()" in snapshot_action
-assert "directedDataRunMainGateAction(owner, directedDataSnapshotAction" in snapshot
-assert "&action, tryOnly)" in snapshot
+assert "directedDataSnapshotAction, &action, tryOnly)" in snapshot
+assert "*gateResultOut = static_cast<int>(gateResult)" in snapshot
+assert "return gateResult == kIOReturnSuccess && action.valid" in snapshot
 assert "directedDataCaptureSnapshot" not in snapshot
 assert "gate->runAction(action, owner, argument, nullptr, nullptr)" in ACTION
 assert "gate->attemptAction(action, owner, argument, nullptr," in ACTION
