@@ -20,27 +20,27 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "13dedf3e3a249a0b5088d4e409ba786c8946a423875b705b3a9f79c816388c79"
+      "sha256": "22521272b3b5809ec7845e4ad978a7f3f3c926823af18cc5a5cdc27eb71ebac7"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "11ea0cb63ef23d1721622d84d35c32190ef694e8987c01faa49b7ca931d5b563"
+      "sha256": "54328845b87c89c9acb6a88212f5d02726aaa7ab1b7c70fbb96e2a772c166b4d"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "1c4fdf880ba1af9a5e2c45ea8098c09fed274c81ba8258f51e9f7c59b55076c0"
+      "sha256": "9ca6d7abed265980cea66e1f37674ca2c3e586df3292f108e4c40c1b75723d15"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "1c4fdf880ba1af9a5e2c45ea8098c09fed274c81ba8258f51e9f7c59b55076c0"
+      "sha256": "9ca6d7abed265980cea66e1f37674ca2c3e586df3292f108e4c40c1b75723d15"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "4c0d3e49517f12e9dc2ea01cbc128223da4a8ec7dc2ee2fb1f7308b605e6c770"
+      "sha256": "89d74244a25ea5b5fa23366673dee4f0f509d6fcd51e6f7ab5511448a083f416"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
@@ -85,11 +85,11 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-02T22:58:12.832457+08:00",
-  "runtime_scope": "Wi-Fi only",
-  "running_candidate": "25G332-Test117",
-  "next_candidate": "25G332-Test118",
+  "updated_at": "2026-11-03T00:20:57+08:00",
+  "runtime_scope": "Test118 Wi-Fi scan/switch and passive-stability observation; AWDL RF not triggered",
+  "running_candidate": "25G332-Test118",
+  "next_candidate": "25G332-Test119",
   "website_delivery": "reviewed public-safe snapshot",
-  "deployment_state": "test118_deployed_waiting_reboot_wifi_only",
-  "site_preparation": "Test117 loaded but scan failed. Test118 kext written and read back; config unchanged. Wi-Fi-only validation awaits reboot; AWDL RF and sleep remain paused."
+  "deployment_state": "Test118 15-minute passive window passed; A-to-B switch failed; AWDL tool preflight failed before claim; Test119 built/reviewed/pushed, deployment pending",
+  "site_preparation": "Private staging only. No publish. Test119 source commit 062d7d8 is pushed; deployment and restart remain pending."
 }
