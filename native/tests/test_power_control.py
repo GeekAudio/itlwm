@@ -627,11 +627,58 @@ int main(){unsigned scenarios=0;
  assert(f.hal.requestUpdates==2&&f.hal.requestEpoch==f.a.nativePowerEpoch&&!f.hal.requestOn);
  assert(f.hal.requestHistory[0]==std::make_pair(1U,true)&&
   f.hal.requestHistory[1]==std::make_pair(1U,false));++scenarios;}
+ {Fixture f;auto p=f.request(1);f.hal.result=kIOReturnBusy;
+  f.gate.onSleep=[&]{assert(!f.q.gated);
+   if(f.gate.sleeps==1)f.hal.result=kIOReturnSuccess;
+   else f.ready();};
+  assert(f.a.setPOWER(nullptr,&p)==kIOReturnSuccess&&f.hal.enabled==2&&
+   f.hal.ic.ic_if.if_flags==(IFF_UP|IFF_RUNNING)&&f.gate.sleeps==2&&
+   f.state()==1&&f.a.nativePowerEpoch==1&&f.hal.requestOn&&
+   f.hal.requestEpoch==1);++scenarios;}
+ {Fixture f;auto p=f.request(1);f.hal.result=kIOReturnBusy;
+  f.gate.onSleep=[]{};const uint64_t start=g_uptimeNanoseconds;
+  assert(f.a.setPOWER(nullptr,&p)==kIOReturnBusy&&f.hal.enabled==10&&
+   f.hal.ic.ic_if.if_flags==0&&f.gate.sleeps==10&&f.state()==0&&
+   f.a.nativePowerEpoch==1&&
+   g_uptimeNanoseconds-start==250000000ULL&&
+   !f.hal.requestOn&&f.hal.requestEpoch==1);++scenarios;}
+ {Fixture f;auto p=f.request(1);f.hal.result=kIOReturnBusy;
+  f.gate.earlyWakeCount=80;f.gate.onSleep=[]{};
+  const uint64_t start=g_uptimeNanoseconds;
+  assert(f.a.setPOWER(nullptr,&p)==kIOReturnBusy&&f.hal.enabled==10&&
+   f.gate.earlyWakeCount==0&&f.gate.sleeps>10&&f.state()==0&&
+   g_uptimeNanoseconds-start==250000000ULL);++scenarios;}
+ {Fixture f;auto on=f.request(1),off=f.request(0);f.hal.result=kIOReturnBusy;
+  f.gate.onSleep=[&]{assert(!f.q.gated);
+   assert(f.a.setPOWER(nullptr,&off)==kIOReturnSuccess);
+   assert(f.a.nativePowerEpoch==2&&f.state()==0&&f.hal.disabled==1);
+   // A late READY from the superseded enable must not satisfy the old epoch.
+   f.hal.ic.ic_if.if_flags=IFF_UP|IFF_RUNNING;
+   f.a.observeNativePowerEvent(ITL_TAHOE_EVT_DRIVER_READY);
+   assert(!(f.a.nativePowerFlags&2U));};
+  assert(f.a.setPOWER(nullptr,&on)==kIOReturnAborted&&f.hal.enabled==1&&
+   f.hal.disabled==1&&f.a.nativePowerEpoch==2&&f.a.nativePowerFlags==0&&
+   f.hal.requestEpoch==2&&!f.hal.requestOn&&f.state()==0);++scenarios;}
+ {Fixture f;auto p=f.request(1);f.hal.result=kIOReturnBusy;
+  f.gate.onSleep=[&]{if(f.gate.sleeps==10)f.hal.ic.ic_if.if_flags=IFF_UP;
+   else if(f.gate.sleeps==11)f.ready();};
+  assert(f.a.setPOWER(nullptr,&p)==kIOReturnSuccess&&f.hal.enabled==10&&
+   f.gate.sleeps==11&&f.hal.ic.ic_if.if_flags==(IFF_UP|IFF_RUNNING)&&
+   f.a.nativePowerEpoch==1&&f.state()==1);++scenarios;}
  {Fixture f;auto p=f.request(1);bool sawOff=false;
  f.gate.onSleep=[&]{assert(!f.q.gated);sawOff=f.state()==0;f.ready();};
  assert(f.a.setPOWER(nullptr,&p)==0&&sawOff&&f.state()==1&&f.gate.sleeps==1);
  assert(f.hal.requestOn&&f.hal.requestEpoch==f.a.nativePowerEpoch&&f.hal.requestUpdates==1);
  assert(f.hal.observedPublicEpoch+1==f.hal.requestEpoch);++scenarios;}
+ {Fixture f;auto p=f.request(1);f.hal.ic.ic_if.if_flags=IFF_UP;
+  assert(f.a.setPOWER(nullptr,&p)==kIOReturnSuccess&&f.hal.enabled==0&&
+   f.gate.sleeps==1&&f.state()==1&&f.a.nativePowerFlags==3&&
+   f.a.nativePowerEpoch==1&&f.hal.requestOn&&f.hal.requestEpoch==1);++scenarios;}
+ {Fixture f;auto p=f.request(1);f.hal.ic.ic_if.if_flags=IFF_UP;
+  f.gate.onSleep=[&]{assert(f.a.advanceNativePowerEpoch(true)==2);f.ready();};
+  assert(f.a.setPOWER(nullptr,&p)==kIOReturnAborted&&f.hal.enabled==0&&
+   f.gate.sleeps==1&&f.a.nativePowerFlags==3&&
+   f.hal.ic.ic_if.if_flags==(IFF_UP|IFF_RUNNING)&&f.state()==1);++scenarios;}
  {Fixture f;auto p=f.request(1);f.a.nativePowerFlags=1;f.hal.ic.ic_if.if_flags=IFF_UP;
  assert(f.a.setPOWER(nullptr,&p)==0&&f.hal.enabled==0&&f.gate.sleeps==1&&f.state()==1);++scenarios;}
  {Fixture f;auto p=f.request(1);assert(f.a.setPOWER(nullptr,&p)==0);

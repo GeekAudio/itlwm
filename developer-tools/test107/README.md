@@ -1,6 +1,6 @@
 # Test107：原生单帧发送诊断
 
-Test108 沿用此工具，`--expect-build` 填当前测试版本。
+Test108 / Test109 沿用此工具，`--expect-build` 填当前测试版本。
 
 只验证 `awdl0 → BSD 输出 → 独立 LINK/TID0 队列 → 固件完成 → 回收`。不把 socket 返回成功或固件完成当成手机收件、无线 ACK 或 AirDrop 成功。
 

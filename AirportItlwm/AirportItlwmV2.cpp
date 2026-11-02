@@ -2455,29 +2455,142 @@ IOReturn AirportItlwm::nativePowerAction(OSObject *owner, void *argument,
                 }
                 return kIOReturnSuccess;
             }
-            if ((flags & IFF_UP) &&
-                (__atomic_load_n(&self->nativePowerFlags, __ATOMIC_ACQUIRE) & 1U))
-                return self->waitForNativePower(
-                    __atomic_load_n(&self->nativePowerEpoch, __ATOMIC_ACQUIRE),
-                    traceCallId);
+            if (flags & IFF_UP) {
+                const uint32_t powerFlags = __atomic_load_n(
+                    &self->nativePowerFlags, __ATOMIC_ACQUIRE);
+                if (powerFlags & 1U)
+                    return self->waitForNativePower(
+                        __atomic_load_n(&self->nativePowerEpoch,
+                                        __ATOMIC_ACQUIRE),
+                        traceCallId);
+
+                // A new On request can arrive after a partial init or a
+                // completed Off while the BSD interface still has IFF_UP.
+                // Make it the owner of a new power epoch and wait for the
+                // existing init path to publish READY. Calling enableAdapter
+                // here would hit the HAL's already-UP fast path and cannot
+                // prove that hardware initialization restarted. The wait is
+                // bounded, and a newer Off supersedes it through the epoch.
+                self->updateNativePowerFlags(0, 1U);
+                __atomic_store_n(&self->nativePowerOffPending, false,
+                                 __ATOMIC_RELEASE);
+                const uint32_t epoch = self->advanceNativePowerEpoch(true);
+                self->wakeNativePowerWaiters();
+                return self->waitForNativePower(epoch, traceCallId);
+            }
             return kIOReturnBusy;
         }
         self->updateNativePowerFlags(2U, 1U);
         __atomic_store_n(&self->nativePowerOffPending, false, __ATOMIC_RELEASE);
         const uint32_t epoch = self->advanceNativePowerEpoch(true);
+        constexpr unsigned kEnableAdmissionWindowMilliseconds = 250;
+        constexpr unsigned kEnableRetryDelayMilliseconds = 25;
+        AbsoluteTime retryDeadline;
+        clock_interval_to_deadline(kEnableAdmissionWindowMilliseconds,
+                                   kMillisecondScale, &retryDeadline);
         self->recordNativeControlTrace(traceCallId,
             NativePowerTrace::Operation::kPowerSet,
             NativePowerTrace::Phase::kEnableBegin, epoch, 0);
-        const IOReturn result = self->enableAdapter(self->bsdInterface);
-        if (result != kIOReturnSuccess) {
-            self->updateNativePowerFlags(3U, 0);
-            self->fHalService->setNativePowerRequestState(epoch, false);
+        IOReturn result = kIOReturnBusy;
+        bool waitForReady = false;
+        for (;;) {
+            if (__atomic_load_n(&self->nativePowerStopping, __ATOMIC_ACQUIRE) ||
+                epoch != __atomic_load_n(&self->nativePowerEpoch, __ATOMIC_ACQUIRE) ||
+                !(__atomic_load_n(&self->nativePowerFlags, __ATOMIC_ACQUIRE) & 1U)) {
+                result = kIOReturnAborted;
+                break;
+            }
+
+            const uint32_t currentFlags = ifp->if_flags & (IFF_UP | IFF_RUNNING);
+            if (currentFlags & IFF_UP) {
+                // The first enable attempt may have moved the interface into
+                // its asynchronous UP phase before reporting Busy. Never call
+                // enableAdapter again in that state; wait for the real READY
+                // event with waitForNativePower's absolute 12-second bound.
+                waitForReady = true;
+                result = kIOReturnBusy;
+                break;
+            }
+            if (currentFlags) {
+                // Do not issue another hardware enable against an unknown
+                // partial interface state (for example RUNNING without UP).
+                result = kIOReturnBusy;
+                break;
+            }
+
+            result = self->enableAdapter(self->bsdInterface);
+            if (result != kIOReturnBusy) break;
+
+            const uint32_t afterAttemptFlags =
+                ifp->if_flags & (IFF_UP | IFF_RUNNING);
+            if (afterAttemptFlags & IFF_UP) {
+                waitForReady = true;
+                break;
+            }
+            if (afterAttemptFlags) break;
+
+            AbsoluteTime now;
+            clock_get_uptime(&now);
+            if (now >= retryDeadline) break;
+
+            AbsoluteTime nextRetry;
+            clock_interval_to_deadline(kEnableRetryDelayMilliseconds,
+                                       kMillisecondScale, &nextRetry);
+            if (nextRetry > retryDeadline) nextRetry = retryDeadline;
+            while (now < nextRetry) {
+                if (__atomic_load_n(&self->nativePowerStopping, __ATOMIC_ACQUIRE) ||
+                    epoch != __atomic_load_n(&self->nativePowerEpoch, __ATOMIC_ACQUIRE) ||
+                    !(__atomic_load_n(&self->nativePowerFlags, __ATOMIC_ACQUIRE) & 1U)) {
+                    result = kIOReturnAborted;
+                    break;
+                }
+                const IOReturn wake = _fCommandGate->commandSleep(
+                    &self->nativePowerFlags, nextRetry, THREAD_INTERRUPTIBLE);
+                if (wake != THREAD_AWAKENED && wake != THREAD_TIMED_OUT) {
+                    result = kIOReturnAborted;
+                    break;
+                }
+                clock_get_uptime(&now);
+            }
+            if (result == kIOReturnAborted) break;
+            if (__atomic_load_n(&self->nativePowerStopping, __ATOMIC_ACQUIRE) ||
+                epoch != __atomic_load_n(&self->nativePowerEpoch, __ATOMIC_ACQUIRE) ||
+                !(__atomic_load_n(&self->nativePowerFlags, __ATOMIC_ACQUIRE) & 1U)) {
+                result = kIOReturnAborted;
+                break;
+            }
+            const uint32_t afterWaitFlags = ifp->if_flags & (IFF_UP | IFF_RUNNING);
+            if (afterWaitFlags & IFF_UP) {
+                waitForReady = true;
+                break;
+            }
+            if (afterWaitFlags) {
+                result = kIOReturnBusy;
+                break;
+            }
+            clock_get_uptime(&now);
+            if (now >= retryDeadline) {
+                result = kIOReturnBusy;
+                break;
+            }
+            // READY/other early wakes do not move the retry deadline. Recheck
+            // flags and epoch before another admission attempt.
+        }
+        if (result != kIOReturnSuccess && !waitForReady) {
+            const bool currentRequest =
+                epoch == __atomic_load_n(&self->nativePowerEpoch, __ATOMIC_ACQUIRE) &&
+                (__atomic_load_n(&self->nativePowerFlags, __ATOMIC_ACQUIRE) & 1U) &&
+                !__atomic_load_n(&self->nativePowerStopping, __ATOMIC_ACQUIRE);
+            if (currentRequest) {
+                self->updateNativePowerFlags(3U, 0);
+                self->fHalService->setNativePowerRequestState(epoch, false);
+            }
         }
         self->recordNativeControlTrace(traceCallId,
             NativePowerTrace::Operation::kPowerSet,
             NativePowerTrace::Phase::kEnableEnd,
             0, result);
-        return result == kIOReturnSuccess
+        return result == kIOReturnSuccess || waitForReady
             ? self->waitForNativePower(epoch, traceCallId) : result;
     }
     const uint32_t previousPolicy = self->updateNativePowerFlags(1U, 0);

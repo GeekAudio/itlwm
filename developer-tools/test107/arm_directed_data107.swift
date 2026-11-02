@@ -30,14 +30,14 @@ func stop(_ text: String, _ code: Int32 = 1) -> Never {
 let args = Array(CommandLine.arguments.dropFirst())
 let run = args.last == "--run"
 let values = run ? Array(args.dropLast()) : args
-guard values.count == 12, values[0] == "--expect-build", ["25G332-Test107", "25G332-Test108"].contains(values[1]),
+guard values.count == 12, values[0] == "--expect-build", ["25G332-Test107", "25G332-Test108", "25G332-Test109"].contains(values[1]),
       values[2] == "--expect-uuid", values[4] == "--peer-mac",
       values[6] == "--local-ipv6", values[8] == "--nonce", values[10] == "--run-token",
       matches(values[3], "^[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}$"),
       matches(values[5], "^[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}$"),
       matches(values[9], "^[0-9a-f]{16}$"), values[9].contains(where: { $0 != "0" }),
       matches(values[11], "^[0-9a-f]{32}$"), values[11].contains(where: { $0 != "0" }) else {
-    stop("Usage: --expect-build 25G332-Test107|25G332-Test108 --expect-uuid UUID --peer-mac MAC --local-ipv6 fe80::ADDRESS --nonce 16hex --run-token 32hex [--run]")
+    stop("Usage: --expect-build 25G332-Test107|25G332-Test108|25G332-Test109 --expect-uuid UUID --peer-mac MAC --local-ipv6 fe80::ADDRESS --nonce 16hex --run-token 32hex [--run]")
 }
 let peer = values[5].split(separator: ":").map { UInt8($0, radix: 16)! }
 guard peer[0] & 1 == 0, peer.contains(where: { $0 != 0 }) else { stop("Invalid unicast peer") }
