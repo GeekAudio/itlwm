@@ -145,9 +145,11 @@ DecodeResult decodeScan(const void *buffer, size_t n, ScanPlan &out, uint32_t *f
             if (length > ITL_SCAN_SSID_BYTES)
                 return rejected(field,offset + 4,DecodeResult::Malformed);
             // The saved producer leaves its trailing zero-length record
-            // zero-filled. Nonempty records have version 1. Unknown per-SSID
+            // zero-filled, only in the final slot. Explicit records have
+            // version 1 (including an explicit empty SSID). Unknown per-SSID
             // metadata must not be silently discarded.
-            if (version != 1 && !(version == 0 && !length && allZero(entry,56)))
+            if (version != 1 && !(version == 0 && i + 1 == targetCount &&
+                                  !length && allZero(entry,56)))
                 return rejected(field,offset,DecodeResult::Unsupported);
             if (!allZero(entry + 40,16) || (!length && !allZero(entry + 8,32)))
                 return rejected(field,offset + 40,DecodeResult::Unsupported);

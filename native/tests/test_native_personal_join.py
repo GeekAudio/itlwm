@@ -39,6 +39,7 @@ struct ieee80211_wpaparams {
 static ieee80211_wpaparams parameters;
 static unsigned scanCalls, clearCalls, saeCalls, deriveCalls;
 static int setterError, stateError, configError;
+static bool deriveError;
 static unsigned char saePassword[64]; static size_t saeLength;
 static bool allZero(const void *p, size_t n) {
  const auto b=static_cast<const unsigned char *>(p);
@@ -63,7 +64,7 @@ static int ieee80211_new_state(ieee80211com *ic,int state,int) {
 }
 namespace NativeWifi {
 bool deriveWPA2Pmk(const uint8_t*,size_t,const uint8_t*,size_t,uint8_t *out) {
- ++deriveCalls; memset(out,0x3c,32);return true;
+ ++deriveCalls; memset(out,0x3c,32);return !deriveError;
 }
 }
 struct Hal {
@@ -82,7 +83,16 @@ public:
  static void radioClearCredentials(void*);
 };
 static int idle(ieee80211com*){return 0;}
-static int newstate(ieee80211com*,int,int){return stateError;}
+static AirportItlwmSkywalkInterface *replacementOwner;
+static NativeWifi::JoinPlan replacementPlan;
+static bool replaceOnState;
+static int newstate(ieee80211com *ic,int,int){
+ if(replaceOnState){
+  replaceOnState=false;ic->ic_state=IEEE80211_S_SCAN;
+  assert(replacementOwner->radioJoin(replacementOwner,replacementPlan)==NativeWifi::Status::Ok);
+ }
+ return stateError;
+}
 '''
 tests = r'''
 int main(){
@@ -125,6 +135,21 @@ int main(){
  setterError=0;hal.ic.ic_state=IEEE80211_S_RUN;stateError=EIO;
  assert(self.radioJoin(&self,p)==NativeWifi::Status::Failed);
  assert(!saeLength&&allZero(saePassword,64)&&!hal.ic.ic_tahoe_join_requested);
+ assert(!hal.ic.ic_des_esslen&&allZero(hal.ic.ic_des_essid,32)&&allZero(hal.ic.ic_des_bssid,6));
+ assert(!(hal.ic.ic_flags&(IEEE80211_F_DESBSSID|IEEE80211_F_MFPR|IEEE80211_F_PSK)));
+ assert(!self.current_authtype_lower&&!self.current_authtype_upper);
+ // An earlier setup failure also retires a prior desired target.
+ stateError=0;hal.ic.ic_state=IEEE80211_S_SCAN;
+ assert(self.radioJoin(&self,p)==NativeWifi::Status::Ok);
+ configError=EIO;
+ assert(self.radioJoin(&self,p)==NativeWifi::Status::Failed);
+ assert(!hal.ic.ic_des_esslen&&allZero(hal.ic.ic_des_bssid,6));
+ assert(!(hal.ic.ic_flags&IEEE80211_F_DESBSSID)&&!hal.ic.ic_tahoe_join_requested);
+ configError=0;
+ p.authentication=NativeWifi::Authentication::Psk;p.derivePmk=true;deriveError=true;
+ assert(self.radioJoin(&self,p)==NativeWifi::Status::Failed);
+ assert(!hal.ic.ic_des_esslen&&allZero(hal.ic.ic_des_bssid,6)&&allZero(hal.ic.ic_psk,32));
+ deriveError=false;p.authentication=NativeWifi::Authentication::Sae;p.derivePmk=false;
  // Async reset/failure cleanup clears configuration without a radio transition.
  stateError=0;hal.ic.ic_state=IEEE80211_S_SCAN;
  assert(self.radioJoin(&self,p)==NativeWifi::Status::Ok);
@@ -134,6 +159,18 @@ int main(){
  assert(!saeLength&&allZero(saePassword,64)&&allZero(hal.ic.ic_psk,32));
  assert(!hal.ic.ic_tahoe_join_requested&&!hal.ic.ic_des_esslen);
  assert(!(hal.ic.ic_flags&(IEEE80211_F_PSK|IEEE80211_F_MFPR|IEEE80211_F_DESBSSID)));
+ // Failure cleanup is scoped to the exact radio request epoch. Model a
+ // synchronous boundary replacement: A's failure must not erase B's selection.
+ replacementOwner=&self;replacementPlan=p;replacementPlan.ssid[0]='b';
+ replacementPlan.bssid[5]=2;replacementPlan.password[0]='b';
+ hal.ic.ic_state=IEEE80211_S_RUN;stateError=EIO;replaceOnState=true;
+ const unsigned oldEpoch=self.nativeJoinEpoch;
+ assert(self.radioJoin(&self,p)==NativeWifi::Status::Failed);
+ assert(self.nativeJoinEpoch==oldEpoch+2);
+ assert(hal.ic.ic_tahoe_join_requested&&hal.ic.ic_des_esslen==1&&hal.ic.ic_des_essid[0]=='b');
+ assert(!memcmp(hal.ic.ic_des_bssid,replacementPlan.bssid,6));
+ assert((hal.ic.ic_flags&IEEE80211_F_DESBSSID)&&saeLength==1&&saePassword[0]=='b');
+ assert(self.current_authtype_upper==replacementPlan.upperAuth);
 }
 '''
 with tempfile.TemporaryDirectory(prefix='native-personal-join-') as d:

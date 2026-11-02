@@ -1946,17 +1946,22 @@ NativeWifi::Status AirportItlwmSkywalkInterface::radioJoin(void *context,
     if (plan.pmfRequired && !(ic->ic_caps & IEEE80211_C_MFP))
         return NativeWifi::Status::Unsupported;
     if (!++self->nativeJoinEpoch) ++self->nativeJoinEpoch;
+    const uint32_t attemptedEpoch = self->nativeJoinEpoch;
     ieee80211_sae_clear(ic);
     ieee80211_disable_rsn(ic); ieee80211_disable_wep(ic);
     NativeWifi::erase(ic->ic_psk, sizeof(ic->ic_psk));
     ic->ic_flags &= ~(IEEE80211_F_AUTO_JOIN | IEEE80211_F_PSK | IEEE80211_F_MFPR);
     if (plan.pmfRequired) ic->ic_flags |= IEEE80211_F_MFPR;
-    const auto failed = [ic]() {
-        ieee80211_sae_clear(ic);
-        NativeWifi::erase(ic->ic_psk, sizeof(ic->ic_psk));
-        ic->ic_tahoe_join_requested = false;
-        ic->ic_flags &= ~(IEEE80211_F_PSK | IEEE80211_F_MFPR);
-        ieee80211_disable_rsn(ic);
+    const auto failed = [self, ic, attemptedEpoch]() {
+        // Failure is radio-local: immediate admission has no pending backend
+        // Join whose finish callback could retire the desired network. Never
+        // erase a replacement Join or another controller's selection.
+        if (self->nativeJoinEpoch == attemptedEpoch &&
+            self->fHalService->get80211Controller() == ic) {
+            self->current_authtype_lower = 0;
+            self->current_authtype_upper = 0;
+            radioClearCredentials(self);
+        }
         return NativeWifi::Status::Failed;
     };
     if (plan.secured) {

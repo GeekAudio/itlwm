@@ -6,7 +6,7 @@ association, and event flow. The separate P2P/AWDL path experiments with action
 frames, peer timing, transmit queues, RX tracing, and the native `awdl0`
 interface lifecycle.
 
-The isolated `25G332-WPA3PMF-Dev03` candidate adds bounded native SSID-list
+The isolated `25G332-WPA3PMF-Dev04` candidate adds bounded native SSID-list
 scanning, directed hidden-network discovery/join and OS-driven saved-network
 retry, plus the existing SAE/PMF candidate, on the Test120 source baseline.
 See [hidden networks](HIDDEN-NETWORKS.md) and [WPA3/PMF](WPA3-PMF.md) for its
@@ -84,7 +84,7 @@ repository. Wire offsets are read explicitly rather than reinterpreting an
 unrelated older C++ structure.
 
 `wcl_backend` owns request state and secret material. The isolated
-`25G332-WPA3PMF-Dev03` candidate adds ordinary WPA3-SAE (group 19, H&P/H2E),
+`25G332-WPA3PMF-Dev04` candidate adds ordinary WPA3-SAE (group 19, H&P/H2E),
 WPA2-PSK-SHA256, and optional/required PMF to the existing WPA2-PSK/CCMP path.
 SAE uses the supplied password for authentication; it never treats the native
 request's auxiliary 32-byte field as an authenticated SAE PMK. Enterprise and

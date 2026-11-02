@@ -1,6 +1,6 @@
 # AX201 WPA3 / PMF development candidate
 
-`25G332-WPA3PMF-Dev03` is an isolated x86_64 Tahoe/AX201 development candidate.
+`25G332-WPA3PMF-Dev04` is an isolated x86_64 Tahoe/AX201 development candidate.
 It has not been deployed or tested against an access point. A successful build,
 portable handshake, or firmware command-table match does not establish a working
 encrypted Wi-Fi connection or AirDrop interoperability.
@@ -51,9 +51,17 @@ supports MFP. Native capability bit 75 has been located in both saved Tahoe buil
 25G241 and 25G332. An independent native meaning for the old bit-48 PMF comment
 has not been proved, so this change does not invent a new bit-48 contract.
 
+## Dev03 review corrections
+
+Dev04 supersedes the independent `88c80fe` Dev03 snapshot. Immediate failed
+Join now retires desired SSID/BSSID/DESBSSID and authentication metadata only
+for the captured epoch/controller; a replacement request is preserved. Native
+version0 scan-list sentinels are accepted only in the final slot. These
+corrections have production-body and parser/backend regressions.
+
 ## Test120 integration
 
-Dev03 ports the complete Dev02 series onto `dd5913819449b6a9d4d8701531f093d88e9260c8`.
+Dev04 ports the complete Dev02 series onto `dd5913819449b6a9d4d8701531f093d88e9260c8`.
 The observed-key wrapper goes through the real PMF main gate and forwards the
 same receipt pointer to the installer. Gate rejection returns EAGAIN rather than
 the submitted-asynchronous EBUSY result. The installer samples TX PN once for
@@ -65,10 +73,12 @@ The pinned SO68 reverse evidence for MGMT_MCAST_KEY 0x011f uses exactly four
 payload bytes containing LE32 status 1; unknown firmware ABI, failed/short/long
 responses, timeout and stale command/node/key identities cannot activate IGTK.
 These checks validate parsing and host policy offline; no live firmware reply
-or protected AP exchange has been observed for Dev03.
+or protected AP exchange has been observed for Dev04.
 
 The current lifecycle fence, tagged init-task dispatch, MCC and directed-DMA
-ownership guards are retained. Stop/detach still require actual ownership and
+ownership guards are retained. Shared RX decryption/dispatch, HCMD completion,
+common CCMP key install/delete, stop/detach and DMA-owner retention are affected
+by the port; ordinary WPA2 and GTK rekey need runtime regression too. Stop/detach still require actual ownership and
 quiescence checks; the host tests do not establish unload safety on hardware.
 Hidden-network behavior and scan priority are described separately in
 [HIDDEN-NETWORKS.md](HIDDEN-NETWORKS.md).

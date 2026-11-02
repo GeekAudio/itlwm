@@ -33,14 +33,14 @@ struct Radio {
     Backend backend;
     unsigned scans{}, joins{}, leaves{}, linkUps{}, connections{}, clearCalls{};
     ScanPlan captured{};
-    bool busyJoin{};
+    bool busyJoin{}, failJoin{};
     static Status scanOp(void *raw, const ScanPlan &p) {
         auto &r = *static_cast<Radio *>(raw); ++r.scans; r.captured = p;
         return Status::Ok;
     }
     static Status joinOp(void *raw, const JoinPlan &) {
         auto &r = *static_cast<Radio *>(raw); ++r.joins;
-        return r.busyJoin ? Status::Busy : Status::Ok;
+        return r.busyJoin ? Status::Busy : (r.failJoin ? Status::Failed : Status::Ok);
     }
     static void leaveOp(void *raw) { ++static_cast<Radio *>(raw)->leaves; }
     static void clearOp(void *raw) { ++static_cast<Radio *>(raw)->clearCalls; }
@@ -98,6 +98,16 @@ int main() {
     reject(bad, DecodeResult::Unsupported, 0x131c + 40);
     bad = wire; write32(bad.data() + 0x1c, 1); bad[0x20] = 'x';
     reject(bad, DecodeResult::Unsupported, 0x1c);
+    // Only the producer's final all-zero v0 sentinel is accepted. An
+    // explicit version1 zero-length target is a separate, valid record.
+    auto middle = scan(3); target(middle,0,hidden,sizeof(hidden));
+    target(middle,2,hidden,sizeof(hidden));
+    reject(middle,DecodeResult::Unsupported,0x131c+56);
+    auto first = scan(2);target(first,1,hidden,sizeof(hidden));
+    reject(first,DecodeResult::Unsupported,0x131c);
+    target(first,0,nullptr,0);
+    assert(decodeScan(first.data(),first.size(),p)==DecodeResult::Ok);
+    assert(p.targets.count==2&&!p.targets.entries[0].length);
     auto passive = scan(2, true); target(passive, 0, hidden, sizeof(hidden));
     assert(decodeScan(passive.data(), passive.size(), p) == DecodeResult::Ok && p.type == 2);
 
@@ -139,6 +149,15 @@ int main() {
     auto missingCandidate = j; write32(missingCandidate.data() + 0x214, 0);
     JoinPlan jp{};
     assert(decodeJoin(missingCandidate.data(), missingCandidate.size(), jp) == DecodeResult::Malformed);
+    // Immediate Failed has no pending Join callback: adapter-local cleanup
+    // must handle it. Deferred failure does invoke the backend cleanup hook.
+    Radio immediate;immediate.failJoin=true;
+    assert(immediate.backend.joinRequest(j.data(),j.size())==Status::Failed);
+    assert(!immediate.backend.joining()&&immediate.clearCalls==0);
+    Radio deferred;deferred.busyJoin=true;
+    assert(deferred.backend.joinRequest(j.data(),j.size())==Status::Ok);
+    deferred.busyJoin=false;deferred.failJoin=true;deferred.backend.tick(1);
+    assert(!deferred.backend.joining()&&deferred.clearCalls==1&&deferred.connections==1);
     r.backend.stop();
     assert(r.backend.scanRequest(passive.data(), passive.size()) == Status::NotReady);
     assert(r.backend.joinRequest(j.data(), j.size()) == Status::NotReady);

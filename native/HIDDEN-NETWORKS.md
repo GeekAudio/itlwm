@@ -1,6 +1,6 @@
 # AX201 hidden-network offline candidate
 
-Dev03 is based on Test120 (`dd5913819449b6a9d4d8701531f093d88e9260c8`).
+Dev04 is based on Test120 (`dd5913819449b6a9d4d8701531f093d88e9260c8`).
 It has not been deployed, loaded, or tested with a hidden AP.
 
 ## Request and firmware path
@@ -9,9 +9,10 @@ The existing native setWCL_SCAN_REQ path decodes scan441 (0x1550 bytes). Its
 SSID-list count at +0x1318 is bounded to ten; +0x131c carries 56-byte records
 (version DWORD, byte length DWORD, 32 SSID bytes, 16 reserved bytes). The saved
 25G332 producer supports up to nine caller strings and appends one zero-filled
-record. Version 1 nonempty entries and the canonical all-zero empty record are
-accepted. Unknown versions/metadata, length >32, count >10 and ambiguous list
-plus single-SSID requests fail closed. Target bytes and duplicates retain order.
+record. Version 1 entries (including explicit empty SSIDs) and a canonical
+all-zero version0 record only in the final slot are accepted. A version0
+sentinel before the final slot is rejected. Unknown versions/metadata, length
+>32, count >10 and ambiguous list plus single-SSID requests fail closed. Target bytes and duplicates retain order.
 
 A captured, fixed-capacity target set passes through the native owned gate into
 net80211 and the HAL main-gate scan-policy snapshot. All three UMAC builders
@@ -39,7 +40,11 @@ Scan admission protects an RSN association whose controlled port is not yet
 valid or whose PMF key batch is pending, including actual HAL background-scan
 admission. OS-driven saved-network retries use current bounded deferred-Join
 admission, a fresh epoch and current BSS/port authorization. Leave/failure/stop
-clear temporary credentials; this is not a new persistent credential store or
+clear temporary credentials. Immediate radio-admission failure also clears the
+same attempt's desired SSID/BSSID/DESBSSID and authentication metadata, guarded
+by the captured Join epoch and controller identity so it cannot erase a
+replacement request. Deferred failure still has its separate backend callback.
+This is not a new persistent credential store or
 a driver-initiated automatic reconnect loop.
 
 ## Offline checks and limits
