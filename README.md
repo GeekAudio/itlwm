@@ -1,53 +1,94 @@
 # AirportItlwm-Tahoe
 
-Intel AX201 的 macOS Tahoe 原生 Wi-Fi 驱动，基于 OpenIntelWireless/itlwm。
+让 Intel AX201 在 macOS Tahoe 使用系统原生 Wi-Fi，基于 [OpenIntelWireless/itlwm](https://github.com/OpenIntelWireless/itlwm) 开发。通过 OpenCore 加载，无需 HeliPort 或 OCLP，不修改系统卷。
 
-## Release 与开发状态
+[下载驱动](https://github.com/GeekAudio/itlwm/releases/tag/tahoe-2.4.0) · [安装](#安装opencore) · [实测进度与开发时间线](https://geekaudio.github.io/itlwm/milestones.html) · [开发源码](https://github.com/GeekAudio/itlwm/tree/codex/tahoe-test095)
 
-- **GitHub Release：2.4.0 / Test059。** Release 只包含 `AirportItlwm-Tahoe.zip` 二进制包；下方的安装说明和设备范围针对这个版本。
-- **开发源码：Test079。** 新增引导后的安全配对与接收收尾处理，尚待实机验证。Test078 的两段短测通过，但后段发生断链和 watchdog；没有数据回包或 AirDrop 文件收件证明。开发源码不属于现有 Release 压缩包，详见[接收路径分析](developer-tools/RX-DATA-PATH.md)。
+## 版本
 
-## Test059 Release 适用范围
+| 版本 | 用途 | 当前状态 |
+| --- | --- | --- |
+| **2.4.0 / Test059** | 已发布的 Wi-Fi 驱动 | 下载文件为 `AirportItlwm-Tahoe.zip`，支持范围见下表 |
+| **Test120** | 开发与诊断 | 已构建并部署到测试机，等待重启验证；未发布到 Release |
 
-- 本次发布：2.4.0 / Test059。
-- 实测系统：macOS 26.7.2，build 25G332，x86_64。
-- 实测网卡：AX201，PCI 8086:7AF0，子设备 8086:0074。本包只匹配这组设备。
-- 使用系统 Wi-Fi 菜单，可扫描、连接和使用私有地址。支持已实现的开放网络及 WPA2-PSK；WPA3-only、企业认证暂不支持。
+开发进度更新于 **2026-11-03**。Test120 处理接收诊断失败后的资源清理；最近的实测结果来自 Test119。最新逐项结果以[里程碑页](https://geekaudio.github.io/itlwm/milestones.html)为准。
 
-## 依赖
+## 适用范围
 
-通过 OpenCore 注入。Wi-Fi 无需额外 kext、HelliPort 或 OCLP，不修改系统卷；保留系统自带 IO80211Family 和 IOSkywalkFamily，不为本驱动添加 Kernel → Block。
+目前只在一台机器上验证，**本发布包只匹配下列设备**。
 
-蓝牙独立安装 OpenIntelWireless 的 IntelBluetoothFirmware 和适用于当前系统的 BlueToolFixup，本包不含蓝牙驱动。
+| 项目 | 范围 |
+| --- | --- |
+| 系统 | macOS 26.7.2，build `25G332`，x86_64 |
+| 网卡 | Intel AX201，PCI `8086:7AF0`，子设备 `8086:0074` |
+| 网络认证 | 开放网络、WPA2-Personal（PSK） |
+| 其他系统、网卡 | 尚未验证；上游支持的设备不等于本包支持 |
+| WPA3-only、企业认证 | 暂不支持 |
 
-## 安装
+用 `sw_vers -productVersion` 和 `sw_vers -buildVersion` 查看系统版本。本驱动使用系统私有接口，不能只按“macOS 26”判断兼容性。
 
-1. 解压 `AirportItlwm-Tahoe.zip`，把 `AirportItlwm.kext` 放到 `EFI/OC/Kexts/`。
-2. 禁用同一网卡的其他 AirportItlwm / itlwm 条目。
-3. 在 `config.plist → Kernel → Add` 添加以下条目，保存后重启。
+## 功能状态
+
+✅ 已有实测　⚠️ 可用但仍有问题　🚧 开发中　— 尚未验收
+
+| 功能 | 已发布 Test059 | 开发版最近实测（Test119） |
+| --- | --- | --- |
+| 系统 Wi-Fi 菜单、扫描、连接、获取 IP | ✅ | ⚠️ 普通联网可用；扫描和菜单状态仍有异常 |
+| 私有 Wi-Fi 地址 | ✅ | 保留支持，未逐项复验 |
+| 快速切换网络（A → B → A） | — | ⚠️ 偶发无法加入、菜单不显示已连接网络 |
+| 长时间联网、密钥更新 | ⚠️ 出现过发送超时并自动恢复 | ⚠️ 仍在排查断链和恢复，短时观察通过不代表长期稳定 |
+| 睡眠与唤醒 | — | — 当前暂停测试 |
+| 即时热点 | — | ⚠️ 手机能开启热点，Mac 扫描并加入的过程仍会失败 |
+| 原生 awdl0 数据接收 | 不作为发布功能 | 🚧 已收到受控 OpenWrt 测试的 UDP 载荷；尚未证明 iPhone 数据回包 |
+| 双向 AirDrop | 不支持 | 🚧 尚未打通文件传输 |
+| 接力、通用剪贴板 | 不列为支持功能 | — 尚未完成独立验收 |
+
+设备互相可见、驱动报告发出数据，都不等于 AirDrop 传输成功。
+
+## 组件与依赖
+
+| 组件 | 用途 | 依赖 |
+| --- | --- | --- |
+| `AirportItlwm.kext` | Intel Wi-Fi | OpenCore；系统自带 `IO80211Family`、`IOSkywalkFamily` |
+| Intel 蓝牙组件（另装） | 固件加载与系统蓝牙兼容 | 见下方官方安装说明，本发布包不包含蓝牙组件 |
+
+Wi-Fi 本身不依赖 Lilu 或额外辅助 kext。保留系统 Wi-Fi 框架，不为此驱动添加 `Kernel → Block`。
+
+如果使用 Intel 蓝牙，按 [OpenIntelWireless 官方说明](https://openintelwireless.github.io/IntelBluetoothFirmware/FAQ.html#what-additional-steps-should-i-do-to-make-bluetooth-work-on-macos-monterey-and-newer)配置 `IntelBluetoothFirmware`、`IntelBTPatcher`、`BlueToolFixup` 及 Lilu；在 Tahoe 上不要加载 `IntelBluetoothInjector`。具体版本需适配当前系统，蓝牙能发现设备也不代表 AirDrop 数据通路已完成。
+
+## 安装（OpenCore）
+
+以下步骤针对已发布的 **Test059**。
+
+1. 下载并解压 [AirportItlwm-Tahoe.zip](https://github.com/GeekAudio/itlwm/releases/download/tahoe-2.4.0/AirportItlwm-Tahoe.zip)。
+2. 将 `AirportItlwm.kext` 放入 `EFI/OC/Kexts/`。
+3. 禁用同一网卡的其他 `itlwm` / `AirportItlwm` 条目，在 `config.plist → Kernel → Add` 添加下面的配置。
+4. 保存后重启，在系统 Wi-Fi 菜单扫描并连接网络。
 
 | 字段 | 值 |
 | --- | --- |
-| BundlePath | AirportItlwm.kext |
-| ExecutablePath | Contents/MacOS/AirportItlwm |
-| PlistPath | Contents/Info.plist |
-| Enabled | true |
-| Arch | x86_64 |
-| MinKernel | 25.6.0 |
-| MaxKernel | 25.6.0 |
+| BundlePath | `AirportItlwm.kext` |
+| ExecutablePath | `Contents/MacOS/AirportItlwm` |
+| PlistPath | `Contents/Info.plist` |
+| Enabled | `true` |
+| Arch | `x86_64` |
+| MinKernel | `25.6.0` |
+| MaxKernel | `25.6.0` |
 
-这些版本字段不能代替系统 build 检查。此版本使用私有系统接口，其他系统版本或网卡尚未验证。
+`MinKernel` / `MaxKernel` 限制的是 Darwin 内核版本，不能代替上面的系统 build 检查。
 
-## Test059 发布验证记录
+## 验证与反馈
 
-普通 Wi-Fi 可扫描和连接，支持私有地址。Test059 的发布复查曾记录一次发送超时并自动恢复；长期稳定性、睡眠恢复和即时热点不在该次验收范围内。
+先确认扫描、连接、获取 IP 和实际联网，再测试开关 Wi-Fi、切换已知网络和持续联网。AirDrop 目前仍是开发目标。
 
-Test059 不支持 AirDrop 或接力。AWDL 实验属于后续开发源码。
+反馈问题时附上系统 build、网卡 PCI ID、驱动 Test 编号、发生时间和具体操作，例如“连接 B 后立即切回 A”。日志中的 SSID、MAC 地址、设备标识和密码请先移除。
 
-## Release 下载与源码
+## 源码与构建
 
-在本仓库 Releases 下载 `AirportItlwm-Tahoe.zip`。它与本次实机使用的 Test059 驱动一致，保留原有构建标识。
+- **复现发布包：**使用 [Test059 对应源码](https://github.com/GeekAudio/itlwm/tree/0b292eb0f304079eb11f10d8659489f8ded3762d)和[该提交的构建说明](https://github.com/GeekAudio/itlwm/blob/0b292eb0f304079eb11f10d8659489f8ded3762d/AirportItlwm-Tahoe-README.md)，需要完整 Xcode、Python 3 和 MacKernelSDK。
+- **参与开发：**查看[开发分支](https://github.com/GeekAudio/itlwm/tree/codex/tahoe-test095)与[数据接收路径说明](https://github.com/GeekAudio/itlwm/blob/codex/tahoe-test095/developer-tools/RX-DATA-PATH.md)。实验诊断与普通 Wi-Fi 安装分开。
+- Release 附件只提供二进制压缩包，校验值见[发布说明](https://github.com/GeekAudio/itlwm/releases/tag/tahoe-2.4.0)；源码通过 Git 提交和分支保存。
 
-构建步骤见 [AirportItlwm-Tahoe-README.md](AirportItlwm-Tahoe-README.md)。Release 只提供二进制压缩包，校验值列在发布说明；开发源码按 Git 分支管理。
+## 许可
 
-基于 [OpenIntelWireless/itlwm](https://github.com/OpenIntelWireless/itlwm)，遵循 GPL-2.0；Intel 固件许可见 `iwlwifi-firmware-license`。上游代码和固件保留各自版权及许可。
+基于 [OpenIntelWireless/itlwm](https://github.com/OpenIntelWireless/itlwm)，遵循 [GPL-2.0](LICENSE)。Intel 固件条款见 [iwlwifi-firmware-license](iwlwifi-firmware-license)，上游代码和固件保留各自版权及许可。
