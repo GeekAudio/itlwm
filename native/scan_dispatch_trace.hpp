@@ -1,7 +1,6 @@
 #ifndef ITL_NATIVE_SCAN_DISPATCH_TRACE_HPP
 #define ITL_NATIVE_SCAN_DISPATCH_TRACE_HPP
 
-#include <limits.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -13,7 +12,7 @@ namespace ScanDispatchTrace {
 constexpr uint32_t kSchema = 1;
 constexpr size_t kCapacity = 16;
 constexpr unsigned kSnapshotAttempts = 2;
-constexpr int32_t kNoResult = INT32_MIN;
+constexpr int32_t kNoResult = int32_t(0x80000000U);
 
 enum class Selector : uint32_t {
     WclBgscanCacheResult = 1,

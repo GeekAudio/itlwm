@@ -479,8 +479,11 @@ void Backend::driverState(bool isReady) {
                                  ScanTerminalSource::DriverOffline);
             }
         }
+        // Finishing a queued scan publishes its 237 event synchronously. Its
+        // consumer can change Ready/Join before this old Off path continues.
+        if (stopped_ || controlRevision_ != publishRevision || ready_ != isReady)
+            return;
         finishJoin(1, NativeOffline);
-        authorized_ = false;
     }
 }
 void Backend::retryDeferredJoin() {

@@ -18,15 +18,24 @@ struct Event {
 
 struct Radio {
     Backend backend;
-    unsigned joins {}, leaves {};
+    unsigned joins {}, leaves {}, busyScanResponses {};
     std::vector<Event> events;
     void (*associationHook)(Radio *) {};
     void (*linkDownHook)(Radio *) {};
     void (*driverResetHook)(Radio *) {};
     void (*driverAvailabilityHook)(Radio *) {};
+    void (*scanFinishHook)(Radio *) {};
+    void (*connectionHook)(Radio *) {};
     Status hookJoinResult {Status::Failed};
 
-    static Status scan(void *, const ScanPlan &) { return Status::Unsupported; }
+    static Status scan(void *context, const ScanPlan &) {
+        auto self = static_cast<Radio *>(context);
+        if (self->busyScanResponses) {
+            --self->busyScanResponses;
+            return Status::Busy;
+        }
+        return Status::Unsupported;
+    }
     static Status join(void *context, const JoinPlan &) {
         ++static_cast<Radio *>(context)->joins;
         return Status::Ok;
@@ -40,6 +49,16 @@ struct Radio {
             event.body.assign(bytes, bytes + size);
         }
         self->events.push_back(event);
+        if (kind == ScanFinished && self->scanFinishHook) {
+            auto hook = self->scanFinishHook;
+            self->scanFinishHook = nullptr;
+            hook(self);
+        }
+        if (kind == Connection && self->connectionHook) {
+            auto hook = self->connectionHook;
+            self->connectionHook = nullptr;
+            hook(self);
+        }
         if (kind == Association && self->associationHook) {
             auto hook = self->associationHook;
             self->associationHook = nullptr;
@@ -102,6 +121,18 @@ std::vector<uint8_t> joinWire(const uint8_t bssid[6]) {
     wire[0x20] = 'x';
     write32(wire.data() + 0x214, 1);
     memcpy(wire.data() + 0x21c, bssid, 6);
+    return wire;
+}
+
+std::vector<uint8_t> scanWire() {
+    std::vector<uint8_t> wire(ScanWireSize);
+    write32(wire.data(), 17);
+    wire[4] = 1;
+    write32(wire.data() + 0x40, 1);
+    write32(wire.data() + 0x54, 1);
+    write32(wire.data() + 0x58, 1);
+    write32(wire.data() + 0x5c, 6);
+    write32(wire.data() + 0x60, 0xa);
     return wire;
 }
 
@@ -250,6 +281,19 @@ void cancelBAndStartCFromAvailabilityEmit(Radio *radio) {
     requestJoin(*radio, c); // Keep C pending to detect an outer stale failure.
 }
 
+void readyAndStartCFromScanFinishEmit(Radio *radio) {
+    static const uint8_t c[6] = {2, 0, 0, 0, 2, 3};
+    radio->backend.driverState(true);
+    requestJoin(*radio, c);
+}
+
+void readyAndStartAuthenticatedCFromConnectionEmit(Radio *radio) {
+    static const uint8_t c[6] = {2, 0, 0, 0, 2, 4};
+    radio->backend.driverState(true);
+    requestJoin(*radio, c);
+    radio->backend.observeAuthorization(true);
+}
+
 void testAssociationEmitControlReentryRejectsOldCallback() {
     const uint8_t a[6] = {2, 0, 0, 0, 1, 1};
     const uint8_t b[6] = {2, 0, 0, 0, 1, 2};
@@ -376,6 +420,49 @@ void testDriverAvailabilityEmitReentryDoesNotFailNewJoin() {
     assert(!memcmp(radio.last(Connection).body.data() + 4, c, sizeof(c)));
 }
 
+void testScanOfflineEmitReentryDoesNotFailNewJoin() {
+    const uint8_t c[6] = {2, 0, 0, 0, 2, 3};
+    Radio radio;
+    radio.busyScanResponses = 1;
+    auto scan = scanWire();
+    assert(radio.backend.scanRequest(scan.data(), scan.size()) == Status::Ok);
+    assert(radio.backend.scanning());
+    radio.scanFinishHook = readyAndStartCFromScanFinishEmit;
+    radio.backend.driverState(false);
+
+    // The 237/offline emit re-enters Ready and accepts C. The old Off path
+    // must return before finishJoin(Offline) can fail that new request.
+    assert(radio.backend.ready() && radio.backend.joining());
+    assert(radio.count(Connection) == 0);
+    assert(read32(radio.last(ScanFinished).body.data()) == 0xe00002d7U);
+    completeAssociation(radio, c);
+    assert(radio.count(Connection) == 1);
+    assert(!memcmp(radio.last(Connection).body.data() + 4, c, sizeof(c)));
+}
+
+void testConnectionEmitReentryKeepsNewAuthorization() {
+    const uint8_t b[6] = {2, 0, 0, 0, 2, 5};
+    const uint8_t c[6] = {2, 0, 0, 0, 2, 4};
+    Radio radio;
+    requestJoin(radio, b);
+    radio.connectionHook = readyAndStartAuthenticatedCFromConnectionEmit;
+    radio.backend.driverState(false);
+
+    // Connection(B failed/offline) synchronously starts C and authorizes it.
+    // The former authorized_=false tail must not clear C's newer state.
+    assert(radio.backend.ready() && radio.backend.joining());
+    assert(radio.count(Connection) == 1);
+    assert(read32(radio.last(Connection).body.data() + 12) == 0xe00002d7U);
+    assert(radio.backend.observeAssociation(0, c));
+    const uint8_t ssid[] = {'x'}, ies[] = {0, 0}, frame[38] = {0x80};
+    Beacon beacon {ssid, c, ies, frame, sizeof(ssid), sizeof(ies), sizeof(frame),
+                   0x1006, 100, 0, 6, -45, -95, 50};
+    radio.backend.observeBeacon(beacon);
+    assert(radio.count(Connection) == 2 && radio.count(Link) == 1);
+    assert(!memcmp(radio.last(Connection).body.data() + 4, c, sizeof(c)));
+    assertLink(radio.last(Link), true, c);
+}
+
 void testSameTargetReentryDoesNotDuplicateLinkIdentity() {
     const uint8_t a[6] = {2, 0, 0, 0, 0, 9};
     Radio radio;
@@ -441,6 +528,8 @@ int main() {
     testLinkDownEmitReplacementAddressSurvivesOuterReturn();
     testDriverResetEmitReentryStopsStaleAvailability();
     testDriverAvailabilityEmitReentryDoesNotFailNewJoin();
+    testScanOfflineEmitReentryDoesNotFailNewJoin();
+    testConnectionEmitReentryKeepsNewAuthorization();
     testSameTargetReentryDoesNotDuplicateLinkIdentity();
     testAddressRestartAndOffReadyRetireOldTarget();
 }
