@@ -9,10 +9,11 @@ func fail(_ text: String) -> Never {
 let args = Array(CommandLine.arguments.dropFirst())
 let run = args.last == "--run"
 let values = run ? Array(args.dropLast()) : args
-guard values.count == 8, values[0] == "--expect-build", values[1] == "25G332-Test105",
+guard values.count == 8, values[0] == "--expect-build",
+      ["25G332-Test105", "25G332-Test106"].contains(values[1]),
       values[2] == "--expect-uuid", values[4] == "--peer-mac",
       values[6] == "--run-token" else {
-    fail("Usage: arm_directed_prepare105 --expect-build 25G332-Test105 --expect-uuid UUID --peer-mac MAC --run-token 32hex [--run]")
+    fail("Usage: arm_directed_prepare105 --expect-build 25G332-Test105|25G332-Test106 --expect-uuid UUID --peer-mac MAC --run-token 32hex [--run]")
 }
 func matches(_ value: String, _ regex: String) -> Bool {
     value.range(of: regex, options: .regularExpression) != nil

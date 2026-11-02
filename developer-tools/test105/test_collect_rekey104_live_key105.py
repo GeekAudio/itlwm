@@ -122,6 +122,32 @@ def ioreg_fixture(service):
 
 
 class LiveKeyCollectorIntegrationTests(unittest.TestCase):
+    def test_sample_marks_entirely_absent_completion_group_as_not_published(self):
+        service = service_fixture()
+        service = {
+            key: value for key, value in service.items()
+            if not (key.startswith("NativeStaCompletion") and
+                    not key.startswith("NativeStaCompletionLive"))
+        }
+        ticks = IncrementingNs()
+        sample = collector.sample_once(
+            BUILD,
+            {"boot_epoch": BOOT, "os_build": base.EXPECTED_OS_BUILD,
+             "loaded_kext_uuid": UUID},
+            ioreg_fn=ioreg_fixture(service),
+            ifconfig_fn=lambda _argv, **_kwargs: (
+                b"en1: flags=8863<UP,RUNNING> mtu 1500\n status: active\n"),
+            monotonic_ns=ticks,
+            wall_now=lambda: datetime.datetime.fromisoformat(
+                "2026-11-01T10:00:00+08:00"))
+        completion = sample["firmware_queue_completion"]
+        self.assertEqual(completion["status"], "unknown")
+        self.assertIsNone(completion["firmware_single_queue_completion_success"])
+        self.assertEqual(completion["reason"], "completion_observation_not_published")
+        self.assertEqual(sample["completion_scalars"], {})
+        self.assertFalse(completion["peer_receipt_proven"])
+        self.assertFalse(completion["airdrop_proven"])
+
     def test_sample_once_to_capture_jsonl_retains_separate_unknown_live_key(self):
         service = service_fixture()
         ioreg = ioreg_fixture(service)
@@ -243,10 +269,26 @@ class LiveKeyCollectorIntegrationTests(unittest.TestCase):
     def test_completion_needs_live_current_owner_context_and_covering_time(self):
         completion = completion_fixture()
 
+        absent = completion_with_live_authority({}, parse_live_key(live_key_properties()))
+        self.assertEqual(absent["status"], "unknown")
+        self.assertIsNone(absent["firmware_single_queue_completion_success"])
+        self.assertEqual(absent["reason"], "completion_observation_not_published")
+        self.assertFalse(absent["peer_receipt_proven"])
+        self.assertFalse(absent["airdrop_proven"])
+
         unavailable = completion_with_live_authority(
             completion, {"status": "not_published"})
         self.assertIsNone(unavailable["firmware_single_queue_completion_success"])
         self.assertEqual(unavailable["reason"], "authoritative_context_unavailable")
+
+        # A partial completion publication is not the same as an absent one;
+        # preserve the existing field/time-boundary refusal.
+        partial = completion_with_live_authority(
+            {"Schema": 5}, parse_live_key(live_key_properties()))
+        self.assertEqual(partial["status"], "unknown")
+        self.assertIsNone(partial["firmware_single_queue_completion_success"])
+        self.assertEqual(partial["reason"], "owner_sample_does_not_cover_event_clock")
+        self.assertFalse(partial["peer_receipt_proven"])
 
         cases = [
             (live_key_properties(context_stable=0),

@@ -96,6 +96,12 @@ def completion_with_live_authority(completion_scalars: dict, live: dict) -> dict
     """
     from firmware_single_queue_completion105 import evaluate
     unknown = evaluate({}, expected_generation=None, expected_output_epoch=None)
+    # The collector returns an empty mapping when no NativeStaCompletion
+    # scalar was published in this IORegistry cut. Keep that distinct from a
+    # present-but-incomplete completion record, whose missing fields should
+    # still flow through the existing authority/time/schema checks below.
+    if completion_scalars == {}:
+        return dict(unknown, reason="completion_observation_not_published")
     if live.get("status") != "stable_publication":
         return unknown
     raw = live.get("scalars", {})

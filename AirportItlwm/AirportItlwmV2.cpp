@@ -23,6 +23,7 @@
 #endif
 #include <IOKit/IOUserClient.h>
 #include <libkern/c++/OSData.h>
+#include <libkern/c++/OSNumber.h>
 #include <kern/clock.h>
 #include <kern/task.h>
 #endif
@@ -97,6 +98,19 @@ bool validDirectedPreparePeer(OSObject *object)
     return any != 0;
 }
 
+static bool directedPrepareRx149DataInputProfileEnabled(
+    IOEthernetController *controller)
+{
+    if (!controller)
+        return false;
+    // The HAL publishes this availability field with setProperty(..., 32),
+    // which creates an OSNumber. Keep this exact 1-valued numeric gate
+    // separate from the OSBoolean feature switches below.
+    auto profile = OSDynamicCast(OSNumber, controller->getProperty(
+        "NativeP2PRx149DataInputProfileEnabled"));
+    return profile && profile->unsigned64BitValue() == 1;
+}
+
 struct NativeRx149ArmContext {
     OSString *runToken;
 };
@@ -156,8 +170,7 @@ IOReturn armNativeP2PDirectedPrepareOnMainGate(
             kOSBooleanTrue ||
         controller->getProperty("NativeP2PRx149DataInputExperiment") !=
             kOSBooleanTrue ||
-        controller->getProperty("NativeP2PRx149DataInputProfileEnabled") !=
-            kOSBooleanTrue ||
+        !directedPrepareRx149DataInputProfileEnabled(controller) ||
         controller->getProperty("NativeAwdlResidentEnabled") !=
             kOSBooleanTrue ||
         controller->getProperty("NativeP2PProbe") != kOSBooleanTrue ||

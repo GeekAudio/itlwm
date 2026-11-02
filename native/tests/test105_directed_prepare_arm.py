@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Run the actual HAL arm function against bounded host shims; no hardware."""
 from pathlib import Path
+import re
 import subprocess
 import tempfile
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCE = (ROOT / 'itlwm/hal_iwx/ItlIwxP2PProbe.cpp').read_text()
+AIRPORT_SOURCE = (ROOT / 'AirportItlwm/AirportItlwmV2.cpp').read_text()
 
 def function(marker):
     start = SOURCE.index(marker)
@@ -15,6 +17,15 @@ def function(marker):
         depth += (SOURCE[end] == '{') - (SOURCE[end] == '}')
         end += 1
     return SOURCE[start:end]
+
+def airport_function(marker):
+    start = AIRPORT_SOURCE.index(marker)
+    opening = AIRPORT_SOURCE.index('{', start)
+    end, depth = opening + 1, 1
+    while depth:
+        depth += (AIRPORT_SOURCE[end] == '{') - (AIRPORT_SOURCE[end] == '}')
+        end += 1
+    return AIRPORT_SOURCE[start:end]
 
 PRODUCTION = '\n'.join(function(marker) for marker in (
     'static uint32_t manualProbeArmMode(',
@@ -26,6 +37,8 @@ PRODUCTION = '\n'.join(function(marker) for marker in (
     'static bool rx149ObservationOnlyRequested(',
     'IOReturn ItlIwx::nativeP2pArmDirectedPrepare(',
 ))
+PROFILE_GATE = airport_function(
+    'static bool directedPrepareRx149DataInputProfileEnabled(')
 SHIM = r'''
 #include <cassert>
 #include <cstdint>
@@ -36,13 +49,28 @@ SHIM = r'''
 using IOReturn = int;
 enum { kIOReturnSuccess=0, kIOReturnUnsupported=1, kIOReturnBadArgument=2,
        kIOReturnBusy=3, IWX_P2P_RESOURCE_ABSENT=0 };
-static int trueObject;
-static void * const kOSBooleanTrue=&trueObject;
+struct OSObject { virtual ~OSObject() = default; };
+struct OSBoolean : OSObject {};
+static OSBoolean trueObject;
+static OSObject * const kOSBooleanTrue=&trueObject;
+struct OSNumber : OSObject {
+    explicit OSNumber(uint64_t value=0) : value(value) {}
+    uint64_t unsigned64BitValue() const { return value; }
+    uint64_t value;
+};
+struct OSString : OSObject {};
+#define OSDynamicCast(type, object) dynamic_cast<type *>(object)
 static constexpr uint32_t kDirectedPrepareArmMode=3u;
-struct IOEthernetController {
-    std::map<std::string, bool> properties;
-    void *getProperty(const char *name) {
-        return properties[name] ? kOSBooleanTrue : nullptr;
+struct IOEthernetController : OSObject {
+    std::map<std::string, OSObject *> properties;
+    OSNumber profileOne{1}, profileZero{0}, profileTwo{2}, profileHigh{0x100000001ULL};
+    OSString profileString;
+    IOEthernetController() {
+        properties["NativeP2PRx149DataInputProfileEnabled"]=&profileOne;
+    }
+    OSObject *getProperty(const char *name) {
+        const auto found=properties.find(name);
+        return found==properties.end() ? nullptr : found->second;
     }
 };
 namespace NativeP2PRx149Observation {
@@ -76,9 +104,9 @@ struct ItlIwx {
     bool mainGate=true, busy=false, retained=false;
     ItlIwx() {
         com.sc_ic.ic_bss=&bss;
-        controller.properties["NativeP2PDirectedPrepareEnabled"]=true;
-        controller.properties["NativeP2PManualTrigger"]=true;
-        controller.properties["NativeP2PRx149ObservationOnly"]=true;
+        controller.properties["NativeP2PDirectedPrepareEnabled"]=&trueObject;
+        controller.properties["NativeP2PManualTrigger"]=&trueObject;
+        controller.properties["NativeP2PRx149ObservationOnly"]=&trueObject;
     }
     IOEthernetController *getController() { return &controller; }
     bool tahoeP2pOnMainGate() const { return mainGate; }
@@ -96,6 +124,25 @@ int main() {
     assert(off.nativeP2pArmDirectedPrepare(peer,token)==kIOReturnUnsupported);
     assert(off.nativeP2pManualArmRequested_==0 && off.nativeP2pDirectedPrepareArmed_==0);
 #else
+    // The profile availability property is an OSNumber published with a
+    // 32-bit setProperty call. Accept exactly numeric 1, never booleans or
+    // truthy values; all other feature switches remain OSBoolean gates.
+    {
+        ItlIwx profile;
+        auto *property="NativeP2PRx149DataInputProfileEnabled";
+        assert(directedPrepareRx149DataInputProfileEnabled(&profile.controller));
+        profile.controller.properties[property]=&profile.controller.profileZero;
+        assert(!directedPrepareRx149DataInputProfileEnabled(&profile.controller));
+        profile.controller.properties[property]=&profile.controller.profileTwo;
+        assert(!directedPrepareRx149DataInputProfileEnabled(&profile.controller));
+        profile.controller.properties[property]=&profile.controller.profileHigh;
+        assert(!directedPrepareRx149DataInputProfileEnabled(&profile.controller));
+        profile.controller.properties[property]=&profile.controller.profileString;
+        assert(!directedPrepareRx149DataInputProfileEnabled(&profile.controller));
+        profile.controller.properties.erase(property);
+        assert(!directedPrepareRx149DataInputProfileEnabled(&profile.controller));
+        assert(!directedPrepareRx149DataInputProfileEnabled(nullptr));
+    }
     // RX149 availability is not an active RX149 request. The combined
     // artifact must be able to admit mode3 while its RX profile stays true.
     {
@@ -140,12 +187,12 @@ int main() {
         assert(a.nativeP2pManualArmRequested_==0);
     }
     {
-        ItlIwx a;a.controller.properties["NativeP2PDirectedPrepareEnabled"]=false;
+        ItlIwx a;a.controller.properties["NativeP2PDirectedPrepareEnabled"]=nullptr;
         assert(a.nativeP2pArmDirectedPrepare(peer,token)==kIOReturnUnsupported);
         assert(a.nativeP2pManualArmRequested_==0);
     }
     {
-        ItlIwx a;a.controller.properties["NativeP2PManualTrigger"]=false;
+        ItlIwx a;a.controller.properties["NativeP2PManualTrigger"]=nullptr;
         assert(a.nativeP2pArmDirectedPrepare(peer,token)==kIOReturnUnsupported);
         assert(a.nativeP2pManualArmRequested_==0 && a.nativeP2pDirectedPrepareArmed_==0);
     }
@@ -168,8 +215,20 @@ int main() {
     puts("Test105 production directed arm guards passed");
 }
 '''
+for gate in (
+    "NativeP2PDirectedPrepareEnabled",
+    "NativeP2PRx149ObservationOnly",
+    "NativeP2PRx149DataInputExperiment",
+    "NativeAwdlResidentEnabled",
+    "NativeP2PProbe",
+    "NativeP2PManualTrigger",
+):
+    expected=rf'controller->getProperty\("{re.escape(gate)}"\)\s*!=\s*kOSBooleanTrue'
+    if not re.search(expected, AIRPORT_SOURCE):
+        raise SystemExit(f"static_boolean_gate_missing_or_changed:{gate}")
+
 with tempfile.TemporaryDirectory(prefix='test105-directed-arm-') as temporary:
-    cpp=Path(temporary)/'arm.cpp';cpp.write_text(SHIM+'\n'+PRODUCTION+'\n'+BODY)
+    cpp=Path(temporary)/'arm.cpp';cpp.write_text(SHIM+'\n'+PROFILE_GATE+'\n'+PRODUCTION+'\n'+BODY)
     for enabled in (False,True):
         output=Path(temporary)/('enabled' if enabled else 'disabled')
         args=['clang++','-std=c++14','-Wall','-Wextra','-Werror','-Wno-unused-function',
