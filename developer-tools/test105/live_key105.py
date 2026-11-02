@@ -37,6 +37,15 @@ FLAG_ORIGIN_GENERATION_PRESENT = 1 << 17
 FLAG_ORIGIN_GENERATION_CHANGED = 1 << 18
 FLAG_ORIGIN_SUBMIT_SERIAL_PRESENT = 1 << 19
 
+# Submit.Version is the command-header version. Sequence-row Version carries
+# the ADD_STA_KEY CMD_VERSIONS API version, so compare it only between sequence
+# rows, not between a Submit row and its sequence observation.
+SUBMIT_SEQUENCE_COMMAND_FIELDS = (
+    "CommandId", "GroupId", "Qid", "Index", "HeaderSequence")
+SUBMIT_SEQUENCE_IDENTITY_FIELDS = (
+    "DriverGeneration", *SUBMIT_SEQUENCE_COMMAND_FIELDS)
+SEQUENCE_PAIR_IDENTITY_FIELDS = SUBMIT_SEQUENCE_IDENTITY_FIELDS + ("Version",)
+
 
 def parse_live_key(service: dict) -> dict:
     schema = service.get(PREFIX + "Schema")
@@ -210,8 +219,7 @@ def parse_live_key(service: dict) -> dict:
             unavailable_entry = unavailable.get("entry", {})
             fields_match = all(
                 submit_entry.get(key) == unavailable_entry.get(key)
-                for key in ("CommandId", "GroupId", "Version", "Qid",
-                            "Index", "HeaderSequence"))
+                for key in SUBMIT_SEQUENCE_COMMAND_FIELDS)
             if unavailable.get("origin_generation_present"):
                 fields_match = fields_match and (
                     submit_entry.get("DriverGeneration") ==
@@ -230,10 +238,9 @@ def parse_live_key(service: dict) -> dict:
                 bundle["origin_submit_serial"] = rx_id
                 rx_entry = rx.get("entry", {})
                 tx_entry = tx.get("entry", {})
-                compare_fields = ("DriverGeneration", "CommandId", "GroupId",
-                                  "Version", "Qid", "Index", "HeaderSequence")
-                same_identity = all(rx_entry.get(key) == tx_entry.get(key)
-                                    for key in compare_fields)
+                same_identity = all(
+                    rx_entry.get(key) == tx_entry.get(key)
+                    for key in SEQUENCE_PAIR_IDENTITY_FIELDS)
                 same_generation = (
                     rx_entry.get("DriverGeneration") ==
                     tx_entry.get("DriverGeneration"))
@@ -252,11 +259,7 @@ def parse_live_key(service: dict) -> dict:
                 else:
                     submit_fields_match = all(
                         submit_entry.get(key) == rx_entry.get(key)
-                        for key in ("CommandId", "GroupId", "Version", "Qid",
-                                    "Index", "HeaderSequence"))
-                    submit_fields_match = submit_fields_match and (
-                        submit_entry.get("DriverGeneration") ==
-                        rx_entry.get("DriverGeneration"))
+                        for key in SUBMIT_SEQUENCE_IDENTITY_FIELDS)
                     bundle["status"] = ("same_submit_serial" if submit_fields_match
                         else "same_submit_serial_identity_conflict")
         elif unavailable.get("entry"):
@@ -269,8 +272,7 @@ def parse_live_key(service: dict) -> dict:
                 unavailable_entry = unavailable.get("entry", {})
                 fields_match = all(
                     submit_entry.get(key) == unavailable_entry.get(key)
-                    for key in ("CommandId", "GroupId", "Version", "Qid",
-                                "Index", "HeaderSequence"))
+                    for key in SUBMIT_SEQUENCE_COMMAND_FIELDS)
                 if unavailable.get("origin_generation_present"):
                     fields_match = fields_match and (
                         submit_entry.get("DriverGeneration") ==
@@ -289,8 +291,7 @@ def parse_live_key(service: dict) -> dict:
             else:
                 fields_match = all(
                     submit_entry.get(key) == event_entry.get(key)
-                    for key in ("CommandId", "GroupId", "Version", "Qid",
-                                "Index", "HeaderSequence"))
+                    for key in SUBMIT_SEQUENCE_COMMAND_FIELDS)
                 if event.get("origin_generation_present"):
                     fields_match = fields_match and (
                         submit_entry.get("DriverGeneration") ==

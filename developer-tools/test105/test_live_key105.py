@@ -86,7 +86,7 @@ class LiveKeyTests(unittest.TestCase):
     def test_sequence_slots_keep_independent_origin_submit_serials(self):
         d = fixture()
         d.update({PREFIX + key: value for key, value in {
-            "SubmitSerial": 21, "SubmitGroupId": 1, "SubmitVersion": 3,
+            "SubmitSerial": 21, "SubmitGroupId": 1, "SubmitVersion": 0,
             "SubmitIndex": 5, "SubmitHeaderSequence": 5,
         }.items()})
         rx_prefix = PREFIX + "RxSequence"
@@ -120,6 +120,16 @@ class LiveKeyTests(unittest.TestCase):
         self.assertTrue(parsed["key_sequence_bundle"]["same_origin_submit_serial"])
         self.assertFalse(parsed["key_install_success_proven"])
         self.assertFalse(parsed["peer_ack_proven"])
+        self.assertEqual(parsed["observations"]["submit"]["entry"]["Version"], 0)
+        self.assertEqual(parsed["observations"]["rxsequence"]["entry"]["Version"], 3)
+
+        # The shared command identity still matters even though Version is
+        # phase-specific: a different submit group must not join the sequence.
+        d[PREFIX + "SubmitGroupId"] = 0
+        parsed = parse_live_key(d)
+        self.assertEqual(parsed["key_sequence_bundle"]["status"],
+                         "same_submit_serial_identity_conflict")
+        d[PREFIX + "SubmitGroupId"] = 1
 
         # Same qid/index is not enough: distinct command-event serials never
         # get joined into one key update.
@@ -144,7 +154,7 @@ class LiveKeyTests(unittest.TestCase):
     def test_current_unavailable_slot_supersedes_older_sequence_pair(self):
         d = fixture()
         d.update({PREFIX + key: value for key, value in {
-            "SubmitSerial": 33, "SubmitGroupId": 1, "SubmitVersion": 99,
+            "SubmitSerial": 33, "SubmitGroupId": 1, "SubmitVersion": 0,
             "SubmitIndex": 5, "SubmitHeaderSequence": 5,
         }.items()})
         common = {
@@ -152,7 +162,7 @@ class LiveKeyTests(unittest.TestCase):
             "DroppedSerial": 0, "MonotonicNs": 950,
             "DriverGeneration": 3, "FirmwareGeneration": 3,
             "Source": 1, "CommandId": 0x17, "GroupId": 1,
-            "Version": 99, "Qid": 0, "Index": 5,
+            "Version": 3, "Qid": 0, "Index": 5,
             "HeaderSequence": 5, "Result": 2, "ResultDetail": 0,
             "PacketLength": 0, "PayloadLength": 33,
             "OriginSubmitSerial": 33,
@@ -195,12 +205,43 @@ class LiveKeyTests(unittest.TestCase):
         self.assertFalse(bundle["origin_submit_serial_matches_current_submit"])
         self.assertEqual(bundle["status"], "stale_sequence_pair_not_current")
 
+    def test_partial_sequence_uses_shared_identity_not_phase_version(self):
+        d = fixture()
+        d.update({PREFIX + key: value for key, value in {
+            "SubmitSerial": 21, "SubmitGroupId": 1, "SubmitVersion": 0,
+            "SubmitIndex": 5, "SubmitHeaderSequence": 5,
+        }.items()})
+        row = {
+            "Present": 1, "Stable": 1, "Serial": 30,
+            "MonotonicNs": 950, "DriverGeneration": 3,
+            "FirmwareGeneration": 3, "Phase": 14, "Source": 1,
+            "CommandId": 0x17, "GroupId": 1, "Version": 3,
+            "Qid": 0, "Index": 5, "HeaderSequence": 5,
+            "Flags": (1 << 4) | (1 << 13) | (1 << 14) | (1 << 15) |
+                     (1 << 17) | (1 << 19),
+            "Result": 7, "ResultDetail": 0, "PacketLength": 0,
+            "PayloadLength": 21, "OriginSubmitSerial": 21,
+            "DroppedCount": 0, "DroppedSerial": 0,
+        }
+        d.update({PREFIX + "RxSequence" + key: value
+                  for key, value in row.items()})
+        parsed = parse_live_key(d)
+        self.assertEqual(parsed["key_sequence_bundle"]["status"],
+                         "partial_sequence_observation")
+
+        # Header identity remains enforced for a matching phase-local row.
+        d[PREFIX + "SubmitIndex"] = 6
+        d[PREFIX + "SubmitHeaderSequence"] = 6
+        parsed = parse_live_key(d)
+        self.assertEqual(parsed["key_sequence_bundle"]["status"],
+                         "current_submit_identity_conflict")
+
     def test_unknown_or_changed_generation_is_not_key_install_evidence(self):
         d = fixture()
         d.update({PREFIX + key: value for key, value in {
             "SubmitSerial": 21, "SubmitDriverGeneration": 2,
             "SubmitFirmwareGeneration": 0, "SubmitGroupId": 1,
-            "SubmitVersion": 3, "SubmitIndex": 5,
+            "SubmitVersion": 0, "SubmitIndex": 5,
             "SubmitHeaderSequence": 5,
         }.items()})
         prefix = PREFIX + "RxSequence"
