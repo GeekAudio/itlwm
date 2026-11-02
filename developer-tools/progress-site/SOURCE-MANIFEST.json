@@ -10,12 +10,12 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "ea8ff33ea0c86a3817b92163900ce86e672c3bfcf23f7c0f274c1ef87dac6b7e"
+      "sha256": "b1c530482e736ae3b65b7c1b0f1ebeff9f2dab650d4679390f22b92fa40c1ff7"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "d22ab4c4802e5e963c156c9662becb6e0de8277d664af26652affa71148ab535"
+      "sha256": "9306957265e865c4b62de532da889651e0f1af669c2249ae02ddbfce75466886"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
@@ -30,7 +30,7 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "8fa5c583dda70f2166185eb4427d55934eb82910a303f9d493305d42f45bcb1e"
+      "sha256": "b2721fa14f6df6437545b8bad1244b88b052e8227f3b0ca071427bf9e0dfc53a"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
@@ -50,8 +50,8 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-02T13:36:07+08:00",
-  "runtime_scope": "Test109自然Wi-Fi短暂中断未通过长期稳定性；Test110已部署待重启。",
-  "running_candidate": "25G332-Test109",
-  "next_candidate": "25G332-Test110"
+  "updated_at": "2026-11-02T13:54:15+08:00",
+  "runtime_scope": "Test110注入失败：40项中1项未通过、39项未覆盖；Test111已部署待重启。GTK/AWDL/AirDrop未测。",
+  "running_candidate": "25G332-Test110",
+  "next_candidate": "25G332-Test111"
 }
