@@ -1172,6 +1172,12 @@ void AirportItlwm::stop(IOService *provider)
     // Close admission before any stop/drain work can yield. A request already
     // inside the command gate is retired by the terminal action below.
     setNativePowerStopping(true);
+    auto retainStopOwner = [this]() {
+        if (!stopRetainedForBusy_) {
+            retain();
+            stopRetainedForBusy_ = true;
+        }
+    };
 #endif
 #if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
     // The HAL uses this same command gate for the final address check and
@@ -1194,12 +1200,12 @@ void AirportItlwm::stop(IOService *provider)
 #endif
     XYLog("%s\n", __PRETTY_FUNCTION__);XYLog("%s\n", __PRETTY_FUNCTION__);
     struct _ifnet *ifp = &fHalService->get80211Controller()->ic_ac.ac_if;
-    detachWatchdogTimer();
 #ifdef AIRPORT_TAHOE
     // This barrier must run outside the radio gate. HAL producers are detached
     // afterwards; only then may the ingress allocation and its owner refs go.
     if (fNetIf && !static_cast<AirportItlwmSkywalkInterface *>(fNetIf)->stopNative()) {
         XYLog("Native ingress closing; stop cannot wait in radio gate\n");
+        retainStopOwner();
         return;
     }
     // The terminal policy/epoch writer must share the SET_POWER command gate.
@@ -1226,17 +1232,52 @@ void AirportItlwm::stop(IOService *provider)
         return;
     }
 #endif
+#ifdef AIRPORT_TAHOE
+    /* A previous detach attempt may have closed HAL lifecycle admission.
+     * Retry that fence directly; disableAdapter cannot enter a tearing-down
+     * HAL to repeat the earlier disable. */
+    const bool retryingHalDetach = fHalService->detachResourcesRetained();
+    if (!retryingHalDetach) {
+        const IOReturn disableResult = disableAdapter(bsdInterface);
+        if (disableResult != kIOReturnSuccess) {
+            XYLog("HAL disable deferred during stop result=%d; owner retained\n",
+                  disableResult);
+            retainStopOwner();
+            return;
+        }
+        // Only drain the watchdog after the HAL accepted its stop. A Busy
+        // result leaves the live controller and its watchdog owned.
+        detachWatchdogTimer();
+    }
+#else
+    detachWatchdogTimer();
     super::stop(provider);
     disableAdapter(bsdInterface);
+#endif
+#ifdef AIRPORT_TAHOE
+    fHalService->detach(pciNub);
+    if (fHalService->detachResourcesRetained()) {
+        XYLog("HAL detach deferred; controller owner and gate retained\n");
+        retainStopOwner();
+        return;
+    }
+    super::stop(provider);
+    setLinkStatus(kIONetworkLinkValid);
+    if (fNetIf) static_cast<AirportItlwmSkywalkInterface *>(fNetIf)->releaseNative();
+#else
     setLinkStatus(kIONetworkLinkValid);
     fHalService->detach(pciNub);
-#ifdef AIRPORT_TAHOE
-    if (fNetIf) static_cast<AirportItlwmSkywalkInterface *>(fNetIf)->releaseNative();
 #endif
     ether_ifdetach(ifp);
     detachInterface(fNetIf, true);
     OSSafeReleaseNULL(fNetIf);
     releaseAll();
+#ifdef AIRPORT_TAHOE
+    if (stopRetainedForBusy_) {
+        stopRetainedForBusy_ = false;
+        release(); // Balance the one owner retain from the earlier Busy stop.
+    }
+#endif
 }
 
 void AirportItlwm::free()
@@ -1645,8 +1686,17 @@ getCARD_CAPABILITIES(OSObject *object,
     // real terminal event 237 and produces SCAN_DONE after collecting BSSes.
     // Without this bit, GET11 is issued immediately and returns WCL busy.
     cd->capabilities[5] |= 0x40;
+    // Saved 25G332 Apple80211Scan tests handle+0x61 bit1 (capability 73)
+    // to select native WCL SSID lists instead of unsupported legacy IOC86.
+    if (fHalService->get80211Controller()->ic_tahoe_scan_state != nullptr)
+        cd->capabilities[9] |= 0x02;
+    // Native IO80211 GET12 caches the 21 capability bytes at handle+0x58.
+    // Associate2 tests handle+0x61 bit3 for SAE admission (25G241 and the
+    // retained 25G332 producer/gate bytes agree). SAE requires our MFP path.
+    if (caps & IEEE80211_C_MFP)
+        cd->capabilities[9] |= 0x08;
     // Legacy upper capability bytes contain unimplemented features. This
-    // native subset does not advertise AWDL, WPA3, PMF, MLO, or enterprise AKMs.
+    // native subset does not advertise AWDL, MLO, FT or enterprise AKMs.
     return kIOReturnSuccess;
 #endif
     

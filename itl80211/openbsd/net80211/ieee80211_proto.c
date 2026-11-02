@@ -68,6 +68,7 @@
 
 #include <net80211/ieee80211_var.h>
 #include <net80211/ieee80211_priv.h>
+#include <net80211/ieee80211_sae.h>
 
 const char * const ieee80211_mgt_subtype_name[] = {
 	"assoc_req",	"assoc_resp",	"reassoc_req",	"reassoc_resp",
@@ -467,6 +468,8 @@ ieee80211_setkeys(struct ieee80211com *ic)
 		/* Swap(GM_igtk, GN_igtk) */
 		kid = (ic->ic_igtk_kid == 4) ? 5 : 4;
 		k = &ic->ic_nw_keys[kid];
+		if (k->k_cipher != IEEE80211_CIPHER_NONE)
+			(*ic->ic_delete_key)(ic, ic->ic_bss, k);
 		memset(k, 0, sizeof(*k));
 		k->k_id = kid;
 		k->k_cipher = ic->ic_bss->ni_rsngroupmgmtcipher;
@@ -568,6 +571,149 @@ ieee80211_sa_query_request(struct ieee80211com *ic, struct ieee80211_node *ni)
 	IEEE80211_SEND_ACTION(ic, ni, IEEE80211_CATEG_SA_QUERY,
 	    IEEE80211_ACTION_SA_QUERY_REQ, 0);
 	timeout_add_msec(&ni->ni_sa_query_to, 10);
+}
+#endif	/* IEEE80211_STA_ONLY */
+
+#ifdef IEEE80211_STA_ONLY
+/*
+ * Hostap uses 201 TU retries and a 1000 TU maximum by default. This timer
+ * API has millisecond granularity, so STA retries use a bounded 204 ms
+ * interval; five intervals cap the exchange at 1020 ms.
+ */
+#define IEEE80211_SA_QUERY_STA_RETRY_MS 204
+
+int
+ieee80211_sa_query_sta_authorized(struct ieee80211com *ic,
+    struct ieee80211_node *ni)
+{
+	u_int32_t required_flags = IEEE80211_NODE_MFP |
+	    IEEE80211_NODE_RXMGMTPROT | IEEE80211_NODE_TXMGMTPROT;
+
+	if (ic == NULL || ni == NULL || ic->ic_opmode != IEEE80211_M_STA ||
+	    ic->ic_state != IEEE80211_S_RUN || ic->ic_bss != ni ||
+	    (ic->ic_caps & IEEE80211_C_MFP) == 0 ||
+	    (ic->ic_flags & IEEE80211_F_RSNON) == 0 ||
+	    (ni->ni_flags & required_flags) != required_flags ||
+	    !ni->ni_port_valid || ni->ni_pmf_link_pending)
+		return 0;
+
+	/* Once started, retries stay bound to the same BSSID and local address. */
+	if ((ni->ni_flags & IEEE80211_NODE_SA_QUERY) &&
+	    (memcmp(ni->ni_sa_query_bssid, ni->ni_bssid,
+	    IEEE80211_ADDR_LEN) != 0 ||
+	    memcmp(ni->ni_sa_query_local, ic->ic_myaddr,
+	    IEEE80211_ADDR_LEN) != 0))
+		return 0;
+	return 1;
+}
+
+static void
+ieee80211_sa_query_sta_clear(struct ieee80211_node *ni)
+{
+	timeout_del(&ni->ni_sa_query_to);
+	ni->ni_flags &= ~(IEEE80211_NODE_SA_QUERY |
+	    IEEE80211_NODE_SA_QUERY_FAILED);
+	ni->ni_sa_query_count = 0;
+	ni->ni_sa_query_trid = 0;
+	memset(ni->ni_sa_query_trids, 0, sizeof(ni->ni_sa_query_trids));
+	memset(ni->ni_sa_query_bssid, 0, sizeof(ni->ni_sa_query_bssid));
+	memset(ni->ni_sa_query_local, 0, sizeof(ni->ni_sa_query_local));
+}
+
+static void
+ieee80211_sa_query_sta_fail(struct ieee80211com *ic,
+    struct ieee80211_node *ni)
+{
+	ieee80211_sa_query_sta_clear(ni);
+	/* Close the data path before enqueueing the asynchronous AUTH transition. */
+	ni->ni_port_valid = 0;
+	ieee80211_set_link_state(ic, LINK_STATE_DOWN);
+	ic->ic_deauth_reason = IEEE80211_REASON_AUTH_EXPIRE;
+	ieee80211_new_state(ic, IEEE80211_S_AUTH,
+	    IEEE80211_FC0_SUBTYPE_DEAUTH);
+}
+
+static u_int16_t
+ieee80211_sa_query_sta_next_trid(struct ieee80211_node *ni)
+{
+	u_int16_t trid;
+	int i, j, used;
+
+	arc4random_buf(&trid, sizeof(trid));
+	for (j = 0; j <= ni->ni_sa_query_count; j++) {
+		used = 0;
+		for (i = 0; i < ni->ni_sa_query_count; i++) {
+			if (ni->ni_sa_query_trids[i] == trid) {
+				used = 1;
+				break;
+			}
+		}
+		if (!used)
+			return trid;
+		trid++;
+	}
+	return trid;
+}
+
+static int
+ieee80211_sa_query_sta_send(struct ieee80211com *ic,
+    struct ieee80211_node *ni)
+{
+	u_int16_t trid;
+
+	if (ni->ni_sa_query_count >= IEEE80211_SA_QUERY_STA_MAX_ATTEMPTS)
+		return 0;
+	trid = ieee80211_sa_query_sta_next_trid(ni);
+	ni->ni_sa_query_trid = trid;
+	ni->ni_sa_query_trids[ni->ni_sa_query_count++] = trid;
+	(void)IEEE80211_SEND_ACTION(ic, ni, IEEE80211_CATEG_SA_QUERY,
+	    IEEE80211_ACTION_SA_QUERY_REQ, 0);
+	return timeout_add_msec(&ni->ni_sa_query_to,
+	    IEEE80211_SA_QUERY_STA_RETRY_MS);
+}
+
+void
+ieee80211_sa_query_timeout(void *arg)
+{
+	struct ieee80211_node *ni = (struct ieee80211_node *)arg;
+	struct ieee80211com *ic = ni->ni_ic;
+	int s;
+
+	s = splnet();
+	if (!(ni->ni_flags & IEEE80211_NODE_SA_QUERY))
+		goto done;
+	if (!ieee80211_sa_query_sta_authorized(ic, ni)) {
+		ieee80211_sa_query_sta_clear(ni);
+		goto done;
+	}
+	if (ni->ni_sa_query_count >= IEEE80211_SA_QUERY_STA_MAX_ATTEMPTS ||
+	    !ieee80211_sa_query_sta_send(ic, ni))
+		ieee80211_sa_query_sta_fail(ic, ni);
+done:
+	splx(s);
+}
+
+void
+ieee80211_sa_query_request(struct ieee80211com *ic,
+    struct ieee80211_node *ni)
+{
+	int s;
+
+	s = splnet();
+	if (!ieee80211_sa_query_sta_authorized(ic, ni) ||
+	    (ni->ni_flags & IEEE80211_NODE_SA_QUERY)) {
+		splx(s);
+		return;
+	}
+	memcpy(ni->ni_sa_query_bssid, ni->ni_bssid, IEEE80211_ADDR_LEN);
+	memcpy(ni->ni_sa_query_local, ic->ic_myaddr, IEEE80211_ADDR_LEN);
+	ni->ni_sa_query_count = 0;
+	memset(ni->ni_sa_query_trids, 0, sizeof(ni->ni_sa_query_trids));
+	ni->ni_flags |= IEEE80211_NODE_SA_QUERY;
+	ni->ni_flags &= ~IEEE80211_NODE_SA_QUERY_FAILED;
+	if (!ieee80211_sa_query_sta_send(ic, ni))
+		ieee80211_sa_query_sta_fail(ic, ni);
+	splx(s);
 }
 #endif	/* IEEE80211_STA_ONLY */
 
@@ -1400,6 +1546,26 @@ ieee80211_check_wpa_supplicant_failure(struct ieee80211com *ic,
 		ni2->ni_assoc_fail |= ic->ic_bss->ni_assoc_fail;
 }
 
+static void
+ieee80211_sta_send_auth(struct ieee80211com *ic, struct ieee80211_node *ni,
+	int sequence)
+{
+#ifdef AIRPORT_TAHOE
+	if (ic->ic_opmode == IEEE80211_M_STA &&
+	    ni->ni_rsnakms == IEEE80211_AKM_SAE) {
+		if (ieee80211_sae_start(ic, ni) != 0 ||
+		    IEEE80211_SEND_MGMT(ic, ni, IEEE80211_FC0_SUBTYPE_AUTH,
+		    IEEE80211_AUTH_OPEN_REQUEST) != 0) {
+			ni->ni_fails++;
+			ieee80211_try_another_bss(ic);
+		}
+		return;
+	}
+#endif
+	(void)IEEE80211_SEND_MGMT(ic, ni, IEEE80211_FC0_SUBTYPE_AUTH,
+	    sequence);
+}
+
 int
 ieee80211_newstate(struct ieee80211com *ic, enum ieee80211_state nstate,
     int mgt)
@@ -1413,11 +1579,18 @@ ieee80211_newstate(struct ieee80211com *ic, enum ieee80211_state nstate,
 #endif
 
 	ostate = ic->ic_state;
+#ifdef IEEE80211_STA_ONLY
+    if (ic->ic_bss != NULL && nstate != IEEE80211_S_RUN)
+        ieee80211_sa_query_sta_clear(ic->ic_bss);
+#endif
 	if (ifp->if_flags & IFF_DEBUG)
 		XYLog("%s: %s -> %s\n", ifp->if_xname,
 		    ieee80211_state_name[ostate], ieee80211_state_name[nstate]);
 	ic->ic_state = nstate;			/* state transition */
 	ni = ic->ic_bss;			/* NB: no reference held */
+#ifdef AIRPORT_TAHOE
+	ieee80211_sae_state_transition(ic, ostate, nstate);
+#endif
 	ieee80211_set_link_state(ic, LINK_STATE_DOWN);
 	ic->ic_xflags &= ~IEEE80211_F_TX_MGMT_ONLY;
 	switch (nstate) {
@@ -1573,16 +1746,15 @@ justcleanup:
 				    ieee80211_state_name[nstate]);
 			break;
 		case IEEE80211_S_SCAN:
-			IEEE80211_SEND_MGMT(ic, ni,
-			    IEEE80211_FC0_SUBTYPE_AUTH, 1);
+			ieee80211_sta_send_auth(ic, ni,
+			    IEEE80211_AUTH_OPEN_REQUEST);
 			break;
 		case IEEE80211_S_AUTH:
 		case IEEE80211_S_ASSOC:
 			switch (mgt) {
 			case IEEE80211_FC0_SUBTYPE_AUTH:
 				if (ic->ic_opmode == IEEE80211_M_STA) {
-					IEEE80211_SEND_MGMT(ic, ni,
-					    IEEE80211_FC0_SUBTYPE_AUTH,
+					ieee80211_sta_send_auth(ic, ni,
 					    IEEE80211_AUTH_OPEN_REQUEST);
 				}
 				break;
@@ -1598,14 +1770,13 @@ justcleanup:
 			ieee80211_ba_del(ni);
 			switch (mgt) {
 			case IEEE80211_FC0_SUBTYPE_AUTH:
-				IEEE80211_SEND_MGMT(ic, ni,
-				    IEEE80211_FC0_SUBTYPE_AUTH, 2);
+				ieee80211_sta_send_auth(ic, ni, 2);
 				ic->ic_state = ostate;	/* stay RUN */
 				break;
 			case IEEE80211_FC0_SUBTYPE_DEAUTH:
 				/* try to reauth */
-				IEEE80211_SEND_MGMT(ic, ni,
-				    IEEE80211_FC0_SUBTYPE_AUTH, 1);
+				ieee80211_sta_send_auth(ic, ni,
+				    IEEE80211_AUTH_OPEN_REQUEST);
 				break;
 			}
 			break;
@@ -1707,6 +1878,10 @@ justcleanup:
 		}
 		break;
 	}
+    if (ic->ic_opmode == IEEE80211_M_STA &&
+        ic->ic_state != IEEE80211_S_RUN &&
+        (ostate == IEEE80211_S_RUN || nstate == IEEE80211_S_INIT))
+        ieee80211_sta_security_cleanup(ic, ic->ic_bss);
 	return 0;
 }
 

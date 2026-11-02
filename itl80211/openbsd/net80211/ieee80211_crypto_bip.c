@@ -55,6 +55,7 @@
 
 #include <crypto/aes.h>
 #include <crypto/cmac.h>
+#include "../../../native/pmf_crypto_policy.h"
 
 /* BIP software crypto context */
 struct ieee80211_bip_ctx {
@@ -69,6 +70,10 @@ int
 ieee80211_bip_set_key(struct ieee80211com *ic, struct ieee80211_key *k)
 {
 	struct ieee80211_bip_ctx *ctx;
+	if (k->k_len != 16)
+		return EINVAL;
+	if (k->k_priv != NULL)
+		ieee80211_bip_delete_key(ic, k);
 
 	ctx = (struct ieee80211_bip_ctx *)malloc(sizeof(*ctx), 0, 0);
 	if (ctx == NULL)
@@ -103,9 +108,16 @@ ieee80211_bip_encap(struct ieee80211com *ic, mbuf_t m0,
 	struct ieee80211_bip_ctx *ctx = (struct ieee80211_bip_ctx *)k->k_priv;
 	struct ieee80211_bip_frame aad;
 	struct ieee80211_frame *wh;
+	AES_CMAC_CTX cmac;
 	u_int8_t *mmie, mic[AES_CMAC_DIGEST_LENGTH];
 	mbuf_t m;
     mbuf_t temp;
+	if (ctx == NULL || !itl_pmf_bip_pn_can_advance(k->k_tsc)) {
+		ic->ic_stats.is_tx_nombuf++;
+		mbuf_freem(m0);
+		return NULL;
+	}
+	cmac = ctx->cmac;
 
 	wh = mtod(m0, struct ieee80211_frame *);
 	_KASSERT((wh->i_fc[0] & IEEE80211_FC0_TYPE_MASK) ==
@@ -122,9 +134,9 @@ ieee80211_bip_encap(struct ieee80211com *ic, mbuf_t m0,
 	IEEE80211_ADDR_COPY(aad.i_addr2, wh->i_addr2);
 	IEEE80211_ADDR_COPY(aad.i_addr3, wh->i_addr3);
 
-	AES_CMAC_Init(&ctx->cmac);
-	AES_CMAC_Update(&ctx->cmac, (u_int8_t *)&aad, sizeof aad);
-	AES_CMAC_Update(&ctx->cmac, (u_int8_t *)&wh[1],
+	AES_CMAC_Init(&cmac);
+	AES_CMAC_Update(&cmac, (u_int8_t *)&aad, sizeof aad);
+	AES_CMAC_Update(&cmac, (u_int8_t *)&wh[1],
 	    mbuf_len(m0) - sizeof(*wh));
 
 	m = m0;
@@ -141,16 +153,15 @@ ieee80211_bip_encap(struct ieee80211com *ic, mbuf_t m0,
 
 	/* construct Management MIC IE */
 	mmie = mtod(m, u_int8_t *) + mbuf_len(m);
-	mmie[0] = IEEE80211_ELEMID_MMIE;
-	mmie[1] = 16;
-	LE_WRITE_2(&mmie[2], k->k_id);
-	LE_WRITE_6(&mmie[4], k->k_tsc);
-	memset(&mmie[10], 0, 8);	/* MMIE MIC field set to 0 */
+	itl_pmf_bip_mmie_init(mmie, IEEE80211_ELEMID_MMIE, k->k_id,
+	    k->k_tsc);
 
-	AES_CMAC_Update(&ctx->cmac, mmie, IEEE80211_MMIE_LEN);
-	AES_CMAC_Final(mic, &ctx->cmac);
+	AES_CMAC_Update(&cmac, mmie, IEEE80211_MMIE_LEN);
+	AES_CMAC_Final(mic, &cmac);
 	/* truncate AES-128-CMAC to 64-bit */
 	memcpy(&mmie[10], mic, 8);
+	explicit_bzero(&cmac, sizeof(cmac));
+	explicit_bzero(mic, sizeof(mic));
 
     mbuf_setlen(m, mbuf_len(m) + IEEE80211_MMIE_LEN);
     mbuf_pkthdr_setlen(m0, mbuf_pkthdr_len(m0) + IEEE80211_MMIE_LEN);
@@ -159,6 +170,8 @@ ieee80211_bip_encap(struct ieee80211com *ic, mbuf_t m0,
 
 	return m0;
  nospace:
+	explicit_bzero(&cmac, sizeof(cmac));
+	explicit_bzero(mic, sizeof(mic));
 	ic->ic_stats.is_tx_nombuf++;
 	mbuf_freem(m0);
 	return NULL;
@@ -171,8 +184,14 @@ ieee80211_bip_decap(struct ieee80211com *ic, mbuf_t m0,
 	struct ieee80211_bip_ctx *ctx = (struct ieee80211_bip_ctx *)k->k_priv;
 	struct ieee80211_frame *wh;
 	struct ieee80211_bip_frame aad;
+	AES_CMAC_CTX cmac;
 	u_int8_t *mmie, mic0[8], mic[AES_CMAC_DIGEST_LENGTH];
 	u_int64_t ipn;
+	if (ctx == NULL) {
+		mbuf_freem(m0);
+		return NULL;
+	}
+	cmac = ctx->cmac;
 
 	wh = mtod(m0, struct ieee80211_frame *);
 	_KASSERT((wh->i_fc[0] & IEEE80211_FC0_TYPE_MASK) ==
@@ -185,10 +204,18 @@ ieee80211_bip_decap(struct ieee80211com *ic, mbuf_t m0,
 	 */
 	_KASSERT(m0->m_len >= sizeof(*wh) + IEEE80211_MMIE_LEN);
 	mmie = mtod(m0, u_int8_t *) + mbuf_len(m0) - IEEE80211_MMIE_LEN;
+	if (mmie[0] != IEEE80211_ELEMID_MMIE || mmie[1] != 16 ||
+	    LE_READ_2(&mmie[2]) != k->k_id) {
+		explicit_bzero(&cmac, sizeof(cmac));
+		ic->ic_stats.is_cmac_icv_errs++;
+		mbuf_freem(m0);
+		return NULL;
+	}
 
 	ipn = LE_READ_6(&mmie[4]);
-	if (ipn <= k->k_mgmt_rsc) {
+	if (!itl_pmf_bip_replay_ok(ipn, k->k_mgmt_rsc)) {
 		/* replayed frame, discard */
+		explicit_bzero(&cmac, sizeof(cmac));
 		ic->ic_stats.is_cmac_replays++;
 		mbuf_freem(m0);
 		return NULL;
@@ -208,14 +235,17 @@ ieee80211_bip_decap(struct ieee80211com *ic, mbuf_t m0,
 	IEEE80211_ADDR_COPY(aad.i_addr3, wh->i_addr3);
 
 	/* compute MIC */
-	AES_CMAC_Init(&ctx->cmac);
-	AES_CMAC_Update(&ctx->cmac, (u_int8_t *)&aad, sizeof aad);
-	AES_CMAC_Update(&ctx->cmac, (u_int8_t *)&wh[1],
+	AES_CMAC_Init(&cmac);
+	AES_CMAC_Update(&cmac, (u_int8_t *)&aad, sizeof aad);
+	AES_CMAC_Update(&cmac, (u_int8_t *)&wh[1],
 	    mbuf_len(m0) - sizeof(*wh));
-	AES_CMAC_Final(mic, &ctx->cmac);
+	AES_CMAC_Final(mic, &cmac);
+	explicit_bzero(&cmac, sizeof(cmac));
 
 	/* check that MIC matches the one in MMIE */
 	if (timingsafe_bcmp(mic, mic0, 8) != 0) {
+		explicit_bzero(mic0, sizeof(mic0));
+		explicit_bzero(mic, sizeof(mic));
 		ic->ic_stats.is_cmac_icv_errs++;
 		mbuf_freem(m0);
 		return NULL;
@@ -230,6 +260,8 @@ ieee80211_bip_decap(struct ieee80211com *ic, mbuf_t m0,
 
 	/* update last seen packet number (MIC is validated) */
 	k->k_mgmt_rsc = ipn;
+	explicit_bzero(mic0, sizeof(mic0));
+	explicit_bzero(mic, sizeof(mic));
 
 	return m0;
 }

@@ -6,7 +6,14 @@ association, and event flow. The separate P2P/AWDL path experiments with action
 frames, peer timing, transmit queues, RX tracing, and the native `awdl0`
 interface lifecycle.
 
-The current development candidate, Test105, targets x86_64 macOS Tahoe 26.7.2
+The isolated `25G332-WPA3PMF-Dev03` candidate adds bounded native SSID-list
+scanning, directed hidden-network discovery/join and OS-driven saved-network
+retry, plus the existing SAE/PMF candidate, on the Test120 source baseline.
+See [hidden networks](HIDDEN-NETWORKS.md) and [WPA3/PMF](WPA3-PMF.md) for its
+scope and offline evidence. It has not been deployed or tested with an AP;
+Enterprise, OWE, legacy WPA/WEP and other security families remain separate work.
+
+The following paragraphs retain the earlier Test105 experiment history. Test105 targets x86_64 macOS Tahoe 26.7.2
 (build 25G332) and the AX201 device match documented in the main README. It is
 a disarmed, manually triggered reply-path candidate. Test104 received controlled channel-149
 frames through the driver and delivered a complete eight-byte UDP marker to a
@@ -76,12 +83,16 @@ association442 is `0x6f8` bytes. Local analysis notes are kept outside the
 repository. Wire offsets are read explicitly rather than reinterpreting an
 unrelated older C++ structure.
 
-`wcl_backend` owns request state and secret material. It accepts open networks
-and explicit WPA2-PSK/CCMP with a PMK, a bounded passphrase, or 64hex key. It rejects
-WPA3-only, mandatory PMF, enterprise/extended AKMs, MLO, unsupported additional
-security/behavior flags, and unimplemented alternate key carriers. Optional SAE
-advertisements are preserved in the original RSN bytes; no scan IE is rewritten
-to downgrade security. An accepted request is not reported as connected until
+`wcl_backend` owns request state and secret material. The isolated
+`25G332-WPA3PMF-Dev03` candidate adds ordinary WPA3-SAE (group 19, H&P/H2E),
+WPA2-PSK-SHA256, and optional/required PMF to the existing WPA2-PSK/CCMP path.
+SAE uses the supplied password for authentication; it never treats the native
+request's auxiliary 32-byte field as an authenticated SAE PMK. Enterprise and
+extended AKMs, OWE, WPA/TKIP, other SAE groups, MLO, and unsupported request flags
+remain rejected. The original RSN advertisement is preserved and the selected
+AKM is explicit. This candidate has offline validation only; see
+[WPA3 and PMF scope](WPA3-PMF.md) for its boundaries and test commands.
+An accepted request is not reported as connected until
 real association, a real associated BSSID beacon, and real port authorization
 have all arrived.
 

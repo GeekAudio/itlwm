@@ -151,6 +151,10 @@ ieee80211_node2req(struct ieee80211com *ic, const struct ieee80211_node *ni,
 		nr->nr_rsnakms |= IEEE80211_WPA_AKM_SHA256_8021X;
 	if (ni->ni_supported_rsnakms & IEEE80211_AKM_SHA256_PSK)
 		nr->nr_rsnakms |= IEEE80211_WPA_AKM_SHA256_PSK;
+#ifdef AIRPORT_TAHOE
+	if (ni->ni_supported_rsnakms & IEEE80211_AKM_SAE)
+		nr->nr_rsnakms |= IEEE80211_WPA_AKM_SAE;
+#endif
 
 	/* Node flags */
 	nr->nr_flags = 0;
@@ -222,6 +226,12 @@ ieee80211_disable_wep(struct ieee80211com *ic)
 void
 ieee80211_disable_rsn(struct ieee80211com *ic)
 {
+	/* Invalidate any in-flight firmware key ACK before clearing credentials.
+	 * A late ACK must not reopen the old PMF association. */
+	if (ic->ic_opmode == IEEE80211_M_STA)
+        ieee80211_sta_security_cleanup(ic, ic->ic_bss);
+    else
+        ieee80211_pmf_keys_cancel(ic, ic->ic_bss);
 	ic->ic_flags &= ~(IEEE80211_F_PSK | IEEE80211_F_RSNON);
 	memset(ic->ic_psk, 0, sizeof(ic->ic_psk));
 	ic->ic_rsnprotos = 0;
@@ -319,6 +329,11 @@ ieee80211_ioctl_setwpaparms(struct ieee80211com *ic,
 {
 	if (!(ic->ic_caps & IEEE80211_C_RSN))
 		return ENODEV;
+#ifdef AIRPORT_TAHOE
+	if ((wpa->i_akms & IEEE80211_WPA_AKM_SAE) &&
+	    ic->ic_opmode != IEEE80211_M_STA)
+		return EOPNOTSUPP;
+#endif
 
 	if (!wpa->i_enabled) {
 		if (!(ic->ic_flags & IEEE80211_F_RSNON))
@@ -348,6 +363,10 @@ ieee80211_ioctl_setwpaparms(struct ieee80211com *ic,
 		ic->ic_rsnakms |= IEEE80211_AKM_8021X;
 	if (wpa->i_akms & IEEE80211_WPA_AKM_SHA256_8021X)
 		ic->ic_rsnakms |= IEEE80211_AKM_SHA256_8021X;
+#ifdef AIRPORT_TAHOE
+	if (wpa->i_akms & IEEE80211_WPA_AKM_SAE)
+		ic->ic_rsnakms |= IEEE80211_AKM_SAE;
+#endif
 	if (ic->ic_rsnakms == 0)	/* set to default (PSK) */
 		ic->ic_rsnakms = IEEE80211_AKM_PSK;
 
@@ -405,6 +424,10 @@ ieee80211_ioctl_getwpaparms(struct ieee80211com *ic,
 		wpa->i_akms |= IEEE80211_WPA_AKM_8021X;
 	if (ic->ic_rsnakms & IEEE80211_AKM_SHA256_8021X)
 		wpa->i_akms |= IEEE80211_WPA_AKM_SHA256_8021X;
+#ifdef AIRPORT_TAHOE
+	if (ic->ic_rsnakms & IEEE80211_AKM_SAE)
+		wpa->i_akms |= IEEE80211_WPA_AKM_SAE;
+#endif
 
 	if (ic->ic_rsngroupcipher == IEEE80211_CIPHER_WEP40)
 		wpa->i_groupcipher = IEEE80211_WPA_CIPHER_WEP40;
@@ -449,6 +472,10 @@ ieee80211_ess_getwpaparms(struct ieee80211_ess *ess,
 		wpa->i_akms |= IEEE80211_WPA_AKM_8021X;
 	if (ess->rsnakms & IEEE80211_AKM_SHA256_8021X)
 		wpa->i_akms |= IEEE80211_WPA_AKM_SHA256_8021X;
+#ifdef AIRPORT_TAHOE
+	if (ess->rsnakms & IEEE80211_AKM_SAE)
+		wpa->i_akms |= IEEE80211_WPA_AKM_SAE;
+#endif
 
 	if (ess->rsngroupcipher == IEEE80211_CIPHER_WEP40)
 		wpa->i_groupcipher = IEEE80211_WPA_CIPHER_WEP40;

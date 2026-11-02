@@ -1134,6 +1134,8 @@
 		A72100000000000000000005 /* ItlIwxP2PPeer.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A72100000000000000000006 /* ItlIwxP2PPeer.cpp */; };
 		A72200000000000000000001 /* awdl_native_concrete_25G332.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A72200000000000000000002 /* awdl_native_concrete_25G332.cpp */; };
 		A72200000000000000000003 /* awdl_native_init_probe_25G332.cpp in Sources */ = {isa = PBXBuildFile; fileRef = A72200000000000000000004 /* awdl_native_init_probe_25G332.cpp */; };
+		93F83AA0E5BBBBC983788DFF /* sae_sha2_bridge.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E4B54B89C4D6D60BFC05D8C5 /* sae_sha2_bridge.cpp */; };
+		78F55124C0AF2E53CE81D8D3 /* ieee80211_sae.c in Sources */ = {isa = PBXBuildFile; fileRef = 7BF0605EAC793D2BCD64CE6D /* ieee80211_sae.c */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -1485,6 +1487,8 @@
 		A72100000000000000000006 /* ItlIwxP2PPeer.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = itlwm/hal_iwx/ItlIwxP2PPeer.cpp; sourceTree = "<group>"; };
 		A72200000000000000000002 /* awdl_native_concrete_25G332.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = native/awdl_native_concrete_25G332.cpp; sourceTree = "<group>"; };
 		A72200000000000000000004 /* awdl_native_init_probe_25G332.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = native/awdl_native_init_probe_25G332.cpp; sourceTree = "<group>"; };
+		E4B54B89C4D6D60BFC05D8C5 /* sae_sha2_bridge.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = third_party/sae/hostap/sae_sha2_bridge.cpp; sourceTree = "<group>"; };
+		7BF0605EAC793D2BCD64CE6D /* ieee80211_sae.c */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = itl80211/openbsd/net80211/ieee80211_sae.c; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -1574,6 +1578,8 @@
 		024A07A223FCBC3C009FBA6C = {
 			isa = PBXGroup;
 			children = (
+				E4B54B89C4D6D60BFC05D8C5 /* sae_sha2_bridge.cpp */,
+				7BF0605EAC793D2BCD64CE6D /* ieee80211_sae.c */,
 				8A4535F8288D5654CEC8FECD /* p2p_hal_probe.cpp */,
 				34FAA69AF16873FA3C660CE7 /* ItlIwxP2PRoc.cpp */,
 				FA08282755E6F14B4D0A5552 /* p2p_action_tx.cpp */,
@@ -2591,6 +2597,7 @@
 			isa = PBXNativeTarget;
 			buildConfigurationList = 6E309A0752F7E21B9AB46C8F /* Build configuration list for PBXNativeTarget "AirportItlwm-Tahoe" */;
 			buildPhases = (
+				0008A55FAA77152178D77E75 /* Build SAE Crypto */,
 				5E739CB37FF5CB5D90B1FCE5 /* Headers */,
 				B6C8B08A53446C0EB3402898 /* Sources */,
 				6AE2495AFA03EC9E9FEEFA8A /* Frameworks */,
@@ -2770,6 +2777,18 @@
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
 			shellScript = "scripts/fw_gen.sh -P \"${PROJECT_DIR}/itlwm/firmware/\"\n";
+		};
+		0008A55FAA77152178D77E75 /* Build SAE Crypto */ = {
+			isa = PBXShellScriptBuildPhase;
+			buildActionMask = 2147483647;
+			files = ();
+			inputPaths = ();
+			name = "Build SAE Crypto";
+			alwaysOutOfDate = 1;
+			outputPaths = ("$(DERIVED_FILE_DIR)/libAX201SAE.a",);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/bash;
+			shellScript = "/bin/bash \"${PROJECT_DIR}/scripts/build_sae_crypto.sh\"";
 		};
 /* End PBXShellScriptBuildPhase section */
 
@@ -3498,6 +3517,8 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				93F83AA0E5BBBBC983788DFF /* sae_sha2_bridge.cpp in Sources */,
+				78F55124C0AF2E53CE81D8D3 /* ieee80211_sae.c in Sources */,
 				A72400000000000000000001 /* awdl_tx_window_evidence.cpp in Sources */,
 				7A374B92FC24DD3E798E84D4 /* ItlIwxP2PRoc.cpp in Sources */,
 				B7C8C571F409F82CB5F59598 /* p2p_action_tx.cpp in Sources */,
@@ -4372,6 +4393,8 @@
 		F44E47FEF7035EDC281E4C98 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				OTHER_LDFLAGS = ("$(inherited)", "$(DERIVED_FILE_DIR)/libAX201SAE.a",);
+				HEADER_SEARCH_PATHS = ("$(inherited)", "$(PROJECT_DIR)/third_party/sae/hostap", "$(PROJECT_DIR)/third_party/sae/mbedtls/include",);
 				CONFIGURATION_BUILD_DIR = "$(SYMROOT)/$(CONFIGURATION)/Tahoe";
 				CURRENT_PROJECT_VERSION = "$(MODULE_VERSION)";
 				GCC_PRECOMPILE_PREFIX_HEADER = YES;
@@ -4405,6 +4428,8 @@
 		2982BC3FC7E157928148FD07 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
+				OTHER_LDFLAGS = ("$(inherited)", "$(DERIVED_FILE_DIR)/libAX201SAE.a",);
+				HEADER_SEARCH_PATHS = ("$(inherited)", "$(PROJECT_DIR)/third_party/sae/hostap", "$(PROJECT_DIR)/third_party/sae/mbedtls/include",);
 				CONFIGURATION_BUILD_DIR = "$(SYMROOT)/$(CONFIGURATION)/Tahoe";
 				CURRENT_PROJECT_VERSION = "$(MODULE_VERSION)";
 				GCC_PRECOMPILE_PREFIX_HEADER = YES;

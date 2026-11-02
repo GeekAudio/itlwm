@@ -9,7 +9,7 @@ namespace {
 struct Emitted { uint32_t kind; std::vector<uint8_t> body; };
 struct Fixture {
     Backend backend;
-    unsigned scans {}, joins {}, leaves {}, cancels {};
+    unsigned scans {}, joins {}, leaves {}, cancels {}, clearedCredentials {};
     unsigned busyJoinResponses {};
     unsigned busyScanResponses {};
     uint32_t generation {};
@@ -58,6 +58,7 @@ struct Fixture {
     }
     static Status cancel(void *x) { ++static_cast<Fixture *>(x)->cancels; return Status::Ok; }
     static void leave(void *x) { ++static_cast<Fixture *>(x)->leaves; }
+    static void clear(void *x) { ++static_cast<Fixture *>(x)->clearedCredentials; }
     static bool privacy(void *x) { return static_cast<Fixture *>(x)->privateReady; }
     static uint64_t monotonic(void *x) { return static_cast<Fixture *>(x)->nowNs; }
     static ScanBusyDetail busyDetail(void *x) { return {static_cast<Fixture *>(x)->busyReasonCode}; }
@@ -110,7 +111,7 @@ struct Fixture {
         f->messages.push_back(e);
     }
     explicit Fixture(bool initialReady = true) {
-        backend.initialize({this, scan, join, leave, emit, privacy, cancel, monotonic, busyDetail});
+        backend.initialize({this, scan, join, leave, emit, privacy, cancel, monotonic, busyDetail, clear});
         if (initialReady) backend.driverState(true);
         messages.clear();
     }
@@ -194,6 +195,59 @@ int main() {
     secured[0xd6 + 20] = 0x40;
     assert(decodeJoin(secured.data(), secured.size(), j) == DecodeResult::Unsupported);
     uint8_t malformed[] = {0,2,1}; assert(!validateIEs(malformed, sizeof(malformed)));
+    {
+        Fixture f;
+        assert(f.backend.joinRequest(join.data(),join.size()) == Status::Ok);
+        uint8_t wrong[6] = {2,0,0,0,0,2};
+        f.backend.observeAssociation(1, wrong);
+        assert(f.backend.joining() && !f.clearedCredentials);
+        f.backend.observeAssociation(1, join.data()+0x21c);
+        assert(!f.backend.joining() && f.clearedCredentials == 1);
+        assert(!f.leaves); // Failure cleanup must not start fresh radio work.
+    }
+    {
+        Fixture f;
+        assert(f.backend.joinRequest(join.data(),join.size()) == Status::Ok);
+        f.backend.driverState(false);
+        assert(!f.backend.joining() && f.clearedCredentials == 1 && !f.leaves);
+        f.backend.stop();
+        assert(f.clearedCredentials == 2);
+        f.backend.stop();
+        assert(f.clearedCredentials == 2); // No callback after provider teardown.
+    }
+    {
+        Fixture f;
+        f.backend.beginAddressChange();
+        assert(f.backend.joinRequest(join.data(),join.size()) == Status::Ok);
+        f.backend.driverState(false);
+        assert(f.backend.joining() && !f.clearedCredentials);
+        f.joinStatus=Status::Failed;
+        f.backend.driverState(true);
+        assert(!f.backend.joining() && f.clearedCredentials == 1 && !f.leaves);
+    }
+    {
+        Fixture f;
+        f.backend.addressHardwareStopped();
+        assert(!f.clearedCredentials);
+        f.backend.beginAddressChange();
+        assert(f.backend.joinRequest(join.data(),join.size()) == Status::Ok);
+        f.backend.driverState(false);
+        assert(!f.clearedCredentials && !f.joins);
+        f.backend.addressHardwareStopped();
+        assert(f.clearedCredentials==1 && f.backend.joining() && !f.joins);
+        f.backend.driverState(true);
+        assert(f.joins==1 && f.backend.joining()); // Deferred plan survived old credential clear.
+    }
+    {
+        Fixture f;
+        f.joinStatus=Status::Busy;
+        assert(f.backend.joinRequest(join.data(),join.size()) == Status::Ok);
+        assert(f.backend.joining()); // Mainline owns a bounded deferred Busy retry.
+        f.backend.tick(1);
+        assert(!f.clearedCredentials); // An unsubmitted retry preserves old credentials.
+        assert(f.backend.leave(true) == Status::Ok);
+        assert(!f.backend.joining() && !f.clearedCredentials);
+    }
     {
         Fixture f;
         uint8_t bssid[6] = {2,0,0,0,0,1};

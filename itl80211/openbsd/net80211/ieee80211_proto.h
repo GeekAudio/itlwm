@@ -177,6 +177,7 @@ extern	void ieee80211_reset_erp(struct ieee80211com *);
 extern	void ieee80211_set_shortslottime(struct ieee80211com *, int);
 extern	void ieee80211_auth_open_confirm(struct ieee80211com *,
 	    struct ieee80211_node *, uint16_t);
+extern	void ieee80211_try_another_bss(struct ieee80211com *);
 extern	void ieee80211_auth_open(struct ieee80211com *,
 	    const struct ieee80211_frame *, struct ieee80211_node *,
 	    struct ieee80211_rxinfo *rs, u_int16_t, u_int16_t);
@@ -189,6 +190,10 @@ extern	void ieee80211_setkeysdone(struct ieee80211com *);
 extern	void ieee80211_sa_query_timeout(void *);
 extern	void ieee80211_sa_query_request(struct ieee80211com *,
 	    struct ieee80211_node *);
+#ifdef IEEE80211_STA_ONLY
+extern	int ieee80211_sa_query_sta_authorized(struct ieee80211com *,
+	    struct ieee80211_node *);
+#endif
 extern  void ieee80211_ht_negotiate_chw(struct ieee80211com *,
     struct ieee80211_node *);
 extern	void ieee80211_ht_negotiate(struct ieee80211com *,

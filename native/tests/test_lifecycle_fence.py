@@ -34,12 +34,14 @@ bits = extract_block("enum : uint32_t {\n    kTahoeLifecycleInitTask")
 guard = extract_block("class TahoeLifecycleGuard")
 fence_methods = "\n".join(extract(marker) for marker in (
     "bool ItlIwx::tahoeTryLifecycleFence()",
-    "void ItlIwx::tahoeReleaseLifecycleFence()",
+    "bool ItlIwx::tahoeReleaseLifecycleFence(bool flushDeferredTasks)",
     "void ItlIwx::tahoeDeferLifecycleTasks(uint32_t taskBits)",
     "void ItlIwx::tahoeFlushLifecycleTasks()",
 ))
 callbacks = "\n".join(extract(marker) for marker in (
     "void ItlIwx::\niwx_init_task(void *arg1)",
+    "void ItlIwx::\niwx_init_task_tagged(void *arg1,",
+    "void ItlIwx::\niwx_init_task_execute(void *arg1,",
     "void ItlIwx::\niwx_ba_task(void *arg)",
     "void ItlIwx::\niwx_mac_ctxt_task(void *arg)",
     "void ItlIwx::\niwx_chan_ctxt_task(void *arg)",
@@ -51,10 +53,18 @@ assert stop_source.index("TahoeLifecycleGuard lifecycle(this)") < \
        stop_source.index("tahoeP2pStopBeforeReset(sc)") < \
        stop_source.index("taskq_try_pause_with_diagnostics(")
 assert "task_del(systq, &tahoe_scan_abort_task_)" in stop_source
+assert "kTahoeLifecycleMccTask = 1u << 5" in bits
+init_entry = extract("void ItlIwx::\niwx_init_task(void *arg1)")
+assert "iwx_init_task_execute(arg1, nullptr, nullptr)" in init_entry
+init_body = extract("void ItlIwx::\niwx_init_task_execute(void *arg1,")
+assert "IWX_PMF_GATE_RESET_VALIDATE" in init_body
+assert "sc_pmf_reset_attempt_token" in init_body
+assert "sc_pmf_reset_attempt_inflight" in init_body
 
 
 HARNESS = r'''
 #include "native/iwx_reset_trace.hpp"
+#include "native/iwx_init_dispatch.hpp"
 #include <cassert>
 #include <cerrno>
 #include <cstddef>
@@ -123,16 +133,38 @@ static void releaseFailedTryPause() {
     allowFailedTry=true; failedTryCondition.notify_all();
 }
 
+// Queue/KPI boundary only; dispatch policy below is the production header.
+struct task_dispatch_context {
+    uint64_t dispatch_id; uint32_t driver_generation, fault_serial;
+    uint32_t power_epoch, power_flags, dispatch_flags;
+};
 struct task { unsigned adds=0; bool queued=false; };
+using task_dispatch_func=void (*)(void *,const task_dispatch_context *,const task *);
 struct taskq {};
 static taskq testTaskq;
 static taskq *systq=&testTaskq;
+static unsigned taskqEnterCalls=0, taskqLeaveCalls=0;
 static int task_add(taskq *, task *task) {
     if (task->queued) return 0;
     task->queued=true; ++task->adds; return 1;
 }
+static int task_defer_tagged(taskq *, const task *, task_dispatch_func,
+                             const task_dispatch_context *) { return 1; }
+static int taskq_flush_deferred_tagged(taskq *, task *work) {
+    return task_add(systq,work);
+}
+static int task_dispatch_is_current(const task *,uint64_t id) { return id==1; }
+static int taskq_enter_unpaused(taskq *queue) {
+    assert(queue); ++taskqEnterCalls; return 0;
+}
+static void taskq_leave(taskq *queue) {
+    assert(queue); ++taskqLeaveCalls;
+}
 
 struct _ifnet { void *if_softc=nullptr; uint32_t if_flags=0; };
+struct IwxLinkStateTrace {
+    enum class Event { kResetSkipped };
+};
 struct ieee80211_rx_ba { int ba_winstart=0,ba_winsize=0,ba_timeout_val=0; };
 struct ieee80211_tx_ba {
     int ba_winstart=0,ba_winend=0,ba_winsize=0,ba_timeout_val=0;
@@ -147,12 +179,22 @@ struct ieee80211com {
     _ifnet ic_if; int ic_state=0; ieee80211_node *ic_bss=nullptr;
 };
 struct iwx_tx_ring { unsigned cur=0,ring_count=16; };
+enum iwx_pmf_gate_operation { IWX_PMF_GATE_RESET_VALIDATE };
+struct iwx_pmf_gate_request {
+    iwx_pmf_gate_operation operation=IWX_PMF_GATE_RESET_VALIDATE;
+    int result=0;
+    uint32_t reset_token=0,reset_node_epoch=0;
+};
 struct iwx_softc {
     ieee80211com sc_ic; int sc_generation=0,sc_flags=0;
     uint32_t sc_enabled_capa=0;
     struct { uint32_t start_tidmask=0,stop_tidmask=0; } ba_rx,ba_tx;
     unsigned sc_rx_ba_sessions=0;
     iwx_tx_ring txq[4];
+    taskq *sc_nswq=&testTaskq;
+    task sc_native_mcc_task;
+    uint8_t sc_pmf_reset_task_active=0,sc_pmf_reset_attempt_inflight=0;
+    uint32_t sc_pmf_reset_attempt_token=0,sc_pmf_reset_attempt_node_epoch=0;
     task init_task,ba_task,mac_ctxt_task,chan_ctxt_task;
 };
 static int splnet() { return 0; }
@@ -167,19 +209,36 @@ struct ItlIwx {
     IORecursiveLock *nativeLifecycleLock_=&lifecycleLock;
     uint32_t nativeLifecycleDepth_=0,nativeLifecycleDeferredTasks_=0;
     uint32_t nativeLifecycleTearingDown_=0;
+    uint64_t nativePowerRequestState_=3;
+    uint32_t nativeInitTaskFaultSerial_=0;
     unsigned baCommands=0,macCommands=0,phyCommands=0,rateCommands=0;
     unsigned scanAbortCommands=0,initCalls=0,stopCalls=0,events=0;
     unsigned readyCalls=0;
+    unsigned pmfGateCalls=0,pmfRetryCalls=0;
+    int pmfGateError=0,pmfGateValidation=0;
     uint32_t scanState=0;
     struct task tahoe_scan_abort_task_;
     bool tahoeTryLifecycleFence();
-    void tahoeReleaseLifecycleFence();
+    bool tahoeReleaseLifecycleFence(bool);
     void tahoeDeferLifecycleTasks(uint32_t);
     void tahoeFlushLifecycleTasks();
     void tahoeRecordInitTaskTrigger(IwxResetTrace::InitTaskTrigger) {}
-    void tahoeRecordReset(IwxResetTrace::ResetReason,iwx_softc *) {}
+    uint32_t tahoeRecordReset(IwxResetTrace::ResetReason,iwx_softc *) { return 1; }
+    void tahoeCapturePreResetFirmwareErrorSnapshot(
+        iwx_softc *,IwxResetTrace::ResetReason,uint32_t) {}
+    void tahoeRecordLinkTransition(iwx_softc *,IwxLinkStateTrace::Event,
+        uint32_t,uint32_t,int,int,uint32_t,bool) {}
+    bool tahoePublishFirmwareDiagnostics(void *,iwx_softc *,bool) { return true; }
+    void *getController() { return nullptr; }
+    int iwx_pmf_run_gate(iwx_softc *,iwx_pmf_gate_request *request) {
+        ++pmfGateCalls; request->result=pmfGateValidation; return pmfGateError;
+    }
+    int iwx_pmf_reset_retry(iwx_softc *,int) { ++pmfRetryCalls; return 0; }
     static uint32_t tahoeScanState(ieee80211com *) { return scanStateForTest; }
     static void iwx_init_task(void *);
+    static void iwx_init_task_tagged(void *,const task_dispatch_context *,const task *);
+    static void iwx_init_task_execute(void *,const task_dispatch_context *,const task *);
+    int tahoeQueueInitTask(iwx_softc *sc) { return task_add(systq,&sc->init_task); }
     static void iwx_ba_task(void *);
     static void iwx_mac_ctxt_task(void *);
     static void iwx_chan_ctxt_task(void *);
@@ -187,7 +246,9 @@ struct ItlIwx {
     int iwx_activate(iwx_softc *,int);
     static uint32_t scanStateForTest;
     int iwx_init(_ifnet *) { ++initCalls; return 0; }
-    int iwx_stop(_ifnet *,IwxResetTrace::ResetReason) { ++stopCalls; return 0; }
+    int iwx_stop(_ifnet *ifp,IwxResetTrace::ResetReason) {
+        ++stopCalls; ifp->if_flags &= ~IFF_RUNNING; return 0;
+    }
     int iwx_resume(iwx_softc *) { return 0; }
     int iwx_set_hw_ready(iwx_softc *) { ++readyCalls; return 1; }
     void tahoeDriverEvent(int) { ++events; }
@@ -238,6 +299,52 @@ static void test_temporary_contention(
     if (kind[0]=='s') assert(owner.scanAbortCommands==1);
 }
 
+static void test_mcc_deferred_flush() {
+    ItlIwx owner;
+    const unsigned enterBefore=taskqEnterCalls;
+    const unsigned leaveBefore=taskqLeaveCalls;
+    auto holder=std::make_unique<TahoeLifecycleGuard>(&owner);
+    assert(bool(*holder));
+    owner.tahoeDeferLifecycleTasks(kTahoeLifecycleMccTask);
+    assert(owner.com.sc_native_mcc_task.adds==0);
+    holder.reset();
+    assert(owner.com.sc_native_mcc_task.adds==1 &&
+           owner.com.sc_native_mcc_task.queued);
+    assert(taskqEnterCalls==enterBefore+1 && taskqLeaveCalls==leaveBefore+1);
+}
+
+static void test_pmf_init_gate_boundary() {
+    {
+        /* A stale/invalid PMF reset request must not reach stop or init. */
+        ItlIwx owner;
+        owner.com.sc_ic.ic_if.if_softc=&owner.com;
+        owner.com.sc_ic.ic_if.if_flags=IFF_UP|IFF_RUNNING;
+        owner.com.sc_pmf_reset_task_active=1;
+        owner.com.sc_pmf_reset_attempt_inflight=1;
+        owner.com.sc_pmf_reset_attempt_token=9;
+        owner.com.sc_pmf_reset_attempt_node_epoch=4;
+        owner.pmfGateValidation=0;
+        ItlIwx::iwx_init_task(&owner.com);
+        assert(owner.pmfGateCalls==1 && owner.stopCalls==0 &&
+               owner.initCalls==0);
+    }
+    {
+        /* A validated attempt may stop/restart even though IFF_RUNNING was
+         * initially set; the stop body clears RUNNING before init. */
+        ItlIwx owner;
+        owner.com.sc_ic.ic_if.if_softc=&owner.com;
+        owner.com.sc_ic.ic_if.if_flags=IFF_UP|IFF_RUNNING;
+        owner.com.sc_pmf_reset_task_active=1;
+        owner.com.sc_pmf_reset_attempt_inflight=1;
+        owner.com.sc_pmf_reset_attempt_token=13;
+        owner.com.sc_pmf_reset_attempt_node_epoch=8;
+        owner.pmfGateValidation=1;
+        ItlIwx::iwx_init_task(&owner.com);
+        assert(owner.pmfGateCalls==1 && owner.stopCalls==1 &&
+               owner.initCalls==1);
+    }
+}
+
 int main() {
     unsigned scenarios=0;
     {
@@ -251,6 +358,24 @@ int main() {
         holder.reset();
         assert(owner.com.init_task.adds==1 && owner.com.init_task.queued);
         ++scenarios;
+    }
+    test_mcc_deferred_flush();
+    ++scenarios;
+    test_pmf_init_gate_boundary();
+    scenarios+=2;
+    {
+        ItlIwx owner; iwx_node node; iwx_phy_context phy{};
+        set_running(owner,node,phy);
+        task_dispatch_context dispatch{1,0,0,1,3,0};
+        ItlIwx::iwx_init_task_tagged(&owner.com,&dispatch,&owner.com.init_task);
+        assert(owner.stopCalls==0 && owner.initCalls==0); // stale power epoch
+        dispatch.power_epoch=0; dispatch.dispatch_id=2;
+        ItlIwx::iwx_init_task_tagged(&owner.com,&dispatch,&owner.com.init_task);
+        assert(owner.stopCalls==0 && owner.initCalls==0); // superseded dispatch
+        dispatch.dispatch_id=1;
+        ItlIwx::iwx_init_task_tagged(&owner.com,&dispatch,&owner.com.init_task);
+        assert(owner.stopCalls==1 && owner.initCalls==1);
+        scenarios+=3;
     }
     {
         ItlIwx owner; iwx_node node; iwx_phy_context phy{};

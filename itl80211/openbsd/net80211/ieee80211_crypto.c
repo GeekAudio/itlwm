@@ -49,6 +49,8 @@
 
 #include <net80211/ieee80211_var.h>
 #include <net80211/ieee80211_priv.h>
+#include <net80211/ieee80211_sae.h>
+#include "../../../native/pmf_crypto_policy.h"
 
 #include <crypto/arc4.h>
 #include <crypto/md5.h>
@@ -93,6 +95,8 @@ ieee80211_crypto_detach(struct _ifnet *ifp)
     XYLog("%s\n", __FUNCTION__);
 	struct ieee80211com *ic = (struct ieee80211com *)ifp;
 	struct ieee80211_pmk *pmk;
+	/* Detach is terminal for this interface's SAE credentials and PMK. */
+	ieee80211_sae_clear(ic);
 
 	/* purge the PMKSA cache */
 	while ((pmk = TAILQ_FIRST(&ic->ic_pmksa)) != NULL) {
@@ -211,6 +215,9 @@ ieee80211_get_txkey(struct ieee80211com *ic, const struct ieee80211_frame *wh,
     struct ieee80211_node *ni)
 {
 	int kid;
+	int robust;
+	uint8_t subtype = wh->i_fc[0] & IEEE80211_FC0_SUBTYPE_MASK;
+	const uint8_t *category = (const uint8_t *)&wh[1];
 
 	if ((ic->ic_flags & IEEE80211_F_RSNON) &&
         !IEEE80211_IS_MULTICAST(wh->i_addr1) &&
@@ -218,7 +225,17 @@ ieee80211_get_txkey(struct ieee80211com *ic, const struct ieee80211_frame *wh,
         return &ni->ni_pairwise_key;
 
     /* All other cases (including WEP) use a group key. */
-    if (ni->ni_flags & IEEE80211_NODE_MFP)
+    if (subtype == IEEE80211_FC0_SUBTYPE_ACTION)
+        robust = itl_pmf_is_robust_mgmt_category(wh->i_fc[0], 1,
+            category[0]);
+    else
+        robust = itl_pmf_is_robust_mgmt_category(wh->i_fc[0], 0, 0);
+
+    if (itl_pmf_use_igtk_tx((ni->ni_flags & IEEE80211_NODE_MFP) != 0,
+        IEEE80211_IS_MULTICAST(wh->i_addr1),
+        (wh->i_fc[0] & IEEE80211_FC0_TYPE_MASK) ==
+            IEEE80211_FC0_TYPE_MGT,
+        (wh->i_fc[1] & IEEE80211_FC1_PROTECTED) != 0, robust))
         kid = ic->ic_igtk_kid;
     else
         kid = ic->ic_def_txkey;
@@ -494,6 +511,13 @@ ieee80211_eapol_key_mic(struct ieee80211_eapol_key *key, const u_int8_t *kck)
 	len = BE_READ_2(key->len) + 4;
 
     switch (BE_READ_2(key->info) & EAPOL_KEY_VERSION_MASK) {
+	case EAPOL_KEY_DESC_AKM_DEFINED:
+		/* Selector 00:0f:ac:8 (ordinary SAE) defines AES-CMAC. */
+		AES_CMAC_Init(&ctx.cmac);
+		AES_CMAC_SetKey(&ctx.cmac, kck);
+		AES_CMAC_Update(&ctx.cmac, (u_int8_t *)key, len);
+		AES_CMAC_Final(key->mic, &ctx.cmac);
+		break;
     case EAPOL_KEY_DESC_V1:
         HMAC_MD5_Init(&ctx.md5, kck, 16);
         HMAC_MD5_Update(&ctx.md5, (u_int8_t *)key, len);
@@ -506,7 +530,7 @@ ieee80211_eapol_key_mic(struct ieee80211_eapol_key *key, const u_int8_t *kck)
         /* truncate HMAC-SHA1 to its 128 MSBs */
         memcpy(key->mic, digest, EAPOL_KEY_MIC_LEN);
         break;
-    case EAPOL_KEY_DESC_V3:
+	case EAPOL_KEY_DESC_V3:
         AES_CMAC_Init(&ctx.cmac);
         AES_CMAC_SetKey(&ctx.cmac, kck);
         AES_CMAC_Update(&ctx.cmac, (u_int8_t *)key, len);
@@ -571,7 +595,8 @@ ieee80211_eapol_key_encrypt(struct ieee80211com *ic,
         rc4_skip(&ctx.rc4, RC4STATE);
         rc4_crypt(&ctx.rc4, data, data, len);
         break;
-    case EAPOL_KEY_DESC_V2:
+	case EAPOL_KEY_DESC_AKM_DEFINED:
+	case EAPOL_KEY_DESC_V2:
     case EAPOL_KEY_DESC_V3:
         if (len < 16 || (len & 7) != 0) {
             /* insert padding */
@@ -624,7 +649,8 @@ ieee80211_eapol_key_decrypt(struct ieee80211_eapol_key *key,
         rc4_skip(&ctx.rc4, RC4STATE);
         rc4_crypt(&ctx.rc4, data, data, len);
         return 0;
-    case EAPOL_KEY_DESC_V2:
+	case EAPOL_KEY_DESC_AKM_DEFINED:
+	case EAPOL_KEY_DESC_V2:
     case EAPOL_KEY_DESC_V3:
         /* Key Data Length must be a multiple of 8 */
         if (len < 16 + 8 || (len & 7) != 0)

@@ -185,6 +185,7 @@ struct itl_iwx_scan_policy {
     bool restricted;
     uint32_t generation;
     uint8_t source_addr[6];
+    struct itl_scan_ssid_targets targets;
 };
 
 #ifdef AIRPORT_TAHOE
@@ -351,6 +352,9 @@ public:
     void free() override;
     virtual bool attach(IOPCIDevice *device) override;
     virtual void detach(IOPCIDevice *device) override;
+    virtual bool detachResourcesRetained() const override {
+        return __atomic_load_n(&nativePmfDetachRetained_, __ATOMIC_ACQUIRE);
+    }
     IOReturn enable(IONetworkInterface *netif) override;
     IOReturn disable(IONetworkInterface *netif) override;
     virtual struct ieee80211com *get80211Controller() override;
@@ -405,12 +409,15 @@ public:
     void quiesceRxInterruptSource();
     IOWorkLoop *rxInterruptWorkloop_ {nullptr};
     bool rxInterruptSourceRegistered_ {false};
+    IORecursiveLock *nativeLifecycleLock_ {nullptr};
+    uint32_t nativeLifecycleTearingDown_ {0};
+    bool nativePmfDetachRetained_ {false};
+    bool nativePmfDetachRetainHeld_ {false};
+    bool nativeDetachQueuePaused_ {false};
 #ifdef AIRPORT_TAHOE
     /* Serializes synchronous per-device firmware work against power stop. */
-    IORecursiveLock *nativeLifecycleLock_ {nullptr};
     uint32_t nativeLifecycleDepth_ {0};
     uint32_t nativeLifecycleDeferredTasks_ {0};
-    uint32_t nativeLifecycleTearingDown_ {0};
     uint64_t nativeLifecycleStopRejectFingerprint_ {0};
     uint64_t nativeInitDispatchSequence_ {0};
     uint32_t nativeInitTaskFaultSerial_ {0};
@@ -762,6 +769,7 @@ public:
     bool tahoe_scan_terminal_processing_ = false;
     uint32_t tahoe_scan_terminal_status_ = 0;
     int tahoe_newstate_generation_ = -1;
+    uint32_t tahoe_newstate_sequence_ = 0;
     struct task tahoe_scan_abort_task_;
     static uint32_t tahoeScanState(struct ieee80211com *);
     static int tahoeScanCancel(struct ieee80211com *);
@@ -971,6 +979,28 @@ public:
             const void *, uint32_t *);
     void    iwx_free_resp(struct iwx_softc *, struct iwx_host_cmd *);
     void    iwx_cmd_done(struct iwx_softc *, int, int, int);
+    static void iwx_pmf_key_task(void *);
+    static void iwx_pmf_key_timeout(void *);
+    static void iwx_pmf_reset_retry_timeout(void *);
+    static void iwx_pmf_reset_task(void *);
+    static IOReturn iwx_pmf_gate_action(OSObject *, void *, void *, void *, void *);
+    static void iwx_pmf_keys_ready(struct ieee80211com *,
+                                  struct ieee80211_node *);
+    void iwx_pmf_key_completion_task(struct iwx_softc *);
+    void iwx_pmf_invalidate_generation(struct iwx_softc *);
+    void iwx_pmf_invalidate_generation_gated(struct iwx_softc *);
+    static void iwx_pmf_cancel_keys(struct ieee80211com *, struct ieee80211_node *);
+    void iwx_pmf_cancel_keys_gated(struct ieee80211com *, struct ieee80211_node *);
+    void iwx_pmf_clear_responses_gated(struct iwx_softc *);
+    int iwx_pmf_clear_responses(struct iwx_softc *);
+    int iwx_pmf_reset_retry(struct iwx_softc *, int);
+    void iwx_pmf_schedule_reset(struct iwx_softc *);
+    void iwx_pmf_cancel_reset(struct iwx_softc *);
+    int iwx_pmf_run_gate(struct iwx_softc *, struct iwx_pmf_gate_request *);
+    int iwx_set_key_gated(struct ieee80211com *, struct ieee80211_node *,
+                          struct ieee80211_key *, IwxStaAuthSubmitReceipt * = nullptr);
+    void iwx_delete_key_gated(struct ieee80211com *, struct ieee80211_node *,
+                              struct ieee80211_key *);
     const struct iwx_rate *iwx_tx_fill_cmd(struct iwx_softc *, struct iwx_node *,
             struct ieee80211_frame *, uint32_t *, uint32_t *);
     uint32_t iwx_get_tx_ant(struct iwx_softc *sc, struct ieee80211_node *ni,
@@ -1071,11 +1101,49 @@ public:
     static struct ieee80211_node *iwx_node_alloc(struct ieee80211com *);
     static int    iwx_set_key(struct ieee80211com *, struct ieee80211_node *,
            struct ieee80211_key *);
+    int    iwx_set_mgmt_mcast_key(struct iwx_softc *,
+                                  struct ieee80211_node *,
+                                  struct ieee80211_key *, int remove_key,
+                                  uint32_t incarnation);
     static void    iwx_delete_key(struct ieee80211com *,
            struct ieee80211_node *, struct ieee80211_key *);
     int    iwx_media_change(struct _ifnet *);
     static void    iwx_newstate_task(void *);
     static int    iwx_newstate(struct ieee80211com *, enum ieee80211_state, int);
+#ifdef AIRPORT_TAHOE
+    struct TahoeNet80211Transition {
+        IOEthernetController *gateOwner = nullptr;
+        struct iwx_softc *sc = nullptr;
+        struct ieee80211_node *node = nullptr;
+        enum ieee80211_state oldState = IEEE80211_S_INIT;
+        enum ieee80211_state newState = IEEE80211_S_INIT;
+        int arg = 0;
+        int generation = 0;
+        uint32_t nodeEpoch = 0;
+        uint32_t requestSequence = 0;
+        uint32_t akm = 0;
+        uint8_t nodeBssid[IEEE80211_ADDR_LEN] {};
+        uint8_t nodeMac[IEEE80211_ADDR_LEN] {};
+        uint8_t localMac[IEEE80211_ADDR_LEN] {};
+        uint8_t desiredBssid[IEEE80211_ADDR_LEN] {};
+        uint8_t nodeEssid[IEEE80211_NWID_LEN] {};
+        uint8_t desiredEssid[IEEE80211_NWID_LEN] {};
+        uint8_t nodeEssidLength = 0;
+        uint8_t desiredEssidLength = 0;
+        uint8_t saeH2e = 0;
+        bool queuedRequest = false;
+        bool captureSnapshot = false;
+        bool identityCaptured = false;
+        bool allowShutdown = false;
+        bool notifyAssociation = false;
+        int stateResult = 0;
+        uint32_t finalState = UINT32_MAX;
+    };
+    static IOReturn iwx_net80211_transition_gate_action(
+        OSObject *, void *, void *, void *, void *);
+    int iwx_run_net80211_transition_gate(struct iwx_softc *,
+        TahoeNet80211Transition *);
+#endif
     void    iwx_endscan(struct iwx_softc *, uint32_t = 0, uint32_t = 1);
     void    iwx_fill_sf_command(struct iwx_softc *, struct iwx_sf_cfg_cmd *,
             struct ieee80211_node *);

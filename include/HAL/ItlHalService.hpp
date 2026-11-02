@@ -39,6 +39,10 @@ public:
     virtual bool attach(IOPCIDevice *device) = 0;
     
     virtual void detach(IOPCIDevice *device) = 0;
+
+    // Some Tahoe HALs may retain their DMA owner when a zero-wait detach
+    // fence is busy. The parent must keep its gate and interfaces alive too.
+    virtual bool detachResourcesRetained() const { return false; }
     
     virtual IOReturn enable(IONetworkInterface *interface) = 0;
     

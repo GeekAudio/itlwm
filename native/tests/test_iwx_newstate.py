@@ -66,6 +66,7 @@ HARNESS = r'''
 #include <assert.h>
 #include <stddef.h>
 #include <stdint.h>
+#include "native/iwx_sta_auth_trace.h"
 
 enum ieee80211_state {
     IEEE80211_S_INIT = 0,
@@ -132,9 +133,17 @@ struct iwx_softc {
     task chan_ctxt_task;
 };
 
+// Diagnostic publication is a KPI boundary, unrelated to state admission.
+static int tahoeRecordStaAuth(iwx_softc *,uint16_t kind,uint16_t stage,
+    uint16_t source,int32_t,uint32_t,uint32_t=0,uint32_t=0,bool=false) {
+    assert(kind==IWX_STA_TRACE_ASSOC_LOSS_REQUEST);
+    assert(stage==IWX_STA_STAGE_STATE_REQUEST && source==IWX_STA_SOURCE_UNKNOWN);
+    return 0;
+}
 struct ItlIwx {
     iwx_softc com;
     uint32_t tahoe_newstate_generation_ = 0;
+    uint32_t tahoe_newstate_sequence_ = 0;
     unsigned addCalls = 0;
     unsigned delBaCalls = 0;
     unsigned delMacCalls = 0;
@@ -303,6 +312,7 @@ static void test_duplicate_run_is_coalesced_while_worker_active()
     assert(f.driver.com.ns_arg == 71);
     assert(f.driver.com.sc_tx_rate_generation == 19);
     assert(f.driver.tahoe_newstate_generation_ == 23);
+    assert(f.driver.tahoe_newstate_sequence_ == 0);
     assert(f.driver.addCalls == 0 && f.queue.scheduled == 0);
     assert(!f.driver.com.newstate_task.onQueue);
     assert(f.driver.delBaCalls == 0 && f.driver.delMacCalls == 0 &&
@@ -325,6 +335,7 @@ static void test_scan_and_auth_repeat_exceptions()
         assert(f.driver.com.ns_arg == 4);
         assert(f.driver.addCalls == 1 && f.queue.scheduled == 1);
 #ifdef AIRPORT_TAHOE
+        assert(f.driver.tahoe_newstate_sequence_ == 1);
         assert(g_clearSnapshotCalls == 1);
 #else
         assert(g_clearSnapshotCalls == 0);
@@ -340,6 +351,7 @@ static void test_scan_and_auth_repeat_exceptions()
         assert(f.driver.com.ns_arg == 5);
         assert(f.driver.addCalls == 1 && f.queue.scheduled == 1);
 #ifdef AIRPORT_TAHOE
+        assert(f.driver.tahoe_newstate_sequence_ == 1);
         assert(g_clearSnapshotCalls == 1);
 #else
         assert(g_clearSnapshotCalls == 0);
@@ -360,6 +372,7 @@ static void test_different_state_transition_still_cleans_and_queues()
            f.driver.delChanCalls == 1);
     assert(f.driver.addCalls == 1 && f.queue.scheduled == 1);
 #ifdef AIRPORT_TAHOE
+    assert(f.driver.tahoe_newstate_sequence_ == 1);
     assert(f.driver.com.sc_tx_rate_generation == 1);
     assert(g_clearSnapshotCalls == 1);
 #else
@@ -415,7 +428,8 @@ def compile_and_run(function: str, tahoe: bool) -> None:
         source = Path(directory) / "iwx_newstate.cpp"
         binary = Path(directory) / "iwx_newstate"
         source.write_text(program)
-        command = ["clang++", "-std=c++17", "-Wall", "-Wextra", "-Werror"]
+        command = ["clang++", "-std=c++17", "-Wall", "-Wextra", "-Werror",
+                   "-fsanitize=address,undefined", "-fno-omit-frame-pointer", "-I", str(ROOT)]
         if tahoe:
             command.append("-DAIRPORT_TAHOE=1")
         else:

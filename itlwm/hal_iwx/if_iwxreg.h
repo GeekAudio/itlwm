@@ -7743,25 +7743,42 @@ struct iwx_rm_sta_cmd {
 } __packed; /* IWX_REMOVE_STA_CMD_API_S_VER_2 */
 
 /**
- * struct iwx_mgmt_mcast_key_cmd
+ * struct iwx_mgmt_mcast_key_cmd_v1
  * ( IWX_MGMT_MCAST_KEY = 0x1f )
  * @ctrl_flags: %iwx_sta_key_flag
- * @IGTK:
- * @K1: IGTK master key
- * @K2: IGTK sub key
+ * @igtk: IGTK key material
+ * @k1: unused
+ * @k2: unused
  * @sta_id: station ID that support IGTK
- * @key_id:
+ * @key_id: key ID
  * @receive_seq_cnt: initial RSC/PN needed for replay check
  */
-struct iwx_mgmt_mcast_key_cmd {
+struct iwx_mgmt_mcast_key_cmd_v1 {
     uint32_t ctrl_flags;
-    uint8_t IGTK[16];
-    uint8_t K1[16];
-    uint8_t K2[16];
+    uint8_t igtk[16];
+    uint8_t k1[16];
+    uint8_t k2[16];
     uint32_t key_id;
     uint32_t sta_id;
     uint64_t receive_seq_cnt;
 } __packed; /* SEC_MGMT_MULTICAST_KEY_CMD_API_S_VER_1 */
+
+/**
+ * struct iwx_mgmt_mcast_key_cmd_v2 - IGTK command for new RX API firmware
+ * ( IWX_MGMT_MCAST_KEY = 0x1f )
+ * @ctrl_flags: %iwx_sta_key_flag
+ * @igtk: IGTK master key (16-byte CMAC key followed by zero padding)
+ * @key_id: key ID
+ * @sta_id: station ID that support IGTK
+ * @receive_seq_cnt: initial RSC/PN needed for replay check
+ */
+struct iwx_mgmt_mcast_key_cmd_v2 {
+    uint32_t ctrl_flags;
+    uint8_t igtk[32];
+    uint32_t key_id;
+    uint32_t sta_id;
+    uint64_t receive_seq_cnt;
+} __packed; /* SEC_MGMT_MULTICAST_KEY_CMD_API_S_VER_2 */
 
 struct iwx_wep_key {
     uint8_t key_index;

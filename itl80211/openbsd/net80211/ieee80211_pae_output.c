@@ -130,15 +130,20 @@ ieee80211_send_eapol_key_internal(struct ieee80211com *ic, mbuf_t m,
     EAPOL_KEY_DESC_IEEE80211 : EAPOL_KEY_DESC_WPA;
     
     info = BE_READ_2(key->info);
-    /* use V3 descriptor if KDF is SHA256-based */
-    if (ieee80211_is_sha256_akm((enum ieee80211_akm)ni->ni_rsnakms))
-        info |= EAPOL_KEY_DESC_V3;
-    /* use V2 descriptor if pairwise or group cipher is CCMP */
-    else if (ni->ni_rsncipher == IEEE80211_CIPHER_CCMP ||
-             ni->ni_rsngroupcipher == IEEE80211_CIPHER_CCMP)
-        info |= EAPOL_KEY_DESC_V2;
-    else
-        info |= EAPOL_KEY_DESC_V1;
+    info &= ~EAPOL_KEY_VERSION_MASK;
+    /* Ordinary SAE selector 00:0f:ac:8 uses AKM-defined version 0 and
+     * AES-CMAC; SAE-EXT-KEY is a distinct, unsupported AKM. */
+    if (ni->ni_rsnakms != IEEE80211_AKM_SAE) {
+        /* use V3 descriptor if a non-SAE AKM uses the SHA256 KDF */
+        if (ieee80211_is_sha256_akm((enum ieee80211_akm)ni->ni_rsnakms))
+            info |= EAPOL_KEY_DESC_V3;
+        /* use V2 descriptor if pairwise or group cipher is CCMP */
+        else if (ni->ni_rsncipher == IEEE80211_CIPHER_CCMP ||
+                 ni->ni_rsngroupcipher == IEEE80211_CIPHER_CCMP)
+            info |= EAPOL_KEY_DESC_V2;
+        else
+            info |= EAPOL_KEY_DESC_V1;
+    }
     BE_WRITE_2(key->info, info);
     
     len = mbuf_len(m) - sizeof(struct ether_header);

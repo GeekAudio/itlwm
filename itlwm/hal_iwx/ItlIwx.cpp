@@ -120,6 +120,7 @@
 #include "../../native/iwx_init_wait.hpp"
 #include "../../native/iwx_eapol_priority.hpp"
 #include "../../native/iwx_tx_rsp_retry_observation.hpp"
+#include "../../native/pmf_crypto_policy.h"
 #ifdef AIRPORT_TAHOE
 #include "IwxTxRate.hpp"
 #endif
@@ -130,6 +131,11 @@
 #include <crypto/sha1.h>
 #include <string.h>
 
+static uint8_t iwx_pmf_key_slot(const struct ieee80211_key *);
+static bool iwx_pmf_key_active(struct iwx_softc *, struct ieee80211_key *,
+                               uint8_t, bool);
+static int iwx_pmf_arm_key_timeout(struct iwx_softc *);
+
 #include <IOKit/IOInterruptController.h>
 #include <IOKit/IOCommandGate.h>
 #include <IOKit/network/IONetworkMedium.h>
@@ -139,6 +145,7 @@
 #include <sys/_task.h>
 #include <sys/pcireg.h>
 #include <net80211/ieee80211_priv.h>
+#include <net80211/ieee80211_sae.h>
 
 static_assert(sizeof(struct iwx_add_sta_key_common) == 52,
               "ADD_STA_KEY common payload layout changed");
@@ -244,6 +251,14 @@ static_assert(offsetof(struct iwx_compressed_ba_notif, tx_rate) == 24,
               "BA completion rate offset must match its wire vector");
 static void iwx_store_current_tx_rate(struct iwx_softc *, struct ieee80211_node *,
                                       uint32_t, uint32_t, IwxTxRate::Source);
+
+static uint64_t iwx_pmf_monotonic_ns()
+{
+    uint64_t absolute = 0, nanoseconds = 0;
+    clock_get_uptime(&absolute);
+    absolutetime_to_nanoseconds(absolute, &nanoseconds);
+    return nanoseconds;
+}
 
 enum : uint32_t {
     // A valid firmware response cleared the shared watchdog. This does not
@@ -975,9 +990,9 @@ public:
             (void)IwxTxQueueObservation::endNewState(
                 state_, token_, terminalReason, tahoeMonotonicNs());
     }
-    // Called before splx(s): all net80211/ifnet fields used by the terminal
-    // trace are read while the caller still owns splnet serialization.
-    void finish()
+    // Callers pass the state captured under the main workloop gate; this
+    // worker-side completion never rereads shared net80211 state.
+    void finish(uint32_t observedState)
     {
         if (finished_)
             return;
@@ -989,7 +1004,7 @@ public:
         if (owner_ && sc_)
             owner_->tahoeRecordLinkTransition(sc_,
                 IwxLinkStateTrace::Event::kNewStateTaskCompleted,
-                oldState_, static_cast<uint32_t>(sc_->sc_ic.ic_state),
+                oldState_, observedState,
                 stateArgument_, static_cast<int>(terminalReason));
         finished_ = true;
     }
@@ -2775,7 +2790,14 @@ detach(IOPCIDevice *device)
 {
     struct _ifnet *ifp = &com.sc_ic.ic_ac.ac_if;
     struct iwx_softc *sc = &com;
-
+    (void)device;
+    bool lifecycleLocked = false;
+    auto retainPmfDetachResources = [this]() {
+        __atomic_store_n(&nativePmfDetachRetained_, true, __ATOMIC_RELEASE);
+        if (!__atomic_exchange_n(&nativePmfDetachRetainHeld_, true,
+                                 __ATOMIC_ACQ_REL))
+            retain();
+    };
 #ifdef AIRPORT_TAHOE
     __atomic_store_n(&nativeLifecycleTearingDown_, 1u, __ATOMIC_RELEASE);
 #if defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
@@ -2784,27 +2806,82 @@ detach(IOPCIDevice *device)
 #endif
     tahoeScanOnline(false);
     tahoeDriverEvent(ITL_TAHOE_EVT_DRIVER_STOPPED);
-    if (sc->sc_nswq)
+
+    /* A lifecycle operation may have passed its teardown check before the
+     * flag above. Take its lock without waiting; on failure keep the HAL and
+     * every DMA owner alive for a later detach attempt. */
+    lifecycleLocked = nativeLifecycleLock_ &&
+        IORecursiveLockTryLock(nativeLifecycleLock_);
+    if (nativeLifecycleLock_ && !lifecycleLocked) {
+        retainPmfDetachResources();
+        XYLog("active Tahoe lifecycle operation prevents detach; preserving HAL resources\n");
+        return;
+    }
+
+    /* The PMF retry timer may have queued a distinct task on systq. Remove a
+     * queued callback and prove any already-running callback has left before
+     * freeing the owner. The queued bit remains set until its callback has
+     * incremented active, closing the dequeue/start gap. */
+    if (sc->sc_pmf_reset_retry_timeout_initialized)
+        timeout_del(&sc->sc_pmf_reset_retry_timeout);
+    if (sc->sc_pmf_reset_task_initialized) {
+        const int removed = task_del(systq, &sc->sc_pmf_reset_task);
+        if (removed)
+            __atomic_store_n(&sc->sc_pmf_reset_task_queued, 0,
+                             __ATOMIC_RELEASE);
+    }
+    if (__atomic_load_n(&sc->sc_pmf_reset_task_active,
+                        __ATOMIC_ACQUIRE) != 0 ||
+        __atomic_load_n(&sc->sc_pmf_reset_task_queued,
+                        __ATOMIC_ACQUIRE) != 0 ||
+        __atomic_load_n(&sc->sc_pmf_reset_timeout_active,
+                        __ATOMIC_ACQUIRE) != 0 ||
+        __atomic_load_n(&sc->sc_pmf_gate_waiters,
+                        __ATOMIC_ACQUIRE) != 0) {
+        if (lifecycleLocked)
+            IORecursiveLockUnlock(nativeLifecycleLock_);
+        retainPmfDetachResources();
+        XYLog("PMF task or gate action is active during detach; preserving HAL resources\n");
+        return;
+    }
+
+    if (sc->sc_nswq && !nativeDetachQueuePaused_) {
+        taskq_pause_diagnostics pause {};
+        const int pauseError = taskq_try_pause_with_diagnostics(
+            sc->sc_nswq, &pause);
+        if (pauseError != 0) {
+            if (lifecycleLocked)
+                IORecursiveLockUnlock(nativeLifecycleLock_);
+            retainPmfDetachResources();
+            XYLog("state task queue is active during detach (error=%d reason=%u active=%u); preserving HAL resources\n",
+                pauseError, pause.reason, pause.active);
+            return;
+        }
+        nativeDetachQueuePaused_ = true;
+    }
+
+    if (sc->sc_nswq) {
         iwx_del_task(sc, sc->sc_nswq, &sc->sc_native_mcc_task);
+        iwx_del_task(sc, sc->sc_nswq, &sc->newstate_task);
+        iwx_del_task(sc, sc->sc_nswq, &sc->sc_pmf_key_task);
+    }
+    task_del(systq, &sc->init_task);
+    task_del(systq, &sc->ba_task);
+    task_del(systq, &sc->mac_ctxt_task);
+    task_del(systq, &sc->chan_ctxt_task);
     tahoeRetireNativeMccNotice(sc);
-#endif
-#ifdef AIRPORT_TAHOE
+
     if (nativeP2pTxQueue_.retainedRing) {
         // Teardown must not race a sleeping P2P command or state task.
         // If the zero-wait fences cannot be acquired, pin this DMA owner.
-        const bool lifecycleLocked = nativeLifecycleLock_ &&
-            IORecursiveLockTryLock(nativeLifecycleLock_);
         const bool softwareIdle = lifecycleLocked && !nativeP2pBusy() &&
             !nativeP2pResourcesRetained();
-        taskq_pause_diagnostics pause {};
-        const bool stateQueuePaused = softwareIdle &&
-            taskq_try_pause_with_diagnostics(sc->sc_nswq, &pause) == 0;
-        const int stopError = stateQueuePaused ? iwx_stop_device(sc) : EBUSY;
-        if (lifecycleLocked)
-            IORecursiveLockUnlock(nativeLifecycleLock_);
+        const int stopError = softwareIdle ? iwx_stop_device(sc) : EBUSY;
         if (stopError != 0 || nativeP2pTxQueue_.retainedRing) {
             XYLog("retained P2P DMA could not be retired during detach; preserving device resources\n");
-            retain(); // Keep the only DMA owner reachable until a safe restart.
+            if (lifecycleLocked)
+                IORecursiveLockUnlock(nativeLifecycleLock_);
+            retainPmfDetachResources(); // Keep the only DMA owner reachable.
             return;
         }
     }
@@ -2815,7 +2892,9 @@ detach(IOPCIDevice *device)
                 this, &nativeP2pDirectedDataTx_, &nativeP2pTxQueue_,
                 static_cast<uint16_t>(txq_i))) {
             XYLog("directed P2P data DMA remains owned during detach; preserving device resources\n");
-            retain();
+            if (lifecycleLocked)
+                IORecursiveLockUnlock(nativeLifecycleLock_);
+            retainPmfDetachResources();
             return;
         }
     }
@@ -2823,6 +2902,29 @@ detach(IOPCIDevice *device)
     // Preserve the established stop path above. Once stop has succeeded,
     // synchronously remove the actual event source before freeing any ring.
     quiesceRxInterruptSource();
+
+    if (iwx_pmf_clear_responses(sc) != 0 ||
+        __atomic_load_n(&sc->sc_pmf_gate_waiters,
+                        __ATOMIC_ACQUIRE) != 0) {
+        if (lifecycleLocked)
+            IORecursiveLockUnlock(nativeLifecycleLock_);
+        retainPmfDetachResources();
+        XYLog("main command gate could not retire PMF/command responses during detach; preserving HAL resources\n");
+        return;
+    }
+    if (sc->sc_pmf_key_timeout_initialized)
+        timeout_del(&sc->sc_pmf_key_timeout);
+    if (sc->sc_pmf_key_timeout_initialized) {
+        timeout_free(&sc->sc_pmf_key_timeout);
+        sc->sc_pmf_key_timeout_initialized = 0;
+    }
+    if (sc->sc_pmf_reset_retry_timeout_initialized) {
+        timeout_free(&sc->sc_pmf_reset_retry_timeout);
+        sc->sc_pmf_reset_retry_timeout_initialized = 0;
+    }
+    sc->sc_pmf_key_task_initialized = 0;
+
+    // The existing quiesceRxInterruptSource above synchronously retired RX.
     for (int txq_i = 0; txq_i < nitems(sc->txq); txq_i++)
         iwx_free_tx_ring(sc, &sc->txq[txq_i]);
     iwx_free_rx_ring(sc, &sc->rxq);
@@ -2831,7 +2933,16 @@ detach(IOPCIDevice *device)
     ieee80211_ifdetach(ifp);
     taskq_destroy(systq);
     taskq_destroy(com.sc_nswq);
-    releaseAll();
+    sc->sc_pmf_reset_task_initialized = 0;
+    nativeDetachQueuePaused_ = false;
+    __atomic_store_n(&nativePmfDetachRetained_, false, __ATOMIC_RELEASE);
+    const bool releasePmfDetachRetain =
+        __atomic_exchange_n(&nativePmfDetachRetainHeld_, false,
+                            __ATOMIC_ACQ_REL);
+    if (lifecycleLocked)
+        IORecursiveLockUnlock(nativeLifecycleLock_);
+    if (releasePmfDetachRetain)
+        release();
 }
 
 void ItlIwx::
@@ -4190,6 +4301,7 @@ iwx_read_firmware(struct iwx_softc *sc)
     while (fw->fw_status == IWX_FW_STATUS_INPROGRESS)
         tsleep_nsec(&sc->sc_fw, 0, "iwxfwp", INFSLP);
     fw->fw_status = IWX_FW_STATUS_INPROGRESS;
+    sc->sc_pmf_igtk_status1_abi = 0;
     
     if (fw->fw_rawdata != NULL)
         iwx_fw_info_free(fw);
@@ -4232,13 +4344,18 @@ iwx_read_firmware(struct iwx_softc *sc)
     sc->sc_fw_mcc_int = 0x3030;
     
     uhdr = (struct iwx_tlv_ucode_header *)fw->fw_rawdata;
-    if (*(uint32_t *)fw->fw_rawdata != 0
+    if (fw->fw_rawdata == NULL || fw->fw_rawsize < sizeof(*uhdr) ||
+        *(uint32_t *)fw->fw_rawdata != 0
         || le32toh(uhdr->magic) != IWX_TLV_UCODE_MAGIC) {
         XYLog("%s: invalid firmware %s\n",
               DEVNAME(sc), sc->sc_fwname);
         err = EINVAL;
         goto out;
     }
+    sc->sc_pmf_igtk_status1_abi =
+        itl_pmf_so68_igtk_status1_firmware_identity(sc->sc_fwname,
+            le32toh(uhdr->ver), le32toh(uhdr->build),
+            uhdr->human_readable);
     
     iwx_fw_version_str(sc->sc_fwver, sizeof(sc->sc_fwver),
              IWX_UCODE_MAJOR(le32toh(uhdr->ver)),
@@ -4643,6 +4760,7 @@ parse_out:
 out:
     if (err) {
         fw->fw_status = IWX_FW_STATUS_NONE;
+        sc->sc_pmf_igtk_status1_abi = 0;
         if (fw->fw_rawdata != NULL)
             iwx_fw_info_free(fw);
     } else
@@ -8421,8 +8539,10 @@ iwx_rx_hwdecrypt(struct iwx_softc *sc, mbuf_t m, uint32_t rx_pkt_status,
     struct _ifnet *ifp = IC2IFP(ic);
     struct ieee80211_frame *wh;
     struct ieee80211_node *ni;
+    struct ieee80211_key *k;
     int ret = 0;
-    uint8_t type, subtype;
+    uint8_t type, subtype, category = 0;
+    int has_action_category, robust_mgmt, protected_bit, multicast;
     
     wh = mtod(m, struct ieee80211_frame *);
     
@@ -8435,26 +8555,83 @@ iwx_rx_hwdecrypt(struct iwx_softc *sc, mbuf_t m, uint32_t rx_pkt_status,
         return 0;
     
     ni = ieee80211_find_rxnode(ic, wh);
+
+    protected_bit = (wh->i_fc[1] & IEEE80211_FC1_PROTECTED) != 0;
+    multicast = IEEE80211_IS_MULTICAST(wh->i_addr1);
+    has_action_category = type == IEEE80211_FC0_TYPE_MGT &&
+        subtype == IEEE80211_FC0_SUBTYPE_ACTION &&
+        mbuf_len(m) >= sizeof(*wh) + 1;
+    if (has_action_category)
+        category = ((uint8_t *)&wh[1])[0];
+    robust_mgmt = type == IEEE80211_FC0_TYPE_MGT &&
+        itl_pmf_is_robust_mgmt_rx(wh->i_fc[0], wh->i_fc[1],
+                                  has_action_category, category);
+
+    /* Reject group robust management frames with the data-protection bit. */
+    if ((ni->ni_flags & IEEE80211_NODE_RXMGMTPROT) && robust_mgmt &&
+        !itl_pmf_group_mgmt_protected_bit_valid(1, multicast,
+                                                protected_bit)) {
+        ret = 1;
+        goto out;
+    }
+
+    /* The firmware exposes replay failure for CCM/CMAC robust MMPDUs. */
+    if ((rx_pkt_status & IWX_RX_MPDU_RES_STATUS_ROBUST_MNG_FRAME) &&
+        (rx_pkt_status & IWX_RX_MPDU_RES_STATUS_MNG_FRAME_REPLAY_ERR)) {
+        ret = 1;
+        goto out;
+    }
+
+    k = ieee80211_get_rxkey(ic, m, ni);
+    if ((ni->ni_flags & IEEE80211_NODE_MFP) && protected_bit) {
+        const uint8_t keySlot = k != NULL ? iwx_pmf_key_slot(k) : 0xff;
+        const bool igtk = k != NULL &&
+            (k->k_flags & IEEE80211_KEY_IGTK) != 0;
+        const bool pairwise = k != NULL &&
+            (k->k_flags & IEEE80211_KEY_GROUP) == 0 && !igtk;
+
+        if (ni->ni_pmf_link_pending || sc->sc_pmf_key_failed ||
+            sc->sc_pmf_timeout_fired || k == NULL ||
+            (k->k_flags & IEEE80211_KEY_FWPENDING) != 0 ||
+            !iwx_pmf_key_active(sc, k, keySlot, pairwise || igtk)) {
+            ret = 1;
+            goto out;
+        }
+    }
     /* Handle hardware decryption. */
-    if (((wh->i_fc[0] & IEEE80211_FC0_TYPE_MASK) != IEEE80211_FC0_TYPE_CTL)
-        && (wh->i_fc[1] & IEEE80211_FC1_PROTECTED) &&
-        (ni->ni_flags & IEEE80211_NODE_RXPROT) &&
-        ((!IEEE80211_IS_MULTICAST(wh->i_addr1) &&
-          ni->ni_rsncipher == IEEE80211_CIPHER_CCMP) ||
-         (IEEE80211_IS_MULTICAST(wh->i_addr1) &&
-          ni->ni_rsngroupcipher == IEEE80211_CIPHER_CCMP))) {
-        if ((rx_pkt_status & IWX_RX_MPDU_RES_STATUS_SEC_ENC_MSK) !=
-            IWX_RX_MPDU_RES_STATUS_SEC_CCM_ENC) {
+    if (type != IEEE80211_FC0_TYPE_CTL &&
+        (ni->ni_flags & IEEE80211_NODE_RXPROT) && k != NULL &&
+        itl_pmf_should_hw_process_ccmp(
+            k->k_cipher == IEEE80211_CIPHER_CCMP, k->k_flags,
+            protected_bit)) {
+        int ccm_status =
+            (rx_pkt_status & IWX_RX_MPDU_RES_STATUS_SEC_ENC_MSK) ==
+                IWX_RX_MPDU_RES_STATUS_SEC_CCM_ENC;
+        int dec_done = (rx_pkt_status &
+                        IWX_RX_MPDU_RES_STATUS_DEC_DONE) != 0;
+        int mic_ok = (rx_pkt_status &
+                      IWX_RX_MPDU_RES_STATUS_MIC_OK) != 0;
+
+        if (!itl_pmf_ccmp_hw_status_ok(ccm_status, dec_done, mic_ok)) {
             ic->ic_stats.is_ccmp_dec_errs++;
             ret = 1;
             goto out;
         }
-        /* Check whether decryption was successful or not. */
-        if ((rx_pkt_status &
-             (IWX_RX_MPDU_RES_STATUS_DEC_DONE |
-              IWX_RX_MPDU_RES_STATUS_MIC_OK)) !=
-            (IWX_RX_MPDU_RES_STATUS_DEC_DONE |
-             IWX_RX_MPDU_RES_STATUS_MIC_OK)) {
+
+        if (robust_mgmt && !multicast &&
+            (ni->ni_flags & IEEE80211_NODE_MFP)) {
+            if ((rx_pkt_status &
+                 IWX_RX_MPDU_RES_STATUS_ROBUST_MNG_FRAME) == 0 ||
+                (k->k_flags & IEEE80211_KEY_FWMFP) == 0) {
+                ic->ic_stats.is_ccmp_dec_errs++;
+                ret = 1;
+                goto out;
+            }
+            rxi->rxi_flags |= IEEE80211_RXI_MFP_HWDEC;
+        }
+
+        if ((ni->ni_flags & IEEE80211_NODE_MFP) && robust_mgmt &&
+            (rx_pkt_status & IWX_RX_MPDU_RES_STATUS_ROBUST_MNG_FRAME) == 0) {
             ic->ic_stats.is_ccmp_dec_errs++;
             ret = 1;
             goto out;
@@ -11530,6 +11707,8 @@ iwx_send_cmd(struct iwx_softc *sc, struct iwx_host_cmd *hcmd,
     uint64_t addr;
     int err = 0, i, paylen, off, s;
     int idx, code, async, group_id;
+    bool command_submitted = false;
+    bool response_allocated = false;
     size_t hdrlen, datasz;
     uint8_t *data;
     int generation = __atomic_load_n(&sc->sc_generation, __ATOMIC_ACQUIRE);
@@ -11542,6 +11721,20 @@ iwx_send_cmd(struct iwx_softc *sc, struct iwx_host_cmd *hcmd,
     
     code = hcmd->id;
     async = hcmd->flags & IWX_CMD_ASYNC;
+    if (hcmd->pmf_command_kind != IWX_PMF_KEY_CMD_NONE &&
+        (!async || (hcmd->flags & IWX_CMD_WANT_RESP) == 0 ||
+         hcmd->pmf_node == NULL || hcmd->pmf_key == NULL ||
+         hcmd->pmf_key_slot >= IWX_PMF_KEY_SLOT_COUNT))
+        return EINVAL;
+#ifdef AIRPORT_TAHOE
+    if (hcmd->pmf_command_kind != IWX_PMF_KEY_CMD_NONE) {
+        ItlIwx *that = container_of(sc, ItlIwx, com);
+        if (!that->tahoeP2pOnMainGate())
+            return EBUSY;
+    }
+#endif
+
+    s = splnet();
     idx = (ring->cur & (ring->ring_count - 1));
 #ifdef AIRPORT_TAHOE
     if (receipt != nullptr) {
@@ -11549,6 +11742,14 @@ iwx_send_cmd(struct iwx_softc *sc, struct iwx_host_cmd *hcmd,
         receipt->queue_index = static_cast<uint32_t>(idx);
     }
 #endif
+    if (hcmd->pmf_command_kind != IWX_PMF_KEY_CMD_NONE) {
+        if (!itl_pmf_ack_slot_available(sc->sc_pmf_key_cmd,
+                nitems(sc->sc_pmf_key_cmd), hcmd->pmf_key_slot,
+                ring->qid, idx)) {
+            err = ENOSPC;
+            goto out;
+        }
+    }
     
     for (i = 0, paylen = 0; i < nitems(hcmd->len); i++) {
         paylen += hcmd->len[i];
@@ -11568,7 +11769,8 @@ iwx_send_cmd(struct iwx_softc *sc, struct iwx_host_cmd *hcmd,
                 receipt->raw_command_result = ENOSPC;
             }
 #endif
-            return ENOSPC;
+            err = ENOSPC;
+            goto out;
         }
         resp_buf = (uint8_t *)malloc(hcmd->resp_pkt_len, 0,
                                      M_NOWAIT | M_ZERO);
@@ -11579,16 +11781,16 @@ iwx_send_cmd(struct iwx_softc *sc, struct iwx_host_cmd *hcmd,
                 receipt->raw_command_result = ENOMEM;
             }
 #endif
-            return ENOMEM;
+            err = ENOMEM;
+            goto out;
         }
         bzero(resp_buf, hcmd->resp_pkt_len);
         sc->sc_cmd_resp_pkt[idx] = resp_buf;
         sc->sc_cmd_resp_len[idx] = hcmd->resp_pkt_len;
+        response_allocated = true;
     } else {
         sc->sc_cmd_resp_pkt[idx] = NULL;
     }
-    
-    s = splnet();
     
     desc = &ring->desc[idx];
     txdata = &ring->data[idx];
@@ -11708,11 +11910,41 @@ iwx_send_cmd(struct iwx_softc *sc, struct iwx_host_cmd *hcmd,
     diagnosticEntry.payload_length = static_cast<uint32_t>(paylen);
     /* Completion may free a dynamic command buffer after the doorbell. */
 #endif
+    if (hcmd->pmf_command_kind != IWX_PMF_KEY_CMD_NONE) {
+        struct iwx_pmf_key_cmd *pending =
+            &sc->sc_pmf_key_cmd[hcmd->pmf_key_slot];
+        memset(pending, 0, sizeof(*pending));
+        pending->node = hcmd->pmf_node;
+        pending->key = hcmd->pmf_key;
+        pending->generation = static_cast<uint32_t>(sc->sc_generation);
+        pending->node_epoch = hcmd->pmf_node_epoch;
+        pending->incarnation = hcmd->pmf_key_incarnation;
+        pending->command_id = iwx_cmd_opcode(hcmd->id);
+        pending->key_slot = hcmd->pmf_key_slot;
+        pending->command_kind = hcmd->pmf_command_kind;
+        pending->command_qid = ring->qid;
+        pending->command_index = idx;
+        pending->igtk_status1_abi =
+            hcmd->pmf_command_kind == IWX_PMF_KEY_CMD_IGTK &&
+            sc->sc_pmf_igtk_status1_abi;
+        pending->timeout_deadline_ns = iwx_pmf_monotonic_ns() +
+            5000000000ULL;
+        pending->active = 1;
+    }
+
     /* Kick command ring. */
     DPRINTF(("%s: Sending command (%.2x.%.2x), %d bytes at [%d]:%d ver: %d\n", __func__, group_id, cmd->hdr.cmd, cmd->hdr_wide.length, cmd->hdr.idx, cmd->hdr.qid, cmd->hdr_wide.version));
     ring->queued++;
     ring->cur = (ring->cur + 1) % getTxQueueSize();
     IWX_WRITE(sc, IWX_HBUS_TARG_WRPTR, ring->qid << 16 | ring->cur);
+    command_submitted = true;
+    if (hcmd->pmf_command_kind != IWX_PMF_KEY_CMD_NONE &&
+        iwx_pmf_arm_key_timeout(sc) != 0) {
+        sc->sc_pmf_timeout_fired = 1;
+        sc->sc_pmf_key_failed = 1;
+        __atomic_store_n(&sc->sc_pmf_force_closed, 1, __ATOMIC_RELEASE);
+        iwx_add_task(sc, sc->sc_nswq, &sc->sc_pmf_key_task);
+    }
 #ifdef AIRPORT_TAHOE
     if (receipt != nullptr)
         receipt->state = IWX_STA_SUBMIT_LOCAL_ENQUEUE;
@@ -11808,6 +12040,12 @@ iwx_send_cmd(struct iwx_softc *sc, struct iwx_host_cmd *hcmd,
         }
     }
 out:
+    if (err != 0 && !command_submitted && response_allocated &&
+        sc->sc_cmd_resp_pkt[idx] != NULL) {
+        ::free(sc->sc_cmd_resp_pkt[idx]);
+        sc->sc_cmd_resp_pkt[idx] = NULL;
+        sc->sc_cmd_resp_len[idx] = 0;
+    }
     splx(s);
 
 #ifdef AIRPORT_TAHOE
@@ -11916,6 +12154,14 @@ iwx_cmd_done(struct iwx_softc *sc, int qid, int idx, int code)
 {
     struct iwx_tx_ring *ring = &sc->txq[IWX_DQA_CMD_QUEUE];
     struct iwx_tx_data *data;
+#ifdef AIRPORT_TAHOE
+    ItlIwx *that = container_of(sc, ItlIwx, com);
+    if (!that->tahoeP2pOnMainGate()) {
+        __atomic_store_n(&sc->sc_pmf_force_closed, 1, __ATOMIC_RELEASE);
+        IOLog("AirportItlwm[Tahoe] command completion arrived outside main workloop gate; retaining ring slot\n");
+        return;
+    }
+#endif
     
     if (qid != IWX_DQA_CMD_QUEUE) {
         return;    /* Not a command ack. */
@@ -11937,6 +12183,24 @@ iwx_cmd_done(struct iwx_softc *sc, int qid, int idx, int code)
         IwxFirmwareDiagnostics::kSourceIsHintOnly;
     tahoeRecordFirmwareMetadata(sc, diagnosticEntry);
 #endif
+
+    const int pendingIndex = itl_pmf_ack_find_ring_slot(
+        sc->sc_pmf_key_cmd, nitems(sc->sc_pmf_key_cmd), qid, idx);
+    if (pendingIndex >= 0) {
+        struct iwx_pmf_key_cmd *pending =
+            &sc->sc_pmf_key_cmd[pendingIndex];
+        if (!pending->completed) {
+            pending->response_command_id = iwx_cmd_opcode(code);
+            pending->response_pkt = sc->sc_cmd_resp_pkt[idx];
+            pending->response_len = pending->response_pkt != NULL ?
+                sizeof(uint32_t) + iwx_rx_packet_len(
+                    (struct iwx_rx_packet *)pending->response_pkt) : 0;
+            sc->sc_cmd_resp_pkt[idx] = NULL;
+            sc->sc_cmd_resp_len[idx] = 0;
+            pending->completed = 1;
+            iwx_add_task(sc, sc->sc_nswq, &sc->sc_pmf_key_task);
+        }
+    }
     
     data = &ring->data[idx];
     
@@ -12090,6 +12354,12 @@ iwx_tx(struct iwx_softc *sc, mbuf_t m, struct ieee80211_node *ni, int ac
        )
 {
 #ifdef AIRPORT_TAHOE
+    ItlIwx *gateOwner = container_of(sc, ItlIwx, com);
+    if (!gateOwner->tahoeP2pOnMainGate()) {
+        __atomic_store_n(&sc->sc_pmf_force_closed, 1, __ATOMIC_RELEASE);
+        mbuf_freem(m);
+        return EBUSY;
+    }
     if (observedSubmitSerial)
         *observedSubmitSerial = 0;
     iwx_txq_obs_input observedPacket{};
@@ -12231,12 +12501,61 @@ iwx_tx(struct iwx_softc *sc, mbuf_t m, struct ieee80211_node *ni, int ac
     
     if (wh->i_fc[1] & IEEE80211_FC1_PROTECTED) {
         k = ieee80211_get_txkey(ic, wh, ni);
-        if (k->k_cipher != IEEE80211_CIPHER_CCMP) {
+        if (ni != NULL && (ni->ni_flags & IEEE80211_NODE_MFP)) {
+            const uint8_t keySlot = k != NULL ? iwx_pmf_key_slot(k) : 0xff;
+            const bool igtk = k != NULL &&
+                (k->k_flags & IEEE80211_KEY_IGTK) != 0;
+            const bool pairwise = k != NULL &&
+                (k->k_flags & IEEE80211_KEY_GROUP) == 0 && !igtk;
+            if (ni->ni_pmf_link_pending || sc->sc_pmf_key_failed ||
+                __atomic_load_n(&sc->sc_pmf_force_closed,
+                                __ATOMIC_ACQUIRE) ||
+                sc->sc_pmf_timeout_fired || k == NULL ||
+                !itl_pmf_key_tx_ready(k->k_flags, igtk, pairwise,
+                    keySlot < IWX_PMF_KEY_SLOT_COUNT &&
+                    sc->sc_pmf_active_generation[keySlot] ==
+                        static_cast<uint32_t>(sc->sc_generation) &&
+                    sc->sc_pmf_active_incarnation[keySlot] ==
+                        sc->sc_pmf_key_incarnation[keySlot],
+                    ni->ni_pmf_link_pending,
+                    sc->sc_pmf_key_failed || sc->sc_pmf_timeout_fired)) {
+                mbuf_freem(m);
+                return EBUSY;
+            }
+        }
+        if (itl_pmf_use_software_crypto(
+                k->k_cipher == IEEE80211_CIPHER_CCMP, k->k_flags)) {
             if ((m = ieee80211_encrypt(ic, m, k)) == NULL)
                 return ENOBUFS;
             /* 802.11 header may have moved. */
             wh = mtod(m, struct ieee80211_frame *);
             flags |= htole32(IWX_TX_FLAGS_ENCRYPT_DIS);
+            if (k->k_cipher == IEEE80211_CIPHER_BIP) {
+                const size_t packetLength = mbuf_pkthdr_len(m);
+                uint8_t mmie[IEEE80211_MMIE_LEN] = {};
+                bool validBip = false;
+
+                /* The management-output path sets Protected before calling
+                 * iwx_tx; BIP encapsulation then clears it and appends MMIE.
+                 * Check the final tail across the whole mbuf chain before
+                 * the descriptor is queued, so the selected IGTK and the
+                 * software-produced frame cannot silently diverge. */
+                if (packetLength >= IEEE80211_MMIE_LEN) {
+                    mbuf_copydata(m,
+                        static_cast<int>(packetLength -
+                            IEEE80211_MMIE_LEN),
+                        sizeof(mmie), reinterpret_cast<caddr_t>(mmie));
+                    validBip = itl_pmf_bip_tx_frame_valid(
+                        (wh->i_fc[1] & IEEE80211_FC1_PROTECTED) != 0,
+                        packetLength, hdrlen, k->k_id, mmie,
+                        sizeof(mmie));
+                }
+                explicit_bzero(mmie, sizeof(mmie));
+                if (!validBip) {
+                    mbuf_freem(m);
+                    return EINVAL;
+                }
+            }
         } else {
             k->k_tsc++;
             /* Hardware increments PN internally and adds IV. */
@@ -13034,7 +13353,14 @@ itl_iwx_scan_policy_for(const struct ieee80211com *ic, int bgscan,
     if (policy->ssid_len > sizeof(policy->ssid))
         return false;
     memcpy(policy->ssid, ssid, policy->ssid_len);
-    return true;
+    policy->targets.count = 1;
+    policy->targets.entries[0].length = policy->ssid_len;
+    memcpy(policy->targets.entries[0].bytes, policy->ssid, policy->ssid_len);
+#ifdef AIRPORT_TAHOE
+    if (policy->requested && ic->ic_tahoe_scan_targets.count != 0)
+        policy->targets = ic->ic_tahoe_scan_targets;
+#endif
+    return itl_scan_targets_valid(&policy->targets) != 0;
 }
 
 #ifdef AIRPORT_TAHOE
@@ -13042,8 +13368,17 @@ static IOReturn
 itl_iwx_capture_scan_policy(OSObject *, void *ic_arg, void *policy_arg,
                             void *bgscan_arg, void *)
 {
-    return itl_iwx_scan_policy_for((const struct ieee80211com *)ic_arg,
-        *(const int *)bgscan_arg, (struct itl_iwx_scan_policy *)policy_arg) ?
+    const auto *ic = static_cast<const struct ieee80211com *>(ic_arg);
+    const int bgscan = *static_cast<const int *>(bgscan_arg);
+    // Serialized with key completion: background work cannot take the radio
+    // away from an unfinished four-way/group-key handshake.
+    if (bgscan && ic->ic_state == IEEE80211_S_RUN &&
+        (ic->ic_flags & IEEE80211_F_RSNON) &&
+        (!ic->ic_bss || !ic->ic_bss->ni_port_valid ||
+         ic->ic_bss->ni_pmf_link_pending))
+        return kIOReturnBusy;
+    return itl_iwx_scan_policy_for(ic, bgscan,
+        static_cast<struct itl_iwx_scan_policy *>(policy_arg)) ?
         kIOReturnSuccess : kIOReturnBadArgument;
 }
 #endif
@@ -13058,7 +13393,8 @@ iwx_capture_scan_policy(struct iwx_softc *sc, int bgscan,
         return ENXIO;
     IOReturn result = gate->runAction(itl_iwx_capture_scan_policy,
         &sc->sc_ic, scan, &bgscan);
-    return result == kIOReturnSuccess ? 0 : EINVAL;
+    return result == kIOReturnSuccess ? 0 :
+        (result == kIOReturnBusy ? EBUSY : EINVAL);
 #else
     return itl_iwx_scan_policy_for(&sc->sc_ic, bgscan, scan) ? 0 : EINVAL;
 #endif
@@ -13282,7 +13618,11 @@ iwx_umac_scan_fill_channels(struct iwx_softc *sc,
             || (scan->requested && scan->active)
 #endif
             ))
-            chan->flags = htole32(1 << 0); /* select SSID 0 */
+            #ifdef AIRPORT_TAHOE
+            chan->flags = htole32(itl_scan_targets_bitmap(&scan->targets));
+#else
+            chan->flags = htole32(1 << 0); /* legacy single target */
+#endif
         chan++;
         nchan++;
     }
@@ -13616,6 +13956,22 @@ iwx_get_scan_req_umac_data(struct iwx_softc *sc, struct iwx_scan_req_umac *req)
 /* minimal number of 2GHz and 5GHz channels in the regular scan request */
 #define IWX_MVM_6GHZ_PASSIVE_SCAN_MIN_CHANS 4
 
+static unsigned
+itl_iwx_fill_direct_scan(struct iwx_ssid_ie *output, size_t capacity,
+                          const struct itl_iwx_scan_policy *scan)
+{
+    if (!scan->active || !itl_scan_targets_valid(&scan->targets) ||
+        scan->targets.count > capacity)
+        return 0;
+    for (unsigned i = 0; i < scan->targets.count; ++i) {
+        const auto &target = scan->targets.entries[i];
+        output[i].id = IEEE80211_ELEMID_SSID;
+        output[i].len = target.length;
+        memcpy(output[i].ssid, target.bytes, target.length);
+    }
+    return scan->targets.count;
+}
+
 int ItlIwx::
 iwx_umac_scan(struct iwx_softc *sc, int bgscan, uint32_t *serial)
 {
@@ -13668,7 +14024,7 @@ iwx_umac_scan(struct iwx_softc *sc, int bgscan, uint32_t *serial)
         if (isset(sc->sc_ucode_api, IWX_UCODE_TLV_API_ADWELL_HB_DEF_N_AP))
             req->v9.adwell_default_hb_n_aps = IWX_SCAN_ADWELL_DEFAULT_HB_N_APS;
         
-        if (scan.active && scan.ssid_len != 0)
+        if (scan.active && itl_scan_targets_directed(&scan.targets))
             req->v7.adwell_max_budget =
             htole16(IWX_SCAN_ADWELL_MAX_BUDGET_DIRECTED_SCAN);
         else
@@ -13751,25 +14107,18 @@ iwx_umac_scan(struct iwx_softc *sc, int bgscan, uint32_t *serial)
         IWX_UMAC_SCAN_GEN_FLAGS2_ALLOW_CHNL_REORDER;
     }
     
-    /* SSID 0 may be empty for an explicitly active broadcast scan. */
     if (scan.active) {
-        if (isset(sc->sc_ucode_api, IWX_UCODE_TLV_API_SCAN_EXT_CHAN_VER)) {
-            tail->direct_scan[0].id = IEEE80211_ELEMID_SSID;
-            tail->direct_scan[0].len = scan.ssid_len;
-            memcpy(tail->direct_scan[0].ssid, scan.ssid,
-                   scan.ssid_len);
-        } else {
-            tailv1->direct_scan[0].id = IEEE80211_ELEMID_SSID;
-            tailv1->direct_scan[0].len = scan.ssid_len;
-            memcpy(tailv1->direct_scan[0].ssid, scan.ssid,
-                   scan.ssid_len);
-        }
-        if (scan.ssid_len != 0)
-            req->general_flags |=
-                htole32(IWX_UMAC_SCAN_GEN_FLAGS_PRE_CONNECT);
+        if (isset(sc->sc_ucode_api, IWX_UCODE_TLV_API_SCAN_EXT_CHAN_VER))
+            itl_iwx_fill_direct_scan(tail->direct_scan, nitems(tail->direct_scan), &scan);
+        else
+            itl_iwx_fill_direct_scan(tailv1->direct_scan, nitems(tailv1->direct_scan), &scan);
+        if (scan.targets.count > 1)
+            req->general_flags |= htole32(IWX_UMAC_SCAN_GEN_FLAGS_MULTIPLE_SSID);
+        else if (itl_scan_targets_directed(&scan.targets))
+            req->general_flags |= htole32(IWX_UMAC_SCAN_GEN_FLAGS_PRE_CONNECT);
     } else
         req->general_flags |= htole32(IWX_UMAC_SCAN_GEN_FLAGS_PASSIVE);
-    
+
     if (isset(sc->sc_enabled_capa, IWX_UCODE_TLV_CAPA_DS_PARAM_SET_IE_SUPPORT) &&
         isset(sc->sc_enabled_capa, IWX_UCODE_TLV_CAPA_WFA_TPC_REP_IE_SUPPORT))
         req->general_flags |=
@@ -13838,6 +14187,8 @@ iwx_umac_scan_v12(struct iwx_softc *sc, int bgscan,
     if (!scan.active)
         gen_flags |= IWX_UMAC_SCAN_GEN_FLAGS_V2_FORCE_PASSIVE;
     
+    if (scan.active && scan.targets.count > 1)
+        gen_flags |= IWX_UMAC_SCAN_GEN_FLAGS_V2_MULTI_SSID;
     gen_flags |= IWX_UMAC_SCAN_GEN_FLAGS_V2_PASS_ALL |
     IWX_UMAC_SCAN_GEN_FLAGS_V2_ADAPTIVE_DWELL;
     
@@ -13848,7 +14199,7 @@ iwx_umac_scan_v12(struct iwx_softc *sc, int bgscan,
     general_params->adwell_default_2g = IWX_SCAN_ADWELL_DEFAULT_LB_N_APS;
     general_params->adwell_default_5g = IWX_SCAN_ADWELL_DEFAULT_HB_N_APS;
 
-    if (scan.active && scan.ssid_len != 0)
+    if (scan.active && itl_scan_targets_directed(&scan.targets))
         general_params->adwell_max_budget =
             cpu_to_le16(IWX_SCAN_ADWELL_MAX_BUDGET_DIRECTED_SCAN);
     else
@@ -13881,15 +14232,10 @@ iwx_umac_scan_v12(struct iwx_softc *sc, int bgscan,
         return err;
     }
 
-    if (scan.active) {
-        req->scan_params.probe_params.ssid_num = 1;
-        req->scan_params.probe_params.direct_scan[0].id = IEEE80211_ELEMID_SSID;
-        req->scan_params.probe_params.direct_scan[0].len = scan.ssid_len;
-        memcpy(req->scan_params.probe_params.direct_scan[0].ssid, scan.ssid,
-               scan.ssid_len);
-    } else
-        req->scan_params.probe_params.ssid_num = 0;
-    
+    req->scan_params.probe_params.ssid_num = itl_iwx_fill_direct_scan(
+        req->scan_params.probe_params.direct_scan,
+        nitems(req->scan_params.probe_params.direct_scan), &scan);
+
     cp = &req->scan_params.channel_params;
     
     cp->flags = IWX_SCAN_CHANNEL_FLAG_ENABLE_CHAN_ORDER;
@@ -13946,6 +14292,8 @@ iwx_umac_scan_v14(struct iwx_softc *sc, int bgscan,
     if (!scan.active)
         gen_flags |= IWX_UMAC_SCAN_GEN_FLAGS_V2_FORCE_PASSIVE;
     
+    if (scan.active && scan.targets.count > 1)
+        gen_flags |= IWX_UMAC_SCAN_GEN_FLAGS_V2_MULTI_SSID;
     gen_flags |= IWX_UMAC_SCAN_GEN_FLAGS_V2_PASS_ALL |
     IWX_UMAC_SCAN_GEN_FLAGS_V2_ADAPTIVE_DWELL;
     
@@ -13955,7 +14303,7 @@ iwx_umac_scan_v14(struct iwx_softc *sc, int bgscan,
         IWX_SCAN_ADWELL_DEFAULT_N_APS_SOCIAL;
     general_params->adwell_default_2g = IWX_SCAN_ADWELL_DEFAULT_LB_N_APS;
     general_params->adwell_default_5g = IWX_SCAN_ADWELL_DEFAULT_HB_N_APS;
-    if (scan.active && scan.ssid_len != 0)
+    if (scan.active && itl_scan_targets_directed(&scan.targets))
         general_params->adwell_max_budget =
             cpu_to_le16(IWX_SCAN_ADWELL_MAX_BUDGET_DIRECTED_SCAN);
     else
@@ -13987,13 +14335,9 @@ iwx_umac_scan_v14(struct iwx_softc *sc, int bgscan,
         ::free(req);
         return err;
     }
-    if (scan.active) {
-        req->scan_params.probe_params.direct_scan[0].id = IEEE80211_ELEMID_SSID;
-        req->scan_params.probe_params.direct_scan[0].len = scan.ssid_len;
-        memcpy(req->scan_params.probe_params.direct_scan[0].ssid, scan.ssid,
-               scan.ssid_len);
-    }
-    
+    itl_iwx_fill_direct_scan(req->scan_params.probe_params.direct_scan,
+        nitems(req->scan_params.probe_params.direct_scan), &scan);
+
     cp = &req->scan_params.channel_params;
     
     cp->flags = IWX_SCAN_CHANNEL_FLAG_ENABLE_CHAN_ORDER;
@@ -16393,9 +16737,1071 @@ iwx_node_alloc(struct ieee80211com *ic)
     return (struct ieee80211_node *)malloc(sizeof (struct iwx_node), 0, M_NOWAIT | M_ZERO);
 }
 
-static int iwx_set_key_with_receipt(struct ieee80211com *ic,
-    struct ieee80211_node *ni, struct ieee80211_key *k,
+static_assert(sizeof(struct iwx_mgmt_mcast_key_cmd_v1) == 68,
+              "legacy MGMT_MCAST_KEY command must be 68 bytes");
+static_assert(IWX_STA_KEY_MFP == (1 << 15) &&
+              offsetof(struct iwx_add_sta_key_common, key_flags) == 2,
+              "pairwise MFP flag must occupy key_flags bit 15 at payload +2");
+static_assert(offsetof(struct iwx_mgmt_mcast_key_cmd_v1, igtk) == 4 &&
+              offsetof(struct iwx_mgmt_mcast_key_cmd_v1, key_id) == 52 &&
+              offsetof(struct iwx_mgmt_mcast_key_cmd_v1, sta_id) == 56 &&
+              offsetof(struct iwx_mgmt_mcast_key_cmd_v1,
+                       receive_seq_cnt) == 60,
+              "legacy MGMT_MCAST_KEY field offsets must match firmware ABI");
+static_assert(sizeof(struct iwx_mgmt_mcast_key_cmd_v2) == 52,
+              "new RX API MGMT_MCAST_KEY command must be 52 bytes");
+static_assert(offsetof(struct iwx_mgmt_mcast_key_cmd_v2, key_id) == 36 &&
+              offsetof(struct iwx_mgmt_mcast_key_cmd_v2, sta_id) == 40 &&
+              offsetof(struct iwx_mgmt_mcast_key_cmd_v2,
+                       receive_seq_cnt) == 44,
+              "MGMT_MCAST_KEY v2 field offsets must match firmware ABI");
+
+static int
+iwx_pmf_arm_key_timeout(struct iwx_softc *sc)
+{
+#ifdef AIRPORT_TAHOE
+    ItlIwx *that = container_of(sc, ItlIwx, com);
+    if (!that->tahoeP2pOnMainGate())
+        return EBUSY;
+#endif
+    const uint64_t now = iwx_pmf_monotonic_ns();
+    uint64_t nearest = UINT64_MAX;
+    for (size_t i = 0; i < nitems(sc->sc_pmf_key_cmd); i++) {
+        const struct iwx_pmf_key_cmd *pending =
+            &sc->sc_pmf_key_cmd[i];
+        if (pending->active && !pending->completed &&
+            !pending->timed_out && pending->timeout_deadline_ns != 0 &&
+            pending->timeout_deadline_ns < nearest)
+            nearest = pending->timeout_deadline_ns;
+    }
+    timeout_del(&sc->sc_pmf_key_timeout);
+    if (nearest == UINT64_MAX)
+        return 0;
+    const uint64_t remaining = nearest > now ? nearest - now : 0;
+    uint64_t delayMs = (remaining + 999999ULL) / 1000000ULL;
+    if (delayMs == 0)
+        delayMs = 1;
+    if (delayMs > INT_MAX)
+        delayMs = INT_MAX;
+    return timeout_add_msec(&sc->sc_pmf_key_timeout,
+                            static_cast<int>(delayMs)) ? 0 : EIO;
+}
+
+IOReturn ItlIwx::
+iwx_pmf_gate_action(OSObject *, void *ownerArg, void *scArg,
+                    void *requestArg, void *)
+{
+    auto *that = static_cast<ItlIwx *>(ownerArg);
+    auto *sc = static_cast<struct iwx_softc *>(scArg);
+    auto *request = static_cast<struct iwx_pmf_gate_request *>(requestArg);
+    if (that == nullptr || sc == nullptr || request == nullptr ||
+        sc != &that->com)
+        return kIOReturnBadArgument;
+#ifdef AIRPORT_TAHOE
+    if (__atomic_load_n(&that->nativeLifecycleTearingDown_,
+                        __ATOMIC_ACQUIRE) != 0 &&
+        request->operation != IWX_PMF_GATE_CLEAR_RESPONSES &&
+        request->operation != IWX_PMF_GATE_CANCEL_KEYS &&
+        request->operation != IWX_PMF_GATE_INVALIDATE)
+        return kIOReturnNotReady;
+    if (!that->tahoeP2pOnMainGate())
+        return kIOReturnNotReady;
+#endif
+
+    switch (request->operation) {
+    case IWX_PMF_GATE_COMPLETE:
+        that->iwx_pmf_key_completion_task(sc);
+        break;
+    case IWX_PMF_GATE_INVALIDATE:
+        that->iwx_pmf_invalidate_generation_gated(sc);
+        break;
+    case IWX_PMF_GATE_CANCEL_KEYS:
+        that->iwx_pmf_cancel_keys_gated(request->ic, request->node);
+        break;
+    case IWX_PMF_GATE_SET_KEY:
+        request->result = that->iwx_set_key_gated(
+            request->ic, request->node, request->key, request->submit_receipt);
+        break;
+    case IWX_PMF_GATE_DELETE_KEY:
+        that->iwx_delete_key_gated(request->ic, request->node,
+                                   request->key);
+        break;
+    case IWX_PMF_GATE_CLEAR_RESPONSES:
+        that->iwx_pmf_clear_responses_gated(sc);
+        break;
+    case IWX_PMF_GATE_RESET:
+        request->result = that->iwx_pmf_reset_retry(sc, request->result);
+        if (request->result != 0) {
+            request->reset_token = __atomic_load_n(
+                &sc->sc_pmf_reset_token, __ATOMIC_ACQUIRE);
+            request->reset_node_epoch = sc->sc_pmf_reset_node_epoch;
+            __atomic_store_n(&sc->sc_pmf_reset_attempt_token,
+                             request->reset_token, __ATOMIC_RELEASE);
+            __atomic_store_n(&sc->sc_pmf_reset_attempt_node_epoch,
+                             request->reset_node_epoch, __ATOMIC_RELEASE);
+        }
+        break;
+    case IWX_PMF_GATE_RESET_VALIDATE:
+        request->result = __atomic_load_n(&sc->sc_pmf_reset_requested,
+                                          __ATOMIC_ACQUIRE) &&
+            __atomic_load_n(&sc->sc_pmf_reset_attempt_inflight,
+                            __ATOMIC_ACQUIRE) != 0 &&
+            request->reset_token != 0 &&
+            request->reset_token == __atomic_load_n(
+                &sc->sc_pmf_reset_token, __ATOMIC_ACQUIRE) &&
+            request->reset_token == __atomic_load_n(
+                &sc->sc_pmf_reset_attempt_token, __ATOMIC_ACQUIRE) &&
+            request->reset_node_epoch == __atomic_load_n(
+                &sc->sc_pmf_reset_attempt_node_epoch, __ATOMIC_ACQUIRE) &&
+            sc->sc_pmf_reset_node == sc->sc_ic.ic_bss &&
+            request->reset_node_epoch == sc->sc_pmf_reset_node_epoch &&
+            sc->sc_pmf_reset_node != nullptr &&
+            request->reset_node_epoch ==
+                sc->sc_pmf_reset_node->ni_pmf_key_epoch &&
+            sc->sc_pmf_reset_generation ==
+                static_cast<uint32_t>(sc->sc_generation) &&
+            (sc->sc_pmf_reset_node->ni_flags & IEEE80211_NODE_MFP) != 0 &&
+            (sc->sc_ic.ic_flags & IEEE80211_F_RSNON) != 0;
+        break;
+    case IWX_PMF_GATE_RESET_COMPLETE:
+        if (__atomic_load_n(&sc->sc_pmf_reset_requested,
+                            __ATOMIC_ACQUIRE) &&
+            __atomic_load_n(&sc->sc_pmf_reset_attempt_inflight,
+                            __ATOMIC_ACQUIRE) != 0 &&
+            request->reset_token == __atomic_load_n(
+                &sc->sc_pmf_reset_token, __ATOMIC_ACQUIRE) &&
+            request->reset_node_epoch == sc->sc_pmf_reset_node_epoch &&
+            sc->sc_pmf_reset_node == sc->sc_ic.ic_bss &&
+            (sc->sc_ic.ic_if.if_flags & IFF_RUNNING) != 0) {
+            that->iwx_pmf_cancel_reset(sc);
+            request->result = 1;
+        }
+        break;
+    default:
+        return kIOReturnBadArgument;
+    }
+    return kIOReturnSuccess;
+}
+
+int ItlIwx::
+iwx_pmf_run_gate(struct iwx_softc *sc,
+                 struct iwx_pmf_gate_request *request)
+{
+    if (sc == nullptr || request == nullptr || sc != &com)
+        return EINVAL;
+#ifdef AIRPORT_TAHOE
+    if (tahoeP2pOnMainGate())
+        return iwx_pmf_gate_action(nullptr, this, sc, request, nullptr) ==
+            kIOReturnSuccess ? 0 : EBUSY;
+    __atomic_add_fetch(&sc->sc_pmf_gate_waiters, 1U, __ATOMIC_ACQ_REL);
+    const bool cleanupAllowed =
+        request->operation == IWX_PMF_GATE_CLEAR_RESPONSES ||
+        request->operation == IWX_PMF_GATE_CANCEL_KEYS ||
+        request->operation == IWX_PMF_GATE_INVALIDATE;
+    if (__atomic_load_n(&nativeLifecycleTearingDown_, __ATOMIC_ACQUIRE) != 0 &&
+        !cleanupAllowed) {
+        __atomic_sub_fetch(&sc->sc_pmf_gate_waiters, 1U, __ATOMIC_ACQ_REL);
+        return ENXIO;
+    }
+    IOCommandGate *gate = getMainCommandGate();
+    if (gate == nullptr) {
+        __atomic_sub_fetch(&sc->sc_pmf_gate_waiters, 1U, __ATOMIC_ACQ_REL);
+        return ENXIO;
+    }
+    const IOReturn result = gate->runAction(
+        iwx_pmf_gate_action, this, sc, request);
+    __atomic_sub_fetch(&sc->sc_pmf_gate_waiters, 1U, __ATOMIC_ACQ_REL);
+    return result == kIOReturnSuccess ? 0 : EBUSY;
+#else
+    return iwx_pmf_gate_action(nullptr, this, sc, request, nullptr) ==
+        kIOReturnSuccess ? 0 : EBUSY;
+#endif
+}
+
+static uint8_t
+iwx_pmf_key_slot(const struct ieee80211_key *k)
+{
+    if (k->k_flags & IEEE80211_KEY_IGTK)
+        return k->k_id == 4 ? 5 : (k->k_id == 5 ? 6 : 0xff);
+    if (k->k_flags & IEEE80211_KEY_GROUP)
+        return k->k_id < 4 ? static_cast<uint8_t>(1 + k->k_id) : 0xff;
+    return 0;
+}
+
+static bool
+iwx_pmf_tracked_node(struct iwx_softc *sc, struct ieee80211_node *ni)
+{
+    return ni != NULL && ni == sc->sc_ic.ic_bss &&
+        sc->sc_ic.ic_opmode == IEEE80211_M_STA &&
+        (ni->ni_flags & IEEE80211_NODE_MFP) != 0;
+}
+
+static int
+iwx_pmf_prepare_key(struct iwx_softc *sc, struct ieee80211_node *ni,
+                    struct ieee80211_key *k, uint8_t *slotOut,
+                    uint32_t *incarnationOut)
+{
+#ifdef AIRPORT_TAHOE
+    ItlIwx *that = container_of(sc, ItlIwx, com);
+    if (!that->tahoeP2pOnMainGate())
+        return -EBUSY;
+#endif
+    if (!iwx_pmf_tracked_node(sc, ni))
+        return 0;
+    const uint8_t slot = iwx_pmf_key_slot(k);
+    if (slot >= IWX_PMF_KEY_SLOT_COUNT)
+        return EINVAL;
+
+    /* A replacement overwrites the host slot before FW acknowledges it.
+     * Keep the data port closed until all required keys are active again. */
+    ni->ni_port_valid = 0;
+    ni->ni_pmf_link_pending = 1;
+    ni->ni_flags &= ~(IEEE80211_NODE_RXMGMTPROT |
+                      IEEE80211_NODE_TXMGMTPROT);
+    __atomic_store_n(&sc->sc_pmf_force_closed, 1, __ATOMIC_RELEASE);
+
+    if (sc->sc_pmf_current_node != ni ||
+        sc->sc_pmf_current_node_epoch != ni->ni_pmf_key_epoch) {
+        sc->sc_pmf_current_node = ni;
+        sc->sc_pmf_current_node_epoch = ni->ni_pmf_key_epoch;
+        sc->sc_pmf_key_failed = 0;
+        sc->sc_pmf_timeout_fired = 0;
+    }
+    if (sc->sc_pmf_key_failed || sc->sc_pmf_timeout_fired)
+        return EIO;
+
+    uint32_t incarnation = ++sc->sc_pmf_key_incarnation[slot];
+    if (incarnation == 0)
+        incarnation = ++sc->sc_pmf_key_incarnation[slot];
+    sc->sc_pmf_active_generation[slot] = 0;
+    sc->sc_pmf_active_incarnation[slot] = 0;
+    k->k_flags &= ~(IEEE80211_KEY_FWMFP | IEEE80211_KEY_FWACTIVE);
+    k->k_flags |= IEEE80211_KEY_FWPENDING;
+    *slotOut = slot;
+    *incarnationOut = incarnation;
+    return 1;
+}
+
+static bool
+iwx_pmf_key_active(struct iwx_softc *sc, struct ieee80211_key *k,
+                   uint8_t slot, bool requireMfp)
+{
+#ifdef AIRPORT_TAHOE
+    ItlIwx *that = container_of(sc, ItlIwx, com);
+    if (!that->tahoeP2pOnMainGate())
+        return false;
+#endif
+    if (k == NULL || slot >= IWX_PMF_KEY_SLOT_COUNT ||
+        k->k_cipher == IEEE80211_CIPHER_NONE ||
+        (k->k_flags & IEEE80211_KEY_FWPENDING) != 0)
+        return false;
+
+    if (k->k_flags & IEEE80211_KEY_SWCRYPTO) {
+        if (k->k_flags & IEEE80211_KEY_IGTK)
+            return (k->k_flags & (IEEE80211_KEY_FWMFP |
+                                  IEEE80211_KEY_FWACTIVE)) ==
+                    (IEEE80211_KEY_FWMFP | IEEE80211_KEY_FWACTIVE) &&
+                sc->sc_pmf_active_generation[slot] ==
+                    static_cast<uint32_t>(sc->sc_generation) &&
+                sc->sc_pmf_active_incarnation[slot] ==
+                    sc->sc_pmf_key_incarnation[slot];
+        return !requireMfp;
+    }
+
+    if ((k->k_flags & IEEE80211_KEY_FWACTIVE) == 0 ||
+        sc->sc_pmf_active_generation[slot] !=
+            static_cast<uint32_t>(sc->sc_generation) ||
+        sc->sc_pmf_active_incarnation[slot] !=
+            sc->sc_pmf_key_incarnation[slot])
+        return false;
+    return !requireMfp || (k->k_flags & IEEE80211_KEY_FWMFP) != 0;
+}
+
+void ItlIwx::
+iwx_pmf_key_task(void *arg)
+{
+    struct iwx_softc *sc = static_cast<struct iwx_softc *>(arg);
+    ItlIwx *that = container_of(sc, ItlIwx, com);
+    struct iwx_pmf_gate_request request = {};
+    request.operation = IWX_PMF_GATE_COMPLETE;
+    if (that->iwx_pmf_run_gate(sc, &request) != 0)
+        __atomic_store_n(&sc->sc_pmf_force_closed, 1, __ATOMIC_RELEASE);
+}
+
+void ItlIwx::
+iwx_pmf_key_timeout(void *arg)
+{
+    struct iwx_softc *sc = static_cast<struct iwx_softc *>(arg);
+    ItlIwx *that = container_of(sc, ItlIwx, com);
+    /* A timeout callback may be stale after key rotation or stop. It only
+     * schedules a gate trampoline; absolute per-command deadlines decide
+     * whether the current batch has actually expired. */
+    that->iwx_add_task(sc, sc->sc_nswq, &sc->sc_pmf_key_task);
+}
+
+void ItlIwx::
+iwx_pmf_reset_retry_timeout(void *arg)
+{
+    struct iwx_softc *sc = static_cast<struct iwx_softc *>(arg);
+    ItlIwx *that = container_of(sc, ItlIwx, com);
+    __atomic_add_fetch(&sc->sc_pmf_reset_timeout_active, 1U,
+                       __ATOMIC_ACQ_REL);
+    if (__atomic_load_n(&that->nativeLifecycleTearingDown_,
+                        __ATOMIC_ACQUIRE) != 0) {
+        __atomic_sub_fetch(&sc->sc_pmf_reset_timeout_active, 1U,
+                           __ATOMIC_ACQ_REL);
+        return;
+    }
+    __atomic_store_n(&sc->sc_pmf_reset_task_queued, 1, __ATOMIC_RELEASE);
+    task_add(systq, &sc->sc_pmf_reset_task);
+    __atomic_sub_fetch(&sc->sc_pmf_reset_timeout_active, 1U,
+                       __ATOMIC_ACQ_REL);
+}
+
+void ItlIwx::
+iwx_pmf_reset_task(void *arg)
+{
+    struct iwx_softc *sc = static_cast<struct iwx_softc *>(arg);
+    ItlIwx *that = container_of(sc, ItlIwx, com);
+    __atomic_add_fetch(&sc->sc_pmf_reset_task_active, 1U, __ATOMIC_ACQ_REL);
+    __atomic_store_n(&sc->sc_pmf_reset_task_queued, 0, __ATOMIC_RELEASE);
+    if (__atomic_load_n(&that->nativeLifecycleTearingDown_,
+                        __ATOMIC_ACQUIRE) == 0) {
+        struct iwx_pmf_gate_request request = {};
+        request.operation = IWX_PMF_GATE_RESET;
+        if (that->iwx_pmf_run_gate(sc, &request) == 0 &&
+            request.result != 0) {
+            /* This task is distinct from init_task so a stale PMF timeout
+             * cannot consume/coalesce an unrelated recovery request. */
+            that->iwx_init_task(sc);
+            if ((sc->sc_ic.ic_if.if_flags & IFF_RUNNING) != 0) {
+                struct iwx_pmf_gate_request complete = {};
+                complete.operation = IWX_PMF_GATE_RESET_COMPLETE;
+                complete.reset_token = request.reset_token;
+                complete.reset_node_epoch = request.reset_node_epoch;
+                if (that->iwx_pmf_run_gate(sc, &complete) != 0 ||
+                    complete.result != 1)
+                    __atomic_store_n(&sc->sc_pmf_force_closed, 1,
+                                     __ATOMIC_RELEASE);
+            }
+            if (!timeout_pending(&sc->sc_pmf_reset_retry_timeout))
+                that->iwx_pmf_reset_retry(sc, EBUSY);
+        } else {
+            __atomic_store_n(&sc->sc_pmf_force_closed, 1, __ATOMIC_RELEASE);
+        }
+    }
+    __atomic_sub_fetch(&sc->sc_pmf_reset_task_active, 1U, __ATOMIC_ACQ_REL);
+}
+
+void ItlIwx::
+iwx_pmf_keys_ready(struct ieee80211com *ic, struct ieee80211_node *ni)
+{
+    struct iwx_softc *sc = (struct iwx_softc *)ic->ic_softc;
+    (void)ni;
+    ItlIwx *that = container_of(sc, ItlIwx, com);
+    that->iwx_add_task(sc, sc->sc_nswq, &sc->sc_pmf_key_task);
+}
+
+void ItlIwx::
+iwx_pmf_invalidate_generation(struct iwx_softc *sc)
+{
+    struct iwx_pmf_gate_request request = {};
+    request.operation = IWX_PMF_GATE_INVALIDATE;
+    if (iwx_pmf_run_gate(sc, &request) != 0)
+        __atomic_store_n(&sc->sc_pmf_force_closed, 1, __ATOMIC_RELEASE);
+}
+
+void ItlIwx::
+iwx_pmf_cancel_reset(struct iwx_softc *sc)
+{
+#ifdef AIRPORT_TAHOE
+    if (!tahoeP2pOnMainGate()) {
+        __atomic_store_n(&sc->sc_pmf_force_closed, 1, __ATOMIC_RELEASE);
+        return;
+    }
+#endif
+    if (sc->sc_pmf_reset_retry_timeout_initialized)
+        timeout_del(&sc->sc_pmf_reset_retry_timeout);
+    if (sc->sc_pmf_reset_task_initialized)
+        task_del(systq, &sc->sc_pmf_reset_task);
+    __atomic_store_n(&sc->sc_pmf_reset_requested, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&sc->sc_pmf_reset_attempt_inflight, 0,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&sc->sc_pmf_reset_attempt_token, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&sc->sc_pmf_reset_attempt_node_epoch, 0,
+                     __ATOMIC_RELEASE);
+    uint32_t resetToken = __atomic_add_fetch(&sc->sc_pmf_reset_token, 1U,
+                                             __ATOMIC_ACQ_REL);
+    if (resetToken == 0)
+        __atomic_add_fetch(&sc->sc_pmf_reset_token, 1U, __ATOMIC_ACQ_REL);
+    __atomic_store_n(&sc->sc_pmf_reset_task_queued, 0, __ATOMIC_RELEASE);
+    sc->sc_pmf_reset_attempts = 0;
+    sc->sc_pmf_reset_generation = 0;
+    sc->sc_pmf_reset_node_epoch = 0;
+    sc->sc_pmf_reset_deadline_ns = 0;
+    sc->sc_pmf_reset_node = nullptr;
+}
+
+void ItlIwx::
+iwx_pmf_schedule_reset(struct iwx_softc *sc)
+{
+#ifdef AIRPORT_TAHOE
+    if (!tahoeP2pOnMainGate()) {
+        __atomic_store_n(&sc->sc_pmf_force_closed, 1, __ATOMIC_RELEASE);
+        return;
+    }
+#endif
+    struct ieee80211com *ic = &sc->sc_ic;
+    struct ieee80211_node *ni = ic->ic_bss;
+    if (ni == nullptr || (ni->ni_flags & IEEE80211_NODE_MFP) == 0 ||
+        (ic->ic_flags & IEEE80211_F_RSNON) == 0) {
+        __atomic_store_n(&sc->sc_pmf_force_closed, 1, __ATOMIC_RELEASE);
+        return;
+    }
+    if (__atomic_load_n(&sc->sc_pmf_reset_requested, __ATOMIC_ACQUIRE) &&
+        sc->sc_pmf_reset_generation ==
+            static_cast<uint32_t>(sc->sc_generation) &&
+        sc->sc_pmf_reset_node == ni &&
+        sc->sc_pmf_reset_node_epoch == ni->ni_pmf_key_epoch)
+        return;
+
+    iwx_pmf_cancel_reset(sc);
+    __atomic_store_n(&sc->sc_pmf_reset_requested, 1, __ATOMIC_RELEASE);
+    sc->sc_pmf_reset_generation = static_cast<uint32_t>(sc->sc_generation);
+    sc->sc_pmf_reset_node = ni;
+    sc->sc_pmf_reset_node_epoch = ni->ni_pmf_key_epoch;
+    sc->sc_pmf_reset_attempts = 0;
+    sc->sc_pmf_reset_deadline_ns = iwx_pmf_monotonic_ns() +
+        uint64_t(ITL_PMF_RESET_RETRY_DELAY_MS) * 1000000ULL;
+    if (!timeout_add_msec(&sc->sc_pmf_reset_retry_timeout,
+                          ITL_PMF_RESET_RETRY_DELAY_MS)) {
+        iwx_pmf_cancel_reset(sc);
+        __atomic_store_n(&sc->sc_pmf_force_closed, 1, __ATOMIC_RELEASE);
+        IOLog("AirportItlwm[Tahoe] PMF reset retry timer unavailable; port remains closed\n");
+    }
+}
+
+int ItlIwx::
+iwx_pmf_reset_retry(struct iwx_softc *sc, int stopError)
+{
+#ifdef AIRPORT_TAHOE
+    if (!tahoeP2pOnMainGate()) {
+        struct iwx_pmf_gate_request request = {};
+        request.operation = IWX_PMF_GATE_RESET;
+        request.result = stopError;
+        if (iwx_pmf_run_gate(sc, &request) != 0) {
+            __atomic_store_n(&sc->sc_pmf_force_closed, 1,
+                             __ATOMIC_RELEASE);
+            return 0;
+        }
+        return request.result;
+    }
+#endif
+    if (!__atomic_load_n(&sc->sc_pmf_reset_requested, __ATOMIC_ACQUIRE))
+        return 0;
+
+    struct ieee80211com *ic = &sc->sc_ic;
+    struct ieee80211_node *ni = ic->ic_bss;
+    const bool requestCurrent = ni != nullptr &&
+        itl_pmf_reset_identity_valid(
+            __atomic_load_n(&sc->sc_pmf_reset_requested, __ATOMIC_ACQUIRE),
+            sc->sc_pmf_reset_generation,
+            static_cast<uint32_t>(sc->sc_generation),
+            sc->sc_pmf_reset_node_epoch, ni->ni_pmf_key_epoch) &&
+        ni == sc->sc_pmf_reset_node &&
+        (ni->ni_flags & IEEE80211_NODE_MFP) != 0 &&
+        (ic->ic_flags & IEEE80211_F_RSNON) != 0;
+    if (!requestCurrent) {
+        iwx_pmf_cancel_reset(sc);
+        return 0;
+    }
+
+    if (stopError != 0) {
+        if (stopError != EBUSY || !itl_pmf_reset_busy_retry_allowed(
+                sc->sc_pmf_reset_attempts, ITL_PMF_RESET_RETRY_LIMIT)) {
+            IOLog("AirportItlwm[Tahoe] PMF reset retry stopped generation=%u attempts=%u error=%d; port remains closed\n",
+                sc->sc_pmf_reset_generation,
+                sc->sc_pmf_reset_attempts, stopError);
+            iwx_pmf_cancel_reset(sc);
+            __atomic_store_n(&sc->sc_pmf_force_closed, 1,
+                             __ATOMIC_RELEASE);
+            return 0;
+        }
+        __atomic_store_n(&sc->sc_pmf_reset_attempt_inflight, 0,
+                         __ATOMIC_RELEASE);
+        __atomic_store_n(&sc->sc_pmf_reset_attempt_token, 0,
+                         __ATOMIC_RELEASE);
+        __atomic_store_n(&sc->sc_pmf_reset_attempt_node_epoch, 0,
+                         __ATOMIC_RELEASE);
+        sc->sc_pmf_reset_deadline_ns = iwx_pmf_monotonic_ns() +
+            uint64_t(ITL_PMF_RESET_RETRY_DELAY_MS) * 1000000ULL;
+        timeout_del(&sc->sc_pmf_reset_retry_timeout);
+        if (!timeout_add_msec(&sc->sc_pmf_reset_retry_timeout,
+                              ITL_PMF_RESET_RETRY_DELAY_MS)) {
+            iwx_pmf_cancel_reset(sc);
+            __atomic_store_n(&sc->sc_pmf_force_closed, 1,
+                             __ATOMIC_RELEASE);
+            IOLog("AirportItlwm[Tahoe] PMF reset retry rearm failed; port remains closed\n");
+        }
+        return 0;
+    }
+
+    const uint64_t now = iwx_pmf_monotonic_ns();
+    if (!itl_pmf_reset_deadline_expired(
+            now, sc->sc_pmf_reset_deadline_ns)) {
+        __atomic_store_n(&sc->sc_pmf_reset_attempt_inflight, 0,
+                         __ATOMIC_RELEASE);
+        __atomic_store_n(&sc->sc_pmf_reset_attempt_token, 0,
+                         __ATOMIC_RELEASE);
+        __atomic_store_n(&sc->sc_pmf_reset_attempt_node_epoch, 0,
+                         __ATOMIC_RELEASE);
+        uint64_t delayMs = (sc->sc_pmf_reset_deadline_ns - now +
+                            999999ULL) / 1000000ULL;
+        if (delayMs == 0)
+            delayMs = 1;
+        if (delayMs > ITL_PMF_RESET_RETRY_DELAY_MS)
+            delayMs = ITL_PMF_RESET_RETRY_DELAY_MS;
+        timeout_del(&sc->sc_pmf_reset_retry_timeout);
+        if (!timeout_add_msec(&sc->sc_pmf_reset_retry_timeout,
+                              static_cast<int>(delayMs))) {
+            iwx_pmf_cancel_reset(sc);
+            __atomic_store_n(&sc->sc_pmf_force_closed, 1,
+                             __ATOMIC_RELEASE);
+        }
+        return 0;
+    }
+    if (!itl_pmf_reset_busy_retry_allowed(sc->sc_pmf_reset_attempts,
+                                           ITL_PMF_RESET_RETRY_LIMIT)) {
+        IOLog("AirportItlwm[Tahoe] PMF reset retries exhausted generation=%u; port remains closed\n",
+            sc->sc_pmf_reset_generation);
+        iwx_pmf_cancel_reset(sc);
+        __atomic_store_n(&sc->sc_pmf_force_closed, 1, __ATOMIC_RELEASE);
+        return 0;
+    }
+
+    ++sc->sc_pmf_reset_attempts;
+    __atomic_store_n(&sc->sc_pmf_reset_attempt_inflight, 1,
+                     __ATOMIC_RELEASE);
+    return 1;
+}
+
+void ItlIwx::
+iwx_pmf_cancel_keys(struct ieee80211com *ic, struct ieee80211_node *ni)
+{
+    if (ic == nullptr || ic->ic_softc == nullptr)
+        return;
+    struct iwx_softc *sc = (struct iwx_softc *)ic->ic_softc;
+    ItlIwx *that = container_of(sc, ItlIwx, com);
+    struct iwx_pmf_gate_request request = {};
+    request.operation = IWX_PMF_GATE_CANCEL_KEYS;
+    request.ic = ic;
+    request.node = ni;
+    if (that->iwx_pmf_run_gate(sc, &request) != 0)
+        __atomic_store_n(&sc->sc_pmf_force_closed, 1, __ATOMIC_RELEASE);
+}
+
+void ItlIwx::
+iwx_pmf_cancel_keys_gated(struct ieee80211com *ic,
+                          struct ieee80211_node *ni)
+{
+    if (ic == nullptr || ic != &com.sc_ic || ni == nullptr)
+        return;
+#ifdef AIRPORT_TAHOE
+    if (!tahoeP2pOnMainGate()) {
+        __atomic_store_n(&com.sc_pmf_force_closed, 1, __ATOMIC_RELEASE);
+        return;
+    }
+#endif
+    struct iwx_softc *sc = &com;
+    __atomic_store_n(&sc->sc_pmf_force_closed, 1, __ATOMIC_RELEASE);
+    ni->ni_flags &= ~(IEEE80211_NODE_RXMGMTPROT |
+                      IEEE80211_NODE_TXMGMTPROT);
+    ni->ni_port_valid = 0;
+    ni->ni_pmf_link_pending = 1;
+    ni->ni_pmf_key_batch_ready = 0;
+    ni->ni_pmf_pending_key_ids = 0;
+    iwx_pmf_cancel_reset(sc);
+    for (size_t i = 0; i < nitems(sc->sc_pmf_key_cmd); i++) {
+        struct iwx_pmf_key_cmd *pending = &sc->sc_pmf_key_cmd[i];
+        if (pending->active && pending->node == ni)
+            pending->timed_out = 1;
+    }
+    for (size_t i = 0; i < IWX_PMF_KEY_SLOT_COUNT; i++) {
+        if (++sc->sc_pmf_key_incarnation[i] == 0)
+            ++sc->sc_pmf_key_incarnation[i];
+        sc->sc_pmf_active_generation[i] = 0;
+        sc->sc_pmf_active_incarnation[i] = 0;
+    }
+    sc->sc_pmf_key_failed = 1;
+    sc->sc_pmf_timeout_fired = 0;
+}
+
+int ItlIwx::
+iwx_pmf_clear_responses(struct iwx_softc *sc)
+{
+    struct iwx_pmf_gate_request request = {};
+    request.operation = IWX_PMF_GATE_CLEAR_RESPONSES;
+    return iwx_pmf_run_gate(sc, &request);
+}
+
+void ItlIwx::
+iwx_pmf_clear_responses_gated(struct iwx_softc *sc)
+{
+#ifdef AIRPORT_TAHOE
+    if (!tahoeP2pOnMainGate()) {
+        __atomic_store_n(&sc->sc_pmf_force_closed, 1, __ATOMIC_RELEASE);
+        return;
+    }
+#endif
+    iwx_pmf_cancel_reset(sc);
+    __atomic_store_n(&sc->sc_pmf_force_closed, 1, __ATOMIC_RELEASE);
+    for (size_t i = 0; i < nitems(sc->sc_cmd_resp_pkt); i++) {
+        if (sc->sc_cmd_resp_pkt[i] != nullptr) {
+            explicit_bzero(sc->sc_cmd_resp_pkt[i],
+                           sc->sc_cmd_resp_len[i]);
+            ::free(sc->sc_cmd_resp_pkt[i]);
+        }
+        sc->sc_cmd_resp_pkt[i] = nullptr;
+        sc->sc_cmd_resp_len[i] = 0;
+    }
+    for (size_t i = 0; i < nitems(sc->sc_pmf_key_cmd); i++) {
+        struct iwx_pmf_key_cmd *pending = &sc->sc_pmf_key_cmd[i];
+        if (pending->response_pkt != nullptr) {
+            explicit_bzero(pending->response_pkt,
+                           pending->response_len);
+            ::free(pending->response_pkt);
+        }
+        memset(pending, 0, sizeof(*pending));
+    }
+}
+
+void ItlIwx::
+iwx_pmf_invalidate_generation_gated(struct iwx_softc *sc)
+{
+#ifdef AIRPORT_TAHOE
+    if (!tahoeP2pOnMainGate()) {
+        __atomic_store_n(&sc->sc_pmf_force_closed, 1, __ATOMIC_RELEASE);
+        return;
+    }
+#endif
+    struct ieee80211com *ic = &sc->sc_ic;
+    struct ieee80211_node *ni = ic->ic_bss;
+    int s = splnet();
+
+    const bool keepResetAttempt =
+        __atomic_load_n(&sc->sc_pmf_reset_requested, __ATOMIC_ACQUIRE) &&
+        __atomic_load_n(&sc->sc_pmf_reset_attempt_inflight,
+                        __ATOMIC_ACQUIRE) != 0 && ni != nullptr &&
+        __atomic_load_n(&sc->sc_pmf_reset_attempt_token,
+                        __ATOMIC_ACQUIRE) == __atomic_load_n(
+                            &sc->sc_pmf_reset_token, __ATOMIC_ACQUIRE) &&
+        __atomic_load_n(&sc->sc_pmf_reset_attempt_node_epoch,
+                        __ATOMIC_ACQUIRE) == sc->sc_pmf_reset_node_epoch &&
+        ni == sc->sc_pmf_reset_node &&
+        ni->ni_pmf_key_epoch == sc->sc_pmf_reset_node_epoch &&
+        (ni->ni_flags & IEEE80211_NODE_MFP) != 0 &&
+        (ic->ic_flags & IEEE80211_F_RSNON) != 0;
+    if (keepResetAttempt)
+        sc->sc_pmf_reset_generation = static_cast<uint32_t>(sc->sc_generation);
+    else
+        iwx_pmf_cancel_reset(sc);
+    __atomic_store_n(&sc->sc_pmf_force_closed, 1, __ATOMIC_RELEASE);
+    sc->sc_pmf_key_failed = 1;
+    sc->sc_pmf_timeout_fired = 1;
+    timeout_del(&sc->sc_pmf_key_timeout);
+
+    for (size_t i = 0; i < nitems(sc->sc_pmf_key_cmd); i++) {
+        if (sc->sc_pmf_key_cmd[i].active)
+            sc->sc_pmf_key_cmd[i].timed_out = 1;
+    }
+    for (size_t i = 0; i < IWX_PMF_KEY_SLOT_COUNT; i++) {
+        if (++sc->sc_pmf_key_incarnation[i] == 0)
+            ++sc->sc_pmf_key_incarnation[i];
+        sc->sc_pmf_active_generation[i] = 0;
+        sc->sc_pmf_active_incarnation[i] = 0;
+    }
+
+    if (ni != NULL && (ni->ni_flags & IEEE80211_NODE_MFP)) {
+        ni->ni_port_valid = 0;
+        ni->ni_flags &= ~(IEEE80211_NODE_RXMGMTPROT |
+                          IEEE80211_NODE_TXMGMTPROT);
+        ni->ni_pmf_link_pending = 1;
+        ni->ni_pmf_key_batch_ready = 0;
+        ni->ni_pmf_pending_key_ids = 0;
+
+        /* Firmware reset invalidates every STA group-key slot. Retire the
+         * host copies too so a repeated M3 must install them again. */
+        ieee80211_delete_key(ic, ni, &ni->ni_pairwise_key);
+        for (size_t i = 0; i < nitems(ic->ic_nw_keys); i++)
+            ieee80211_delete_key(ic, ni, &ic->ic_nw_keys[i]);
+        ic->ic_def_txkey = 1;
+        ic->ic_igtk_kid = 4;
+    }
+
+    /* A reset creates a new firmware generation. The first key install in
+     * the next association must be allowed to start a fresh ACK batch. */
+    sc->sc_pmf_current_node = NULL;
+    sc->sc_pmf_current_node_epoch = 0;
+    sc->sc_pmf_key_failed = 0;
+    sc->sc_pmf_timeout_fired = 0;
+    __atomic_store_n(&sc->sc_pmf_force_closed, 0, __ATOMIC_RELEASE);
+    splx(s);
+}
+
+void ItlIwx::
+iwx_pmf_key_completion_task(struct iwx_softc *sc)
+{
+#ifdef AIRPORT_TAHOE
+    if (!tahoeP2pOnMainGate()) {
+        __atomic_store_n(&sc->sc_pmf_force_closed, 1, __ATOMIC_RELEASE);
+        return;
+    }
+#endif
+    struct ieee80211com *ic = &sc->sc_ic;
+    struct ieee80211_node *ni = ic->ic_bss;
+    bool failed;
+    bool pendingCommands = false;
+    bool currentCommandTimedOut = false;
+    const uint64_t now = iwx_pmf_monotonic_ns();
+    const uint32_t generation = static_cast<uint32_t>(sc->sc_generation);
+    int s = splnet();
+    failed = sc->sc_pmf_key_failed || sc->sc_pmf_timeout_fired;
+    bool resetForPmfTimeout = sc->sc_pmf_timeout_fired != 0;
+
+    for (size_t i = 0; i < nitems(sc->sc_pmf_key_cmd); i++) {
+        struct iwx_pmf_key_cmd *pending = &sc->sc_pmf_key_cmd[i];
+        if (!pending->active)
+            continue;
+
+        const bool currentEpoch = ni != NULL && pending->node == ni &&
+            pending->generation == generation &&
+            pending->node_epoch == ni->ni_pmf_key_epoch;
+        if (!pending->timed_out && pending->timeout_deadline_ns != 0 &&
+            now >= pending->timeout_deadline_ns) {
+            pending->timed_out = 1;
+            if (currentEpoch) {
+                currentCommandTimedOut = true;
+                sc->sc_pmf_timeout_fired = 1;
+                sc->sc_pmf_key_failed = 1;
+                resetForPmfTimeout = true;
+                failed = true;
+            }
+        }
+        if (!pending->completed) {
+            pendingCommands = true;
+            continue;
+        }
+
+        bool replyOK = false;
+        struct iwx_rx_packet *pkt =
+            (struct iwx_rx_packet *)pending->response_pkt;
+        if (pkt != NULL && !pending->timed_out &&
+            !sc->sc_pmf_timeout_fired &&
+            pending->response_command_id == pending->command_id &&
+            (pkt->hdr.group_id & IWX_CMD_FAILED_MSK) == 0 &&
+            pending->response_len == sizeof(pkt->len_n_flags) +
+                iwx_rx_packet_len(pkt)) {
+            const uint32_t payloadLength = iwx_rx_packet_payload_len(pkt);
+            if (pending->command_kind == IWX_PMF_KEY_CMD_ADD_STA &&
+                payloadLength == sizeof(struct iwx_cmd_response)) {
+                const struct iwx_cmd_response *response =
+                    (const struct iwx_cmd_response *)pkt->data;
+                replyOK = itl_pmf_add_sta_key_response_ok(
+                    payloadLength, le32toh(response->status),
+                    IWX_ADD_STA_SUCCESS,
+                    (pkt->hdr.group_id & IWX_CMD_FAILED_MSK) != 0);
+            } else if (pending->command_kind == IWX_PMF_KEY_CMD_IGTK) {
+                if (payloadLength == sizeof(struct iwx_cmd_response)) {
+                    const struct iwx_cmd_response *response =
+                        (const struct iwx_cmd_response *)pkt->data;
+                    replyOK = itl_pmf_igtk_response_ok(payloadLength,
+                        le32toh(response->status), 1U,
+                        (pkt->hdr.group_id & IWX_CMD_FAILED_MSK) != 0,
+                        pending->igtk_status1_abi &&
+                        sc->sc_pmf_igtk_status1_abi);
+                }
+            }
+        }
+
+        if (pending->response_pkt != NULL) {
+            explicit_bzero(pending->response_pkt,
+                           pending->response_len);
+            ::free(pending->response_pkt);
+            pending->response_pkt = NULL;
+        }
+
+        struct ieee80211_key *expectedKey = NULL;
+        if (pending->key_slot == 0)
+            expectedKey = ni != NULL ? &ni->ni_pairwise_key : NULL;
+        else if (pending->key_slot < IWX_PMF_KEY_SLOT_COUNT)
+            expectedKey = &ic->ic_nw_keys[pending->key_slot - 1];
+        const bool currentKey = currentEpoch &&
+            pending->key_slot < IWX_PMF_KEY_SLOT_COUNT &&
+            sc->sc_pmf_key_incarnation[pending->key_slot] ==
+                pending->incarnation &&
+            pending->key != NULL && pending->key == expectedKey &&
+            (pending->key->k_flags & IEEE80211_KEY_FWPENDING) != 0;
+
+        if (currentKey) {
+            const bool ackMatches = itl_pmf_ack_response_matches(
+                generation, pending->generation, ni->ni_pmf_key_epoch,
+                pending->node_epoch,
+                sc->sc_pmf_key_incarnation[pending->key_slot],
+                pending->incarnation, pending->command_id,
+                pending->response_command_id, replyOK,
+                pending->timed_out || sc->sc_pmf_timeout_fired);
+            if (ackMatches && !failed) {
+                pending->key->k_flags &= ~IEEE80211_KEY_FWPENDING;
+                pending->key->k_flags |= IEEE80211_KEY_FWACTIVE;
+                if ((pending->key->k_flags & IEEE80211_KEY_IGTK) ||
+                    ((ni->ni_flags & IEEE80211_NODE_MFP) &&
+                     !(pending->key->k_flags & IEEE80211_KEY_GROUP)))
+                    pending->key->k_flags |= IEEE80211_KEY_FWMFP;
+                sc->sc_pmf_active_generation[pending->key_slot] = generation;
+                sc->sc_pmf_active_incarnation[pending->key_slot] =
+                    pending->incarnation;
+            } else {
+                pending->key->k_flags &=
+                    ~(IEEE80211_KEY_FWACTIVE | IEEE80211_KEY_FWMFP);
+                failed = true;
+                sc->sc_pmf_key_failed = 1;
+                sc->sc_pmf_timeout_fired = 1;
+            }
+        }
+
+        memset(pending, 0, sizeof(*pending));
+    }
+
+    if (sc->sc_pmf_timeout_fired) {
+        failed = sc->sc_pmf_key_failed = 1;
+        resetForPmfTimeout |= currentCommandTimedOut ||
+            (ni != NULL && ni == ic->ic_bss &&
+             (ni->ni_flags & IEEE80211_NODE_MFP) != 0);
+    }
+
+    for (size_t i = 0; i < nitems(sc->sc_pmf_key_cmd); i++) {
+        struct iwx_pmf_key_cmd *pending = &sc->sc_pmf_key_cmd[i];
+        if (pending->active && pending->generation == generation)
+            pendingCommands = true;
+    }
+
+    if (ni != NULL && ni == ic->ic_bss &&
+        (ni->ni_flags & IEEE80211_NODE_MFP)) {
+        if (failed) {
+            ni->ni_port_valid = 0;
+            ni->ni_flags &= ~(IEEE80211_NODE_RXMGMTPROT |
+                              IEEE80211_NODE_TXMGMTPROT);
+            ni->ni_pmf_link_pending = 1;
+            ni->ni_pmf_key_batch_ready = 0;
+            if ((sc->sc_flags & (IWX_FLAG_STA_ACTIVE | IWX_FLAG_SHUTDOWN)) ==
+                    IWX_FLAG_STA_ACTIVE && ic->ic_state == IEEE80211_S_RUN)
+                ieee80211_new_state(ic, IEEE80211_S_SCAN, -1);
+        } else {
+            const uint8_t gtkId = (ni->ni_pmf_pending_key_ids &
+                IEEE80211_PMF_PENDING_GTK) ?
+                ni->ni_pmf_pending_gtk_kid : ic->ic_def_txkey;
+            const uint8_t igtkId = (ni->ni_pmf_pending_key_ids &
+                IEEE80211_PMF_PENDING_IGTK) ?
+                ni->ni_pmf_pending_igtk_kid : ic->ic_igtk_kid;
+            const bool pairwiseActive = iwx_pmf_key_active(
+                sc, &ni->ni_pairwise_key, 0, true);
+            const bool gtkActive = gtkId < 4 && iwx_pmf_key_active(
+                sc, &ic->ic_nw_keys[gtkId],
+                static_cast<uint8_t>(1 + gtkId), false);
+            const bool igtkActive = igtkId >= 4 && igtkId <= 5 &&
+                iwx_pmf_key_active(sc, &ic->ic_nw_keys[igtkId],
+                    static_cast<uint8_t>(1 + igtkId), true);
+
+            const bool associationReady =
+                (ic->ic_flags & IEEE80211_F_RSNON) != 0 &&
+                ic->ic_state == IEEE80211_S_RUN &&
+                ni->ni_rsn_state == RNSA_SUPP_PTKDONE;
+            if (associationReady && itl_pmf_authorize_port(
+                    ni->ni_pmf_key_batch_ready, pendingCommands,
+                    sc->sc_pmf_key_failed || sc->sc_pmf_timeout_fired,
+                    pairwiseActive, gtkActive, igtkActive)) {
+                if (ni->ni_pmf_pending_key_ids &
+                    IEEE80211_PMF_PENDING_GTK) {
+                    struct ieee80211_key *gtk =
+                        &ic->ic_nw_keys[ni->ni_pmf_pending_gtk_kid];
+                    if (gtk->k_flags & IEEE80211_KEY_TX)
+                        ic->ic_def_txkey = ni->ni_pmf_pending_gtk_kid;
+                }
+                if (ni->ni_pmf_pending_key_ids &
+                    IEEE80211_PMF_PENDING_IGTK)
+                    ic->ic_igtk_kid = ni->ni_pmf_pending_igtk_kid;
+                ni->ni_pmf_pending_key_ids = 0;
+                ni->ni_pmf_link_pending = 0;
+                ni->ni_pmf_key_batch_ready = 0;
+                ni->ni_flags |= IEEE80211_NODE_RXMGMTPROT |
+                                IEEE80211_NODE_TXMGMTPROT;
+                ni->ni_port_valid = 1;
+                ni->ni_assoc_fail = 0;
+                __atomic_store_n(&sc->sc_pmf_force_closed, 0,
+                                 __ATOMIC_RELEASE);
+                ieee80211_set_link_state(ic, LINK_STATE_UP);
+            } else if (ni->ni_pmf_key_batch_ready && !pendingCommands &&
+                       !(sc->sc_pmf_key_failed ||
+                         sc->sc_pmf_timeout_fired)) {
+                /* No command is outstanding, so missing PTK/GTK/IGTK means
+                 * this completed handshake cannot safely open the port. */
+                sc->sc_pmf_key_failed = 1;
+                failed = true;
+                ni->ni_port_valid = 0;
+                ni->ni_flags &= ~(IEEE80211_NODE_RXMGMTPROT |
+                                  IEEE80211_NODE_TXMGMTPROT);
+                ni->ni_pmf_link_pending = 1;
+                ni->ni_pmf_key_batch_ready = 0;
+                if ((sc->sc_flags & (IWX_FLAG_STA_ACTIVE |
+                                     IWX_FLAG_SHUTDOWN)) ==
+                        IWX_FLAG_STA_ACTIVE &&
+                    ic->ic_state == IEEE80211_S_RUN)
+                    ieee80211_new_state(ic, IEEE80211_S_SCAN, -1);
+            }
+        }
+    }
+
+    if (iwx_pmf_arm_key_timeout(sc) != 0) {
+        sc->sc_pmf_key_failed = 1;
+        sc->sc_pmf_timeout_fired = 1;
+        __atomic_store_n(&sc->sc_pmf_force_closed, 1, __ATOMIC_RELEASE);
+        failed = true;
+        resetForPmfTimeout = true;
+    }
+    if (resetForPmfTimeout && (sc->sc_flags & IWX_FLAG_SHUTDOWN) == 0)
+        iwx_pmf_schedule_reset(sc);
+    splx(s);
+
+    /* Reset retry is armed above while the same generation/node epoch is
+     * protected by the main gate. */
+}
+
+int ItlIwx::
+iwx_set_mgmt_mcast_key(struct iwx_softc *sc, struct ieee80211_node *ni,
+                       struct ieee80211_key *k, int remove_key,
+                       uint32_t incarnation)
+{
+    if (!itl_pmf_igtk_material_valid((k->k_flags & IEEE80211_KEY_IGTK) != 0,
+                                     k->k_id, k->k_len))
+        return EINVAL;
+    if ((sc->sc_capaflags & IWX_UCODE_TLV_FLAGS_MFP) == 0)
+        return EOPNOTSUPP;
+
+    const bool trackAck = !remove_key && ni != NULL &&
+        ni == sc->sc_ic.ic_bss &&
+        sc->sc_ic.ic_opmode == IEEE80211_M_STA &&
+        (ni->ni_flags & IEEE80211_NODE_MFP) != 0;
+    if (trackAck && !sc->sc_pmf_igtk_status1_abi)
+        return EOPNOTSUPP;
+    const uint8_t keySlot = iwx_pmf_key_slot(k);
+    auto send = [&](const void *payload, uint16_t payloadLength) {
+        if (!trackAck)
+            return iwx_send_cmd_pdu(sc, IWX_MGMT_MCAST_KEY,
+                IWX_CMD_ASYNC, payloadLength, payload);
+
+        struct iwx_host_cmd hostCmd = {};
+        hostCmd.id = IWX_MGMT_MCAST_KEY;
+        hostCmd.len[0] = payloadLength;
+        hostCmd.data[0] = payload;
+        hostCmd.flags = IWX_CMD_ASYNC | IWX_CMD_WANT_RESP;
+        hostCmd.resp_pkt_len = sizeof(struct iwx_rx_packet) +
+            (sc->sc_pmf_igtk_status1_abi ?
+                sizeof(struct iwx_cmd_response) : 0);
+        hostCmd.pmf_node = ni;
+        hostCmd.pmf_key = k;
+        hostCmd.pmf_node_epoch = ni->ni_pmf_key_epoch;
+        hostCmd.pmf_key_incarnation = incarnation;
+        hostCmd.pmf_key_slot = keySlot;
+        hostCmd.pmf_command_kind = IWX_PMF_KEY_CMD_IGTK;
+        return iwx_send_cmd(sc, &hostCmd);
+    };
+
+    if (isset(sc->sc_enabled_capa,
+              IWX_UCODE_TLV_CAPA_MULTI_QUEUE_RX_SUPPORT)) {
+        struct iwx_mgmt_mcast_key_cmd_v2 cmd = {};
+
+        if (!itl_pmf_build_igtk_payload(
+                reinterpret_cast<uint8_t *>(&cmd), sizeof(cmd), remove_key,
+                IWX_STA_KEY_NOT_VALID, IWX_STA_KEY_FLG_CCM, k->k_id,
+                IWX_STATION_ID, k->k_key, k->k_mgmt_rsc))
+            return EINVAL;
+        int err = send(&cmd, sizeof(cmd));
+        explicit_bzero(&cmd, sizeof(cmd));
+        return err;
+    }
+
+    struct iwx_mgmt_mcast_key_cmd_v1 cmd = {};
+    if (!itl_pmf_build_igtk_payload(
+            reinterpret_cast<uint8_t *>(&cmd), sizeof(cmd), remove_key,
+            IWX_STA_KEY_NOT_VALID, IWX_STA_KEY_FLG_CCM, k->k_id,
+            IWX_STATION_ID, k->k_key, k->k_mgmt_rsc))
+        return EINVAL;
+    int err = send(&cmd, sizeof(cmd));
+    explicit_bzero(&cmd, sizeof(cmd));
+    return err;
+}
+
+static int iwx_set_key_with_receipt(struct ieee80211com *ic, struct ieee80211_node *ni,
+            struct ieee80211_key *k, IwxStaAuthSubmitReceipt *receipt)
+{
+    struct iwx_softc *sc = (struct iwx_softc *)ic->ic_softc;
+    ItlIwx *that = container_of(sc, ItlIwx, com);
+#ifdef AIRPORT_TAHOE
+    if (receipt != nullptr) {
+        memset(receipt, 0, sizeof(*receipt));
+        receipt->driver_generation = static_cast<uint32_t>(sc->sc_generation);
+        receipt->queue_id = UINT32_MAX;
+        receipt->queue_index = UINT32_MAX;
+    }
+#endif
+    const auto finish = [receipt](int result) {
+#ifdef AIRPORT_TAHOE
+        if (receipt != nullptr) receipt->key_callback_result = result;
+#else
+        (void)receipt;
+#endif
+        return result;
+    };
+#ifdef AIRPORT_TAHOE
+    if (ic->ic_opmode == IEEE80211_M_STA &&
+        (ic->ic_caps & IEEE80211_C_MFP) != 0 &&
+        !that->tahoeP2pOnMainGate()) {
+        struct iwx_pmf_gate_request request = {};
+        request.operation = IWX_PMF_GATE_SET_KEY;
+        request.ic = ic;
+        request.node = ni;
+        request.key = k;
+        request.submit_receipt = receipt;
+        const int gateError = that->iwx_pmf_run_gate(sc, &request);
+        if (gateError != 0) {
+            __atomic_store_n(&sc->sc_pmf_force_closed, 1, __ATOMIC_RELEASE);
+            k->k_flags &= ~(IEEE80211_KEY_FWPENDING |
+                            IEEE80211_KEY_FWACTIVE);
+            return finish(gateError == EBUSY ? EAGAIN : gateError);
+        }
+        return finish(request.result);
+    }
+#endif
+    return finish(that->iwx_set_key_gated(ic, ni, k, receipt));
+}
+
+int ItlIwx::
+iwx_set_key(struct ieee80211com *ic, struct ieee80211_node *ni,
+            struct ieee80211_key *k)
+{
+    return iwx_set_key_with_receipt(ic, ni, k, nullptr);
+}
+
+static int iwx_set_key_observed(struct ieee80211com *ic,
+    struct ieee80211_node *ni, struct ieee80211_key *key, uint32_t,
     IwxStaAuthSubmitReceipt *receipt)
+{
+    return iwx_set_key_with_receipt(ic, ni, key, receipt);
+}
+
+int ItlIwx::
+iwx_set_key_gated(struct ieee80211com *ic, struct ieee80211_node *ni,
+                  struct ieee80211_key *k, IwxStaAuthSubmitReceipt *receipt)
 {
     struct iwx_softc *sc = (struct iwx_softc *)ic->ic_softc;
     struct iwx_add_sta_key_cmd cmd;
@@ -16412,7 +17818,61 @@ static int iwx_set_key_with_receipt(struct ieee80211com *ic,
         receipt->queue_index = UINT32_MAX;
     }
 #endif
-    
+
+#ifdef AIRPORT_TAHOE
+    if (__atomic_load_n(&that->nativeLifecycleTearingDown_,
+                        __ATOMIC_ACQUIRE) != 0) {
+        __atomic_store_n(&sc->sc_pmf_force_closed, 1, __ATOMIC_RELEASE);
+        return ENXIO;
+    }
+    if (ic->ic_opmode == IEEE80211_M_STA &&
+        !that->tahoeP2pOnMainGate())
+        return EAGAIN;
+#endif
+
+    if (k->k_cipher == IEEE80211_CIPHER_BIP) {
+        int err, tracked;
+        uint8_t slot = 0xff;
+        uint32_t incarnation = 0;
+
+        if (!itl_pmf_igtk_material_valid(
+                (k->k_flags & IEEE80211_KEY_IGTK) != 0,
+                k->k_id, k->k_len))
+            return EINVAL;
+        if ((ic->ic_caps & IEEE80211_C_MFP) == 0)
+            return EOPNOTSUPP;
+
+        tracked = iwx_pmf_prepare_key(sc, ni, k, &slot, &incarnation);
+        if (tracked < 0)
+            return -tracked;
+
+        err = ieee80211_set_key(ic, ni, k);
+        if (err) {
+            k->k_flags &= ~(IEEE80211_KEY_FWPENDING |
+                            IEEE80211_KEY_FWACTIVE |
+                            IEEE80211_KEY_FWMFP);
+            return err;
+        }
+        err = that->iwx_set_mgmt_mcast_key(sc, ni, k, 0, incarnation);
+        if (err) {
+            k->k_flags &= ~(IEEE80211_KEY_FWPENDING |
+                            IEEE80211_KEY_FWACTIVE |
+                            IEEE80211_KEY_FWMFP);
+            ieee80211_delete_key(ic, ni, k);
+            if (tracked) {
+                sc->sc_pmf_key_failed = 1;
+                __atomic_store_n(&sc->sc_pmf_force_closed, 1,
+                                 __ATOMIC_RELEASE);
+                that->iwx_pmf_schedule_reset(sc);
+            }
+            return err == EBUSY ? EIO : err;
+        }
+        if (tracked)
+            return EBUSY;
+        k->k_flags |= IEEE80211_KEY_FWMFP;
+        return 0;
+    }
+
     if (k->k_cipher != IEEE80211_CIPHER_CCMP) {
         /* Fallback to software crypto for other ciphers. */
         const int softwareError = ieee80211_set_key(ic, ni, k);
@@ -16450,7 +17910,27 @@ static int iwx_set_key_with_receipt(struct ieee80211com *ic,
         }
     }
 #endif
-    
+
+    uint8_t pmfSlot = 0xff;
+    uint32_t pmfIncarnation = 0;
+    int tracked = iwx_pmf_prepare_key(sc, ni, k, &pmfSlot,
+                                      &pmfIncarnation);
+    if (tracked < 0)
+        return -tracked;
+
+    if (k->k_flags & IEEE80211_KEY_SWCRYPTO) {
+        if (tracked && !(k->k_flags & IEEE80211_KEY_GROUP)) {
+            k->k_flags &= ~(IEEE80211_KEY_FWPENDING |
+                            IEEE80211_KEY_FWACTIVE |
+                            IEEE80211_KEY_FWMFP);
+            return EOPNOTSUPP;
+        }
+        k->k_flags &= ~(IEEE80211_KEY_FWPENDING | IEEE80211_KEY_FWACTIVE |
+                        IEEE80211_KEY_FWMFP);
+        k->k_flags &= ~IEEE80211_KEY_FWMFP;
+        return 0;
+    }
+
     memset(&cmd, 0, sizeof(cmd));
 
     // The host net80211 CCMP replay floor comes from the EAPOL RSC in
@@ -16472,7 +17952,8 @@ static int iwx_set_key_with_receipt(struct ieee80211com *ic,
 #endif
         return EINVAL;
     }
-    
+
+
     cmd.common.key_flags = htole16(IWX_STA_KEY_FLG_CCM |
                                    IWX_STA_KEY_FLG_WEP_KEY_MAP |
                                    ((k->k_id << IWX_STA_KEY_FLG_KEYID_POS) &
@@ -16480,43 +17961,68 @@ static int iwx_set_key_with_receipt(struct ieee80211com *ic,
     if (k->k_flags & IEEE80211_KEY_GROUP) {
         cmd.common.key_offset = 1;
         cmd.common.key_flags |= htole16(IWX_STA_KEY_MULTICAST);
-    } else
+    } else {
         cmd.common.key_offset = 0;
-    
+        if (ni != NULL &&
+            itl_pmf_should_set_ccmp_mfp(
+                (ni->ni_flags & IEEE80211_NODE_MFP) != 0, 0))
+            cmd.common.key_flags |= htole16(IWX_STA_KEY_MFP);
+    }
+
     memcpy(cmd.common.key, k->k_key, MIN(sizeof(cmd.common.key), k->k_len));
     cmd.common.sta_id = IWX_STATION_ID;
-    
+
     cmd.transmit_seq_cnt = htole64(transmitSequencePn);
-    
-    const int error = that->iwx_send_cmd_pdu(sc, IWX_ADD_STA_KEY,
-        IWX_CMD_ASYNC, sizeof(cmd), &cmd, receipt);
+
+    int err;
+    if (tracked) {
+        struct iwx_host_cmd hostCmd = {};
+        hostCmd.id = IWX_ADD_STA_KEY;
+        hostCmd.len[0] = sizeof(cmd);
+        hostCmd.data[0] = &cmd;
+        hostCmd.flags = IWX_CMD_ASYNC | IWX_CMD_WANT_RESP;
+        hostCmd.resp_pkt_len = sizeof(struct iwx_rx_packet) +
+            sizeof(struct iwx_cmd_response);
+        hostCmd.pmf_node = ni;
+        hostCmd.pmf_key = k;
+        hostCmd.pmf_node_epoch = ni->ni_pmf_key_epoch;
+        hostCmd.pmf_key_slot = pmfSlot;
+        hostCmd.pmf_key_incarnation = pmfIncarnation;
+        hostCmd.pmf_command_kind = IWX_PMF_KEY_CMD_ADD_STA;
+        err = that->iwx_send_cmd(sc, &hostCmd, receipt);
+    } else {
+        err = that->iwx_send_cmd_pdu(sc, IWX_ADD_STA_KEY, IWX_CMD_ASYNC,
+                                     sizeof(cmd), &cmd, receipt);
+    }
+    explicit_bzero(&cmd, sizeof(cmd));
+    if (tracked) {
+        if (err != 0) {
+            k->k_flags &= ~(IEEE80211_KEY_FWPENDING |
+                            IEEE80211_KEY_FWACTIVE |
+                            IEEE80211_KEY_FWMFP);
+            __atomic_store_n(&sc->sc_pmf_force_closed, 1,
+                             __ATOMIC_RELEASE);
+            that->iwx_pmf_schedule_reset(sc);
+            return err == EBUSY ? EIO : err;
+        }
+        return EBUSY;
+    }
+    if (err == 0 && ni != NULL &&
+        itl_pmf_should_set_ccmp_mfp(
+            (ni->ni_flags & IEEE80211_NODE_MFP) != 0,
+            (k->k_flags & IEEE80211_KEY_GROUP) != 0))
+        k->k_flags |= IEEE80211_KEY_FWMFP;
+    else
+        k->k_flags &= ~IEEE80211_KEY_FWMFP;
 #ifdef AIRPORT_TAHOE
-    // net80211 treats EBUSY from key installation as an accepted async
-    // request and may commit the key/port state.  The Tahoe command gate's
-    // pre-ring ownership fence means this request was not enqueued; report a
-    // retryable failure instead.  Preserve legacy errno behavior elsewhere.
-    const int callbackError = error == EBUSY ? EAGAIN : error;
+    const int callbackError = err == EBUSY ? EAGAIN : err;
     if (receipt != nullptr)
         receipt->key_callback_result = callbackError;
     return callbackError;
 #else
     (void)receipt;
-    return error;
+    return err;
 #endif
-}
-
-int ItlIwx::
-iwx_set_key(struct ieee80211com *ic, struct ieee80211_node *ni,
-            struct ieee80211_key *k)
-{
-    return iwx_set_key_with_receipt(ic, ni, k, nullptr);
-}
-
-static int iwx_set_key_observed(struct ieee80211com *ic,
-    struct ieee80211_node *ni, struct ieee80211_key *key, uint32_t,
-    IwxStaAuthSubmitReceipt *receipt)
-{
-    return iwx_set_key_with_receipt(ic, ni, key, receipt);
 }
 
 void ItlIwx::
@@ -16524,17 +18030,80 @@ iwx_delete_key(struct ieee80211com *ic, struct ieee80211_node *ni,
                struct ieee80211_key *k)
 {
     struct iwx_softc *sc = (struct iwx_softc *)ic->ic_softc;
+    ItlIwx *that = container_of(sc, ItlIwx, com);
+#ifdef AIRPORT_TAHOE
+    if (ic->ic_opmode == IEEE80211_M_STA &&
+        (ic->ic_caps & IEEE80211_C_MFP) != 0 &&
+        !that->tahoeP2pOnMainGate()) {
+        struct iwx_pmf_gate_request request = {};
+        request.operation = IWX_PMF_GATE_DELETE_KEY;
+        request.ic = ic;
+        request.node = ni;
+        request.key = k;
+        if (that->iwx_pmf_run_gate(sc, &request) != 0)
+            __atomic_store_n(&sc->sc_pmf_force_closed, 1,
+                             __ATOMIC_RELEASE);
+        return;
+    }
+#endif
+    that->iwx_delete_key_gated(ic, ni, k);
+}
+
+void ItlIwx::
+iwx_delete_key_gated(struct ieee80211com *ic, struct ieee80211_node *ni,
+                     struct ieee80211_key *k)
+{
+    struct iwx_softc *sc = (struct iwx_softc *)ic->ic_softc;
     struct iwx_add_sta_key_cmd cmd;
     ItlIwx *that = container_of(sc, ItlIwx, com);
-    
-    if (k->k_cipher != IEEE80211_CIPHER_CCMP) {
+#ifdef AIRPORT_TAHOE
+    if (__atomic_load_n(&that->nativeLifecycleTearingDown_,
+                        __ATOMIC_ACQUIRE) != 0) {
+        __atomic_store_n(&sc->sc_pmf_force_closed, 1, __ATOMIC_RELEASE);
+        return;
+    }
+    if (ic->ic_opmode == IEEE80211_M_STA &&
+        !that->tahoeP2pOnMainGate()) {
+        __atomic_store_n(&sc->sc_pmf_force_closed, 1, __ATOMIC_RELEASE);
+        return;
+    }
+#endif
+
+    if (iwx_pmf_tracked_node(sc, ni)) {
+        ni->ni_port_valid = 0;
+        ni->ni_pmf_link_pending = 1;
+        ni->ni_flags &= ~(IEEE80211_NODE_RXMGMTPROT |
+                          IEEE80211_NODE_TXMGMTPROT);
+        __atomic_store_n(&sc->sc_pmf_force_closed, 1, __ATOMIC_RELEASE);
+        const uint8_t slot = iwx_pmf_key_slot(k);
+        if (slot < IWX_PMF_KEY_SLOT_COUNT) {
+            if (++sc->sc_pmf_key_incarnation[slot] == 0)
+                ++sc->sc_pmf_key_incarnation[slot];
+            sc->sc_pmf_active_generation[slot] = 0;
+            sc->sc_pmf_active_incarnation[slot] = 0;
+        }
+    }
+
+    if (k->k_cipher == IEEE80211_CIPHER_BIP ||
+        (k->k_flags & IEEE80211_KEY_IGTK) != 0) {
+        if ((k->k_flags & (IEEE80211_KEY_FWMFP |
+                           IEEE80211_KEY_FWACTIVE |
+                           IEEE80211_KEY_FWPENDING)) &&
+            (sc->sc_flags & IWX_FLAG_STA_ACTIVE))
+            that->iwx_set_mgmt_mcast_key(sc, ni, k, 1, 0);
+        ieee80211_delete_key(ic, ni, k);
+        return;
+    }
+
+    if (k->k_cipher != IEEE80211_CIPHER_CCMP ||
+        (k->k_flags & IEEE80211_KEY_SWCRYPTO) != 0) {
         /* Fallback to software crypto for other ciphers. */
         ieee80211_delete_key(ic, ni, k);
         return;
     }
-    
+
     memset(&cmd, 0, sizeof(cmd));
-    
+
     cmd.common.key_flags = htole16(IWX_STA_KEY_NOT_VALID |
                                    IWX_STA_KEY_FLG_NO_ENC | IWX_STA_KEY_FLG_WEP_KEY_MAP |
                                    ((k->k_id << IWX_STA_KEY_FLG_KEYID_POS) &
@@ -16545,8 +18114,12 @@ iwx_delete_key(struct ieee80211com *ic, struct ieee80211_node *ni,
     else
         cmd.common.key_offset = 0;
     cmd.common.sta_id = IWX_STATION_ID;
-    
-    that->iwx_send_cmd_pdu(sc, IWX_ADD_STA_KEY, IWX_CMD_ASYNC, sizeof(cmd), &cmd);
+
+    if (sc->sc_flags & IWX_FLAG_STA_ACTIVE)
+        that->iwx_send_cmd_pdu(sc, IWX_ADD_STA_KEY, IWX_CMD_ASYNC,
+                               sizeof(cmd), &cmd);
+    explicit_bzero(&cmd, sizeof(cmd));
+    ieee80211_delete_key(ic, ni, k);
 }
 
 int ItlIwx::
@@ -16556,11 +18129,11 @@ iwx_media_change(struct _ifnet *ifp)
     struct ieee80211com *ic = &sc->sc_ic;
     uint8_t rate, ridx;
     int err;
-    
+
     err = ieee80211_media_change(ifp);
     if (err != ENETRESET)
         return err;
-    
+
     if (ic->ic_fixed_mcs != -1)
         sc->sc_fixed_ridx = iwx_mcs2ridx[ic->ic_fixed_mcs];
     else if (ic->ic_fixed_rate != -1) {
@@ -16572,7 +18145,7 @@ iwx_media_change(struct _ifnet *ifp)
                 break;
         sc->sc_fixed_ridx = ridx;
     }
-    
+
     if ((ifp->if_flags & (IFF_UP | IFF_RUNNING)) ==
         (IFF_UP | IFF_RUNNING)) {
 #ifdef AIRPORT_TAHOE
@@ -16588,6 +18161,150 @@ iwx_media_change(struct _ifnet *ifp)
             err = iwx_init(ifp);
     }
     return err;
+}
+
+IOReturn ItlIwx::
+iwx_net80211_transition_gate_action(OSObject *target, void *arg0,
+                                    void *arg1, void *, void *)
+{
+    auto *gateOwner = static_cast<IOEthernetController *>(arg0);
+    auto *request = static_cast<TahoeNet80211Transition *>(arg1);
+    if (target == nullptr || target != gateOwner || request == nullptr ||
+        request->gateOwner != gateOwner || request->sc == nullptr)
+        return kIOReturnBadArgument;
+
+    ItlIwx *that = container_of(request->sc, ItlIwx, com);
+    IOWorkLoop *loop = that->getMainWorkLoop();
+    if (that->getController() != gateOwner ||
+        request->sc != &that->com || loop == nullptr || !loop->onThread())
+        return kIOReturnNotReady;
+
+    struct iwx_softc *sc = request->sc;
+    struct ieee80211com *ic = &sc->sc_ic;
+    request->finalState = static_cast<uint32_t>(ic->ic_state);
+    if (request->generation != sc->sc_generation ||
+        (!request->allowShutdown &&
+         (sc->sc_flags & IWX_FLAG_SHUTDOWN) != 0))
+        return kIOReturnAborted;
+
+    if (request->queuedRequest &&
+        (__atomic_load_n(&that->tahoe_newstate_sequence_,
+                         __ATOMIC_ACQUIRE) != request->requestSequence ||
+         sc->ns_nstate != request->newState ||
+         sc->ns_arg != request->arg ||
+         that->tahoe_newstate_generation_ != request->generation))
+        return kIOReturnAborted;
+
+    if (request->captureSnapshot) {
+        request->oldState = ic->ic_state;
+        request->node = ic->ic_bss;
+        if (ic->ic_des_esslen > IEEE80211_NWID_LEN)
+            return kIOReturnAborted;
+        request->desiredEssidLength = ic->ic_des_esslen;
+        memcpy(request->desiredEssid, ic->ic_des_essid,
+               request->desiredEssidLength);
+        memcpy(request->desiredBssid, ic->ic_des_bssid,
+               sizeof(request->desiredBssid));
+        memcpy(request->localMac, ic->ic_myaddr,
+               sizeof(request->localMac));
+        request->identityCaptured = request->node != nullptr;
+        if (request->identityCaptured) {
+            const struct ieee80211_node *ni = request->node;
+            if (ni->ni_esslen > IEEE80211_NWID_LEN)
+                return kIOReturnAborted;
+            request->nodeEpoch = ni->ni_pmf_key_epoch;
+            request->akm = ni->ni_rsnakms;
+            request->nodeEssidLength = ni->ni_esslen;
+            request->saeH2e = ni->ni_sae_h2e;
+            memcpy(request->nodeBssid, ni->ni_bssid,
+                   sizeof(request->nodeBssid));
+            memcpy(request->nodeMac, ni->ni_macaddr,
+                   sizeof(request->nodeMac));
+            memcpy(request->nodeEssid, ni->ni_essid,
+                   request->nodeEssidLength);
+        }
+        request->finalState = static_cast<uint32_t>(ic->ic_state);
+        request->captureSnapshot = false;
+        return kIOReturnSuccess;
+    }
+
+    if (!request->allowShutdown) {
+        if (ic->ic_state != request->oldState ||
+            ic->ic_bss != request->node)
+            return kIOReturnAborted;
+        if (memcmp(request->localMac, ic->ic_myaddr,
+                   sizeof(request->localMac)) != 0 ||
+            request->desiredEssidLength != ic->ic_des_esslen ||
+            memcmp(request->desiredEssid, ic->ic_des_essid,
+                   request->desiredEssidLength) != 0 ||
+            memcmp(request->desiredBssid, ic->ic_des_bssid,
+                   sizeof(request->desiredBssid)) != 0)
+            return kIOReturnAborted;
+        if (request->identityCaptured) {
+            /* Do not dereference the saved node until the current owner
+             * pointer matches it; the old node may already have been freed. */
+            const struct ieee80211_node *ni = ic->ic_bss;
+            if (ni == nullptr ||
+                request->nodeEpoch != ni->ni_pmf_key_epoch ||
+                request->akm != ni->ni_rsnakms ||
+                request->saeH2e != ni->ni_sae_h2e ||
+                request->nodeEssidLength != ni->ni_esslen ||
+                memcmp(request->nodeBssid, ni->ni_bssid,
+                       sizeof(request->nodeBssid)) != 0 ||
+                memcmp(request->nodeMac, ni->ni_macaddr,
+                       sizeof(request->nodeMac)) != 0 ||
+                memcmp(request->nodeEssid, ni->ni_essid,
+                       request->nodeEssidLength) != 0)
+                return kIOReturnAborted;
+        }
+    }
+
+    request->stateResult = sc->sc_newstate(ic, request->newState,
+                                            request->arg);
+    request->finalState = static_cast<uint32_t>(ic->ic_state);
+    if (request->notifyAssociation && request->stateResult == 0 &&
+        request->newState == IEEE80211_S_RUN &&
+        ic->ic_state == IEEE80211_S_RUN &&
+        ic->ic_assoc_status == IEEE80211_STATUS_SUCCESS &&
+        ic->ic_event_handler)
+        (*ic->ic_event_handler)(ic, IEEE80211_EVT_STA_ASSOC_DONE, NULL);
+    return kIOReturnSuccess;
+}
+
+int ItlIwx::
+iwx_run_net80211_transition_gate(struct iwx_softc *sc,
+                                 TahoeNet80211Transition *request)
+{
+    if (sc != &com || request == nullptr)
+        return EINVAL;
+    IOCommandGate *gate = getMainCommandGate();
+    IOWorkLoop *loop = getMainWorkLoop();
+    IOEthernetController *owner = getController();
+    if (gate == nullptr || loop == nullptr || owner == nullptr)
+        return ENXIO;
+    if (request->gateOwner != nullptr && request->gateOwner != owner)
+        return ENXIO;
+
+    request->gateOwner = owner;
+    request->sc = sc;
+    request->stateResult = 0;
+    IOReturn gateResult;
+    if (loop->onThread()) {
+        // The workloop serializes its event sources and gate actions. Calling
+        // directly here avoids recursively queueing work from an RX callback.
+        gateResult = iwx_net80211_transition_gate_action(
+            owner, owner, request, nullptr, nullptr);
+    } else {
+        gateResult = gate->runAction(iwx_net80211_transition_gate_action,
+                                     owner, request);
+    }
+    if (gateResult == kIOReturnSuccess)
+        return request->stateResult;
+    if (gateResult == kIOReturnAborted)
+        return ECANCELED;
+    if (gateResult == kIOReturnBusy)
+        return EBUSY;
+    return EIO;
 }
 
 void ItlIwx::
@@ -16611,10 +18328,34 @@ iwx_newstate_task(void *psc)
         return;
     }
     enum ieee80211_state nstate = sc->ns_nstate;
-    enum ieee80211_state ostate = ic->ic_state;
     int arg = sc->ns_arg;
     const int generation = that->tahoe_newstate_generation_;
+    const uint32_t requestSequence = __atomic_load_n(
+        &that->tahoe_newstate_sequence_, __ATOMIC_ACQUIRE);
     taskq_leave(sc->sc_nswq);
+    TahoeNet80211Transition transition{};
+    transition.newState = nstate;
+    transition.arg = arg;
+    transition.generation = generation;
+    transition.requestSequence = requestSequence;
+    transition.queuedRequest = true;
+    transition.captureSnapshot = true;
+    const int captureError = that->iwx_run_net80211_transition_gate(
+        sc, &transition);
+    if (captureError != 0) {
+        that->tahoeRecordLinkTransition(sc,
+            IwxLinkStateTrace::Event::kNewStateTaskCompleted,
+            UINT32_MAX, UINT32_MAX, arg, captureError);
+        if (captureError != ECANCELED &&
+            (sc->sc_flags & IWX_FLAG_SHUTDOWN) == 0) {
+            that->tahoeRecordInitTaskTrigger(
+                IwxResetTrace::InitTaskTrigger::kNewStateError);
+            task_add(systq, &sc->init_task);
+        }
+        splx(s);
+        return;
+    }
+    enum ieee80211_state ostate = transition.oldState;
     NativeNewstateObservation stateObservation(that, sc,
         static_cast<uint32_t>(ostate), static_cast<uint32_t>(nstate),
         static_cast<uint32_t>(generation), static_cast<uint32_t>(sc->sc_generation),
@@ -16632,7 +18373,7 @@ iwx_newstate_task(void *psc)
         /* iwx_stop() is waiting for us. */
 #ifdef AIRPORT_TAHOE
         stateObservation.terminalReason = 0x10001U;
-        stateObservation.finish();
+        stateObservation.finish(transition.finalState);
 #endif
         //        refcnt_rele_wake(&sc->task_refs);
         splx(s);
@@ -16643,7 +18384,7 @@ iwx_newstate_task(void *psc)
         stateObservation.terminalReason = 0x10002U;
         IOLog("AirportItlwm[Tahoe] stale newstate task generation=%d current=%d state=%d target=%d flags=0x%x\n",
             generation, sc->sc_generation, ic->ic_state, nstate, sc->sc_flags);
-        stateObservation.finish();
+        stateObservation.finish(transition.finalState);
         splx(s);
         return;
     }
@@ -16654,7 +18395,7 @@ iwx_newstate_task(void *psc)
             if (sc->sc_flags & IWX_FLAG_SCANNING) {
 #ifdef AIRPORT_TAHOE
                 stateObservation.terminalReason = 0x10003U;
-                stateObservation.finish();
+                stateObservation.finish(transition.finalState);
 #endif
                 //                refcnt_rele_wake(&sc->task_refs);
                 splx(s);
@@ -16689,7 +18430,7 @@ iwx_newstate_task(void *psc)
         if (sc->sc_flags & IWX_FLAG_SHUTDOWN) {
 #ifdef AIRPORT_TAHOE
             stateObservation.terminalReason = 0x10001U;
-            stateObservation.finish();
+            stateObservation.finish(transition.finalState);
 #endif
             //            refcnt_rele_wake(&sc->task_refs);
             splx(s);
@@ -16700,7 +18441,7 @@ iwx_newstate_task(void *psc)
             stateObservation.terminalReason = 0x10002U;
             IOLog("AirportItlwm[Tahoe] newstate task cancelled generation=%d current=%d state=%d target=%d flags=0x%x\n",
                 generation, sc->sc_generation, ic->ic_state, nstate, sc->sc_flags);
-            stateObservation.finish();
+            stateObservation.finish(transition.finalState);
             splx(s);
             return;
         }
@@ -16718,7 +18459,7 @@ iwx_newstate_task(void *psc)
                 break;
 #ifdef AIRPORT_TAHOE
             stateObservation.terminalReason = 0x10005U;
-            stateObservation.finish();
+            stateObservation.finish(transition.finalState);
 #endif
             //        refcnt_rele_wake(&sc->task_refs);
             splx(s);
@@ -16751,7 +18492,7 @@ out:
         if (generation != sc->sc_generation)
             IOLog("AirportItlwm[Tahoe] newstate completion discarded generation=%d current=%d state=%d target=%d error=%d flags=0x%x\n",
                 generation, sc->sc_generation, ic->ic_state, nstate, err, sc->sc_flags);
-        stateObservation.finish();
+        stateObservation.finish(transition.finalState);
         splx(s);
         return;
     }
@@ -16772,8 +18513,27 @@ out:
 #endif
         } else {
 #ifdef AIRPORT_TAHOE
-            int state_error = sc->sc_newstate(ic, nstate, arg);
+            transition.notifyAssociation = true;
+            int state_error = that->iwx_run_net80211_transition_gate(
+                sc, &transition);
             stateObservation.terminalReason = static_cast<uint32_t>(state_error);
+            if (state_error == ECANCELED) {
+                stateObservation.finish(transition.finalState);
+                splx(s);
+                return;
+            }
+            if (state_error != 0) {
+                IOLog("AirportItlwm[Tahoe] net80211 transition gate failed generation=%d state=%d target=%d error=%d\n",
+                      generation, ostate, nstate, state_error);
+                if ((sc->sc_flags & IWX_FLAG_SHUTDOWN) == 0) {
+                    that->tahoeRecordInitTaskTrigger(
+                        IwxResetTrace::InitTaskTrigger::kNewStateError);
+                    task_add(systq, &sc->init_task);
+                }
+                stateObservation.finish(transition.finalState);
+                splx(s);
+                return;
+            }
             if (state_error == 0 && nstate == IEEE80211_S_RUN &&
                 ostate != IEEE80211_S_RUN &&
                 ic->ic_state == IEEE80211_S_RUN &&
@@ -16805,7 +18565,7 @@ out:
     }
     //    refcnt_rele_wake(&sc->task_refs);
 #ifdef AIRPORT_TAHOE
-    stateObservation.finish();
+    stateObservation.finish(transition.finalState);
 #endif
     splx(s);
 }
@@ -16905,6 +18665,11 @@ iwx_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
     sc->ns_arg = arg;
 #ifdef AIRPORT_TAHOE
     that->tahoe_newstate_generation_ = sc->sc_generation;
+    uint32_t sequence = __atomic_add_fetch(
+        &that->tahoe_newstate_sequence_, 1u, __ATOMIC_RELEASE);
+    if (sequence == 0)
+        __atomic_add_fetch(&that->tahoe_newstate_sequence_, 1u,
+                           __ATOMIC_RELEASE);
 #endif
     
     that->iwx_add_task(sc, sc->sc_nswq, &sc->newstate_task);
@@ -17975,6 +19740,20 @@ iwx_stop(struct _ifnet *ifp, IwxResetTrace::ResetReason reason)
     taskq_pause_diagnostics pause_diagnostics {};
     int pause_error = taskq_try_pause_with_diagnostics(
         sc->sc_nswq, &pause_diagnostics);
+    const bool pmfResetOwnsPausedQueue =
+        __atomic_load_n(&sc->sc_pmf_reset_requested, __ATOMIC_ACQUIRE) != 0 &&
+        __atomic_load_n(&sc->sc_pmf_reset_attempt_inflight,
+                        __ATOMIC_ACQUIRE) != 0 &&
+        __atomic_load_n(&sc->sc_pmf_reset_attempt_token,
+                        __ATOMIC_ACQUIRE) != 0 &&
+        __atomic_load_n(&sc->sc_pmf_reset_attempt_token,
+                        __ATOMIC_ACQUIRE) == __atomic_load_n(
+                            &sc->sc_pmf_reset_token, __ATOMIC_ACQUIRE);
+    if (pause_error != 0 &&
+        pause_diagnostics.reason == TASKQ_PAUSE_DIAG_PAUSED &&
+        (sc->sc_flags & IWX_FLAG_SHUTDOWN) != 0 &&
+        pmfResetOwnsPausedQueue)
+        pause_error = 0;
     if (pause_error) {
         if (IOEthernetController *controller = getController()) {
             uint64_t fingerprint = 14695981039346656037ull;
@@ -18041,6 +19820,7 @@ iwx_stop(struct _ifnet *ifp, IwxResetTrace::ResetReason reason)
 #ifdef AIRPORT_TAHOE
     /* Fence running state tasks before the firmware and rings are reset. */
     sc->sc_generation++;
+    iwx_pmf_invalidate_generation(sc);
 #ifdef AIRPORT_TAHOE
     iwx_group2_tx_trace_invalidate_slots(
         &ic->ic_tahoe_auth_trace.group2_tx, tahoeMonotonicNs() / 1000ULL,
@@ -18055,6 +19835,8 @@ iwx_stop(struct _ifnet *ifp, IwxResetTrace::ResetReason reason)
     
     /* Cancel scheduled tasks and let any stale tasks finish up. */
     task_del(systq, &sc->init_task);
+    timeout_del(&sc->sc_pmf_key_timeout);
+    iwx_del_task(sc, sc->sc_nswq, &sc->sc_pmf_key_task);
 #ifdef AIRPORT_TAHOE
     task_del(systq, &tahoe_scan_abort_task_);
 #endif
@@ -18070,6 +19852,17 @@ iwx_stop(struct _ifnet *ifp, IwxResetTrace::ResetReason reason)
     
 #ifdef AIRPORT_TAHOE
     const int hardwareStopError = iwx_stop_device(sc);
+    /* Command completions and PMF response ownership are main-gate state.
+     * If the gate cannot retire them, keep shutdown asserted and nswq paused
+     * so no response can race a later ring or key-table teardown. */
+    const int responseClearError = iwx_pmf_clear_responses(sc);
+    if (responseClearError != 0) {
+        sc->sc_flags |= IWX_FLAG_SHUTDOWN;
+        IOLog("AirportItlwm[Tahoe] stop retained after response clear gate error=%d generation=%d\n",
+              responseClearError, sc->sc_generation);
+        splx(s);
+        return EBUSY;
+    }
     // Do this after firmware stop while splnet still excludes a final
     // notification. No old-generation CHUB request may survive into init.
     tahoeRetireNativeMccNotice(sc);
@@ -18082,11 +19875,22 @@ iwx_stop(struct _ifnet *ifp, IwxResetTrace::ResetReason reason)
     sc->sc_generation++;
 #endif
 
+#ifndef AIRPORT_TAHOE
     for (i = 0; i < nitems(sc->sc_cmd_resp_pkt); i++) {
         ::free(sc->sc_cmd_resp_pkt[i]);
         sc->sc_cmd_resp_pkt[i] = NULL;
         sc->sc_cmd_resp_len[i] = 0;
     }
+    for (i = 0; i < nitems(sc->sc_pmf_key_cmd); i++) {
+        if (sc->sc_pmf_key_cmd[i].response_pkt != NULL) {
+            explicit_bzero(sc->sc_pmf_key_cmd[i].response_pkt,
+                           sc->sc_pmf_key_cmd[i].response_len);
+            ::free(sc->sc_pmf_key_cmd[i].response_pkt);
+        }
+        memset(&sc->sc_pmf_key_cmd[i], 0,
+               sizeof(sc->sc_pmf_key_cmd[i]));
+    }
+#endif
     ifp->if_flags &= ~IFF_RUNNING;
     ifq_clr_oactive(&ifp->if_snd);
     ifq_flush(&ifp->if_snd);
@@ -18103,7 +19907,6 @@ iwx_stop(struct _ifnet *ifp, IwxResetTrace::ResetReason reason)
     sc->sc_flags &= ~IWX_FLAG_STA_ACTIVE;
     sc->sc_flags &= ~IWX_FLAG_TE_ACTIVE;
     sc->sc_flags &= ~IWX_FLAG_HW_ERR;
-    sc->sc_flags &= ~IWX_FLAG_SHUTDOWN;
     sc->sc_flags &= ~IWX_FLAG_TXFLUSH;
 
     sc->sc_rx_ba_sessions = 0;
@@ -18113,7 +19916,20 @@ iwx_stop(struct _ifnet *ifp, IwxResetTrace::ResetReason reason)
     sc->ba_tx.stop_tidmask = 0;
     
 #ifdef AIRPORT_TAHOE
-    const int stopStateError = sc->sc_newstate(ic, IEEE80211_S_INIT, -1);
+    TahoeNet80211Transition stopTransition{};
+    stopTransition.newState = IEEE80211_S_INIT;
+    stopTransition.arg = -1;
+    stopTransition.generation = sc->sc_generation;
+    stopTransition.allowShutdown = true;
+    const int stopStateError = iwx_run_net80211_transition_gate(
+        sc, &stopTransition);
+    if (stopStateError != 0) {
+        sc->sc_flags |= IWX_FLAG_SHUTDOWN;
+        IOLog("AirportItlwm[Tahoe] stop retained after INIT gate error=%d generation=%d\n",
+              stopStateError, sc->sc_generation);
+        splx(s);
+        return EBUSY;
+    }
 #else
     sc->sc_newstate(ic, IEEE80211_S_INIT, -1);
 #endif
@@ -18129,6 +19945,8 @@ iwx_stop(struct _ifnet *ifp, IwxResetTrace::ResetReason reason)
             linkResetOldState, static_cast<uint32_t>(ic->ic_state),
             stopStateError);
 #endif
+    sc->ns_arg = -1;
+    sc->sc_flags &= ~IWX_FLAG_SHUTDOWN;
     
     for (i = 0; i < nitems(sc->sc_rxba_data); i++) {
         struct iwx_rxba_data *rxba = &sc->sc_rxba_data[i];
@@ -19716,6 +21534,14 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
 #endif
            )
 {
+#ifdef AIRPORT_TAHOE
+    ItlIwx *gateOwner = container_of(sc, ItlIwx, com);
+    if (!gateOwner->tahoeP2pOnMainGate()) {
+        __atomic_store_n(&sc->sc_pmf_force_closed, 1, __ATOMIC_RELEASE);
+        IOLog("AirportItlwm[Tahoe] RX dispatch arrived outside main workloop gate; dropping notification batch\n");
+        return;
+    }
+#endif
     struct _ifnet *ifp = IC2IFP(&sc->sc_ic);
     struct iwx_rx_packet *pkt, *nextpkt;
     uint32_t offset = 0, nextoff = 0, nmpdu = 0, len;
@@ -19822,6 +21648,15 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
 #endif
             break;
         }
+
+        /* Firmware marks a failed command response in the group byte. Keep
+         * the raw header for status validation below, but dispatch it using
+         * the original command group so the command slot is retired now and
+         * the PMF ACK gate can fail closed immediately instead of waiting for
+         * the timeout reset. */
+        if (pkt->hdr.group_id & IWX_CMD_FAILED_MSK)
+            code = IWX_WIDE_ID(
+                pkt->hdr.group_id & ~IWX_CMD_FAILED_MSK, pkt->hdr.cmd);
 
         /*
          * XXX Intel inside (tm)
@@ -20247,6 +22082,7 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
             case IWX_WIDE_ID(IWX_REGULATORY_AND_NVM_GROUP,
                 IWX_NVM_GET_INFO):
             case IWX_ADD_STA_KEY:
+            case IWX_MGMT_MCAST_KEY:
             case IWX_PHY_CONFIGURATION_CMD:
             case IWX_TX_ANT_CONFIGURATION_CMD:
             case IWX_ADD_STA:
@@ -22262,6 +24098,24 @@ iwx_match(IOPCIDevice *device)
                          nitems(iwx_devices));
 }
 
+static void
+iwx_update_mfp_capability(struct iwx_softc *sc)
+{
+#ifdef AIRPORT_TAHOE
+    struct ieee80211com *ic = &sc->sc_ic;
+    const bool ax201 = sc->sc_cfg == &iwl_ax201_cfg_qu_hr ||
+        sc->sc_cfg == &iwl_ax201_cfg_quz_hr ||
+        sc->sc_cfg == &iwl_ax201_cfg_qu_c0_hr_b0;
+
+    if (ax201 && (sc->sc_capaflags & IWX_UCODE_TLV_FLAGS_MFP))
+        ic->ic_caps |= IEEE80211_C_MFP;
+    else
+        ic->ic_caps &= ~IEEE80211_C_MFP;
+#else
+    (void)sc;
+#endif
+}
+
 int ItlIwx::
 iwx_preinit(struct iwx_softc *sc)
 {
@@ -22278,8 +24132,14 @@ iwx_preinit(struct iwx_softc *sc)
     
     if (attached) {
         /* Update MAC in case the upper layers changed it. */
+#ifdef AIRPORT_TAHOE
+        if (!IEEE80211_ADDR_EQ(sc->sc_ic.ic_myaddr,
+                               ((struct arpcom *)ifp)->ac_enaddr))
+            ieee80211_sae_clear(&sc->sc_ic);
+#endif
         IEEE80211_ADDR_COPY(sc->sc_ic.ic_myaddr,
                             ((struct arpcom *)ifp)->ac_enaddr);
+        iwx_update_mfp_capability(sc);
         return 0;
     }
     
@@ -22293,6 +24153,9 @@ iwx_preinit(struct iwx_softc *sc)
     iwx_stop_device(sc);
     if (err)
         return err;
+
+    /* Expose PMF only for the Tahoe AX201 path and capable firmware. */
+    iwx_update_mfp_capability(sc);
     
     /* Print version info and MAC address on first successful fw load. */
     attached = 1;
@@ -22677,6 +24540,17 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
     task_set(&sc->ba_task, iwx_ba_task, sc, "iwx_ba_task");
     task_set(&sc->mac_ctxt_task, iwx_mac_ctxt_task, sc, "iwx_mac_ctxt_task");
     task_set(&sc->chan_ctxt_task, iwx_chan_ctxt_task, sc, "iwx_chan_ctxt_task");
+    task_set(&sc->sc_pmf_key_task, iwx_pmf_key_task, sc,
+             "iwx_pmf_key_task");
+    sc->sc_pmf_key_task_initialized = 1;
+    timeout_set(&sc->sc_pmf_key_timeout, iwx_pmf_key_timeout, sc);
+    sc->sc_pmf_key_timeout_initialized = 1;
+    task_set(&sc->sc_pmf_reset_task, iwx_pmf_reset_task, sc,
+             "iwx_pmf_reset_task");
+    sc->sc_pmf_reset_task_initialized = 1;
+    timeout_set(&sc->sc_pmf_reset_retry_timeout,
+                iwx_pmf_reset_retry_timeout, sc);
+    sc->sc_pmf_reset_retry_timeout_initialized = 1;
     
     ic->ic_node_alloc = iwx_node_alloc;
     ic->ic_bgscan_start = iwx_bgscan;
@@ -22685,6 +24559,8 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
     ic->ic_tahoe_set_key_observed = iwx_set_key_observed;
 #endif
     ic->ic_delete_key = iwx_delete_key;
+    ic->ic_pmf_keys_ready = iwx_pmf_keys_ready;
+    ic->ic_pmf_cancel_keys = iwx_pmf_cancel_keys;
     
     /* Override 802.11 state transition machine. */
     sc->sc_newstate = ic->ic_newstate;
@@ -22763,7 +24639,26 @@ iwx_init_task_execute(void *arg1,
     struct iwx_softc *sc = (struct iwx_softc *)arg1;
     struct _ifnet *ifp = &sc->sc_ic.ic_if;
     ItlIwx *that = container_of(sc, ItlIwx, com);
+    bool pmfResetAttempt = false;
 #ifdef AIRPORT_TAHOE
+    uint32_t pmfResetToken = 0;
+    uint32_t pmfResetNodeEpoch = 0;
+    if (__atomic_load_n(&sc->sc_pmf_reset_task_active,
+                        __ATOMIC_ACQUIRE) != 0) {
+        pmfResetToken = __atomic_load_n(
+            &sc->sc_pmf_reset_attempt_token, __ATOMIC_ACQUIRE);
+        pmfResetNodeEpoch = __atomic_load_n(
+            &sc->sc_pmf_reset_attempt_node_epoch, __ATOMIC_ACQUIRE);
+        struct iwx_pmf_gate_request validate = {};
+        validate.operation = IWX_PMF_GATE_RESET_VALIDATE;
+        validate.reset_token = pmfResetToken;
+        validate.reset_node_epoch = pmfResetNodeEpoch;
+        if (pmfResetToken == 0 ||
+            that->iwx_pmf_run_gate(sc, &validate) != 0 ||
+            validate.result == 0)
+            return;
+        pmfResetAttempt = true;
+    }
     TahoeLifecycleGuard lifecycle(that,
         dispatch != nullptr ? 0U : kTahoeLifecycleInitTask);
     if (!lifecycle) {
@@ -22780,6 +24675,18 @@ iwx_init_task_execute(void *arg1,
                     kTahoeLifecycleInitDispatchDeferred);
             }
         }
+        if (pmfResetAttempt)
+            that->iwx_pmf_reset_retry(sc, EBUSY);
+        return;
+    }
+    if (pmfResetAttempt &&
+        (!__atomic_load_n(&sc->sc_pmf_reset_attempt_inflight,
+                          __ATOMIC_ACQUIRE) ||
+         pmfResetToken != __atomic_load_n(
+             &sc->sc_pmf_reset_attempt_token, __ATOMIC_ACQUIRE) ||
+         pmfResetNodeEpoch != __atomic_load_n(
+             &sc->sc_pmf_reset_attempt_node_epoch, __ATOMIC_ACQUIRE)))
+ {
         return;
     }
     if (dispatch != nullptr) {
@@ -22832,13 +24739,14 @@ iwx_init_task_execute(void *arg1,
         return;
     }
     
-    if (ifp->if_flags & IFF_RUNNING) {
+    if ((ifp->if_flags & IFF_RUNNING) != 0 || pmfResetAttempt) {
         int stop_error = that->iwx_stop(ifp,
             IwxResetTrace::ResetReason::kInitTaskRunningRecovery);
 #ifdef AIRPORT_TAHOE
         if (stop_error) {
             IOLog("AirportItlwm[Tahoe] recovery stop deferred error=%d state=%d flags=0x%x\n",
                 stop_error, sc->sc_ic.ic_state, sc->sc_flags);
+            that->iwx_pmf_reset_retry(sc, stop_error);
             splx(s);
             return;
         }

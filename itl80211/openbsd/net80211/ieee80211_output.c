@@ -73,6 +73,8 @@
 
 #include <net80211/ieee80211_var.h>
 #include <net80211/ieee80211_priv.h>
+#include <net80211/ieee80211_sae.h>
+#include "../../../native/pmf_crypto_policy.h"
 
 int	ieee80211_mgmt_output(struct _ifnet *, struct ieee80211_node *,
 	    mbuf_t, int);
@@ -223,10 +225,16 @@ ieee80211_mgmt_output(struct _ifnet *ifp, struct ieee80211_node *ni,
         IEEE80211_ADDR_COPY(wh->i_addr3, ni->ni_bssid);
 
         /* check if protection is required for this mgmt frame */
-        if ((ic->ic_caps & IEEE80211_C_MFP) &&
-            (type == IEEE80211_FC0_SUBTYPE_DISASSOC ||
-             type == IEEE80211_FC0_SUBTYPE_DEAUTH ||
-             type == IEEE80211_FC0_SUBTYPE_ACTION)) {
+        {
+            int has_action_category = type ==
+                IEEE80211_FC0_SUBTYPE_ACTION &&
+                mbuf_len(m) >= sizeof(*wh) + 1;
+            uint8_t category = has_action_category ?
+                ((uint8_t *)&wh[1])[0] : 0;
+            int robust = itl_pmf_is_robust_mgmt_category(wh->i_fc[0],
+                has_action_category, category);
+
+        if ((ic->ic_caps & IEEE80211_C_MFP) && robust) {
             /*
              * Hack: we should not set the Protected bit in outgoing
              * group management frames, however it is used as an
@@ -238,6 +246,7 @@ ieee80211_mgmt_output(struct _ifnet *ifp, struct ieee80211_node *ni,
             if (IEEE80211_IS_MULTICAST(wh->i_addr1) ||
                 (ni->ni_flags & IEEE80211_NODE_TXMGMTPROT))
                 wh->i_fc[1] |= IEEE80211_FC1_PROTECTED;
+        }
         }
 
         if (ifp->if_flags & IFF_DEBUG) {
@@ -1070,6 +1079,13 @@ ieee80211_add_rsn_body(u_int8_t *frm, struct ieee80211com *ic,
         *frm++ = 6;
         count++;
     }
+#ifdef AIRPORT_TAHOE
+    if (!wpa && (ni->ni_rsnakms & IEEE80211_AKM_SAE)) {
+        memcpy(frm, oui, 3); frm += 3;
+        *frm++ = 8;
+        count++;
+    }
+#endif
     /* write AKM Suite List Count field */
     LE_WRITE_2(pcount, count);
 
@@ -1499,6 +1515,26 @@ ieee80211_get_auth(struct ieee80211com *ic, struct ieee80211_node *ni,
 {
 	mbuf_t m;
     u_int8_t *frm;
+
+#ifdef AIRPORT_TAHOE
+	if (ni->ni_rsnakms == IEEE80211_AKM_SAE) {
+		u_int8_t body[512];
+		size_t body_length = 0;
+
+		if (ic->ic_opmode != IEEE80211_M_STA || ni != ic->ic_bss ||
+		    ieee80211_sae_build_auth(ic, ni, seq, body, sizeof(body),
+		    &body_length) != 0)
+			return NULL;
+		mbuf_gethdr(MBUF_DONTWAIT, MT_DATA, &m);
+		if (m == NULL)
+			return NULL;
+		mbuf_align_32(m, body_length);
+		mbuf_pkthdr_setlen(m, body_length);
+		mbuf_setlen(m, body_length);
+		memcpy(mtod(m, u_int8_t *), body, body_length);
+		return m;
+	}
+#endif
     
     mbuf_gethdr(MBUF_DONTWAIT, MT_DATA, &m);
     if (m == NULL)
@@ -1569,6 +1605,10 @@ ieee80211_get_assoc_req(struct ieee80211com *ic, struct ieee80211_node *ni,
 	    (((ic->ic_flags & IEEE80211_F_RSNON) &&
 	      (ni->ni_rsnprotos & IEEE80211_PROTO_RSN)) ?
 		2 + IEEE80211_RSNIE_MAXLEN : 0) +
+#ifdef AIRPORT_TAHOE
+	    ((ni->ni_rsnakms == IEEE80211_AKM_SAE && ni->ni_sae_h2e) ?
+		3 : 0) +
+#endif
 	    ((ni->ni_flags & IEEE80211_NODE_QOS) ? 2 + 1 : 0) +
 	    (((ic->ic_flags & IEEE80211_F_RSNON) &&
 	      (ni->ni_rsnprotos & IEEE80211_PROTO_WPA)) ?
@@ -1609,6 +1649,13 @@ ieee80211_get_assoc_req(struct ieee80211com *ic, struct ieee80211_node *ni,
 #endif
 		frm = ieee80211_add_rsn(frm, ic, ni);
 	}
+#ifdef AIRPORT_TAHOE
+	if (ni->ni_rsnakms == IEEE80211_AKM_SAE && ni->ni_sae_h2e) {
+		*frm++ = IEEE80211_ELEMID_RSNX;
+		*frm++ = 1;
+		*frm++ = (1U << IEEE80211_RSNX_CAPAB_SAE_H2E);
+	}
+#endif
 	if (ni->ni_flags & IEEE80211_NODE_QOS)
 		frm = ieee80211_add_qos_capability(frm, ic);
 	if ((ic->ic_flags & IEEE80211_F_RSNON) &&

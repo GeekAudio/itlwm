@@ -253,7 +253,7 @@ def main():
             info_path = bundle / 'Contents/Info.plist'
             probe_info = plistlib.loads(info_path.read_bytes())
             build_tag = probe_info.get('AirportTahoeBuild', '')
-            if not re.fullmatch(r'[0-9A-Z]+-Test[0-9]+', build_tag):
+            if not re.fullmatch(r'[0-9A-Z]+-(?:Test[0-9]+|WPA3PMF-Dev[0-9]+)', build_tag):
                 raise RuntimeError('Missing or invalid Tahoe test build tag')
             probe_info['IOKitPersonalities']['NetworkController']['NativeTestBuild'] = build_tag
             # Every artifact gets an explicit profile. A normal Wi-Fi build

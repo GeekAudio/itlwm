@@ -17,32 +17,43 @@ bool allZero(const uint8_t *p, size_t n) {
 }
 bool unicast(const uint8_t *p) { return !(p[0] & 1) && !allZero(p, 6); }
 bool takeSuites(const uint8_t *p, size_t end, size_t &offset,
-                uint8_t expected, bool requireOne) {
+                uint8_t expected) {
     if (offset > end || end - offset < 2) return false;
     const uint16_t count = read16(p + offset);
     offset += 2;
-    if ((requireOne && !count) || count > (end - offset) / 4) return false;
+    if (!count || count > (end - offset) / 4) return false;
     bool found = false;
     for (unsigned i = 0; i < count; ++i, offset += 4) {
         const uint8_t *suite = p + offset;
         if (suite[0] || suite[1] != 0x0f || suite[2] != 0xac) return false;
         if (suite[3] == expected) found = true;
-        // An optional SAE offer may coexist with an explicitly selected PSK.
-        // It is preserved byte for byte and never converted into PSK.
-        else if (!(expected == 2 && suite[3] == 8)) return false;
+        // Other offered suites do not change the explicitly selected AKM or
+        // cipher. In particular, a selected SAE request never becomes PSK.
     }
     return found;
 }
-bool pskCCMP(const uint8_t *p, size_t n) {
+bool personalCCMP(const uint8_t *p, size_t n, uint8_t selectedAkm,
+                  bool &pmfCapable, bool &pmfRequired) {
+    pmfCapable = pmfRequired = false;
     if (!p || n < 2 || p[0] != 48 || size_t(p[1]) + 2 != n || n < 10 ||
         read16(p + 2) != 1 || p[4] || p[5] != 0x0f ||
         p[6] != 0xac || p[7] != 4) return false;
     size_t offset = 8;
-    if (!takeSuites(p, n, offset, 4, true) ||
-        !takeSuites(p, n, offset, 2, true)) return false;
-    if (offset == n) return true;
-    if (n - offset < 2 || (read16(p + offset) & 0x40)) return false;
-    offset += 2; // MFPC may be offered; MFPR is unsupported.
+    if (!takeSuites(p, n, offset, 4) ||
+        !takeSuites(p, n, offset, selectedAkm)) return false;
+    if (offset == n) return selectedAkm != 8;
+    if (n - offset < 2) return false;
+    const uint16_t capabilities = read16(p + offset);
+    pmfCapable = (capabilities & 0x80) != 0;
+    pmfRequired = (capabilities & 0x40) != 0;
+    if (pmfRequired && !pmfCapable) return false;
+    // SAE always negotiates management protection, including on a transition
+    // BSS whose advertisement makes PMF optional for its PSK clients.
+    if (selectedAkm == 8) {
+        if (!pmfCapable) return false;
+        pmfRequired = true;
+    }
+    offset += 2;
     if (offset == n) return true;
     if (n - offset < 2) return false;
     const uint16_t pmkids = read16(p + offset);
@@ -50,7 +61,8 @@ bool pskCCMP(const uint8_t *p, size_t n) {
     if (pmkids > (n - offset) / 16) return false;
     offset += size_t(pmkids) * 16;
     if (offset == n) return true;
-    // Optional group-management suite is an offer, not an MFP requirement.
+    // Absent group-management suite defaults to BIP-CMAC-128. It is the only
+    // management cipher implemented by this connection path.
     return n - offset == 4 && !p[offset] && p[offset+1] == 0x0f &&
            p[offset+2] == 0xac && p[offset+3] == 6;
 }
@@ -93,8 +105,14 @@ DecodeResult decodeScan(const void *buffer, size_t n, ScanPlan &out, uint32_t *f
     if (ssid > 32) return rejected(field,0x1c,DecodeResult::Malformed);
     if (p[4] > 1) return rejected(field,4,DecodeResult::Malformed);
     if (type < 1 || type > 2) return rejected(field,0x40,DecodeResult::Unsupported);
-    // Multiple-SSID and additional scan modes need an explicit HAL contract.
-    if (read32(p+0x1318)) return rejected(field,0x1318,DecodeResult::Unsupported);
+    // 25G332 producer + IO80211ScanRequest copy: count followed by ten
+    // 56-byte version/length/SSID/metadata records. Never use the legacy
+    // apple80211_scan_multiple_data layout for scan441.
+    const uint32_t targetCount = read32(p + 0x1318);
+    if (targetCount > ITL_SCAN_TARGET_CAPACITY)
+        return rejected(field,0x1318,DecodeResult::Malformed);
+    if (targetCount && ssid)
+        return rejected(field,0x1c,DecodeResult::Unsupported);
     if (read32(p+0x154c)) return rejected(field,0x154c,DecodeResult::Unsupported);
     if (!allZero(p+0x14,6)) return rejected(field,0x14,DecodeResult::Unsupported);
     ScanPlan plan = {};
@@ -118,6 +136,29 @@ DecodeResult decodeScan(const void *buffer, size_t n, ScanPlan &out, uint32_t *f
     plan.flags = read16(p + 0x44);
     plan.ssidLength = uint8_t(ssid);
     copy(plan.ssid, p + 0x20, ssid);
+    if (targetCount) {
+        plan.targets.count = uint8_t(targetCount);
+        for (uint32_t i = 0; i < targetCount; ++i) {
+            const uint32_t offset = 0x131c + i * 56;
+            const uint8_t *entry = p + offset;
+            const uint32_t version = read32(entry), length = read32(entry + 4);
+            if (length > ITL_SCAN_SSID_BYTES)
+                return rejected(field,offset + 4,DecodeResult::Malformed);
+            // The saved producer leaves its trailing zero-length record
+            // zero-filled. Nonempty records have version 1. Unknown per-SSID
+            // metadata must not be silently discarded.
+            if (version != 1 && !(version == 0 && !length && allZero(entry,56)))
+                return rejected(field,offset,DecodeResult::Unsupported);
+            if (!allZero(entry + 40,16) || (!length && !allZero(entry + 8,32)))
+                return rejected(field,offset + 40,DecodeResult::Unsupported);
+            plan.targets.entries[i].length = uint8_t(length);
+            copy(plan.targets.entries[i].bytes, entry + 8, length);
+        }
+    } else {
+        plan.targets.count = 1;
+        plan.targets.entries[0].length = uint8_t(ssid);
+        copy(plan.targets.entries[0].bytes, p + 0x20, ssid);
+    }
     plan.restricted = count != 0;
     for (uint32_t i = 0; i < count; ++i) {
         const uint8_t *c = p + 0x58 + size_t(i) * 12;
@@ -148,7 +189,8 @@ DecodeResult decodeJoin(const void *buffer, size_t n, JoinPlan &out, uint32_t *f
     const uint32_t allowed = read32(p + 0x210);
     if (read16(p+0xc)!=2) return rejected(field,0xc,DecodeResult::Unsupported);
     if (lower!=1) return rejected(field,0x10,DecodeResult::Unsupported);
-    if (upper!=0&&upper!=8) return rejected(field,0x14,DecodeResult::Unsupported);
+    if (upper!=0&&upper!=8&&upper!=0x400&&upper!=0x1000)
+        return rejected(field,0x14,DecodeResult::Unsupported);
     if (read32(p+0x18)) return rejected(field,0x18,DecodeResult::Unsupported);
     // First-candidate security/behavior subset: ordinary join flags only.
     // +1e4 bit1 is the proven native default produced from the zero policy
@@ -158,32 +200,59 @@ DecodeResult decodeJoin(const void *buffer, size_t n, JoinPlan &out, uint32_t *f
     if (read32(p+0x1e8)) return rejected(field,0x1e8,DecodeResult::Unsupported);
     if (read16(p+0x2cc)) return rejected(field,0x2cc,DecodeResult::Unsupported);
     if (p[0x1dd] || (read32(p+0x1e0)&0x80)) return rejected(field,0x1dd,DecodeResult::Unsupported); // MLO
-    if (allowed!=0&&allowed!=4&&allowed!=0x40000004)
-        return rejected(field,0x210,DecodeResult::Unsupported);
-    if (read32(p+0x1ec) || !allZero(p+0x1f0,32))
-        return rejected(field,0x1ec,DecodeResult::Unsupported);
+    if (upper == 0x1000) {
+        // The pinned native SAE producer emits its SAE restriction policy and
+        // an auxiliary 32-byte password-parser result. WCL copies these into
+        // the driver request at +0x210 and +0x1ec/+0x1f0 respectively. That
+        // parser result is not the PMK negotiated by SAE; never import it.
+        // The SAE producer also has a conditional transition-policy edge
+        // emitting 0x40000004; AllowedAuth is not the selected-auth enum.
+        if (allowed!=0&&allowed!=4&&allowed!=0x40000004&&
+            allowed!=0x100&&allowed!=0x40000100)
+            return rejected(field,0x210,DecodeResult::Unsupported);
+        if (read32(p+0x1ec) != 32)
+            return rejected(field,0x1ec,DecodeResult::Unsupported);
+    } else {
+        if (allowed!=0&&allowed!=4&&allowed!=0x40000004)
+            return rejected(field,0x210,DecodeResult::Unsupported);
+        if (read32(p+0x1ec) || !allZero(p+0x1f0,32))
+            return rejected(field,0x1ec,DecodeResult::Unsupported);
+    }
+    bool pmfCapable = false, pmfRequired = false;
     if (!upper) {
         if (keyLength || rsnLength || !allZero(p + 0x50, 64))
             return rejected(field,0x40,DecodeResult::Unsupported);
     } else {
         const uint32_t cipher = read32(p + 0x48);
-        const bool pmk = (cipher == 6 || cipher == 7) && keyLength == 32;
-        const bool password = cipher == 10 && keyLength >= 8 && keyLength <= 64;
+        const bool sae = upper == 0x1000;
+        const bool pmk = !sae && (cipher == 6 || cipher == 7) && keyLength == 32;
+        const bool password = cipher == 10 && keyLength >= (sae ? 1U : 8U) && keyLength <= 64;
         if (!pmk&&!password) return rejected(field,0x48,DecodeResult::Unsupported);
-        if (!pskCCMP(p+0xd6,rsnLength)) return rejected(field,0xd6,DecodeResult::Unsupported);
+        const uint8_t akm = sae ? 8 : (upper == 0x400 ? 6 : 2);
+        if (!personalCCMP(p+0xd6,rsnLength,akm,pmfCapable,pmfRequired))
+            return rejected(field,0xd6,DecodeResult::Unsupported);
         if (password) for (uint32_t i=0; i<keyLength; ++i) {
             const uint8_t c=p[0x50+i];
-            if (keyLength == 64 ? !((c>='0'&&c<='9')||(c>='a'&&c<='f')||(c>='A'&&c<='F')) : (c<32 || c>126))
+            // SAE receives a password, never a 64-character hexadecimal PMK.
+            // Preserve non-ASCII password bytes; embedded NUL has no supported
+            // native/SAE string representation and is rejected explicitly.
+            if (sae ? c == 0 : (keyLength == 64 ?
+                !((c>='0'&&c<='9')||(c>='a'&&c<='f')||(c>='A'&&c<='F')) : (c<32 || c>126)))
                 return rejected(field,0x50,DecodeResult::Unsupported);
         }
     }
     JoinPlan plan = {};
     plan.lowerAuth = lower; plan.upperAuth = upper; plan.allowedAuth = allowed;
+    plan.authentication = !upper ? Authentication::Open :
+        (upper == 0x1000 ? Authentication::Sae :
+         (upper == 0x400 ? Authentication::PskSha256 : Authentication::Psk));
+    plan.pmfCapable = pmfCapable; plan.pmfRequired = pmfRequired;
     plan.ssidLength = uint8_t(ssid); plan.secured = upper != 0;
     plan.rsnLength = rsnLength; plan.channelSpec = read16(p + 0x228);
     copy(plan.ssid, p + 0x20, ssid); copy(plan.bssid, p + 0x21c, 6);
     if (upper && read32(p + 0x48) == 10) {
-        plan.derivePmk = true; plan.passwordLength = uint8_t(keyLength);
+        plan.derivePmk = plan.authentication != Authentication::Sae;
+        plan.passwordLength = uint8_t(keyLength);
         copy(plan.password, p + 0x50, keyLength);
     } else copy(plan.pmk, p + 0x50, keyLength);
     copy(plan.rsn, p + 0xd6, rsnLength);

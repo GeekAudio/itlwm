@@ -54,8 +54,14 @@ class Test110KeySequenceSource(unittest.TestCase):
             self.assertIn(declaration, DRIVER)
 
     def test_key_submit_uses_firmware_version_and_host_rsc(self):
-        start = DRIVER.index("static int iwx_set_key_with_receipt(")
-        end = DRIVER.index("int ItlIwx::\niwx_set_key(", start)
+        wrapper_start = DRIVER.index("static int iwx_set_key_with_receipt(")
+        wrapper_end = DRIVER.index("int ItlIwx::\niwx_set_key(", wrapper_start)
+        wrapper = DRIVER[wrapper_start:wrapper_end]
+        self.assertIn("request.submit_receipt = receipt", wrapper)
+        self.assertIn("iwx_set_key_gated(ic, ni, k, receipt)", wrapper)
+        self.assertIn("gateError == EBUSY ? EAGAIN : gateError", wrapper)
+        start = DRIVER.index("int ItlIwx::\niwx_set_key_gated(")
+        end = DRIVER.index("void ItlIwx::\niwx_delete_key(", start)
         key_path = DRIVER[start:end]
         self.assertIn("iwx_lookup_cmd_ver(\n        sc, IWX_LONG_GROUP, IWX_ADD_STA_KEY)", key_path)
         self.assertIn("encodeCcmp(\n        k->k_rsc, IEEE80211_NUM_TID, keyApiVersion", key_path)
