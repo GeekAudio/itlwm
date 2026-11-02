@@ -1,13 +1,15 @@
 # Test107：原生单帧发送诊断
 
-Test108 / Test109 / Test110 沿用此工具，`--expect-build` 填当前测试版本。加入 Test110 只扩展允许的版本身份，不放宽任何运行门禁。
+Test108–Test111 沿用此工具，`--expect-build` 填当前测试版本。Test110 和 Test111 要求本轮 peer IPv6 与新鲜 READY 收据，并沿用同 socket 严格回包和内核 RX lease 门禁。Test111 只新增版本身份；旧版参数契约不变。
 
 只验证 `awdl0 → BSD 输出 → 独立 LINK/TID0 队列 → 固件完成 → 回收`。不把 socket 返回成功或固件完成当成手机收件、无线 ACK 或 AirDrop 成功。
 
 默认只检查参数，不访问 IOKit、socket 或无线硬件。加 `--run` 且以管理员运行才会申请一次诊断；任何错误都不会自动重试。驱动默认关闭此路径，测试构建也须由管理员显式触发。
 
 ```sh
-xcrun swiftc arm_directed_data107.swift -o /tmp/arm_directed_data107
+xcrun swiftc -parse-as-library -emit-module -emit-object -module-name IORegistryBooleanFlag107 IORegistryBooleanFlag107.swift -o /tmp/IORegistryBooleanFlag107.o -emit-module-path /tmp/IORegistryBooleanFlag107.swiftmodule
+xcrun clang -std=c11 -Wall -Wextra -Werror -c ../test110/matched_return_test110.c -o /tmp/matched_return_test110.o
+xcrun swiftc -I /tmp /tmp/IORegistryBooleanFlag107.o arm_directed_data107.swift /tmp/matched_return_test110.o -o /tmp/arm_directed_data107
 /tmp/arm_directed_data107 --expect-build 25G332-Test107 --expect-uuid UUID --peer-mac MAC --local-ipv6 LINK_LOCAL --nonce 16hex --run-token 32hex
 ```
 
@@ -25,11 +27,10 @@ Test110 在上述单帧发送后，继续使用原来已绑定 `awdl0:49153` 的
 
 匹配的 nonce 回包证明该报文已到绑定 `awdl0` 的 UDP socket，经过本机 IP/ifnet 接收路径。没有回包时只报告 `no_peer_return_observed` 或 `no_matching_peer_return`，不据此判定驱动 RX 故障。即使回包匹配，也不代表 802.11 ACK 或 AirDrop 成功。
 
-Test110 构建时把接收 helper 链接到 Swift 工具：
+Test110/Test111 构建时把同 socket 接收 helper 链接到 Swift 工具；Test111 另需传入 `--expect-build 25G332-Test111`：
 
 ```sh
-xcrun clang -std=c11 -Wall -Wextra -Werror -c ../test110/matched_return_test110.c -o /tmp/matched_return_test110.o
-xcrun swiftc arm_directed_data107.swift /tmp/matched_return_test110.o -o /tmp/arm_directed_data110
+xcrun swiftc -I /tmp /tmp/IORegistryBooleanFlag107.o arm_directed_data107.swift /tmp/matched_return_test110.o -o /tmp/arm_directed_data111
 ```
 
 离线验证严格地址/端口/scope/ifindex/hop/完整 nonce 与 ancillary 拒绝条件：
@@ -38,6 +39,9 @@ xcrun swiftc arm_directed_data107.swift /tmp/matched_return_test110.o -o /tmp/ar
 xcrun clang -std=c11 -Wall -Wextra -Werror ../test110/test_matched_return_test110.c -o /tmp/test_matched_return110
 /tmp/test_matched_return110
 python3 -m unittest discover -s ../test110 -p 'test_openwrt_echo_ready.py'
+xcrun swiftc -parse-as-library -I /tmp /tmp/IORegistryBooleanFlag107.o ../test111/test_ioreg_boolean_flag111.swift -o /tmp/test_ioreg_boolean_flag111
+/tmp/test_ioreg_boolean_flag111
+ARM_DIRECTED_DATA_HELPER=/tmp/arm_directed_data111 python3 -m unittest discover -s ../test111 -p 'test_arm_directed_data111.py'
 ```
 
 OpenWrt echo parser 和构帧检查也可离线验证；这些用例不打开无线接口：
@@ -46,3 +50,5 @@ OpenWrt echo parser 和构帧检查也可离线验证；这些用例不打开无
 xcrun clang++ -std=c++17 -Wall -Wextra -Werror ../test110/test_openwrt_echo110.cpp ../../native/awdl_data_frame.cpp -o /tmp/test_openwrt_echo110
 /tmp/test_openwrt_echo110
 ```
+
+Test111 的计划测试只做参数校验，不读取 READY 文件、不访问 IOKit、不创建 socket，也不触发无线动作。IORegistry 的三个开关必须是原生 CFBoolean；整数、浮点、字符串和缺失值都会被拒绝，数值计数仍按原来的 CFNumber 解析。

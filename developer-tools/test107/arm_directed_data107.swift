@@ -4,6 +4,7 @@ import IOKit
 import Darwin
 import CoreFoundation
 import CryptoKit
+import IORegistryBooleanFlag107
 
 // Argument-only by default. The explicit run sends exactly one native UDP
 // datagram after the kernel publishes its matching 100 ms ROC START gate.
@@ -72,7 +73,7 @@ let requiredOptions: Set<String> = ["--expect-build", "--expect-uuid", "--peer-m
 guard optionIndex == optionArguments.count,
       Set(options.keys).isSuperset(of: requiredOptions),
       let build = options["--expect-build"],
-      ["25G332-Test107", "25G332-Test108", "25G332-Test109", "25G332-Test110"].contains(build),
+      ["25G332-Test107", "25G332-Test108", "25G332-Test109", "25G332-Test110", "25G332-Test111"].contains(build),
       let expectedUUID = options["--expect-uuid"],
       matches(expectedUUID, "^[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}$"),
       let peerMACText = options["--peer-mac"],
@@ -82,12 +83,12 @@ guard optionIndex == optionArguments.count,
       nonceText.contains(where: { $0 != "0" }),
       let runToken = options["--run-token"], matches(runToken, "^[0-9a-f]{32}$"),
       runToken.contains(where: { $0 != "0" }) else {
-    stop("Usage: --expect-build 25G332-Test107|25G332-Test108|25G332-Test109|25G332-Test110 --expect-uuid UUID --peer-mac MAC --local-ipv6 fe80::ADDRESS --nonce 16hex --run-token 32hex [--peer-ipv6 fe80::ADDRESS --peer-ready-file PRIVATE_JSON] [--run]")
+    stop("Usage: --expect-build 25G332-Test107|25G332-Test108|25G332-Test109|25G332-Test110|25G332-Test111 --expect-uuid UUID --peer-mac MAC --local-ipv6 fe80::ADDRESS --nonce 16hex --run-token 32hex [--peer-ipv6 fe80::ADDRESS --peer-ready-file PRIVATE_JSON] [--run]")
 }
-let test110 = build == "25G332-Test110"
-guard test110 == (options["--peer-ipv6"] != nil),
-      test110 == (options["--peer-ready-file"] != nil) else {
-    stop("Test110 requires peer IPv6 and fresh peer READY file; older identities do not accept them")
+let matchedReturnBuild = build == "25G332-Test110" || build == "25G332-Test111"
+guard matchedReturnBuild == (options["--peer-ipv6"] != nil),
+      matchedReturnBuild == (options["--peer-ready-file"] != nil) else {
+    stop("Test110/Test111 require peer IPv6 and fresh peer READY file; older identities do not accept them")
 }
 let peer = peerMACText.split(separator: ":").compactMap { UInt8($0, radix: 16) }
 guard peer.count == 6, peer[0] & 1 == 0, peer.contains(where: { $0 != 0 }) else {
@@ -114,8 +115,8 @@ var sourceAddress = in6_addr()
 guard inet_pton(AF_INET6, sourceText, &sourceAddress) == 1 else {
     stop("Invalid canonical source IPv6")
 }
-let peerIPv6 = test110 ? canonicalLinkLocal(options["--peer-ipv6"]!) : nil
-if test110 && peerIPv6 == nil { stop("Peer must be canonical unicast link-local IPv6") }
+let peerIPv6 = matchedReturnBuild ? canonicalLinkLocal(options["--peer-ipv6"]!) : nil
+if matchedReturnBuild && peerIPv6 == nil { stop("Peer must be canonical unicast link-local IPv6") }
 
 struct PeerReadyEvidence {
     let windowExpiresAtUptimeNs: UInt64
@@ -266,15 +267,15 @@ if !run {
     emit(["schema": 1, "mode": "plan", "build": build, "hardware_action": false,
           "arm_accepted": false, "channel_index": 6, "roc_window_ms": 100,
           "native_udp_count": 1, "native_udp_payload_bytes": 8,
-          "peer_ready_required": test110, "peer_ready_file_read": false,
-          "matched_return_capture_max_ms": test110 ? 100 : 0,
+          "peer_ready_required": matchedReturnBuild, "peer_ready_file_read": false,
+          "matched_return_capture_max_ms": matchedReturnBuild ? 100 : 0,
           "peer_receipt_proven": false, "ifnet_delivery_proven": false,
           "airdrop_proven": false, "automatic_retry_allowed": false])
     exit(0)
 }
 guard geteuid() == 0 else { stop("Explicit run requires administrator privileges") }
-let peerReady = test110 ? validatePeerReadyFile(options["--peer-ready-file"]!) : nil
-if test110 && peerReady == nil { stop("Fresh matching OpenWrt echo READY receipt missing or invalid; no arm") }
+let peerReady = matchedReturnBuild ? validatePeerReadyFile(options["--peer-ready-file"]!) : nil
+if matchedReturnBuild && peerReady == nil { stop("Fresh matching OpenWrt echo READY receipt missing or invalid; no arm") }
 if let peerReady, peerWindowRemainingMs(peerReady) < 6_000 {
     stop("OpenWrt echo READY window too short for the one-shot ROC wait; no arm")
 }
@@ -347,9 +348,9 @@ func validTest110RxLease(_ d: [String: Any]) -> Test110RxLease? {
 phase = "profile"
 let before = properties()
 guard before["NativeTestBuild"] as? String == build, number(before, "NativePowerReady") == 1,
-      before["NativeP2PManualTrigger"] as? Bool == true,
-      number(before, "NativeP2PDirectedDataEnabled") == 1,
-      number(before, "NativeP2PDirectedDataCompiled") == 1,
+      IORegistryBooleanFlag107.read(before["NativeP2PManualTrigger"]) == true,
+      IORegistryBooleanFlag107.read(before["NativeP2PDirectedDataEnabled"]) == true,
+      IORegistryBooleanFlag107.read(before["NativeP2PDirectedDataCompiled"]) == true,
       number(before, "NativeP2PProbeAttempted") == 0,
       number(before, "NativeP2PDirectedDataDoorbellIssued") ?? 0 == 0 else {
     stop("Profile not ready or one-shot already consumed")
@@ -369,7 +370,7 @@ local.sin6_family = sa_family_t(AF_INET6); local.sin6_port = UInt16(49153).bigEn
 local.sin6_addr = sourceAddress; local.sin6_scope_id = index
 let bound = withUnsafePointer(to: &local) { $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in6>.size)) } }
 guard optionsOK, bound == 0, fcntl(fd, F_SETFL, O_NONBLOCK) == 0 else { stop("Cannot bind exact native source/options") }
-if test110 {
+if matchedReturnBuild {
     var prepareError: Int32 = 0
     let prepareStatus = source.withUnsafeBufferPointer { localBytes in
         t110PrepareExistingSocket(fd, localBytes.baseAddress!, UInt32(index), &prepareError)
@@ -379,7 +380,7 @@ if test110 {
 var destination = sockaddr_in6(); destination.sin6_len = UInt8(MemoryLayout<sockaddr_in6>.size)
 destination.sin6_family = sa_family_t(AF_INET6); destination.sin6_port = UInt16(49152).bigEndian
 _ = inet_pton(AF_INET6, "ff02::1", &destination.sin6_addr); destination.sin6_scope_id = index
-if test110, let peerReady, peerWindowRemainingMs(peerReady) < 6_000 {
+if matchedReturnBuild, let peerReady, peerWindowRemainingMs(peerReady) < 6_000 {
     stop("OpenWrt echo READY window too short before arm; no claim consumed")
 }
 phase = "arm"
@@ -412,8 +413,8 @@ while DispatchTime.now().uptimeNanoseconds < waitEnd {
 guard number(snapshot, "NativeP2PDirectedDataStage") == 4,
       number(snapshot, "NativeP2PDirectedDataReady") == 1,
       rocReadyObservedAt != 0 else { stop("No matching ROC START window") }
-let rxLease = test110 ? validTest110RxLease(snapshot) : nil
-if test110 && rxLease == nil {
+let rxLease = matchedReturnBuild ? validTest110RxLease(snapshot) : nil
+if matchedReturnBuild && rxLease == nil {
     stop("Matching channel 6 kernel RX lease is not ready; no native UDP sent; do not retry")
 }
 if let rxLease {
@@ -433,7 +434,7 @@ udpBytes = nonce.withUnsafeBytes { bytes in
     }
 }
 let sendError = udpBytes < 0 ? errno : 0
-if test110 {
+if matchedReturnBuild {
     if udpBytes != 8 {
         peerReturnStatus = "native_udp_send_not_accepted"
     } else if let peerReady, let rxLease,
