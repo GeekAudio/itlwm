@@ -183,6 +183,20 @@ static int ieee80211_tahoe_install_group_key(struct ieee80211com *ic,
         receipt.state == IWX_STA_SUBMIT_SOFTWARE_CRYPTO
             ? IWX_STA_SOURCE_SOFTWARE_CRYPTO : IWX_STA_SOURCE_HAL_COMMAND,
         error, flags, detail, 0);
+    if (component == IWX_STA_COMPONENT_GTK) {
+        uint32_t generation = receipt.driver_generation;
+        if (generation == 0) {
+            generation = __atomic_load_n(
+                &ic->ic_tahoe_auth_trace.driver_generation,
+                __ATOMIC_RELAXED);
+        }
+        (void)iwx_sta_auth_trace_record_key_command_origin(
+            &ic->ic_tahoe_auth_trace, ieee80211_tahoe_trace_time_us(),
+            generation, attempt, component,
+            receipt.state == IWX_STA_SUBMIT_SOFTWARE_CRYPTO
+                ? IWX_STA_SOURCE_SOFTWARE_CRYPTO : IWX_STA_SOURCE_HAL_COMMAND,
+            receipt.state, receipt.command_submit_serial);
+    }
     return error;
 }
 #endif

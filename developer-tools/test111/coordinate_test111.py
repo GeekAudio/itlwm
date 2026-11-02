@@ -36,6 +36,11 @@ normalize_identity = _ready_module.normalize
 READY_FIXED = _ready_module.FIXED
 
 BUILD_ID = "25G332-Test111"
+TEST112_BUILD_ID = "25G332-Test112"
+COORDINATOR_SCHEMAS = {
+    BUILD_ID: "test111-local-coordinator/v1",
+    TEST112_BUILD_ID: "test112-local-coordinator/v1",
+}
 BUNDLE_ID = "org.geekaudio.AirportItlwm"
 REMOTE_SCRIPT_NAME = "monitor_window111.sh"
 REMOTE_PEER_NAME = "openwrt_echo110"
@@ -46,6 +51,13 @@ TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
 
 class CoordinatorError(RuntimeError):
     pass
+
+
+def _coordinator_schema(build_id: str) -> str:
+    try:
+        return COORDINATOR_SCHEMAS[build_id]
+    except (KeyError, TypeError) as error:
+        raise CoordinatorError("unsupported coordinator build") from error
 
 
 def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -118,7 +130,8 @@ def _validate_hash(value: Any, name: str) -> str:
     return value
 
 
-def validate_config(config: dict[str, Any]) -> tuple[dict[str, Any], dict[str, str]]:
+def validate_config(config: dict[str, Any], *, build_id: str = BUILD_ID) -> tuple[dict[str, Any], dict[str, str]]:
+    _coordinator_schema(build_id)
     required = {
         "ssh_target", "ssh_socket", "remote_dir", "output_dir",
         "expected_boot", "expected_uuid", "expected_build", "expected_reset_count",
@@ -139,8 +152,8 @@ def validate_config(config: dict[str, Any]) -> tuple[dict[str, Any], dict[str, s
         raise CoordinatorError("expected_boot must be a positive integer")
     if type(config["expected_reset_count"]) is not int or config["expected_reset_count"] < 0:
         raise CoordinatorError("expected_reset_count must be a nonnegative integer")
-    if config["expected_build"] != BUILD_ID:
-        raise CoordinatorError("expected_build must be 25G332-Test111")
+    if config["expected_build"] != build_id:
+        raise CoordinatorError("expected_build must be " + build_id)
     if not isinstance(config["expected_uuid"], str) or not UUID_RE.fullmatch(config["expected_uuid"]):
         raise CoordinatorError("expected_uuid must be uppercase canonical UUID")
 
@@ -191,10 +204,10 @@ def validate_config(config: dict[str, Any]) -> tuple[dict[str, Any], dict[str, s
     return normalized, verified
 
 
-def make_plan(config: dict[str, Any]) -> dict[str, Any]:
-    normalized, hashes = validate_config(config)
+def make_plan(config: dict[str, Any], *, build_id: str = BUILD_ID) -> dict[str, Any]:
+    normalized, hashes = validate_config(config, build_id=build_id)
     return {
-        "schema": "test111-local-coordinator/v1",
+        "schema": _coordinator_schema(build_id),
         "mode": "plan",
         "hardware_action": False,
         "ssh_attempted": False,
@@ -635,18 +648,19 @@ class RealDeps:
     verify_socket = staticmethod(verify_ssh_socket)
 
 
-def execute_run(config: dict[str, Any], deps: Any = RealDeps) -> dict[str, Any]:
+def execute_run(config: dict[str, Any], deps: Any = RealDeps, *,
+                build_id: str = BUILD_ID) -> dict[str, Any]:
     os.umask(0o077)
-    normalized, hashes = validate_config(config)
+    normalized, hashes = validate_config(config, build_id=build_id)
     if deps.geteuid() != 0:
         raise CoordinatorError("--run requires effective uid 0")
     directory = _ensure_new_private_directory(normalized)
     identity = normalized["identity"]
     ready_path = directory / f"peer-ready-{identity['run_token']}.json"
     result: dict[str, Any] = {
-        "schema": "test111-local-coordinator/v1",
+        "schema": _coordinator_schema(build_id),
         "mode": "run",
-        "build": BUILD_ID,
+        "build": build_id,
         "hardware_action": False,
         "router_mutation_attempted": False,
         "rf_window_attempted": False,
@@ -722,7 +736,7 @@ def execute_run(config: dict[str, Any], deps: Any = RealDeps) -> dict[str, Any]:
             _write_private(directory / "helper.stdout.raw", stdout)
             _write_private(directory / "helper.stderr.raw", stderr)
             _write_private_json(directory / "helper.result.json", {"timed_out": True, "timeout_seconds": 12})
-            raise CoordinatorError("Test111 helper exceeded 12 seconds") from timeout_error
+            raise CoordinatorError(build_id + " helper exceeded 12 seconds") from timeout_error
         _save_completed(directory, "helper", helper_cp)
         helper_summary = _parse_json_line(helper_cp.stdout or b"")
         result["helper_exit_code"] = helper_cp.returncode
@@ -798,7 +812,8 @@ def execute_run(config: dict[str, Any], deps: Any = RealDeps) -> dict[str, Any]:
     return result
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, build_id: str = BUILD_ID) -> int:
+    schema = _coordinator_schema(build_id)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", required=True, help="absolute mode-0600 private JSON config")
     parser.add_argument("--run", action="store_true", help="execute after strict preflight; requires root")
@@ -807,13 +822,13 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config = read_private_config(args.config)
         if not args.run:
-            result = make_plan(config)
+            result = make_plan(config, build_id=build_id)
         else:
-            result = execute_run(config)
+            result = execute_run(config, build_id=build_id)
         sys.stdout.write(json.dumps(result, sort_keys=True, ensure_ascii=False) + "\n")
         return 0 if not args.run or result.get("orchestration_completed") else 1
     except Exception as error:
-        sys.stdout.write(json.dumps({"schema": "test111-local-coordinator/v1", "mode": "error",
+        sys.stdout.write(json.dumps({"schema": schema, "mode": "error",
                                      "hardware_action": False, "ssh_attempted": False,
                                      "airdrop_proven": False,
                                      "error": error.__class__.__name__ + ": " + str(error)},

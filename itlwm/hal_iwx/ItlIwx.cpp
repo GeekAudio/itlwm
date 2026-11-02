@@ -11701,6 +11701,10 @@ iwx_send_cmd(struct iwx_softc *sc, struct iwx_host_cmd *hcmd,
     const uint64_t commandSubmitSerial =
         tahoeRecordFirmwareMetadata(sc, diagnosticEntry);
     if (receipt != nullptr &&
+        diagnosticEntry.command_id == IWX_ADD_STA_KEY &&
+        diagnosticEntry.group_id == IWX_LONG_GROUP)
+        receipt->command_submit_serial = commandSubmitSerial;
+    if (receipt != nullptr &&
         receipt->state == IWX_STA_SUBMIT_LOCAL_ENQUEUE &&
         diagnosticEntry.command_id == IWX_ADD_STA_KEY &&
         diagnosticEntry.group_id == IWX_LONG_GROUP &&

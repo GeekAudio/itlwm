@@ -153,6 +153,16 @@ struct ExerciseRecoveryProof {
     int32_t cleanupErrno;
     uint32_t attemptSerial;
     uint32_t snapshotRevision;
+    // Separate proof shape for a directed-data exercise which reached a
+    // canonical session END but failed before any TX doorbell. These fields
+    // never weaken the RX149 prepare-abort proof above.
+    bool directedDataRecovery;
+    bool directedDataSessionSubmitted;
+    bool directedDataCanonicalEnd;
+    bool directedDataNoDoorbell;
+    bool directedDataTicketClosed;
+    bool directedDataQueueDrained;
+    bool directedDataResourcesAbsent;
 };
 
 bool safeToRemoveAfterExerciseFailure(

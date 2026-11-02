@@ -21,20 +21,24 @@ UUID = "17D05CC1-2351-3A74-BAAD-77F67E362577"
 BUILD = "25G332-Test104"
 
 
-def auth_blob(*, event=None, duplicate_in_first=False):
+def auth_blob(*, event=None, events=None, duplicate_in_first=False):
+    if events is None:
+        events = [event] if event is not None else []
+    live_events = list(events[:16])
     header = base.AUTH_HEADER.pack(
         base.AUTH_MAGIC, 1, base.AUTH_HEADER.size, base.AUTH_EVENT.size,
-        16, 2, 2, 0, 1 if event else 0, 0, 1, 5, 2, 8,
+        16, 2, 2, 0, len(live_events), 0, 1, 5, 2, 8,
         2 if duplicate_in_first else 0, 1 if duplicate_in_first else 0)
     raw = bytearray(base.AUTH_SIZE)
     raw[:len(header)] = header
-    if event is not None:
-        encoded = base.AUTH_EVENT.pack(*event)
-        offset = base.AUTH_HEADER.size
+    for index, current in enumerate(live_events):
+        encoded = base.AUTH_EVENT.pack(*current)
+        offset = base.AUTH_HEADER.size + index * base.AUTH_EVENT.size
         raw[offset:offset + len(encoded)] = encoded
-        if duplicate_in_first:
-            offset = base.AUTH_HEADER.size + 16 * base.AUTH_EVENT.size
-            raw[offset:offset + len(encoded)] = encoded
+    if duplicate_in_first and live_events:
+        encoded = base.AUTH_EVENT.pack(*live_events[0])
+        offset = base.AUTH_HEADER.size + 16 * base.AUTH_EVENT.size
+        raw[offset:offset + len(encoded)] = encoded
     return bytes(raw)
 
 
@@ -159,6 +163,64 @@ class CollectRekey104Tests(unittest.TestCase):
         self.assertEqual(parsed["events"][0]["result"], -16)
         self.assertEqual(parsed["events"][0]["detail"], 0x02000040)
 
+    def test_auth_parser_decodes_unsigned_command_submit_serial(self):
+        event = (8, 200, 0, 1, 5, 2, 7, 15, 22, 1, 4, -1,
+                 1 << 15, 0x89ABCDEF)
+        parsed = collector._decode_auth_trace(auth_blob(event=event))
+        self.assertEqual(parsed["schema"], 1)
+        origin = parsed["events"][0]["command_submit_origin"]
+        self.assertEqual(origin["status"], "origin_serial_present")
+        self.assertEqual(origin["serial"], 0xFFFFFFFF89ABCDEF)
+
+    def test_auth_parser_labels_software_crypto_without_firmware_serial(self):
+        event = (8, 200, 0, 1, 5, 2, 7, 15, 22, 1, 5, 0, 0, 0)
+        parsed = collector._decode_auth_trace(auth_blob(event=event))
+        self.assertEqual(
+            parsed["events"][0]["command_submit_origin"]["status"],
+            "software_crypto_no_firmware_command")
+
+    def test_auth_parser_rejects_unexpected_origin_flags(self):
+        event = (8, 200, 0, 1, 5, 2, 7, 15, 22, 1, 4, 2,
+                 (1 << 15) | (1 << 6), 0x89ABCDEF)
+        parsed = collector._decode_auth_trace(auth_blob(event=event))
+        self.assertEqual(
+            parsed["events"][0]["command_submit_origin"]["status"],
+            "invalid_origin_witness_flags")
+
+    def test_sample_auth_and_hcmd_cuts_join_exact_origin_together(self):
+        service = make_hcmd_service(sequence_bundle=True)
+        service[collector.AUTH_PROPERTY] = auth_blob(events=[
+            (1, 1_000_900, 0, 1, 5, 2, 7, 1, 0, 1, 1, 0, 0, 0),
+            (2, 1_001_000, 0, 1, 5, 2, 7, 4, 13, 1, 4, 0,
+             1 << 6, (2 << 24) | 5),
+            (3, 1_001_100, 0, 1, 5, 2, 7, 15, 22, 1, 4, 0,
+             1 << 15, 1),
+        ])
+        raw_ioreg = plistlib.dumps([service], fmt=plistlib.FMT_BINARY)
+
+        def ioreg(_argv, **_kwargs):
+            return raw_ioreg
+
+        def ifconfig(_argv, **_kwargs):
+            return (b"en1: flags=8863<UP,RUNNING> mtu 1500\n"
+                    b" status: active\n")
+
+        ticks = FakeClock()
+        point = collector.sample_once(BUILD,
+            {"boot_epoch": 1793525969, "os_build": "25G332",
+             "loaded_kext_uuid": UUID},
+            ioreg_fn=ioreg, ifconfig_fn=ifconfig,
+            monotonic_ns=lambda: int(ticks.monotonic() * 1_000_000_000) + 100,
+            wall_now=lambda: datetime.datetime.fromisoformat(
+                "2026-11-01T10:00:00+08:00"))
+        correlation = collector.correlate_key_lifecycle(
+            point["hcmd"], point["auth_trace"])
+        join = correlation["lifecycles"][0]["origin_submit_join"]
+        self.assertEqual(join["status"], "exact_command_submit_origin_match")
+        self.assertEqual(join["origin_submit_serial"], 1)
+        self.assertEqual(join["sequence_rows_status"], "rx_tx_origin_rows_match")
+        self.assertTrue(join["same_association_lifecycle_observed"])
+
     def test_sample_reads_whole_hcmd_ring_and_emits_only_boolean_link_state(self):
         service = make_hcmd_service()
         service[collector.AUTH_PROPERTY] = auth_blob()
@@ -200,12 +262,13 @@ class CollectRekey104Tests(unittest.TestCase):
                          "stable_complete_cut")
         self.assertEqual(point["key_sequence_trace"]["events"], [])
         raw_hcmd = point["raw_osdata"]["NativeHcmdRxTrace"]
-        self.assertTrue(raw_hcmd["retained"])
+        self.assertFalse(raw_hcmd["retained"])
         self.assertEqual(raw_hcmd["length"], len(service[hcmd.TRACE_PROPERTY]))
         self.assertEqual(raw_hcmd["sha256"],
                          hashlib.sha256(service[hcmd.TRACE_PROPERTY]).hexdigest())
-        self.assertEqual(base64.b64decode(raw_hcmd["base64"]),
-                         service[hcmd.TRACE_PROPERTY])
+        self.assertIsNone(raw_hcmd["base64"])
+        self.assertEqual(raw_hcmd["status"],
+                         "hash_and_length_only_sensitive_sequence_fields")
         raw_auth = point["raw_osdata"][collector.AUTH_PROPERTY]
         self.assertTrue(raw_auth["retained"])
         self.assertEqual(raw_auth["length"], base.AUTH_SIZE)

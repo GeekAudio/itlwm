@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import copy
 import datetime
 import hashlib
 import json
@@ -38,7 +39,8 @@ from key_sequence_trace110 import decode_key_sequences  # noqa: E402
 import collect_rekey100 as base  # noqa: E402
 import hcmd_rx_trace_test103 as hcmd  # noqa: E402
 from hcmd_rekey_correlation104 import (  # noqa: E402
-    correlate_key_lifecycle, trigger_reasons,
+    AUTH_KIND_KEY_COMMAND_ORIGIN, AUTH_STAGE_KEY_COMMAND_ORIGIN,
+    correlate_key_lifecycle, decode_command_submit_origin, trigger_reasons,
 )
 
 MAX_DURATION_SECONDS = 6 * 60 * 60
@@ -103,12 +105,16 @@ def _decode_auth_trace(raw: Any) -> dict:
                 "flags": item[12],
                 "detail": item[13],
             }
+            if (event["kind"] == AUTH_KIND_KEY_COMMAND_ORIGIN and
+                    event["stage"] == AUTH_STAGE_KEY_COMMAND_ORIGIN):
+                event["command_submit_origin"] = decode_command_submit_origin(event)
             old = events_by_sequence.get(sequence)
             if old is not None and old != event:
                 raise CollectorError("auth_duplicate_sequence_conflict")
             events_by_sequence[sequence] = event
     return {
         "snapshot_status": "stable",
+        "schema": header.get("schema"),
         "revision_begin": header["revision_begin"],
         "revision_end": header["revision_end"],
         "diagnostic_instance": header["diagnostic_instance"],
@@ -266,6 +272,104 @@ def _retain_raw_osdata(raw: Any, *, maximum_length: int,
             "retained": True, "status": "retained_bounded_osdata"}
 
 
+def _hash_hcmd_osdata(raw: Any, *, maximum_length: int) -> dict:
+    """Keep HCTX provenance without persisting host key-sequence counters.
+
+    Test110 phase 14/15 rows encode host CCMP sequence values in result and
+    result_detail. A base64 copy of the source ring would bypass structured
+    redaction, so this field retains only the exact cut's length and digest.
+    """
+    if not isinstance(raw, bytes):
+        return {"present": False, "length": None, "sha256": None,
+                "base64": None, "retained": False,
+                "status": "not_published"}
+    length = len(raw)
+    return {
+        "present": True,
+        "length": length,
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "base64": None,
+        "retained": False,
+        "status": ("hash_and_length_only_sensitive_sequence_fields"
+                   if length <= maximum_length else "over_size_hash_only"),
+        "oversize": length > maximum_length,
+    }
+
+
+def _selected_raw_osdata(raw: Any) -> dict:
+    """Enforce the HCTX privacy boundary again at the JSONL writer edge."""
+    if not isinstance(raw, dict):
+        return {}
+    selected = copy.deepcopy(raw)
+    hctx = selected.get("NativeHcmdRxTrace")
+    if not isinstance(hctx, dict):
+        return selected
+    encoded = hctx.get("base64")
+    if isinstance(encoded, str):
+        try:
+            blob = base64.b64decode(encoded, validate=True)
+        except (ValueError, TypeError):
+            blob = None
+        if isinstance(blob, bytes):
+            hctx["length"] = len(blob)
+            hctx["sha256"] = hashlib.sha256(blob).hexdigest()
+            hctx["oversize"] = len(blob) > HCMD_MAX_LENGTH
+        hctx["base64"] = None
+        hctx["retained"] = False
+        hctx["status"] = ("over_size_hash_only" if hctx.get("oversize") else
+                           "hash_and_length_only_sensitive_sequence_fields")
+    return selected
+
+
+def _selected_key_sequence_trace(trace: Any) -> dict:
+    if not isinstance(trace, dict):
+        return {"status": "not_published", "events": [], "bundles": []}
+    selected = copy.deepcopy(trace)
+    redacted = 0
+    for event in selected.get("events", []):
+        if (isinstance(event, dict) and
+                event.get("kind") in ("rx_replay_floor", "tx_sequence_counter") and
+                "counter_value" in event):
+            # counter_value is the host-side RX/TX PN/replay counter. Keep
+            # its presence, event identity, origin submit serial, and time.
+            event.pop("counter_value", None)
+            event["sequence_value_redacted"] = True
+            redacted += 1
+    selected["sequence_values_redacted_count"] = redacted
+    return selected
+
+
+def _selected_live_key(live: Any) -> dict:
+    if not isinstance(live, dict):
+        return {"status": "not_published"}
+    selected = copy.deepcopy(live)
+    redacted_fields: list[str] = []
+    scalars = selected.get("scalars")
+    if isinstance(scalars, dict):
+        for name in ("RxSequenceResult", "RxSequenceResultDetail",
+                     "TxSequenceResult", "TxSequenceResultDetail"):
+            if name in scalars:
+                scalars.pop(name, None)
+                redacted_fields.append("NativeKeyLive." + name)
+    observations = selected.get("observations")
+    if isinstance(observations, dict):
+        for role in ("rxsequence", "txsequence"):
+            observation = observations.get(role)
+            entry = observation.get("entry") if isinstance(observation, dict) else None
+            if not isinstance(entry, dict):
+                continue
+            role_redacted = False
+            for name in ("Result", "ResultDetail"):
+                if name in entry:
+                    entry.pop(name, None)
+                    redacted_fields.append("NativeKeyLive." + role + "." + name)
+                    role_redacted = True
+            if role_redacted:
+                observation["sequence_value_redacted"] = True
+    selected["redacted_sensitive_fields"] = sorted(set(redacted_fields))
+    return selected
+
+
 def sample_once(expected_build: str, identity: dict,
                 *, ioreg_fn: Callable[..., bytes] = subprocess.check_output,
                 ifconfig_fn: Callable[..., bytes] = subprocess.check_output,
@@ -312,11 +416,11 @@ def sample_once(expected_build: str, identity: dict,
         "completion_scalars": selected.get("completion_scalars", {}),
         "completion_live_counters": selected.get("completion_live_counters", {}),
         "completion_host_origin": selected.get("completion_host_origin", {}),
-        # Fixed diagnostic OSData values contain metadata only. Keep
-        # their bytes in the same sample cut so an offline reviewer can replay
-        # the exact decode without saving the full I/O Registry property list.
+        # Fixed diagnostic OSData values are kept in the same sample cut. HCTX
+        # is hash-only because phase 14/15 may encode host PN counters; the
+        # auth and Group2 records contain only their fixed metadata schemas.
         "raw_osdata": {
-            "NativeHcmdRxTrace": _retain_raw_osdata(
+            "NativeHcmdRxTrace": _hash_hcmd_osdata(
                 service.get(hcmd.TRACE_PROPERTY),
                 maximum_length=HCMD_MAX_LENGTH),
             AUTH_PROPERTY: _retain_raw_osdata(
@@ -349,6 +453,22 @@ def _selected_hcmd(decoded: dict) -> dict:
         slot = {key: slot.get(key) for key in (
             "schema", "status", "revision", "trace_version", "dropped_count",
             "dropped_serial", "ring_crosscheck", "event")}
+    selected_rows = []
+    redacted_row_count = 0
+    for original in decoded.get("rows", []) if isinstance(decoded, dict) else []:
+        if not isinstance(original, dict):
+            selected_rows.append(copy.deepcopy(original))
+            continue
+        row = copy.deepcopy(original)
+        if row.get("phase") in (14, 15):
+            flags = row.get("flags", 0)
+            row.pop("result", None)
+            row.pop("result_detail", None)
+            row["sequence_value_present"] = bool(
+                type(flags) is int and flags & (1 << 13))
+            row["sequence_value_redacted"] = True
+            redacted_row_count += 1
+        selected_rows.append(row)
     return {
         "schema": decoded.get("schema") if isinstance(decoded, dict) else None,
         "status": decoded.get("status") if isinstance(decoded, dict) else "invalid",
@@ -359,9 +479,10 @@ def _selected_hcmd(decoded: dict) -> dict:
         "blob_sha256": decoded.get("blob_sha256") if isinstance(decoded, dict) else None,
         "blob_length": decoded.get("blob_length") if isinstance(decoded, dict) else None,
         "header": selected_header,
-        # Full fixed-width HCTX rows: no payload data, keys, addresses, or raw
-        # I/O Registry tree. Repeated snapshots are intentionally retained.
-        "rows": decoded.get("rows", []) if isinstance(decoded, dict) else [],
+        # Fixed-width HCTX metadata; phase 14/15 values are removed before the
+        # sample is serialized, while origin, queue, serial, and time remain.
+        "rows": selected_rows,
+        "sequence_value_rows_redacted_count": redacted_row_count,
         "key_response_slot_is_separate_sticky_evidence": True,
         "key_response_slot": slot,
         "key_install_success_proven": False,
@@ -373,7 +494,7 @@ def _selected_auth(auth: dict) -> dict:
     if not isinstance(auth, dict):
         return {"snapshot_status": "invalid", "events": []}
     return {key: auth.get(key) for key in (
-        "snapshot_status", "revision_begin", "revision_end",
+        "snapshot_status", "schema", "revision_begin", "revision_end",
         "diagnostic_instance", "driver_generation", "association_id",
         "dropped_count", "live_count", "first_state", "first_count",
         "history_may_be_truncated", "events")}
@@ -536,16 +657,18 @@ def capture(output: Path, *, boot_epoch: int, expected_uuid: str,
                         "en1": point.get("en1"),
                         "numeric_counters": point.get("numeric_counters", {}),
                         "hcmd": _selected_hcmd(decoded_hcmd),
-                        "key_sequence_trace": point.get(
-                            "key_sequence_trace", {"status": "not_published"}),
+                        "key_sequence_trace": _selected_key_sequence_trace(
+                            point.get("key_sequence_trace", {"status": "not_published"})),
                         "auth_trace": _selected_auth(auth),
-                        "live_key": point.get("live_key", {"status": "not_published"}),
+                        "live_key": _selected_live_key(
+                            point.get("live_key", {"status": "not_published"})),
                         "firmware_queue_completion": point.get("firmware_queue_completion"),
                         "group2_tx_trace": point.get("group2_tx_trace"),
                         "completion_scalars": point.get("completion_scalars", {}),
                         "completion_live_counters": point.get("completion_live_counters", {}),
                         "completion_host_origin": point.get("completion_host_origin", {}),
-                        "raw_osdata": point.get("raw_osdata", {}),
+                        "raw_osdata": _selected_raw_osdata(
+                            point.get("raw_osdata", {})),
                         "link_trace": point.get("link_trace"),
                         "key_lifecycle_correlation": correlation,
                         "new_event_reasons": reasons,

@@ -207,7 +207,7 @@ def parse_auth_snapshot(raw: bytes) -> dict:
     for i in range(live_count):
         event = AUTH_EVENT.unpack_from(raw, AUTH_HEADER.size + i * AUTH_EVENT.size)
         if event[0] != 0:
-            if event[7] not in range(1, 15):
+            if event[7] not in range(1, 16):
                 raise ValueError("unknown_auth_event_kind")
             events.append({"sequence": event[0], "kind": event[7],
                            "stage": event[8], "component": event[9],
@@ -219,7 +219,7 @@ def parse_auth_snapshot(raw: bytes) -> dict:
     for i in range(first_count):
         event = AUTH_EVENT.unpack_from(raw, first_offset + i * AUTH_EVENT.size)
         if event[0] != 0:
-            if event[7] not in range(1, 15):
+            if event[7] not in range(1, 16):
                 raise ValueError("unknown_auth_event_kind")
             events.append({"sequence": event[0], "kind": event[7],
                            "stage": event[8], "component": event[9],
@@ -229,6 +229,7 @@ def parse_auth_snapshot(raw: bytes) -> dict:
     events.sort(key=lambda item: item["sequence"])
     return {
         "snapshot_status": "stable",
+        "schema": schema,
         "sequence": max((item["sequence"] for item in events), default=None),
         "revision_begin": revision_begin,
         "revision_end": revision_end,

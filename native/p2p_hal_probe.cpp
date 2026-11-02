@@ -11,6 +11,20 @@ constexpr int32_t kNotRun = -1;
 bool safeToRemoveAfterExerciseFailure(
     int32_t exerciseErrno, const ExerciseRecoveryProof &p)
 {
+    if (p.directedDataRecovery) {
+        return exerciseErrno != 0 && p.snapshotValid && p.snapshotStable &&
+            p.ownerMatches && p.contextGenerationMatches &&
+            p.powerGenerationMatches && p.firmwareGenerationMatches &&
+            p.p2pFirmwareGenerationMatches && p.stationGenerationMatches &&
+            p.directedDataSessionSubmitted && p.directedDataCanonicalEnd &&
+            p.directedDataNoDoorbell && p.directedDataTicketClosed &&
+            p.directedDataQueueDrained && p.directedDataResourcesAbsent &&
+            p.fullyRestored && p.bindingAbsent && p.phyUnleased &&
+            (p.rocIdle || p.restoreComplete) &&
+            !p.sessionOutcomeUnknown && !p.txResourcesPresent &&
+            p.cleanupErrno == 0 && p.attemptSerial != 0 &&
+            p.snapshotRevision != 0 && (p.snapshotRevision & 1u) == 0;
+    }
     return exerciseErrno != 0 && p.snapshotValid && p.snapshotStable &&
         p.prepareAttemptMatches && p.prepareErrorMatches &&
         p.ownerMatches && p.contextGenerationMatches &&

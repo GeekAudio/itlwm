@@ -2,6 +2,7 @@
 #include "../p2p_hal_probe.hpp"
 
 #include <assert.h>
+#include <errno.h>
 #include <stdint.h>
 
 using namespace NativeP2PProbe;
@@ -323,6 +324,66 @@ static void testExerciseFailureNeedsCompleteMatchingCleanupProof()
     assert(safe.addCalls == 1 && safe.removeCalls == 1);
 }
 
+static void testDirectedDataFailureNeedsCanonicalEndAndDrainProof()
+{
+    ExerciseRecoveryProof proof{};
+    proof.directedDataRecovery = true;
+    proof.snapshotValid = true;
+    proof.snapshotStable = true;
+    proof.ownerMatches = true;
+    proof.contextGenerationMatches = true;
+    proof.powerGenerationMatches = true;
+    proof.firmwareGenerationMatches = true;
+    proof.p2pFirmwareGenerationMatches = true;
+    proof.stationGenerationMatches = true;
+    proof.directedDataSessionSubmitted = true;
+    proof.directedDataCanonicalEnd = true;
+    proof.directedDataNoDoorbell = true;
+    proof.directedDataTicketClosed = true;
+    proof.directedDataQueueDrained = true;
+    proof.directedDataResourcesAbsent = true;
+    proof.fullyRestored = true;
+    proof.bindingAbsent = true;
+    proof.phyUnleased = true;
+    proof.rocIdle = true;
+    proof.restoreComplete = true;
+    proof.cleanupErrno = 0;
+    proof.attemptSerial = 22;
+    proof.snapshotRevision = 2;
+    assert(safeToRemoveAfterExerciseFailure(ESTALE, proof));
+
+    const auto reject = [&](ExerciseRecoveryProof p) {
+        assert(!safeToRemoveAfterExerciseFailure(ESTALE, p));
+    };
+    { auto p = proof; p.directedDataCanonicalEnd = false; reject(p); }
+    { auto p = proof; p.directedDataNoDoorbell = false; reject(p); }
+    { auto p = proof; p.directedDataTicketClosed = false; reject(p); }
+    { auto p = proof; p.directedDataQueueDrained = false; reject(p); }
+    { auto p = proof; p.directedDataResourcesAbsent = false; reject(p); }
+    { auto p = proof; p.directedDataSessionSubmitted = false; reject(p); }
+    { auto p = proof; p.ownerMatches = false; reject(p); }
+    { auto p = proof; p.p2pFirmwareGenerationMatches = false; reject(p); }
+    { auto p = proof; p.sessionOutcomeUnknown = true; reject(p); }
+    { auto p = proof; p.txResourcesPresent = true; reject(p); }
+    { auto p = proof; p.cleanupErrno = EBUSY; reject(p); }
+    assert(!safeToRemoveAfterExerciseFailure(0, proof));
+
+    Controller recovered;
+    FakeCommands commands;
+    commands.exerciseResult = ESTALE;
+    commands.exerciseProof = proof;
+    auto operations = commands.operations();
+    operations.exercise = FakeCommands::exercise;
+    operations.exerciseRecovery = FakeCommands::exerciseRecovery;
+    assert(recovered.tryQueue(readyAdmission()));
+    assert(recovered.executeOnce(operations) ==
+           RunResult::kExerciseFailedCleaned);
+    const Snapshot snapshot = recovered.snapshot();
+    assert(snapshot.exerciseRecoveryProofAccepted == 1);
+    assert(snapshot.removeResult == 0 && snapshot.resourceMayExist == 0);
+    assert(commands.removeCalls == 1);
+}
+
 static void testFailedOrStaleRecoveryKeepsMacLeaseQuarantined()
 {
     const int32_t originalPrepareError = 60;
@@ -463,6 +524,7 @@ int main()
     assert(exerciseFailure.snapshot().blocked == kExerciseOutcomeUnknown);
 
     testExerciseFailureNeedsCompleteMatchingCleanupProof();
+    testDirectedDataFailureNeedsCanonicalEndAndDrainProof();
     testFailedOrStaleRecoveryKeepsMacLeaseQuarantined();
 
     Controller exerciseSuccess;

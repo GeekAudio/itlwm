@@ -5,15 +5,18 @@ import unittest
 
 from hcmd_rekey_correlation104 import (
     AUTH_COMPONENT_GTK,
+    AUTH_FLAG_COMMAND_SUBMIT_SERIAL_PRESENT,
     AUTH_FLAG_DOORBELL_ISSUED,
     AUTH_FLAG_REPLAY_CHECKED,
     AUTH_FLAG_REPLAY_EQUAL,
     AUTH_KIND_GROUP2_RESULT,
+    AUTH_KIND_KEY_COMMAND_ORIGIN,
     AUTH_KIND_KEY_SUBMIT,
     AUTH_KIND_RX_DEAUTH,
     AUTH_SOURCE_HAL_COMMAND,
     AUTH_STAGE_GROUP2_OUTPUT,
     AUTH_STAGE_KEY_CALLBACK,
+    AUTH_STAGE_KEY_COMMAND_ORIGIN,
     COMMAND_GROUP_LONG,
     COMMAND_ID_ADD_STA_KEY,
     COMMAND_QUEUE_ID,
@@ -98,7 +101,7 @@ def stable_decoded(rows):
 
 
 def stable_auth(events):
-    return {"snapshot_status": "stable", "events": events,
+    return {"snapshot_status": "stable", "schema": 1, "events": events,
             "dropped_count": 0, "driver_generation": 5}
 
 
@@ -112,7 +115,182 @@ def gtk_submit(*, index=64, mono_us=1_001_000, generation=5,
         detail=detail)
 
 
+def group1_begin(*, mono_us=1_000_900, generation=5,
+                 association=2, attempt=7, sequence=1):
+    return auth_event(sequence, 1, mono_us=mono_us,
+        generation=generation, association=association, attempt=attempt,
+        component=AUTH_COMPONENT_GTK, source=1)
+
+
+def origin_witness(origin_serial, *, sequence=3, mono_us=1_001_100,
+                   generation=5, association=2, attempt=7,
+                   component=AUTH_COMPONENT_GTK,
+                   source=AUTH_SOURCE_HAL_COMMAND, flags=None,
+                   result_override=None, detail_override=None):
+    high = (origin_serial >> 32) & 0xFFFFFFFF
+    result = high if high < (1 << 31) else high - (1 << 32)
+    if flags is None:
+        flags = AUTH_FLAG_COMMAND_SUBMIT_SERIAL_PRESENT
+    return auth_event(
+        sequence, AUTH_KIND_KEY_COMMAND_ORIGIN, mono_us=mono_us,
+        generation=generation, association=association, attempt=attempt,
+        stage=AUTH_STAGE_KEY_COMMAND_ORIGIN, component=component, source=source,
+        result=result if result_override is None else result_override,
+        flags=flags,
+        detail=(origin_serial & 0xFFFFFFFF) if detail_override is None else detail_override)
+
+
+def hcmd_origin_sequence(serial, phase, origin_serial, *, index=64,
+                         generation=5, mono=1_000_100_000):
+    row = hcmd_row(serial, phase, SOURCE_HOST_COMMAND,
+                   index=index, generation=generation, mono=mono,
+                   flags=FLAG_HEADER_FIELDS_PRESENT | (1 << 13) | (1 << 19))
+    row["packet_length"] = (origin_serial >> 32) & 0xFFFFFFFF
+    row["payload_length"] = origin_serial & 0xFFFFFFFF
+    return row
+
+
 class HcmdRekeyCorrelationTests(unittest.TestCase):
+    def test_kind15_exactly_joins_unsigned_u64_origin_and_per_phase_rows(self):
+        origin = 0xFFFFFFFF00000010
+        rows = [
+            hcmd_row(origin, PHASE_COMMAND_SUBMITTED, SOURCE_HOST_COMMAND,
+                     index=64, generation=5, mono=1_000_000_000),
+            hcmd_origin_sequence(origin + 1, 14, origin, mono=1_000_100_000),
+            hcmd_origin_sequence(origin + 2, 15, origin, mono=1_000_200_000),
+        ]
+        result = correlate_key_lifecycle(
+            stable_decoded(rows), stable_auth([
+                group1_begin(), gtk_submit(),
+                origin_witness(origin, sequence=3)]))
+        lifecycle = result["lifecycles"][0]
+        join = lifecycle["origin_submit_join"]
+        self.assertEqual(lifecycle["hcmd_submit_status"],
+                         "same_tuple_submit_observed")
+        self.assertEqual(join["status"], "exact_command_submit_origin_match")
+        self.assertTrue(join["exact_match"])
+        self.assertEqual(join["origin_submit_serial"], origin)
+        self.assertEqual(join["hcmd_submit_row_serial"], origin)
+        self.assertEqual(join["sequence_rows_status"], "rx_tx_origin_rows_match")
+        self.assertTrue(join["sequence_bundle_complete"])
+        self.assertEqual(join["association_lifecycle_status"],
+                         "same_association_group1_key_submit_origin_ordered")
+        self.assertTrue(join["same_association_lifecycle_observed"])
+        self.assertEqual(join["sequence_rows_by_phase"], {"14": 1, "15": 1, "16": 0})
+        self.assertFalse(join["peer_ack_proven"])
+
+    def test_missing_kind15_never_promotes_tuple_time_match_to_exact_origin(self):
+        rows = [hcmd_row(100, PHASE_COMMAND_SUBMITTED, SOURCE_HOST_COMMAND,
+                         mono=1_000_000_000)]
+        result = correlate_key_lifecycle(
+            stable_decoded(rows), stable_auth([gtk_submit()]))
+        lifecycle = result["lifecycles"][0]
+        self.assertEqual(lifecycle["hcmd_submit_status"],
+                         "same_tuple_submit_observed")
+        self.assertEqual(lifecycle["origin_submit_join"]["status"],
+                         "origin_witness_not_observed_auth_schema1")
+        self.assertFalse(lifecycle["origin_submit_join"]["exact_match"])
+        self.assertFalse(lifecycle["origin_submit_join"][
+            "auth_ring_may_have_truncated"])
+
+    def test_missing_kind15_with_unknown_schema_is_not_labeled_schema1(self):
+        rows = [hcmd_row(100, PHASE_COMMAND_SUBMITTED, SOURCE_HOST_COMMAND,
+                         mono=1_000_000_000)]
+        auth = stable_auth([gtk_submit()])
+        auth.pop("schema")
+        result = correlate_key_lifecycle(stable_decoded(rows), auth)
+        self.assertEqual(result["lifecycles"][0]["origin_submit_join"]["status"],
+                         "origin_witness_not_observed")
+
+    def test_duplicate_same_attempt_origin_witnesses_are_never_exact(self):
+        origin = 0x0000000289ABCDEF
+        rows = [hcmd_row(origin, PHASE_COMMAND_SUBMITTED, SOURCE_HOST_COMMAND,
+                         mono=1_000_000_000)]
+        result = correlate_key_lifecycle(
+            stable_decoded(rows), stable_auth([
+                gtk_submit(),
+                origin_witness(origin, sequence=3),
+                origin_witness(origin, sequence=4, association=0),
+            ]))
+        join = result["lifecycles"][0]["origin_submit_join"]
+        self.assertEqual(join["status"], "origin_witness_ambiguous_same_attempt")
+        self.assertEqual(join["matching_origin_witness_count"], 2)
+        self.assertFalse(join["exact_match"])
+
+    def test_kind15_serial_requires_exact_hcmd_identity_and_surfaces_ring_loss(self):
+        origin = 0x0000000289ABCDEF
+        mismatched = hcmd_row(origin, PHASE_COMMAND_SUBMITTED,
+                              SOURCE_HOST_COMMAND, index=65,
+                              mono=1_000_000_000)
+        conflict = correlate_key_lifecycle(
+            stable_decoded([mismatched]), stable_auth([
+                gtk_submit(), origin_witness(origin, sequence=3)]))
+        self.assertEqual(conflict["lifecycles"][0]["origin_submit_join"]["status"],
+                         "origin_submit_hctx_identity_mismatch")
+        self.assertFalse(conflict["lifecycles"][0]["origin_submit_join"][
+            "exact_match"])
+
+        cut = stable_decoded([
+            hcmd_row(100, PHASE_COMMAND_SUBMITTED, SOURCE_HOST_COMMAND,
+                     mono=1_000_000_000)])
+        cut["header"]["dropped_count"] = 2
+        missing = correlate_key_lifecycle(
+            cut, stable_auth([
+                gtk_submit(), origin_witness(origin, sequence=3)]))
+        join = missing["lifecycles"][0]["origin_submit_join"]
+        self.assertEqual(join["status"],
+                         "origin_submit_serial_not_in_hctx_cut_may_be_truncated")
+        self.assertTrue(join["auth_ring_may_have_truncated"] is False)
+        self.assertTrue(join["hctx_history_may_be_truncated"])
+
+    def test_zero_association_blocks_lifecycle_but_keeps_exact_command_join(self):
+        origin = 0x0000000289ABCDEF
+        rows = [hcmd_row(origin, PHASE_COMMAND_SUBMITTED, SOURCE_HOST_COMMAND,
+                         mono=1_000_000_000)]
+        result = correlate_key_lifecycle(
+            stable_decoded(rows), stable_auth([
+                group1_begin(association=2),
+                gtk_submit(association=0),
+                origin_witness(origin, sequence=3, association=0)]))
+        join = result["lifecycles"][0]["origin_submit_join"]
+        self.assertEqual(join["status"], "exact_command_submit_origin_match")
+        self.assertTrue(join["exact_match"])
+        self.assertEqual(join["association_lifecycle_status"],
+                         "association_id_zero_or_unavailable")
+        self.assertFalse(join["same_association_lifecycle_observed"])
+        self.assertEqual(result["lifecycles"][0]["association_relation"],
+                         "association_id_unavailable_no_join")
+
+    def test_cross_association_witness_keeps_serial_join_but_rejects_lifecycle(self):
+        origin = 0x0000000289ABCDEF
+        rows = [hcmd_row(origin, PHASE_COMMAND_SUBMITTED, SOURCE_HOST_COMMAND,
+                         mono=1_000_000_000)]
+        result = correlate_key_lifecycle(
+            stable_decoded(rows), stable_auth([
+                group1_begin(association=2), gtk_submit(association=2),
+                origin_witness(origin, sequence=3, association=3),
+            ]))
+        join = result["lifecycles"][0]["origin_submit_join"]
+        self.assertEqual(join["status"], "exact_command_submit_origin_match")
+        self.assertTrue(join["exact_match"])
+        self.assertEqual(join["association_lifecycle_status"],
+                         "association_mismatch_across_group1_key_submit_origin")
+        self.assertFalse(join["same_association_lifecycle_observed"])
+
+    def test_missing_group1_anchor_does_not_claim_association_lifecycle(self):
+        origin = 0x0000000289ABCDEF
+        rows = [hcmd_row(origin, PHASE_COMMAND_SUBMITTED, SOURCE_HOST_COMMAND,
+                         mono=1_000_000_000)]
+        result = correlate_key_lifecycle(
+            stable_decoded(rows), stable_auth([
+                gtk_submit(), origin_witness(origin, sequence=3)]))
+        join = result["lifecycles"][0]["origin_submit_join"]
+        self.assertEqual(join["status"], "exact_command_submit_origin_match")
+        self.assertTrue(join["exact_match"])
+        self.assertEqual(join["association_lifecycle_status"],
+                         "group1_anchor_not_observed")
+        self.assertFalse(join["same_association_lifecycle_observed"])
+
     def test_test110_key_sequence_phases_do_not_break_existing_correlation(self):
         rows = [
             hcmd_row(100, PHASE_COMMAND_SUBMITTED, SOURCE_HOST_COMMAND,

@@ -25,7 +25,8 @@ enum IwxStaAuthTraceKind {
     IWX_STA_TRACE_ASSOC_LOSS_REQUEST = 11,
     IWX_STA_TRACE_DRIVER_DEAUTH_CLEANUP = 12,
     IWX_STA_TRACE_ASSOC_LOSS = 13,
-    IWX_STA_TRACE_GROUP2_CALLSITE_GATE = 14
+    IWX_STA_TRACE_GROUP2_CALLSITE_GATE = 14,
+    IWX_STA_TRACE_KEY_COMMAND_ORIGIN = 15
 };
 
 enum IwxStaAuthTraceStage {
@@ -50,7 +51,8 @@ enum IwxStaAuthTraceStage {
     IWX_STA_STAGE_ASSOC_COMPLETE = 18,
     IWX_STA_STAGE_DRIVER_CLEANUP_ENTER = 19,
     IWX_STA_STAGE_DRIVER_CLEANUP_RETURN = 20,
-    IWX_STA_STAGE_GROUP2_CALLSITE_GATE = 21
+    IWX_STA_STAGE_GROUP2_CALLSITE_GATE = 21,
+    IWX_STA_STAGE_KEY_COMMAND_ORIGIN = 22
 };
 
 enum IwxStaAuthTraceComponent {
@@ -83,7 +85,8 @@ enum IwxStaAuthTraceFlags {
     IWX_STA_FLAG_GROUP2_SCAN_PHASE_PRESENT = 1u << 11,
     IWX_STA_FLAG_GROUP2_REPLAY_ECHO_CHECKED = 1u << 12,
     IWX_STA_FLAG_GROUP2_REPLAY_ECHO_EQUAL = 1u << 13,
-    IWX_STA_FLAG_GROUP2_REPLAY_ECHO_MISMATCH = 1u << 14
+    IWX_STA_FLAG_GROUP2_REPLAY_ECHO_MISMATCH = 1u << 14,
+    IWX_STA_FLAG_COMMAND_SUBMIT_SERIAL_PRESENT = 1u << 15
 };
 
 /* Compare EAPOL replay fields without publishing or retaining their values. */
@@ -134,6 +137,8 @@ struct IwxStaAuthSubmitReceipt {
     uint32_t key_sequence_max_tid;
     uint64_t key_sequence_rx_pn;
     uint64_t key_sequence_tx_pn;
+    /* Exact HCTX CommandSubmitted origin for this ADD_STA_KEY receipt. */
+    uint64_t command_submit_serial;
 };
 
 struct IwxStaAuthTraceEvent {
@@ -356,6 +361,36 @@ static inline int iwx_sta_auth_trace_record(struct IwxStaAuthTrace *trace, const
     __atomic_add_fetch(&trace->revision, 1u, __ATOMIC_RELEASE); /* even */
     iwx_sta_auth_trace_unlock(trace);
     return 1;
+}
+
+/* Add a value-free association between a Group1 attempt and the exact host
+ * ADD_STA_KEY command serial. The serial is split into the existing signed
+ * result field's raw 32-bit bit pattern (high half) and detail (low half).
+ * The public record remains 48 bytes/schema 1; readers must gate decoding on
+ * kind, stage, and COMMAND_SUBMIT_SERIAL_PRESENT. A missing serial is retained
+ * as an origin event with zero halves and no presence flag. */
+static inline int iwx_sta_auth_trace_record_key_command_origin(
+    struct IwxStaAuthTrace *trace, uint64_t monotonic_us,
+    uint32_t driver_generation, uint32_t attempt_id, uint16_t component,
+    uint16_t source, uint32_t submit_state, uint64_t command_submit_serial)
+{
+    struct IwxStaAuthTraceInput input = {};
+    input.monotonic_us = monotonic_us;
+    input.driver_generation = driver_generation;
+    input.attempt_id = attempt_id;
+    input.kind = IWX_STA_TRACE_KEY_COMMAND_ORIGIN;
+    input.stage = IWX_STA_STAGE_KEY_COMMAND_ORIGIN;
+    input.component = component;
+    input.source = source;
+    if (source == IWX_STA_SOURCE_HAL_COMMAND &&
+        submit_state == IWX_STA_SUBMIT_LOCAL_ENQUEUE &&
+        command_submit_serial != 0) {
+        const uint32_t high = (uint32_t)(command_submit_serial >> 32);
+        __builtin_memcpy(&input.result, &high, sizeof(high));
+        input.detail = (uint32_t)command_submit_serial;
+        input.flags = IWX_STA_FLAG_COMMAND_SUBMIT_SERIAL_PRESENT;
+    }
+    return iwx_sta_auth_trace_record(trace, &input);
 }
 
 static inline uint32_t iwx_sta_auth_trace_begin_attempt(struct IwxStaAuthTrace *trace, uint64_t monotonic_us, uint32_t driver_generation)
