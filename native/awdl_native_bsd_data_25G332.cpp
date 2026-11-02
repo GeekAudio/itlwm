@@ -57,12 +57,26 @@ struct Rx {
     NativeP2PRx149DataInput::Permit rx149Permit{};
     uint8_t bytes[2048]{};
 };
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+struct DirectedRx {
+    uint16_t length=0;
+    uint32_t generation=0;
+    uint64_t interfaceIncarnation=0;
+    uint64_t guardVersion=0;
+    uint64_t receiptSequence=0;
+    NativeP2PDirectedDataRxInput::Permit permit{};
+    uint8_t bytes[2048]{};
+};
+#endif
 IOSimpleLock *lock;
 uint32_t attachClaimed=0;
 uint64_t interfaceIncarnation=0;
 AttachTraceLedger attachTrace;
 Ring<Tx,QueueDepth> tx;
 Ring<Rx,QueueDepth> rx;
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+Ring<DirectedRx,QueueDepth> directedRx;
+#endif
 ifnet_t interface;
 interface_filter_t filter;
 uint8_t own[6];
@@ -80,6 +94,15 @@ uint64_t rx149OwnerSerialHighWater=0;
 uint64_t rx149ReceiptSequence=0;
 uint64_t rx149ReceiptContentRevision=0;
 Rx149InputReceipt rx149Receipt{};
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+NativeP2PDirectedDataRxInput::Lease activeDirectedRxLease{};
+bool activeDirectedRxLeaseValid=false;
+uint64_t activeDirectedRxVersion=0;
+uint64_t directedRxOwnerSerialHighWater=0;
+uint64_t directedRxReceiptSequence=0;
+uint64_t directedRxReceiptContentRevision=0;
+DirectedDataRxInputReceipt directedRxReceipt{};
+#endif
 Rx149InputGateState::Word rx149InputGateState=0;
 Rx149CaptureDiagnostics::Ledger rx149CaptureLedger;
 uint32_t rx149RecoveryPreparedFaultSerial=0;
@@ -188,6 +211,13 @@ bool acceptsRx149(const NativeAwdlData::PacketView &packet,
     return !memcmp(packet.destinationAddress,own,6)&&
         nativeLinkLocalTarget(destination,own);
 }
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+bool acceptsDirectedDataRx(const NativeAwdlData::PacketView &packet,
+                           const uint8_t own[6],const uint8_t peer[6]) {
+    return acceptsRx149(packet,own)&&validUnicastAddress(peer)&&
+        memcmp(packet.sourceAddress,peer,6)==0;
+}
+#endif
 bool isStrictContinuityQm(const NativeAwdlData::TxObservation &observation) {
     const auto &mdns=observation.mdnsQuery;
     return observation.ipv6PacketWellFormed&&
@@ -257,6 +287,173 @@ bool removeRxAt(size_t offset,Rx *removed) {
     --rx.count;
     return true;
 }
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+bool removeDirectedRxAt(size_t offset,DirectedRx *removed) {
+    if(!removed||offset>=directedRx.count)return false;
+    const size_t selected=(directedRx.head+offset)%QueueDepth;
+    *removed=directedRx.values[selected];
+    for(size_t index=offset;index+1<directedRx.count;++index) {
+        const size_t destination=(directedRx.head+index)%QueueDepth;
+        const size_t source=(directedRx.head+index+1)%QueueDepth;
+        directedRx.values[destination]=directedRx.values[source];
+    }
+    const size_t last=(directedRx.head+directedRx.count-1)%QueueDepth;
+    directedRx.values[last]=DirectedRx{};
+    directedRx.tail=last;
+    --directedRx.count;
+    return true;
+}
+void recordDirectedRxReceiptLocked(const DirectedRx &item,uint32_t disposition,
+    uint64_t inputUs,uint32_t decodedCount,bool inputPresent,int inputResult) {
+    if(!item.receiptSequence||
+       directedRxReceipt.sequence!=item.receiptSequence)
+        return;
+    if(directedRxReceiptContentRevision==UINT64_MAX) {
+        directedRxReceipt.schemaVersion=0;
+        return;
+    }
+    auto &receipt=directedRxReceipt;
+    receipt.disposition=disposition;
+    receipt.contentRevision=++directedRxReceiptContentRevision;
+    receipt.ownerSerial=item.permit.ownerSerial;
+    receipt.interfaceIncarnation=item.interfaceIncarnation;
+    receipt.contextGeneration=item.permit.epochs.context;
+    receipt.powerGeneration=item.permit.epochs.power;
+    receipt.stationGeneration=item.permit.epochs.station;
+    receipt.rocGeneration=item.permit.epochs.roc;
+    receipt.captureUs=item.permit.capturedUs;
+    receipt.inputUs=inputUs;
+    receipt.startUs=item.permit.startUs;
+    receipt.deadlineUs=item.permit.deadlineUs;
+    receipt.ieeeChannel=item.permit.ieeeChannel;
+    receipt.macIndexPresent=1;
+    receipt.macIndex=item.permit.macIndex;
+    receipt.macPhyDecodeMode=item.permit.decodeMode;
+    receipt.originalRxStatus=item.permit.originalRawStatus;
+    receipt.mpduLength=item.length;
+    receipt.decodedIpv6Count=decodedCount;
+    receipt.ifnetInputResultPresent=inputPresent?1u:0u;
+    receipt.ifnetInputResult=inputResult;
+}
+bool sameDirectedRxLeaseIdentity(
+    const NativeP2PDirectedDataRxInput::Lease &left,
+    const NativeP2PDirectedDataRxInput::Lease &right) {
+    return NativeP2PDirectedDataRxInput::sameLeaseIdentity(left,right);
+}
+bool sameDirectedRxPermitIdentity(
+    const NativeP2PDirectedDataRxInput::Lease &lease,
+    const NativeP2PDirectedDataRxInput::Permit &permit) {
+    return lease.ownerSerial==permit.ownerSerial&&
+        lease.startUs==permit.startUs&&
+        lease.deadlineUs==permit.leaseDeadlineUs&&
+        NativeP2PDirectedDataRxInput::sameEpochs(lease.epochs,permit.epochs)&&
+        memcmp(lease.peerMac,permit.peerMac,sizeof(permit.peerMac))==0&&
+        memcmp(lease.localMac,permit.localMac,sizeof(permit.localMac))==0;
+}
+size_t removeDirectedRxItemsLocked(bool all,uint64_t version,
+    uint64_t ownerSerial,const NativeP2PDirectedDataRxInput::Epochs *epochs,
+    uint64_t nowUsValue) {
+    size_t removedCount=0;
+    for(size_t offset=0;offset<directedRx.count;) {
+        const size_t index=(directedRx.head+offset)%QueueDepth;
+        const DirectedRx &item=directedRx.values[index];
+        const bool match=all||(item.guardVersion==version&&
+            item.permit.ownerSerial==ownerSerial&&epochs&&
+            NativeP2PDirectedDataRxInput::sameEpochs(item.permit.epochs,*epochs));
+        if(match) {
+            DirectedRx removed{};
+            if(removeDirectedRxAt(offset,&removed)) {
+                recordDirectedRxReceiptLocked(removed,
+                    DirectedDataRxReceiptStaleOrInvalid,nowUsValue,0,false,0);
+                ++removedCount;
+            }
+        } else {
+            ++offset;
+        }
+    }
+    set(DirectedRxPending,directedRx.count);
+    return removedCount;
+}
+bool activateDirectedRxLeaseLocked(
+    const NativeP2PDirectedDataRxInput::Lease &lease,size_t *discardedCount,
+    uint64_t nowUsValue) {
+    if(discardedCount)*discardedCount=0;
+    if(Rx149InputGateState::blocked(
+           __atomic_load_n(&rx149InputGateState,__ATOMIC_ACQUIRE))||
+       !NativeP2PDirectedDataRxInput::leaseCurrent(lease,nowUsValue)||
+       memcmp(lease.localMac,own,sizeof(own))!=0||
+       interfaceIncarnation==0||!interface||closing||detached||!radio||
+       radioGeneration!=lease.epochs.power||
+       __atomic_load_n(&closingRequested,__ATOMIC_ACQUIRE)!=0||
+       __atomic_load_n(&counters[Attached],__ATOMIC_ACQUIRE)==0)
+        return false;
+    if(!activeDirectedRxLeaseValid||
+       !sameDirectedRxLeaseIdentity(activeDirectedRxLease,lease)) {
+        if(lease.ownerSerial<=directedRxOwnerSerialHighWater)
+            return false;
+        if(activeDirectedRxVersion==UINT64_MAX) {
+            activeDirectedRxLeaseValid=false;
+            if(discardedCount)
+                *discardedCount=removeDirectedRxItemsLocked(true,0,0,nullptr,
+                                                             nowUsValue);
+            else
+                (void)removeDirectedRxItemsLocked(true,0,0,nullptr,nowUsValue);
+            return false;
+        }
+        ++activeDirectedRxVersion;
+        if(discardedCount)
+            *discardedCount=removeDirectedRxItemsLocked(true,0,0,nullptr,
+                                                         nowUsValue);
+        else
+            (void)removeDirectedRxItemsLocked(true,0,0,nullptr,nowUsValue);
+        activeDirectedRxLease=lease;
+        activeDirectedRxLeaseValid=true;
+        directedRxOwnerSerialHighWater=lease.ownerSerial;
+        return true;
+    }
+    activeDirectedRxLease=lease;
+    return true;
+}
+size_t revokeDirectedRxLeaseLocked(
+    uint64_t ownerSerial,const NativeP2PDirectedDataRxInput::Epochs *epochs,
+    uint64_t nowUsValue) {
+    if(!ownerSerial||!epochs||
+       !NativeP2PDirectedDataRxInput::validEpochs(*epochs))
+        return 0;
+    if(activeDirectedRxLeaseValid) {
+        if(activeDirectedRxLease.ownerSerial>ownerSerial)return 0;
+        if(activeDirectedRxLease.ownerSerial==ownerSerial&&
+           !NativeP2PDirectedDataRxInput::sameEpochs(
+               activeDirectedRxLease.epochs,*epochs))return 0;
+        if(activeDirectedRxLease.ownerSerial==ownerSerial) {
+            activeDirectedRxLeaseValid=false;
+            activeDirectedRxLease=NativeP2PDirectedDataRxInput::Lease{};
+            if(ownerSerial>directedRxOwnerSerialHighWater)
+                directedRxOwnerSerialHighWater=ownerSerial;
+            if(activeDirectedRxVersion==UINT64_MAX)
+                return removeDirectedRxItemsLocked(true,0,0,nullptr,nowUsValue);
+            ++activeDirectedRxVersion;
+            return removeDirectedRxItemsLocked(false,activeDirectedRxVersion-1,
+                ownerSerial,epochs,nowUsValue);
+        }
+        (void)removeDirectedRxItemsLocked(true,0,0,nullptr,nowUsValue);
+        activeDirectedRxLeaseValid=false;
+        activeDirectedRxLease=NativeP2PDirectedDataRxInput::Lease{};
+    }
+    if(ownerSerial<=directedRxOwnerSerialHighWater)return 0;
+    directedRxOwnerSerialHighWater=ownerSerial;
+    return removeDirectedRxItemsLocked(false,activeDirectedRxVersion,
+                                        ownerSerial,epochs,nowUsValue);
+}
+void recordDirectedRxReceipt(const DirectedRx &item,uint32_t disposition,
+    uint64_t inputUs,uint32_t decodedCount,bool inputPresent,int inputResult) {
+    if(!bridgeLock())return;
+    auto irq=IOSimpleLockLockDisableInterrupt(lock);
+    recordDirectedRxReceiptLocked(item,disposition,inputUs,decodedCount,
+                                  inputPresent,inputResult);
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+}
+#endif
 bool sameRx149LeaseIdentity(
     const NativeP2PRx149DataInput::Lease &left,
     const NativeP2PRx149DataInput::Lease &right) {
@@ -760,6 +957,12 @@ void detachedCallback(void *,ifnet_t) {
     auto irq=IOSimpleLockLockDisableInterrupt(stateLock);
     detached=true;filter=nullptr;set(Detached,1);
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    activeDirectedRxLeaseValid=false;
+    activeDirectedRxLease=NativeP2PDirectedDataRxInput::Lease{};
+    if(activeDirectedRxVersion!=UINT64_MAX)++activeDirectedRxVersion;
+    (void)removeDirectedRxItemsLocked(true,0,0,nullptr,nowUs());
+#endif
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
     (void)directedOriginGate.revoke(
         nowUs(),NativeAwdlDirectedOriginTx::Reason::InterfaceStopped);
 #endif
@@ -938,6 +1141,52 @@ bool publishRx149DataInputLease(
     for(size_t i=0;i<discarded;++i)add(RxRejected);
     return activated;
 }
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+bool publishDirectedDataRxInputLease(
+    const NativeP2PDirectedDataRxInput::Lease &lease) {
+    if(!bridgeLock())return false;
+    size_t discarded=0;
+    bool activated=false;
+    auto irq=IOSimpleLockLockDisableInterrupt(lock);
+    const uint64_t lockedNow=nowUs();
+    if(NativeP2PDirectedDataRxInput::leaseCurrent(lease,lockedNow))
+        activated=activateDirectedRxLeaseLocked(lease,&discarded,lockedNow);
+    else if(lease.endSeen||lease.outcomeUnknown||
+            !lease.ownerCurrent||!lease.epochsMatch||!lease.tokenMatches) {
+        if(lease.ownerSerial&&
+           NativeP2PDirectedDataRxInput::validEpochs(lease.epochs))
+            discarded=revokeDirectedRxLeaseLocked(lease.ownerSerial,
+                &lease.epochs,lockedNow);
+    }
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+    for(size_t i=0;i<discarded;++i)add(DirectedRxRejected);
+    return activated;
+}
+void revokeDirectedDataRxInput(uint64_t ownerSerial,
+    const NativeP2PDirectedDataRxInput::Epochs &epochs) {
+    if(!bridgeLock()||!ownerSerial)return;
+    auto irq=IOSimpleLockLockDisableInterrupt(lock);
+    const size_t discarded=revokeDirectedRxLeaseLocked(
+        ownerSerial,&epochs,nowUs());
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+    for(size_t i=0;i<discarded;++i)add(DirectedRxRejected);
+}
+void revokeDirectedDataRxInput() {
+    if(!bridgeLock())return;
+    auto irq=IOSimpleLockLockDisableInterrupt(lock);
+    size_t discarded=0;
+    if(activeDirectedRxLeaseValid) {
+        const uint64_t ownerSerial=activeDirectedRxLease.ownerSerial;
+        const auto epochs=activeDirectedRxLease.epochs;
+        discarded=revokeDirectedRxLeaseLocked(ownerSerial,&epochs,nowUs());
+    } else {
+        discarded=removeDirectedRxItemsLocked(true,0,0,nullptr,nowUs());
+        if(activeDirectedRxVersion!=UINT64_MAX)++activeDirectedRxVersion;
+    }
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+    for(size_t i=0;i<discarded;++i)add(DirectedRxRejected);
+}
+#endif
 bool configureReplyShadow(const NativeAwdlReplyShadow::Config &config,
                           const NativeP2PRx149DataInput::Lease &lease) {
 #if defined(ITL_NATIVE_AWDL_REPLY_SHADOW_25G332)
@@ -1135,9 +1384,22 @@ void poll(bool ready,uint32_t generation) {
     mbuf_t retiredOrigin=nullptr;
 #endif
     bool discardQueued=false;
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    size_t retiredDirectedRx=0;
+#endif
     auto irq=IOSimpleLockLockDisableInterrupt(lock);
     const bool changed=radioGeneration&&radioGeneration!=generation;
     discardQueued=!ready||changed;
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    const uint64_t directedPollNow=nowUs();
+    const bool preserveDirectedRxLease=activeDirectedRxLeaseValid&&ready&&radio&&
+        !changed&&interface&&!closing&&!detached&&
+        __atomic_load_n(&closingRequested,__ATOMIC_ACQUIRE)==0&&
+        __atomic_load_n(&counters[Attached],__ATOMIC_ACQUIRE)!=0&&
+        generation==activeDirectedRxLease.epochs.power&&
+        NativeP2PDirectedDataRxInput::leaseCurrent(
+            activeDirectedRxLease,directedPollNow);
+#endif
 #if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
     // This build is receive-only regardless of runtime RX-profile state.
     discardQueued=true;
@@ -1146,6 +1408,19 @@ void poll(bool ready,uint32_t generation) {
         Tx item{};
         while(tx.pop(&item))retiredTx.push(item);
     }
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    if(!preserveDirectedRxLease) {
+        if(activeDirectedRxLeaseValid) {
+            const uint64_t owner=activeDirectedRxLease.ownerSerial;
+            const auto epochs=activeDirectedRxLease.epochs;
+            retiredDirectedRx=revokeDirectedRxLeaseLocked(
+                owner,&epochs,directedPollNow);
+        } else {
+            retiredDirectedRx=removeDirectedRxItemsLocked(
+                true,0,0,nullptr,directedPollNow);
+        }
+    }
+#endif
     radioGeneration=generation;radio=ready&&!closing&&!detached&&
         __atomic_load_n(&closingRequested,__ATOMIC_ACQUIRE)==0&&
         __atomic_load_n(&counters[Attached],__ATOMIC_ACQUIRE)!=0;
@@ -1167,6 +1442,10 @@ void poll(bool ready,uint32_t generation) {
     ifnet_t dev=interface;
     if(dev&&!closing&&!detached)++inputCalls;else dev=nullptr;
     IOSimpleLockUnlockEnableInterrupt(lock,irq);
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    for(size_t index=0;index<retiredDirectedRx;++index)
+        add(DirectedRxRejected);
+#endif
     Tx retired{};
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
     if(retiredOrigin) {
@@ -1406,6 +1685,287 @@ void poll(bool ready,uint32_t generation,
         IOSimpleLockUnlockEnableInterrupt(lock,irq);
     }
 }
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+void poll(bool ready,uint32_t generation,
+          const NativeP2PDirectedDataRxInput::Lease *directedLease) {
+    if(!bridgeLock())return;
+
+    ifnet_t dev=nullptr;
+    uint8_t expectedAddress[6]{};
+    auto irq=IOSimpleLockLockDisableInterrupt(lock);
+    const uint64_t firstNow=nowUs();
+    const bool interfaceReady=interface&&!closing&&!detached&&radio&&
+        __atomic_load_n(&closingRequested,__ATOMIC_ACQUIRE)==0&&
+        __atomic_load_n(&counters[Attached],__ATOMIC_ACQUIRE)!=0&&
+        radioGeneration==generation&&ready;
+    if(interfaceReady) {
+        dev=interface;
+        memcpy(expectedAddress,own,sizeof(expectedAddress));
+        ++inputCalls;
+    }
+    if(activeDirectedRxLeaseValid&&
+       (!interfaceReady||!directedLease||
+        !sameDirectedRxLeaseIdentity(activeDirectedRxLease,*directedLease)||
+        !NativeP2PDirectedDataRxInput::leaseCurrent(
+            activeDirectedRxLease,firstNow))) {
+        const uint64_t owner=activeDirectedRxLease.ownerSerial;
+        const auto epochs=activeDirectedRxLease.epochs;
+        (void)revokeDirectedRxLeaseLocked(owner,&epochs,firstNow);
+    }
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+
+    for(unsigned index=0;index<QueueDepth;++index) {
+        DirectedRx item{};
+        NativeP2PDirectedDataRxInput::Lease authoritativeLease{};
+        bool authoritativeMatch=false;
+        irq=IOSimpleLockLockDisableInterrupt(lock);
+        const bool have=directedRx.pop(&item);
+        if(have&&directedLease&&activeDirectedRxLeaseValid&&
+           !Rx149InputGateState::blocked(__atomic_load_n(
+               &rx149InputGateState,__ATOMIC_ACQUIRE))&&
+           item.guardVersion==activeDirectedRxVersion&&
+           item.interfaceIncarnation==interfaceIncarnation&&
+           sameDirectedRxLeaseIdentity(activeDirectedRxLease,*directedLease)&&
+           sameDirectedRxPermitIdentity(activeDirectedRxLease,item.permit)) {
+            authoritativeLease=activeDirectedRxLease;
+            authoritativeMatch=true;
+        }
+        set(DirectedRxPending,directedRx.count);
+        IOSimpleLockUnlockEnableInterrupt(lock,irq);
+        if(!have)break;
+
+        const uint64_t captureNow=nowUs();
+        const bool permitCurrent=ready&&dev&&directedLease&&
+            item.generation==generation&&
+            item.generation==directedLease->epochs.power&&
+            item.interfaceIncarnation!=0&&authoritativeMatch&&
+            NativeP2PDirectedDataRxInput::stillCurrent(
+                item.permit,authoritativeLease,captureNow)&&
+            NativeP2PDirectedDataRxInput::stillCurrent(
+                item.permit,*directedLease,captureNow);
+        if(!permitCurrent) {
+            recordDirectedRxReceipt(item,DirectedDataRxReceiptStaleOrInvalid,
+                                    captureNow,0,false,0);
+            add(DirectedRxRejected);
+            continue;
+        }
+
+        NativeAwdlData::DecodedFrame parsed{};
+        if(NativeAwdlData::decodeIpv6DataMpdu(
+                item.bytes,item.length,&parsed)!=NativeAwdlData::Status::Ok) {
+            recordDirectedRxReceipt(item,DirectedDataRxReceiptDecodeRejected,
+                                    captureNow,0,false,0);
+            add(DirectedRxRejected);
+            continue;
+        }
+        add(DirectedRxDecoded);
+        for(size_t packetIndex=0;packetIndex<parsed.packetCount;++packetIndex) {
+            const auto &packet=parsed.packets[packetIndex];
+            if(!acceptsDirectedDataRx(packet,expectedAddress,
+                                      item.permit.peerMac)) {
+                recordDirectedRxReceipt(item,
+                    DirectedDataRxReceiptAddressRejected,captureNow,
+                    uint32_t(parsed.packetCount),false,0);
+                add(DirectedRxRejected);
+                continue;
+            }
+            mbuf_t packetMbuf=packetWithHeader();
+            if(!packetMbuf) {
+                recordDirectedRxReceipt(item,
+                    DirectedDataRxReceiptMbufAllocationFailed,captureNow,
+                    uint32_t(parsed.packetCount),false,0);
+                add(DirectedRxInputFailed);
+                continue;
+            }
+            uint8_t *bytes=static_cast<uint8_t *>(mbuf_data(packetMbuf));
+            memcpy(bytes,packet.destinationAddress,6);
+            memcpy(bytes+6,packet.sourceAddress,6);
+            bytes[12]=0x86;
+            bytes[13]=0xdd;
+            memcpy(bytes+14,packet.ipv6Packet,packet.ipv6Length);
+            mbuf_setlen(packetMbuf,packet.ipv6Length+14);
+            mbuf_pkthdr_setlen(packetMbuf,packet.ipv6Length+14);
+            mbuf_pkthdr_setrcvif(packetMbuf,dev);
+            mbuf_pkthdr_setheader(packetMbuf,bytes);
+            mbuf_adj(packetMbuf,14);
+
+            // Hold a shared lock-free input ticket across DLIL. The gate is
+            // conservative across the resident receive paths; packet work
+            // and ifnet_input remain outside IOSimpleLock.
+            irq=IOSimpleLockLockDisableInterrupt(lock);
+            const uint64_t ticketNow=nowUs();
+            const bool stillAttached=interface==dev&&!closing&&!detached&&
+                radio&&__atomic_load_n(&closingRequested,__ATOMIC_ACQUIRE)==0&&
+                __atomic_load_n(&counters[Attached],__ATOMIC_ACQUIRE)!=0&&
+                radioGeneration==generation&&
+                !Rx149InputGateState::blocked(__atomic_load_n(
+                    &rx149InputGateState,__ATOMIC_ACQUIRE))&&
+                interfaceIncarnation==item.interfaceIncarnation&&
+                memcmp(own,expectedAddress,sizeof(expectedAddress))==0;
+            const bool permitStillCurrent=stillAttached&&directedLease&&
+                activeDirectedRxLeaseValid&&
+                item.guardVersion==activeDirectedRxVersion&&
+                sameDirectedRxLeaseIdentity(activeDirectedRxLease,
+                                            *directedLease)&&
+                sameDirectedRxLeaseIdentity(activeDirectedRxLease,
+                                            authoritativeLease)&&
+                NativeP2PDirectedDataRxInput::leaseCurrent(
+                    activeDirectedRxLease,ticketNow)&&
+                NativeP2PDirectedDataRxInput::stillCurrent(
+                    item.permit,activeDirectedRxLease,ticketNow);
+            const bool ticketReserved=permitStillCurrent&&
+                reserveRx149InputTicketFast();
+            if(ticketReserved)++inputCalls;
+            IOSimpleLockUnlockEnableInterrupt(lock,irq);
+            if(!ticketReserved) {
+                mbuf_freem(packetMbuf);
+                recordDirectedRxReceipt(item,
+                    DirectedDataRxReceiptStaleOrInvalid,ticketNow,
+                    uint32_t(parsed.packetCount),false,0);
+                add(DirectedRxRejected);
+                continue;
+            }
+
+            const int inputResult=ifnet_input(dev,packetMbuf,nullptr);
+            recordDirectedRxReceipt(item,
+                inputResult==0?DirectedDataRxReceiptIfnetInputSucceeded:
+                              DirectedDataRxReceiptIfnetInputFailed,
+                ticketNow,uint32_t(parsed.packetCount),true,inputResult);
+            irq=IOSimpleLockLockDisableInterrupt(lock);
+            releaseRx149InputTicketFast();
+            if(inputCalls)--inputCalls;
+            IOSimpleLockUnlockEnableInterrupt(lock,irq);
+            if(inputResult==0)add(DirectedRxDelivered);
+            else add(DirectedRxInputFailed);
+        }
+    }
+
+    if(dev) {
+        irq=IOSimpleLockLockDisableInterrupt(lock);
+        if(inputCalls)--inputCalls;
+        IOSimpleLockUnlockEnableInterrupt(lock,irq);
+    }
+}
+
+CaptureResult captureDirectedDataRx(
+    const uint8_t *bytes,size_t length,bool protectedFrame,
+    const NativeP2PDirectedDataRxInput::Lease &lease,
+    const NativeP2PDirectedDataRxInput::Permit &permit,uint32_t generation) {
+    if(!bytes||!NativeAwdlData::isAwdlDataCandidate(bytes,length))
+        return CaptureResult::NotAwdlDataCandidate;
+    if(length>2048||protectedFrame||!permit.valid||
+       generation!=permit.epochs.power) {
+        add(DirectedRxRejected);
+        return CaptureResult::Rejected;
+    }
+    if(!bridgeLock()) {
+        add(DirectedRxRejected);
+        return CaptureResult::Rejected;
+    }
+
+    DirectedRx item{};
+    item.length=uint16_t(length);
+    item.generation=generation;
+    item.permit=permit;
+    memcpy(item.bytes,bytes,length);
+    size_t expired=0;
+    bool accepted=false;
+    bool queueFull=false;
+    auto irq=IOSimpleLockLockDisableInterrupt(lock);
+    const uint64_t captureNow=nowUs();
+    for(size_t offset=0;offset<directedRx.count;) {
+        const size_t queuedIndex=(directedRx.head+offset)%QueueDepth;
+        const auto &queued=directedRx.values[queuedIndex];
+        const bool stale=captureNow<queued.permit.capturedUs||
+            captureNow>=queued.permit.deadlineUs||
+            !activeDirectedRxLeaseValid||
+            queued.guardVersion!=activeDirectedRxVersion;
+        if(stale) {
+            DirectedRx removed{};
+            if(removeDirectedRxAt(offset,&removed)) {
+                recordDirectedRxReceiptLocked(removed,
+                    DirectedDataRxReceiptStaleOrInvalid,captureNow,0,false,0);
+                ++expired;
+            }
+        } else {
+            ++offset;
+        }
+    }
+    const bool authorityCurrent=
+        !Rx149InputGateState::blocked(__atomic_load_n(
+            &rx149InputGateState,__ATOMIC_ACQUIRE))&&
+        activeDirectedRxLeaseValid&&activeDirectedRxVersion!=0&&
+        sameDirectedRxLeaseIdentity(activeDirectedRxLease,lease)&&
+        sameDirectedRxPermitIdentity(activeDirectedRxLease,permit)&&
+        NativeP2PDirectedDataRxInput::leaseCurrent(
+            activeDirectedRxLease,captureNow)&&
+        NativeP2PDirectedDataRxInput::stillCurrent(
+            permit,activeDirectedRxLease,captureNow);
+    const bool interfaceCurrent=interface&&!closing&&!detached&&radio&&
+        __atomic_load_n(&closingRequested,__ATOMIC_ACQUIRE)==0&&
+        radioGeneration==generation&&generation==lease.epochs.power&&
+        interfaceIncarnation!=0&&
+        __atomic_load_n(&counters[Attached],__ATOMIC_ACQUIRE)!=0&&
+        memcmp(lease.localMac,own,sizeof(own))==0;
+    const bool sequenceAvailable=directedRxReceiptSequence!=UINT64_MAX;
+    const bool revisionAvailable=directedRxReceiptContentRevision!=UINT64_MAX;
+    const bool queueSpace=directedRx.count<QueueDepth;
+    const bool queueDeadlineAvailable=captureNow<=UINT64_MAX-
+        NativeP2PDirectedDataRxInput::kMaximumQueuedAgeUs;
+    accepted=authorityCurrent&&interfaceCurrent&&sequenceAvailable&&
+        revisionAvailable&&queueSpace&&queueDeadlineAvailable;
+    if(accepted) {
+        item.interfaceIncarnation=interfaceIncarnation;
+        item.guardVersion=activeDirectedRxVersion;
+        item.receiptSequence=++directedRxReceiptSequence;
+        item.permit.capturedUs=captureNow;
+        item.permit.deadlineUs=captureNow+
+            NativeP2PDirectedDataRxInput::kMaximumQueuedAgeUs;
+        if(item.permit.deadlineUs>lease.deadlineUs)
+            item.permit.deadlineUs=lease.deadlineUs;
+        directedRxReceipt=DirectedDataRxInputReceipt{};
+        directedRxReceipt.disposition=DirectedDataRxReceiptCaptured;
+        directedRxReceipt.sequence=item.receiptSequence;
+        directedRxReceipt.contentRevision=++directedRxReceiptContentRevision;
+        directedRxReceipt.ownerSerial=lease.ownerSerial;
+        directedRxReceipt.interfaceIncarnation=interfaceIncarnation;
+        directedRxReceipt.contextGeneration=lease.epochs.context;
+        directedRxReceipt.powerGeneration=lease.epochs.power;
+        directedRxReceipt.stationGeneration=lease.epochs.station;
+        directedRxReceipt.rocGeneration=lease.epochs.roc;
+        directedRxReceipt.captureUs=captureNow;
+        directedRxReceipt.startUs=lease.startUs;
+        directedRxReceipt.deadlineUs=item.permit.deadlineUs;
+        directedRxReceipt.ieeeChannel=NativeP2PDirectedDataRxInput::kIeeeChannel;
+        directedRxReceipt.macIndexPresent=1;
+        directedRxReceipt.macIndex=permit.macIndex;
+        directedRxReceipt.macPhyDecodeMode=permit.decodeMode;
+        directedRxReceipt.originalRxStatus=permit.originalRawStatus;
+        directedRxReceipt.mpduLength=uint32_t(length);
+        directedRxReceipt.ifnetInputResultPresent=0;
+        queueFull=false;
+        (void)directedRx.push(item);
+    } else {
+        queueFull=authorityCurrent&&interfaceCurrent&&sequenceAvailable&&
+            revisionAvailable&&queueDeadlineAvailable&&!queueSpace;
+        if(!sequenceAvailable||!revisionAvailable)
+            directedRxReceipt.schemaVersion=0;
+    }
+    set(DirectedRxPending,directedRx.count);
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+    for(size_t index=0;index<expired;++index)add(DirectedRxRejected);
+    if(accepted) {
+        add(DirectedRxCaptured);
+        return CaptureResult::Captured;
+    }
+    if(queueFull) {
+        add(DirectedRxQueueFull);
+        return CaptureResult::QueueFull;
+    }
+    add(DirectedRxRejected);
+    return CaptureResult::Rejected;
+}
+#endif
 CaptureResult capture(const uint8_t *bytes,size_t length,bool protectedFrame,bool leaseCurrent,uint32_t generation) {
     if(!bytes||!NativeAwdlData::isAwdlDataCandidate(bytes,length))
         return CaptureResult::NotAwdlDataCandidate;
@@ -2006,6 +2566,9 @@ bool close() {
     if(!bridgeLock())return true;
     publishClosing();
     revokeRx149DataInput();
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    revokeDirectedDataRxInput();
+#endif
     auto irq=IOSimpleLockLockDisableInterrupt(lock);
     auto ref=filter;IOSimpleLockUnlockEnableInterrupt(lock,irq);
     if(ref)iflt_detach(ref);
@@ -2024,7 +2587,13 @@ bool close() {
 #endif
             ;
         ifnet_t dev=done?interface:nullptr;
-        if(done){interface=nullptr;rx.head=rx.tail=rx.count=0;memset(rx.values,0,sizeof(rx.values));set(RxPending,0);}
+        if(done){interface=nullptr;rx.head=rx.tail=rx.count=0;memset(rx.values,0,sizeof(rx.values));set(RxPending,0);
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+            directedRx.head=directedRx.tail=directedRx.count=0;
+            memset(directedRx.values,0,sizeof(directedRx.values));
+            set(DirectedRxPending,0);
+#endif
+        }
         IOSimpleLockUnlockEnableInterrupt(lock,irq);
         if(done){if(dev)ifnet_release(dev);return true;}IOSleep(1);
     }
@@ -2035,6 +2604,12 @@ void publishClosing() {
     if(!bridgeLock())return;
     auto irq=IOSimpleLockLockDisableInterrupt(lock);
     closing=true;radio=false;set(Closing,1);set(LinkReady,0);
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    activeDirectedRxLeaseValid=false;
+    activeDirectedRxLease=NativeP2PDirectedDataRxInput::Lease{};
+    if(activeDirectedRxVersion!=UINT64_MAX)++activeDirectedRxVersion;
+    (void)removeDirectedRxItemsLocked(true,0,0,nullptr,nowUs());
+#endif
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
     // This is a short main-gate publication point: invalidate authority but
     // leave any queued mbuf for close()/revoke to free outside this lock.
@@ -2053,6 +2628,9 @@ Snapshot snapshot(){
     if(bridgeLock()) {
         auto irq=IOSimpleLockLockDisableInterrupt(lock);
         s.rx149Input=rx149Receipt;
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+        s.directedDataRxInput=directedRxReceipt;
+#endif
         IOSimpleLockUnlockEnableInterrupt(lock,irq);
     }
     return s;

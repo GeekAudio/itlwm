@@ -71,7 +71,12 @@ def check_source_contract() -> None:
     worker = function_body(probe, "void ItlIwx::tahoeP2pProbeTask(")
     selected = worker.index("run.rx149ObservationOnly")
     assert selected < worker.index("owner->nativeP2pProbe_.executeOnce(operations)")
-    assert "run.txProbeEnabled = false" in worker[selected:selected + 1800]
+    rx149_branch = worker.index("if (rx149Latched) {")
+    rx149_end = worker.index("if (run.directedPrepareOnly)", rx149_branch)
+    assert selected < rx149_branch < rx149_end
+    assert "run.txProbeEnabled = false" in worker[rx149_branch:rx149_end]
+    assert "run.awdlPsfProbeEnabled = false" in worker[rx149_branch:rx149_end]
+    assert "run.awdlMifFollowupEnabled = false" in worker[rx149_branch:rx149_end]
 
     prearm = function_body(probe, "static IOReturn rx149PrearmCounterAction(")
     assert "probeSnapshot.attempted != 0" in prearm

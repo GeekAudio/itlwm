@@ -23,6 +23,8 @@ Test104 还会只读采集 TX completion trace。schema 4 没有本轮新增的�
 
 sidecar 使用自己的采样和时间记录。它与 RX coordinator 没有共同的采集起点或跨报告时钟校准；不要把两份报告的单调时钟数值直接拼接来判定先后。Hcmd/认证事件只在各自快照内按其字段关联，仍不代表硬件 ACK、密钥安装成功或对端收件。没有事件或到达采集时限，不算密钥更新成功或 Wi‑Fi 长期稳定。
 
+Test110 在固件命令提交记录旁增加 `ADD_STA_KEY` 的数值序列观察。`key_sequence_trace110.py` 可解码 HCTX 新阶段：RX replay floor、TX sequence counter、命令 API 版本和驱动队列索引。它只证明驱动在同一命令提交路径中记录了这些数值；不证明固件安装密钥、AP 接受 GTK、无线帧 PN 或 AirDrop 成功。诊断不保留密钥材料、SSID、BSSID 或设备地址。
+
 输出应放在权限为 `0700` 的本轮私有目录中；新 JSONL 文件为 `0600`，同名文件不会覆盖。示例使用当前启动的 `kern.boottime` 秒值和本轮实际加载的 Test104 UUID，不要复用旧启动的身份：
 
 ```sh

@@ -14,10 +14,10 @@ static FakeIf replacementIf;
 
 static void inspectInput(ifnet_t dev,mbuf_t packet) {
     assert(dev==expectedInputIf&&packet->receiveIf==dev);
-    assert(B::lock->try_lock()); // KPI must execute outside the bridge lock.
+    assert(B::lock->mutex.try_lock()); // KPI must execute outside the bridge lock.
     assert(B::inputCalls>=2);
     assert(B::Rx149InputGateState::ticketCount(B::rx149InputGateState)==1);
-    B::lock->unlock();
+    B::lock->mutex.unlock();
 }
 static void blockInput(ifnet_t dev,mbuf_t packet) {
     inspectInput(dev,packet);

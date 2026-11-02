@@ -217,9 +217,10 @@ public:
     bool tahoeP2pOnMainGate() const { return mainGate; }
     void runFirmwareTraceSample(struct iwx_softc *, bool forceTraceSample);
     void tahoeFreezeFirmwareMetadata(struct iwx_softc *, uint32_t);
-    void tahoeRecordFirmwareMetadata(
+    uint64_t tahoeRecordFirmwareMetadata(
         struct iwx_softc *, IwxFirmwareDiagnostics::Entry entry) {
         metadata.push_back(entry);
+        return metadata.size();
     }
     static IOReturn _tahoe_fw_error_snapshot_action(
         OSObject *, void *, void *, void *, void *);

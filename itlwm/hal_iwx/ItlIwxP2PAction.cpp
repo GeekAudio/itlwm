@@ -2464,6 +2464,8 @@ static bool directedDataMainGateCheck(ItlIwx *owner,
     const uint32_t responseGeneration =
         sc->sc_native_mcc_response_firmware_generation;
     const uint32_t responseStatus = sc->sc_native_mcc_response_status;
+    const uint32_t responseChannelCount =
+        sc->sc_native_mcc_response_channel_count;
     const uint32_t appliedNotice = sc->sc_native_mcc_applied_notice_generation;
     const uint32_t appliedGeneration =
         sc->sc_native_mcc_applied_firmware_generation;
@@ -2473,17 +2475,22 @@ static bool directedDataMainGateCheck(ItlIwx *owner,
         &sc->sc_native_mcc_notice_generation, __ATOMIC_ACQUIRE);
     const uint32_t generation = static_cast<uint32_t>(sc->sc_generation);
     const struct ieee80211_channel *channel = &sc->sc_ic.ic_channels[6];
-    const bool channelAllowed = channel->ic_freq == 2437 &&
-        channel->ic_flags != 0 &&
-        (channel->ic_flags & IEEE80211_CHAN_2GHZ) != 0 &&
-        (channel->ic_flags & (IEEE80211_CHAN_PASSIVE | IEEE80211_CHAN_DFS)) == 0 &&
-        ieee80211_chan2ieee(&sc->sc_ic,
-            const_cast<struct ieee80211_channel *>(channel)) == 6;
+    uint32_t noIrMask = 0;
+#ifdef IEEE80211_CHAN_NO_IR
+    noIrMask = IEEE80211_CHAN_NO_IR;
+#endif
+    const bool channelAllowed =
+        IwxMccRefreshPolicy::directedDataChannel6TxAllowed(
+            responseStatus, responseChannelCount,
+            ieee80211_chan2ieee(&sc->sc_ic,
+                const_cast<struct ieee80211_channel *>(channel)),
+            channel->ic_freq, channel->ic_flags, IEEE80211_CHAN_2GHZ,
+            IEEE80211_CHAN_PASSIVE, IEEE80211_CHAN_DFS, noIrMask);
     return noticeBefore != 0 && (noticeBefore & 1u) == 0 &&
         noticeBefore == noticeAfter && responsePresent == 1 &&
         responseNotice == noticeBefore && responseGeneration == generation &&
-        responseStatus == 0 && appliedNotice == noticeBefore &&
-        appliedGeneration == generation && pending == 0 && channelAllowed;
+        appliedNotice == noticeBefore && appliedGeneration == generation &&
+        pending == 0 && channelAllowed;
 }
 
 static IOReturn directedDataMainGateCheckAction(

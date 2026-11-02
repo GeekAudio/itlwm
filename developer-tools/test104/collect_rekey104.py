@@ -30,8 +30,10 @@ DEVTOOLS = HERE.parent
 sys.path.insert(0, str(DEVTOOLS / "test100"))
 sys.path.insert(0, str(DEVTOOLS / "test103"))
 sys.path.insert(0, str(DEVTOOLS / "test105"))
+sys.path.insert(0, str(HERE))
 
 from live_key105 import parse_live_key, completion_with_live_authority  # noqa: E402
+from key_sequence_trace110 import decode_key_sequences  # noqa: E402
 
 import collect_rekey100 as base  # noqa: E402
 import hcmd_rx_trace_test103 as hcmd  # noqa: E402
@@ -278,6 +280,7 @@ def sample_once(expected_build: str, identity: dict,
     service = _locate_candidate_service(tree, expected_build)
     selected = base.select_allowlisted(service, expected_build)
     hcmd_decoded = _hcmd_sample_from_service(service, before, after)
+    key_sequence_trace = decode_key_sequences(hcmd_decoded)
     live_key = parse_live_key(service)
     auth_raw = service.get(AUTH_PROPERTY)
     auth = _decode_auth_trace(auth_raw)
@@ -300,6 +303,7 @@ def sample_once(expected_build: str, identity: dict,
         },
         "numeric_counters": selected.get("numeric_counters", {}),
         "hcmd": hcmd_decoded,
+        "key_sequence_trace": key_sequence_trace,
         "auth_trace": auth,
         "live_key": live_key,
         "firmware_queue_completion": completion_with_live_authority(
@@ -532,6 +536,8 @@ def capture(output: Path, *, boot_epoch: int, expected_uuid: str,
                         "en1": point.get("en1"),
                         "numeric_counters": point.get("numeric_counters", {}),
                         "hcmd": _selected_hcmd(decoded_hcmd),
+                        "key_sequence_trace": point.get(
+                            "key_sequence_trace", {"status": "not_published"}),
                         "auth_trace": _selected_auth(auth),
                         "live_key": point.get("live_key", {"status": "not_published"}),
                         "firmware_queue_completion": point.get("firmware_queue_completion"),

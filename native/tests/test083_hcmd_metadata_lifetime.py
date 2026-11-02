@@ -101,6 +101,7 @@ struct iwx_wide_header {
 };
 struct iwx_device_cmd { iwx_wide_header hdr_wide; };
 struct command_ring { uint32_t queued = 0, cur = 2, qid = 4; };
+struct iwx_sta_cmd_receipt { uint32_t state = 0; };
 
 static iwx_device_cmd *cmd = nullptr;
 static iwx_host_cmd *hcmd = nullptr;
@@ -112,8 +113,10 @@ static uint32_t captured_count = 0;
 static Entry captured{};
 static bool doorbell_seen = false;
 static bool command_invalidated = false;
+static iwx_sta_cmd_receipt *receipt = nullptr;
 
 constexpr uint32_t IWX_CMD_WANT_RESP = 1U;
+constexpr uint32_t IWX_STA_SUBMIT_LOCAL_ENQUEUE = 2U;
 constexpr uint32_t IWX_HBUS_TARG_WRPTR = 0x100U;
 static uint32_t getTxQueueSize() { return 64U; }
 static void fakeWrite(iwx_softc *, uint32_t reg, uint32_t value) {
@@ -127,12 +130,13 @@ static void fakeWrite(iwx_softc *, uint32_t reg, uint32_t value) {
 }
 #define IWX_WRITE(sc_, reg_, value_) fakeWrite((sc_), (reg_), (value_))
 #define DPRINTF(args_) ((void)0)
-static void tahoeRecordFirmwareMetadata(iwx_softc *, Entry value) {
+static uint64_t tahoeRecordFirmwareMetadata(iwx_softc *, Entry value) {
     assert(doorbell_seen);
     assert(command_invalidated);
     assert(cmd == nullptr);
     captured = value;
     ++captured_count;
+    return captured_count;
 }
 
 int main() {
@@ -153,6 +157,7 @@ int main() {
     (void)group_id;
 
     @@PRODUCTION_SLICE@@
+    (void)commandSubmitSerial;
 
     assert(captured_count == 1U);
     assert(captured.phase == static_cast<uint32_t>(

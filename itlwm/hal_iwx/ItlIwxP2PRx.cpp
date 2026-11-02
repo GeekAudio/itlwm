@@ -9,6 +9,9 @@
 #include <libkern/c++/OSNumber.h>
 #if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
 #include "../../native/awdl_native_bsd_data_25G332.hpp"
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+#include "../../native/awdl_directed_data_rx_receipt_publisher.hpp"
+#endif
 #endif
 #if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
 #include "../../native/p2p_rx149_input_receipt_publisher.hpp"
@@ -251,6 +254,29 @@ void publishRx149InputReceipt(
         return controller && controller->setProperty(name, value, bits);
     };
     (void)publisher.publish(receipt, readNumber, writeNumber);
+}
+#endif
+
+#if defined(ITL_NATIVE_AWDL_RESIDENT_25G332) && \
+    ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+void publishDirectedDataRxInputReceipt(
+    IOEthernetController *controller,
+    const NativeAwdlBSD::DirectedDataRxInputReceipt &receipt)
+{
+    if(!controller)return;
+    static NativeAwdlBSD::DirectedDataRxReceiptPublisher publisher;
+    auto readNumber=[controller](const char *name,uint64_t *value) {
+        if(!controller||!name||!value)return false;
+        OSNumber *number=OSDynamicCast(OSNumber,controller->getProperty(name));
+        if(!number)return false;
+        *value=number->unsigned64BitValue();
+        return true;
+    };
+    auto writeNumber=[controller](const char *name,uint64_t value,
+                                  unsigned int bits) {
+        return controller&&controller->setProperty(name,value,bits);
+    };
+    (void)publisher.publish(receipt,readNumber,writeNumber);
 }
 #endif
 
@@ -1118,6 +1144,12 @@ void ItlIwx::tahoeP2pTapAction(struct iwx_softc *sc, const uint8_t *frame,
         (controller && controller->getProperty(
             "NativeP2PRx149ObservationOnly") == kOSBooleanTrue) ||
         receiveObservationOnly;
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    if (armMode == NativeP2PDirectedDataRxInput::kOwnerArmMode) {
+        // Mode 4 has its own channel-6 lease and ring below. Do not route it
+        // through the RX149 mode-2 admission predicate.
+    } else
+#endif
     if (rx149ProfilePath) {
         const auto session = nativeP2pRocEvents_.snapshot();
         const auto evidence = currentRx149ActionEvidence(
@@ -1167,6 +1199,50 @@ void ItlIwx::tahoeP2pTapAction(struct iwx_softc *sc, const uint8_t *frame,
     // complete MAC ID/color or PHY for API59. Never infer either from payload.
 #if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
 #if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    if (armMode == NativeP2PDirectedDataRxInput::kOwnerArmMode) {
+        NativeP2PDirectedDataRxInput::Lease inputLease{};
+        NativeP2PDirectedDataRxInput::Permit permit{};
+        const bool leaseReady=tahoeP2pDirectedDataRxLease(&inputLease);
+        if (leaseReady&&originalData&&originalData->present&&frame&&
+            length<=UINT32_MAX&&channel<nitems(sc->sc_ic.ic_channels)) {
+            NativeP2PDirectedDataRxInput::Descriptor descriptor{};
+            descriptor.channelPresent=true;
+            descriptor.ieeeChannel=ieee80211_chan2ieee(
+                &sc->sc_ic,&sc->sc_ic.ic_channels[channel]);
+            descriptor.macPhyIndexPresent=rxMacPhyIndexPresent;
+            descriptor.macPhyIndex=static_cast<uint8_t>(rxMacPhyIndex);
+            descriptor.decodeModePresent=true;
+            descriptor.decodeMode=isset(sc->sc_ucode_api,
+                IWX_UCODE_TLV_API_BAND_IN_RX_DATA) ?
+                NativeP2PDirectedDataRxInput::kMacPhyDecodeBandInRx :
+                NativeP2PDirectedDataRxInput::kMacPhyDecodeLegacy;
+            descriptor.protectedFrame=wasProtected||
+                originalData->protectedFrame;
+            descriptor.awdlDataCandidate=
+                NativeAwdlData::isAwdlDataCandidate(frame,length);
+            descriptor.originalDescriptorPresent=originalData->present;
+            descriptor.hardwareDeaggregated=
+                originalData->hardwareDeaggregated;
+            descriptor.originalRawStatus=originalData->rawStatus;
+            descriptor.sourceMacPresent=length>=16;
+            if(descriptor.sourceMacPresent)
+                memcpy(descriptor.sourceMac,frame+10,
+                       sizeof(descriptor.sourceMac));
+            (void)NativeP2PDirectedDataRxInput::makePermit(
+                inputLease,descriptor,&permit);
+        }
+        const auto capture=NativeAwdlBSD::captureDirectedDataRx(
+            frame,length,wasProtected||(originalData&&
+                originalData->protectedFrame),inputLease,permit,
+            uint32_t(sc->sc_generation));
+        if(capture==NativeAwdlBSD::CaptureResult::Rejected||
+           capture==NativeAwdlBSD::CaptureResult::QueueFull)
+            tahoe_awdl_rx_stage_counters_.recordData(
+                uint32_t(lease.contextGeneration),
+                TahoeAwdlRxStageCounters::kDataTapRejected);
+    } else
+#endif
     if (rx149ProfilePath) {
         NativeP2PRx149DataInput::Lease inputLease{};
         const bool leaseReady=tahoeP2pRx149DataLease(&inputLease);
@@ -1610,7 +1686,14 @@ void ItlIwx::tahoeP2pRxDrain()
         "NativeAwdlDataTxMdnsLastQuestionCount",
         "NativeAwdlDataTxMdnsLastTargetPtrInQuestionCount",
         "NativeAwdlDataTxMdnsLastQuQuestionMask",
-        "NativeAwdlDataTxMdnsLastAttemptToken"};
+        "NativeAwdlDataTxMdnsLastAttemptToken",
+        "NativeAwdlDataDirectedRxCaptured",
+        "NativeAwdlDataDirectedRxRejected",
+        "NativeAwdlDataDirectedRxQueueFull",
+        "NativeAwdlDataDirectedRxDecoded",
+        "NativeAwdlDataDirectedRxDelivered",
+        "NativeAwdlDataDirectedRxInputFailed",
+        "NativeAwdlDataDirectedRxPending"};
     static_assert(sizeof(names)/sizeof(names[0])==NativeAwdlBSD::Count,"data counters");
     for(unsigned i=0;i<NativeAwdlBSD::Count;++i){
         auto prior=OSDynamicCast(OSNumber,controller->getProperty(names[i]));
@@ -1634,6 +1717,9 @@ void ItlIwx::tahoeP2pRxDrain()
     if(captureAttemptsChanged)
         controller->setProperty("NativeAwdlDataRx149CaptureAttempts",
                                 &captureAttempts,sizeof(captureAttempts));
+#endif
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    publishDirectedDataRxInputReceipt(controller,data.directedDataRxInput);
 #endif
 #endif
 #if defined(ITL_NATIVE_AWDL_LIFECYCLE_25G332)

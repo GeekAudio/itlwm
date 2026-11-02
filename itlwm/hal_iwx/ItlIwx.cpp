@@ -116,6 +116,7 @@
 #include "../../native/iwx_tx_response_metadata.hpp"
 #include "../../native/iwx_txcmd_identity_observation.hpp"
 #include "../../native/iwx_add_sta_key_status.hpp"
+#include "../../native/iwx_sta_key_rx_pn.hpp"
 #include "../../native/iwx_init_wait.hpp"
 #include "../../native/iwx_eapol_priority.hpp"
 #include "../../native/iwx_tx_rsp_retry_observation.hpp"
@@ -138,6 +139,15 @@
 #include <sys/_task.h>
 #include <sys/pcireg.h>
 #include <net80211/ieee80211_priv.h>
+
+static_assert(sizeof(struct iwx_add_sta_key_common) == 52,
+              "ADD_STA_KEY common payload layout changed");
+static_assert(offsetof(struct iwx_add_sta_key_common, rx_secur_seq_cnt) == 36,
+              "ADD_STA_KEY RX sequence field offset changed");
+static_assert(sizeof(struct iwx_add_sta_key_cmd) == 76,
+              "ADD_STA_KEY API v2/v3 payload size changed");
+static_assert(offsetof(struct iwx_add_sta_key_cmd, transmit_seq_cnt) == 68,
+              "ADD_STA_KEY transmit counter offset changed");
 
 static uint64_t iwxMonotonicNs()
 {
@@ -2116,21 +2126,22 @@ int ItlIwx::tahoeQueueInitTask(struct iwx_softc *sc, uint32_t faultSerial)
                            &context);
 }
 
-void ItlIwx::tahoeRecordFirmwareMetadata(
+uint64_t ItlIwx::tahoeRecordFirmwareMetadata(
     struct iwx_softc *sc, IwxFirmwareDiagnostics::Entry entry)
 {
     if (!sc)
-        return;
+        return 0;
     entry.monotonic_ns = tahoeMonotonicNs();
-    entry.driver_generation = static_cast<uint32_t>(sc->sc_generation);
+    const uint32_t currentDriverGeneration = static_cast<uint32_t>(
+        __atomic_load_n(&sc->sc_generation, __ATOMIC_ACQUIRE));
     const uint32_t aliveGeneration = __atomic_load_n(
         &nativeFwDiagnosticAliveGeneration_, __ATOMIC_ACQUIRE);
-    entry.firmware_generation =
-        aliveGeneration == entry.driver_generation
-            ? entry.driver_generation : 0U;
-    if (entry.firmware_generation != 0)
-        entry.flags |= IwxFirmwareDiagnostics::kFirmwareStateKnown;
-    (void)IwxFirmwareDiagnostics::record(&nativeFwDiagnosticTrace_, entry);
+    const uint32_t currentDriverGenerationAfter = static_cast<uint32_t>(
+        __atomic_load_n(&sc->sc_generation, __ATOMIC_ACQUIRE));
+    IwxFirmwareDiagnostics::applyMetadataGeneration(
+        &entry, currentDriverGeneration, aliveGeneration,
+        currentDriverGenerationAfter);
+    return IwxFirmwareDiagnostics::record(&nativeFwDiagnosticTrace_, entry);
 }
 
 void ItlIwx::tahoeFreezeFirmwareMetadata(
@@ -11466,11 +11477,16 @@ iwx_send_cmd(struct iwx_softc *sc, struct iwx_host_cmd *hcmd,
 {
 #ifdef AIRPORT_TAHOE
     if (receipt != nullptr) {
-        memset(receipt, 0, sizeof(*receipt));
+        // The key caller pre-stages versioned, non-secret sequence metadata
+        // here. Reinitialize only command receipt fields so this handoff
+        // survives until the exact qid/index is known and the doorbell fires.
+        receipt->state = IWX_STA_SUBMIT_UNKNOWN;
         receipt->command_id = hcmd->id;
-        receipt->driver_generation = static_cast<uint32_t>(sc->sc_generation);
+        receipt->driver_generation = 0U;
         receipt->queue_id = UINT32_MAX;
         receipt->queue_index = UINT32_MAX;
+        receipt->raw_command_result = 0;
+        receipt->key_callback_result = 0;
     }
 #endif
 #ifdef AIRPORT_TAHOE
@@ -11496,7 +11512,11 @@ iwx_send_cmd(struct iwx_softc *sc, struct iwx_host_cmd *hcmd,
     int idx, code, async, group_id;
     size_t hdrlen, datasz;
     uint8_t *data;
-    int generation = sc->sc_generation;
+    int generation = __atomic_load_n(&sc->sc_generation, __ATOMIC_ACQUIRE);
+#ifdef AIRPORT_TAHOE
+    if (receipt != nullptr)
+        receipt->driver_generation = static_cast<uint32_t>(generation);
+#endif
     unsigned int max_chunks = 1;
     IOPhysicalSegment seg;
     
@@ -11678,7 +11698,71 @@ iwx_send_cmd(struct iwx_softc *sc, struct iwx_host_cmd *hcmd,
         receipt->state = IWX_STA_SUBMIT_LOCAL_ENQUEUE;
 #endif
 #ifdef AIRPORT_TAHOE
-    tahoeRecordFirmwareMetadata(sc, diagnosticEntry);
+    const uint64_t commandSubmitSerial =
+        tahoeRecordFirmwareMetadata(sc, diagnosticEntry);
+    if (receipt != nullptr &&
+        receipt->state == IWX_STA_SUBMIT_LOCAL_ENQUEUE &&
+        diagnosticEntry.command_id == IWX_ADD_STA_KEY &&
+        diagnosticEntry.group_id == IWX_LONG_GROUP &&
+        receipt->key_sequence_status != IWX_STA_KEY_SEQUENCE_NOT_APPLICABLE) {
+        const auto recordKeySequence = [this, sc, receipt,
+                                        commandSubmitSerial](
+            IwxFirmwareDiagnostics::Phase phase, uint64_t pn,
+            bool hasValue, bool hasMaximumTid) {
+            IwxFirmwareDiagnostics::Entry sequenceEntry{};
+            sequenceEntry.phase = static_cast<uint32_t>(phase);
+            sequenceEntry.source = static_cast<uint32_t>(
+                IwxFirmwareDiagnostics::Source::HostCommand);
+            sequenceEntry.command_id = IWX_ADD_STA_KEY;
+            sequenceEntry.group_id = IWX_LONG_GROUP;
+            // In this phase only, `version` is the ADD_STA_KEY CMD_VERSIONS
+            // value; a flag prevents treating it as the command-header byte.
+            sequenceEntry.version = receipt->key_sequence_api_version;
+            sequenceEntry.driver_generation = receipt->driver_generation;
+            sequenceEntry.qid = receipt->queue_id;
+            sequenceEntry.index = receipt->queue_index;
+            sequenceEntry.header_sequence = (sequenceEntry.qid << 8) |
+                sequenceEntry.index;
+            sequenceEntry.flags = IwxFirmwareDiagnostics::kHeaderFieldsPresent |
+                IwxFirmwareDiagnostics::kKeySequenceApiVersionPresent;
+            if (receipt->driver_generation != 0U)
+                sequenceEntry.flags |=
+                    IwxFirmwareDiagnostics::kOriginGenerationPresent;
+            if (commandSubmitSerial != 0U) {
+                sequenceEntry.flags |=
+                    IwxFirmwareDiagnostics::kOriginSubmitSerialPresent;
+                sequenceEntry.packet_length = static_cast<uint32_t>(
+                    commandSubmitSerial >> 32);
+                sequenceEntry.payload_length = static_cast<uint32_t>(
+                    commandSubmitSerial & 0xffffffffULL);
+            }
+            if (hasValue)
+                sequenceEntry.flags |=
+                    IwxFirmwareDiagnostics::kKeySequenceValuePresent;
+            if (hasMaximumTid) {
+                sequenceEntry.flags |=
+                    IwxFirmwareDiagnostics::kKeySequenceMaxTidPresent |
+                    ((receipt->key_sequence_max_tid <<
+                      IwxFirmwareDiagnostics::kKeySequenceMaxTidShift) &
+                     IwxFirmwareDiagnostics::kKeySequenceMaxTidMask);
+            }
+            sequenceEntry.result = static_cast<uint32_t>(pn & 0xffffffffULL);
+            sequenceEntry.result_detail = static_cast<uint32_t>(pn >> 32);
+            tahoeRecordFirmwareMetadata(sc, sequenceEntry);
+        };
+        if (receipt->key_sequence_status == IWX_STA_KEY_SEQUENCE_READY) {
+            recordKeySequence(
+                IwxFirmwareDiagnostics::Phase::KeyRxSequenceSubmitted,
+                receipt->key_sequence_rx_pn, true, true);
+            recordKeySequence(
+                IwxFirmwareDiagnostics::Phase::KeyTxSequenceSubmitted,
+                receipt->key_sequence_tx_pn, true, false);
+        } else {
+            recordKeySequence(
+                IwxFirmwareDiagnostics::Phase::KeySequenceUnavailable,
+                receipt->key_sequence_status, false, false);
+        }
+    }
     }
 #endif
     
@@ -16286,6 +16370,10 @@ static int iwx_set_key_with_receipt(struct ieee80211com *ic,
     struct iwx_softc *sc = (struct iwx_softc *)ic->ic_softc;
     struct iwx_add_sta_key_cmd cmd;
     ItlIwx *that = container_of(sc, ItlIwx, com);
+    IwxStaKeyRxPn::Encoded rxSequence{};
+    uint8_t keyApiVersion = IWX_FW_CMD_VER_UNKNOWN;
+    IwxStaKeyRxPn::Status rxSequenceStatus =
+        IwxStaKeyRxPn::Status::kUnsupportedApi;
 #ifdef AIRPORT_TAHOE
     if (receipt != nullptr) {
         memset(receipt, 0, sizeof(*receipt));
@@ -16307,8 +16395,53 @@ static int iwx_set_key_with_receipt(struct ieee80211com *ic,
 #endif
         return softwareError;
     }
+
+    // Keep the submitted payload and its private diagnostic receipt tied to
+    // one host-side counter sample, even if another path advances k_tsc.
+    const uint64_t transmitSequencePn = k->k_tsc;
+    keyApiVersion = that->iwx_lookup_cmd_ver(
+        sc, IWX_LONG_GROUP, IWX_ADD_STA_KEY);
+    rxSequenceStatus = IwxStaKeyRxPn::encodeCcmp(
+        k->k_rsc, IEEE80211_NUM_TID, keyApiVersion, &rxSequence);
+#ifdef AIRPORT_TAHOE
+    if (receipt != nullptr) {
+        receipt->key_sequence_api_version = keyApiVersion;
+        receipt->key_sequence_status =
+            rxSequenceStatus == IwxStaKeyRxPn::Status::kReady
+                ? IWX_STA_KEY_SEQUENCE_READY
+                : (rxSequenceStatus == IwxStaKeyRxPn::Status::kPnOutOfRange ||
+                   rxSequenceStatus == IwxStaKeyRxPn::Status::kInvalidArgument
+                    ? IWX_STA_KEY_SEQUENCE_INVALID_PN
+                    : IWX_STA_KEY_SEQUENCE_UNSUPPORTED_API);
+        if (rxSequenceStatus == IwxStaKeyRxPn::Status::kReady) {
+            receipt->key_sequence_max_tid = rxSequence.maximumTid;
+            receipt->key_sequence_rx_pn = rxSequence.maximumPn;
+            receipt->key_sequence_tx_pn = transmitSequencePn;
+        }
+    }
+#endif
     
     memset(&cmd, 0, sizeof(cmd));
+
+    // The host net80211 CCMP replay floor comes from the EAPOL RSC in
+    // k_rsc[]. Pass the maximum per-TID floor to firmware in the versioned
+    // ADD_STA_KEY representation. Unknown/unsupported command versions leave
+    // the existing zero-initialized payload unchanged; no layout is guessed.
+    if (rxSequenceStatus == IwxStaKeyRxPn::Status::kReady) {
+        memcpy(cmd.common.rx_secur_seq_cnt, rxSequence.bytes,
+               sizeof(cmd.common.rx_secur_seq_cnt));
+    } else if (rxSequenceStatus == IwxStaKeyRxPn::Status::kPnOutOfRange ||
+               rxSequenceStatus == IwxStaKeyRxPn::Status::kInvalidArgument) {
+#ifdef AIRPORT_TAHOE
+        if (receipt != nullptr) {
+            receipt->state = IWX_STA_SUBMIT_OTHER_ERROR;
+            receipt->raw_command_result = EINVAL;
+            receipt->key_callback_result = EINVAL;
+            receipt->key_sequence_status = IWX_STA_KEY_SEQUENCE_INVALID_PN;
+        }
+#endif
+        return EINVAL;
+    }
     
     cmd.common.key_flags = htole16(IWX_STA_KEY_FLG_CCM |
                                    IWX_STA_KEY_FLG_WEP_KEY_MAP |
@@ -16323,7 +16456,7 @@ static int iwx_set_key_with_receipt(struct ieee80211com *ic,
     memcpy(cmd.common.key, k->k_key, MIN(sizeof(cmd.common.key), k->k_len));
     cmd.common.sta_id = IWX_STATION_ID;
     
-    cmd.transmit_seq_cnt = htole64(k->k_tsc);
+    cmd.transmit_seq_cnt = htole64(transmitSequencePn);
     
     const int error = that->iwx_send_cmd_pdu(sc, IWX_ADD_STA_KEY,
         IWX_CMD_ASYNC, sizeof(cmd), &cmd, receipt);

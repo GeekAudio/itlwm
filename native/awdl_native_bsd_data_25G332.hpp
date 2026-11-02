@@ -6,6 +6,8 @@
 #include <net/kpi_interface.h>
 #include "awdl_bsd_attach_trace.hpp"
 #include "p2p_rx149_data_input.hpp"
+#include "p2p_directed_data_rx_input.hpp"
+#include "awdl_directed_data_rx_receipt.hpp"
 #include "rx149_capture_diagnostics.hpp"
 #include "awdl_reply_shadow.hpp"
 #ifndef ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
@@ -42,7 +44,10 @@ enum Counter : unsigned {
     TxMdnsLastDestinationPortIs5353, TxMdnsLastDestinationIsFf02Fb,
     TxMdnsLastDnsHeaderParsed, TxMdnsLastQr, TxMdnsLastTc,
     TxMdnsLastQuestionCount, TxMdnsLastTargetPtrInQuestionCount,
-    TxMdnsLastQuQuestionMask, TxMdnsLastAttemptToken, Count
+    TxMdnsLastQuQuestionMask, TxMdnsLastAttemptToken,
+    DirectedRxCaptured, DirectedRxRejected, DirectedRxQueueFull,
+    DirectedRxDecoded, DirectedRxDelivered, DirectedRxInputFailed,
+    DirectedRxPending, Count
 };
 enum Rx149InputDisposition : uint32_t {
     Rx149ReceiptNone=0,
@@ -107,6 +112,7 @@ enum class Rx149RecoveryResult : uint32_t {
 struct Snapshot {
     uint64_t value[Count];
     Rx149InputReceipt rx149Input;
+    DirectedDataRxInputReceipt directedDataRxInput;
 };
 // Numeric-only capability for the exact selected eligible QM packet. This snapshot
 // exposes no mbuf, address, or payload and is revalidated before dequeue.
@@ -139,6 +145,19 @@ void poll(bool radioReady,uint32_t powerGeneration);
 // caller supplies a freshly sampled main-gate lease; nullptr is fail-closed.
 void poll(bool radioReady,uint32_t powerGeneration,
           const NativeP2PRx149DataInput::Lease *rx149Lease);
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+// Separate mode-4/channel-6 bridge owner. This never consumes RX149 permits.
+void poll(bool radioReady,uint32_t powerGeneration,
+          const NativeP2PDirectedDataRxInput::Lease *directedDataRxLease);
+CaptureResult captureDirectedDataRx(const uint8_t *,size_t,bool protectedFrame,
+          const NativeP2PDirectedDataRxInput::Lease &,
+          const NativeP2PDirectedDataRxInput::Permit &,uint32_t powerGeneration);
+bool publishDirectedDataRxInputLease(
+          const NativeP2PDirectedDataRxInput::Lease &lease);
+void revokeDirectedDataRxInput();
+void revokeDirectedDataRxInput(uint64_t ownerSerial,
+          const NativeP2PDirectedDataRxInput::Epochs &epochs);
+#endif
 CaptureResult capture(const uint8_t *,size_t,bool protectedFrame,bool leaseCurrent,uint32_t powerGeneration);
 CaptureResult captureRx149Data(const uint8_t *,size_t,bool protectedFrame,
           const NativeP2PRx149DataInput::Lease &,

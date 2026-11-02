@@ -14,6 +14,7 @@ import unittest
 import collect_rekey104 as collector
 import collect_rekey100 as base
 import hcmd_rx_trace_test103 as hcmd
+from live_key105 import FIELDS as LIVE_KEY_FIELDS, PREFIX as LIVE_KEY_PREFIX
 
 
 UUID = "17D05CC1-2351-3A74-BAAD-77F67E362577"
@@ -37,14 +38,29 @@ def auth_blob(*, event=None, duplicate_in_first=False):
     return bytes(raw)
 
 
-def make_hcmd_service(*, include_row=True):
+def make_hcmd_service(*, include_row=True, sequence_bundle=False):
     rows = []
-    if include_row:
+    if sequence_bundle:
+        def encode(serial, phase, *, flags, result=0, result_detail=0,
+                   packet_length=0, payload_length=0):
+            return struct.pack("<QQ16I", serial, serial * 1000000, 5, 5,
+                phase, 1, 0x17, 1, 3, 0, 5, 5, flags, result,
+                result_detail, packet_length, payload_length, 0)
+
+        rows.extend([
+            encode(1, 1, flags=(1 << 2) | (1 << 4), result=0),
+            encode(2, 14, flags=(1 << 4) | (1 << 13) | (1 << 14) |
+                   (1 << 15) | (13 << 20) | (1 << 17) | (1 << 19),
+                   result=7, payload_length=1),
+            encode(3, 15, flags=(1 << 4) | (1 << 13) | (1 << 14) |
+                   (1 << 17) | (1 << 19), result=8, payload_length=1),
+        ])
+    elif include_row:
         rows.append(struct.pack("<QQ16I", 1, 123456789, 5, 5, 1, 1,
             0x17, 1, 0, 0, 64, 64, 1 << 4, 0, 0, 48, 4, 0))
     row_count = len(rows)
     start = 1 if row_count else 0
-    end = start
+    end = start + row_count - 1 if row_count else 0
     header = struct.pack("<4I2Q7I2Q2I", hcmd.WIRE_MAGIC,
         hcmd.WIRE_SCHEMA, hcmd.WIRE_HEADER_BYTES, hcmd.WIRE_ENTRY_BYTES,
         2, 2, 5, 0, 0, row_count, 0, 0, 0, start, end, 1, 1)
@@ -73,6 +89,31 @@ def make_hcmd_service(*, include_row=True):
     }
     service.update(markers)
     return service
+
+
+def live_key_sequence_properties():
+    props = {LIVE_KEY_PREFIX + key: 0 for key in LIVE_KEY_FIELDS}
+    values = {
+        "Schema": 2, "RevisionBegin": 2, "RevisionEnd": 2,
+        "SampleMonotonicNs": 200000000, "OwnerGeneration": 5,
+        "OwnerOutputEpoch": 7, "OwnerContextStable": 1,
+        "RxSequencePresent": 1, "RxSequenceStable": 1,
+        "RxSequenceSerial": 3, "RxSequenceMonotonicNs": 123456789,
+        "RxSequenceDriverGeneration": 5,
+        "RxSequenceFirmwareGeneration": 5,
+        "RxSequencePhase": 14, "RxSequenceSource": 1,
+        "RxSequenceCommandId": 0x17, "RxSequenceGroupId": 1,
+        "RxSequenceVersion": 3, "RxSequenceQid": 0,
+        "RxSequenceIndex": 4, "RxSequenceHeaderSequence": 4,
+        "RxSequenceFlags": (1 << 4) | (1 << 13) | (1 << 14) |
+                            (1 << 15) | (15 << 20) |
+                            (1 << 17) | (1 << 19),
+        "RxSequenceResult": 9, "RxSequencePacketLength": 0,
+        "RxSequencePayloadLength": 1,
+        "RxSequenceOriginSubmitSerial": 1,
+    }
+    props.update({LIVE_KEY_PREFIX + key: value for key, value in values.items()})
+    return props
 
 
 class FakeClock:
@@ -121,6 +162,7 @@ class CollectRekey104Tests(unittest.TestCase):
     def test_sample_reads_whole_hcmd_ring_and_emits_only_boolean_link_state(self):
         service = make_hcmd_service()
         service[collector.AUTH_PROPERTY] = auth_blob()
+        service.update(live_key_sequence_properties())
         raw_ioreg = plistlib.dumps([service], fmt=plistlib.FMT_BINARY)
 
         class Ticks:
@@ -149,6 +191,14 @@ class CollectRekey104Tests(unittest.TestCase):
         self.assertTrue(point["hcmd"]["snapshot_complete"])
         self.assertEqual(point["identity"]["loaded_kext_uuid"], UUID)
         self.assertTrue(point["en1"]["ipv4_present"])
+        self.assertEqual(
+            point["live_key"]["observations"]["rxsequence"]["origin_submit_serial"],
+            1)
+        self.assertEqual(point["live_key"]["key_sequence_bundle"]["status"],
+                         "partial_sequence_current_submit_unknown")
+        self.assertEqual(point["key_sequence_trace"]["status"],
+                         "stable_complete_cut")
+        self.assertEqual(point["key_sequence_trace"]["events"], [])
         raw_hcmd = point["raw_osdata"]["NativeHcmdRxTrace"]
         self.assertTrue(raw_hcmd["retained"])
         self.assertEqual(raw_hcmd["length"], len(service[hcmd.TRACE_PROPERTY]))
@@ -164,6 +214,35 @@ class CollectRekey104Tests(unittest.TestCase):
         encoded = json.dumps(point, sort_keys=True)
         self.assertNotIn("192.0.2.3", encoded)
         self.assertNotIn("SSID", encoded)
+
+    def test_sample_exposes_exact_origin_submit_bundle(self):
+        service = make_hcmd_service(sequence_bundle=True)
+        raw_ioreg = plistlib.dumps([service], fmt=plistlib.FMT_BINARY)
+
+        def ioreg(_argv, **_kwargs):
+            return raw_ioreg
+
+        def ifconfig(_argv, **_kwargs):
+            return (b"en1: flags=8863<UP,RUNNING> mtu 1500\n"
+                    b" status: active\n")
+
+        ticks = FakeClock()
+        point = collector.sample_once(BUILD,
+            {"boot_epoch": 1793525969, "os_build": "25G332",
+             "loaded_kext_uuid": UUID},
+            ioreg_fn=ioreg, ifconfig_fn=ifconfig,
+            monotonic_ns=lambda: int(ticks.monotonic() * 1_000_000_000) + 100,
+            wall_now=lambda: datetime.datetime.fromisoformat(
+                "2026-11-01T10:00:00+08:00"))
+        trace = point["key_sequence_trace"]
+        self.assertEqual(trace["status"], "stable_complete_cut")
+        self.assertEqual([event["kind"] for event in trace["events"]],
+                         ["rx_replay_floor", "tx_sequence_counter"])
+        self.assertEqual(trace["events"][0]["max_tid"], 13)
+        self.assertEqual(trace["events"][0]["origin_submit_serial"], 1)
+        self.assertEqual(trace["bundles"][0]["status"],
+                         "same_origin_submit_serial")
+        self.assertFalse(trace["bundles"][0]["firmware_key_install_proven"])
 
     def test_capture_records_unique_attempt_indexes_and_no_anchor_is_not_pass(self):
         clock = FakeClock()

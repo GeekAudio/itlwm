@@ -10,7 +10,42 @@
  */
 namespace IwxMccRefreshPolicy {
 
+// Values from Intel's iwlwifi MCC response ABI.
+constexpr uint32_t kMccResponseNewChannelProfile = 0U;
+constexpr uint32_t kMccResponseSameChannelProfile = 1U;
+constexpr uint32_t kMccResponseInvalid = 2U;
+constexpr uint32_t kMccResponseNvmDisabled = 3U;
+constexpr uint32_t kMccResponseIllegal = 4U;
+
+constexpr bool mccTxPropertyValuesFitUint32(uint64_t responseStatus,
+                                             uint64_t responseChannelCount)
+{
+    return responseStatus <= UINT32_MAX &&
+        responseChannelCount <= UINT32_MAX;
+}
+
 constexpr uint32_t kMaximumChannelCount = 110;
+// A same-profile reply is valid evidence when the caller also verifies its
+// current applied-generation tuple and the live channel flags. Keep ILLEGAL
+// and all error/unknown statuses out of the transmit path.
+constexpr bool directedDataChannel6TxAllowed(
+    uint32_t responseStatus, uint32_t responseChannelCount,
+    uint32_t channel, uint32_t frequencyMHz, uint32_t flags,
+    uint32_t twoGhzMask, uint32_t passiveMask, uint32_t dfsMask,
+    uint32_t noIrMask)
+{
+    const bool completeProfile = responseChannelCount >= 51U &&
+        responseChannelCount <= kMaximumChannelCount;
+    const bool statusAllowsTx = completeProfile &&
+        (responseStatus == kMccResponseNewChannelProfile ||
+         responseStatus == kMccResponseSameChannelProfile);
+    const uint32_t transmitBlockMask = passiveMask | dfsMask | noIrMask;
+    return statusAllowsTx && channel == 6U && frequencyMHz == 2437U &&
+        flags != 0 && (flags & twoGhzMask) != 0 &&
+        (flags & transmitBlockMask) == 0;
+}
+
+
 constexpr uint32_t kResponseFormatV3 = 3;
 constexpr uint32_t kResponseFormatV4 = 4;
 constexpr uint32_t kResponseHeaderV3Size = 16;
@@ -121,7 +156,8 @@ inline bool parseResponse(const uint8_t *payload, size_t payloadLength,
     const uint32_t profileActionValue = static_cast<uint32_t>(
         profileAction(status, channelCount,
         static_cast<uint32_t>(knownChannelCount), kMaximumChannelCount,
-        0U, 1U, 4U));
+        kMccResponseNewChannelProfile, kMccResponseSameChannelProfile,
+        kMccResponseIllegal));
     if (profileActionValue == 0U)
         return false;
 

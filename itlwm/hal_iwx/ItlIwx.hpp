@@ -170,6 +170,9 @@
 #include "ItlIwxP2PTx.hpp"
 #include "ItlIwxP2PAction.hpp"
 #include "ItlIwxP2PData.hpp"
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+#include "../../native/p2p_directed_data_rx_input.hpp"
+#endif
 #endif
 
 /* A command-local value snapshot. Never retains ic pointers or user storage. */
@@ -486,7 +489,7 @@ public:
     bool tahoePublishLinkTransitionTrace(IOEthernetController *);
     bool tahoePublishStaAuthTrace(IOEthernetController *, struct iwx_softc *);
     bool tahoePublishGroup2TxTrace(IOEthernetController *, struct iwx_softc *);
-    void tahoeRecordFirmwareMetadata(
+    uint64_t tahoeRecordFirmwareMetadata(
         struct iwx_softc *, IwxFirmwareDiagnostics::Entry);
     void tahoeFreezeFirmwareMetadata(
         struct iwx_softc *, uint32_t watchdogSequence);
@@ -560,6 +563,10 @@ public:
                            const NativeP2PRx149DataInput::OriginalDescriptor * = nullptr,
                            uint32_t diagnosticCandidateGeneration = 0);
     bool tahoeP2pRx149DataLease(NativeP2PRx149DataInput::Lease *);
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    bool tahoeP2pDirectedDataRxLease(
+        NativeP2PDirectedDataRxInput::Lease *);
+#endif
     void tahoeP2pRxConsume();
     void tahoeP2pRxDrain();
     static IOReturn tahoeP2pRxDrainAction(OSObject *, void *, void *, void *, void *);
@@ -645,6 +652,7 @@ public:
     TahoeP2PDirectedDataContext nativeP2pDirectedDataTx_;
     TahoeP2PDirectedDataArm nativeP2pDirectedDataArmInput_ {};
     uint32_t nativeP2pDirectedDataArmed_ {0};
+    uint64_t nativeP2pDirectedDataRxLeaseRevision_ {0};
 #endif
     uint32_t nativeP2pRx149LiveSnapshotRevision_ {0};
     uint64_t nativeP2pRx149LiveSnapshotOwnerSerial_ {0};

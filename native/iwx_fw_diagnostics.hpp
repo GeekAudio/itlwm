@@ -31,7 +31,10 @@ enum class Phase : uint32_t {
     FirmwareErrorInterrupt = 10,
     CommandRetired = 11,
     CommandWaitReturned = 12,
-    FirmwareErrorTableCapture = 13
+    FirmwareErrorTableCapture = 13,
+    KeyRxSequenceSubmitted = 14,
+    KeyTxSequenceSubmitted = 15,
+    KeySequenceUnavailable = 16
 };
 
 enum class Source : uint32_t {
@@ -56,8 +59,34 @@ enum EventFlags : uint32_t {
     kHostQueueTuplePresent = 1u << 9,
     kFirmwareStatusPresent = 1u << 10,
     kFirmwareStatusUnavailable = 1u << 11,
-    kCommandResponseFailed = 1u << 12
+    kCommandResponseFailed = 1u << 12,
+    // For Key*Sequence phases only: result/result_detail hold a private
+    // 48-bit CCMP PN counter, not a firmware return code. `version` carries
+    // the CMD_VERSIONS ADD_STA_KEY API version. RX rows also pack max TID in
+    // flags bits 20..23. No key material or peer identity is retained.
+    kKeySequenceValuePresent = 1u << 13,
+    kKeySequenceApiVersionPresent = 1u << 14,
+    kKeySequenceMaxTidPresent = 1u << 15,
+    // Keep the four-bit TID value above the independent origin flags below.
+    kKeySequenceMaxTidShift = 20,
+    kKeySequenceMaxTidMask = 0x0fu << kKeySequenceMaxTidShift,
+    // Key-sequence entries carry the generation sampled by the host-command
+    // submission path. Do not replace it with the generation at publication.
+    kOriginGenerationPresent = 1u << 17,
+    kOriginGenerationChangedBeforeRecord = 1u << 18,
+    // Key-sequence rows store the HCTX CommandSubmitted serial in
+    // packet_length:payload_length (high:low), only when this flag is set.
+    kOriginSubmitSerialPresent = 1u << 19
 };
+
+static_assert((kKeySequenceMaxTidMask &
+               (kKeySequenceValuePresent |
+                kKeySequenceApiVersionPresent |
+                kKeySequenceMaxTidPresent |
+                kOriginGenerationPresent |
+                kOriginGenerationChangedBeforeRecord |
+                kOriginSubmitSerialPresent)) == 0U,
+              "ADD_STA_KEY sequence flags overlap");
 
 // header_sequence is qid<<8 | idx: it identifies a host/RX header slot only;
 // it is not a firmware transaction ID. Presence flags distinguish parsed
@@ -99,6 +128,15 @@ struct TraceRing {
     uint64_t latest_add_sta_key_submit_dropped_serial;
     uint32_t latest_add_sta_key_dropped_count;
     uint64_t latest_add_sta_key_dropped_serial;
+    Slot latest_key_rx_sequence;
+    uint32_t latest_key_rx_sequence_dropped_count;
+    uint64_t latest_key_rx_sequence_dropped_serial;
+    Slot latest_key_tx_sequence;
+    uint32_t latest_key_tx_sequence_dropped_count;
+    uint64_t latest_key_tx_sequence_dropped_serial;
+    Slot latest_key_sequence_unavailable;
+    uint32_t latest_key_sequence_unavailable_dropped_count;
+    uint64_t latest_key_sequence_unavailable_dropped_serial;
 };
 
 struct TraceSnapshot {
@@ -171,6 +209,63 @@ struct TraceWireBuffer {
     uint8_t bytes[kTraceWireBlobBytes];
     uint32_t length;
 };
+
+inline bool isKeySequencePhase(uint32_t phase)
+{
+    return phase == static_cast<uint32_t>(Phase::KeyRxSequenceSubmitted) ||
+        phase == static_cast<uint32_t>(Phase::KeyTxSequenceSubmitted) ||
+        phase == static_cast<uint32_t>(Phase::KeySequenceUnavailable);
+}
+
+// Apply the recorder's generation policy. Ordinary events retain the existing
+// rule (current driver generation, then firmware-alive match). Key-sequence
+// rows are different: their owner is the generation captured when their
+// command was submitted, so a later reset must not relabel the row.
+inline void applyMetadataGeneration(Entry *entry,
+                                    uint32_t currentDriverGeneration,
+                                    uint32_t aliveFirmwareGeneration,
+                                    uint32_t currentDriverGenerationAfter)
+{
+    if (!entry)
+        return;
+
+    if (isKeySequencePhase(entry->phase)) {
+        const bool originPresent =
+            (entry->flags & kOriginGenerationPresent) != 0U &&
+            entry->driver_generation != 0U;
+        if (!originPresent) {
+            entry->driver_generation = 0U;
+            entry->firmware_generation = 0U;
+            entry->flags &= ~kFirmwareStateKnown;
+            return;
+        }
+
+        const uint32_t originGeneration = entry->driver_generation;
+        if (originGeneration != currentDriverGeneration ||
+            currentDriverGeneration != currentDriverGenerationAfter) {
+            entry->flags |= kOriginGenerationChangedBeforeRecord;
+            entry->firmware_generation = 0U;
+            entry->flags &= ~kFirmwareStateKnown;
+            return;
+        }
+
+        if (originGeneration == aliveFirmwareGeneration) {
+            entry->firmware_generation = originGeneration;
+            entry->flags |= kFirmwareStateKnown;
+        } else {
+            entry->firmware_generation = 0U;
+            entry->flags &= ~kFirmwareStateKnown;
+        }
+        return;
+    }
+
+    entry->driver_generation = currentDriverGeneration;
+    entry->firmware_generation =
+        aliveFirmwareGeneration == entry->driver_generation
+            ? entry->driver_generation : 0U;
+    if (entry->firmware_generation != 0U)
+        entry->flags |= kFirmwareStateKnown;
+}
 
 static_assert(sizeof(TraceWireHeader) == kTraceWireHeaderBytes,
               "HCTX wire header size changed");
@@ -279,6 +374,30 @@ struct FirmwareErrorSnapshot {
     uint32_t umac_isr_status;
 };
 
+inline void initializeStickySlot(Slot *slot)
+{
+    if (!slot)
+        return;
+    __atomic_store_n(&slot->writer, 0U, __ATOMIC_RELAXED);
+    __atomic_store_n(&slot->entry.serial, 0ULL, __ATOMIC_RELAXED);
+    __atomic_store_n(&slot->entry.monotonic_ns, 0ULL, __ATOMIC_RELAXED);
+    __atomic_store_n(&slot->entry.driver_generation, 0U, __ATOMIC_RELAXED);
+    __atomic_store_n(&slot->entry.firmware_generation, 0U, __ATOMIC_RELAXED);
+    __atomic_store_n(&slot->entry.phase, 0U, __ATOMIC_RELAXED);
+    __atomic_store_n(&slot->entry.source, 0U, __ATOMIC_RELAXED);
+    __atomic_store_n(&slot->entry.command_id, 0U, __ATOMIC_RELAXED);
+    __atomic_store_n(&slot->entry.group_id, 0U, __ATOMIC_RELAXED);
+    __atomic_store_n(&slot->entry.version, 0U, __ATOMIC_RELAXED);
+    __atomic_store_n(&slot->entry.qid, 0U, __ATOMIC_RELAXED);
+    __atomic_store_n(&slot->entry.index, 0U, __ATOMIC_RELAXED);
+    __atomic_store_n(&slot->entry.header_sequence, 0U, __ATOMIC_RELAXED);
+    __atomic_store_n(&slot->entry.flags, 0U, __ATOMIC_RELAXED);
+    __atomic_store_n(&slot->entry.result, 0U, __ATOMIC_RELAXED);
+    __atomic_store_n(&slot->entry.result_detail, 0U, __ATOMIC_RELAXED);
+    __atomic_store_n(&slot->entry.packet_length, 0U, __ATOMIC_RELAXED);
+    __atomic_store_n(&slot->entry.payload_length, 0U, __ATOMIC_RELAXED);
+}
+
 inline void initialize(TraceRing *ring)
 {
     if (!ring)
@@ -367,6 +486,21 @@ inline void initialize(TraceRing *ring)
                       __ATOMIC_RELAXED);
     __atomic_store_n(&ring->latest_add_sta_key_submit_dropped_serial, 0ULL,
                       __ATOMIC_RELAXED);
+    initializeStickySlot(&ring->latest_key_rx_sequence);
+    __atomic_store_n(&ring->latest_key_rx_sequence_dropped_count, 0U,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&ring->latest_key_rx_sequence_dropped_serial, 0ULL,
+                     __ATOMIC_RELAXED);
+    initializeStickySlot(&ring->latest_key_tx_sequence);
+    __atomic_store_n(&ring->latest_key_tx_sequence_dropped_count, 0U,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&ring->latest_key_tx_sequence_dropped_serial, 0ULL,
+                     __ATOMIC_RELAXED);
+    initializeStickySlot(&ring->latest_key_sequence_unavailable);
+    __atomic_store_n(&ring->latest_key_sequence_unavailable_dropped_count, 0U,
+                     __ATOMIC_RELAXED);
+    __atomic_store_n(&ring->latest_key_sequence_unavailable_dropped_serial, 0ULL,
+                     __ATOMIC_RELAXED);
     for (uint32_t index = 0; index < kTraceCapacity; ++index) {
         Slot &slot = ring->slots[index];
         __atomic_store_n(&slot.writer, 0U, __ATOMIC_RELAXED);
@@ -461,10 +595,26 @@ inline void recordLatestAddStaKeyDrop(TraceRing *ring, uint64_t serial)
             false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {}
 }
 
+inline void recordKeySequenceDrop(uint32_t *count, uint64_t *droppedSerial,
+                                  uint64_t serial)
+{
+    if (!count || !droppedSerial)
+        return;
+    __atomic_add_fetch(count, 1U, __ATOMIC_RELAXED);
+    if (serial == 0)
+        return;
+    uint64_t observed = __atomic_load_n(droppedSerial, __ATOMIC_ACQUIRE);
+    for (unsigned attempt = 0; attempt < 4U && observed < serial; ++attempt) {
+        if (__atomic_compare_exchange_n(droppedSerial, &observed, serial,
+                false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+            break;
+    }
+}
+
 // Commit an already-reserved serial. Kept separate so a test can deterministically
 // model a producer that was descheduled after reserving an older serial.
-inline uint32_t commitReserved(TraceRing *ring, const Entry &input,
-                              uint64_t serial)
+inline uint64_t commitReserved(TraceRing *ring, const Entry &input,
+                               uint64_t serial)
 {
     if (!ring || serial == 0)
         return 0;
@@ -512,19 +662,40 @@ inline uint32_t commitReserved(TraceRing *ring, const Entry &input,
     return serial;
 }
 
-inline uint32_t record(TraceRing *ring, const Entry &input)
+inline uint64_t record(TraceRing *ring, const Entry &input)
 {
     if (!ring)
         return 0;
+    const bool retainLatest = isLatestAddStaKeyResponse(input);
+    const bool retainSubmit = isLatestAddStaKeySubmit(input);
+    Slot *keySequenceSlot = nullptr;
+    uint32_t *keySequenceDroppedCount = nullptr;
+    uint64_t *keySequenceDroppedSerial = nullptr;
+    if (input.phase == static_cast<uint32_t>(Phase::KeyRxSequenceSubmitted)) {
+        keySequenceSlot = &ring->latest_key_rx_sequence;
+        keySequenceDroppedCount = &ring->latest_key_rx_sequence_dropped_count;
+        keySequenceDroppedSerial = &ring->latest_key_rx_sequence_dropped_serial;
+    } else if (input.phase == static_cast<uint32_t>(Phase::KeyTxSequenceSubmitted)) {
+        keySequenceSlot = &ring->latest_key_tx_sequence;
+        keySequenceDroppedCount = &ring->latest_key_tx_sequence_dropped_count;
+        keySequenceDroppedSerial = &ring->latest_key_tx_sequence_dropped_serial;
+    } else if (input.phase == static_cast<uint32_t>(Phase::KeySequenceUnavailable)) {
+        keySequenceSlot = &ring->latest_key_sequence_unavailable;
+        keySequenceDroppedCount =
+            &ring->latest_key_sequence_unavailable_dropped_count;
+        keySequenceDroppedSerial =
+            &ring->latest_key_sequence_unavailable_dropped_serial;
+    }
     if (__atomic_load_n(&ring->serial_exhausted, __ATOMIC_ACQUIRE) != 0U) {
+        if (keySequenceSlot)
+            recordKeySequenceDrop(keySequenceDroppedCount,
+                                  keySequenceDroppedSerial, 0U);
         __atomic_add_fetch(&ring->dropped_count, 1U, __ATOMIC_RELAXED);
         return 0;
     }
 
-    const bool retainLatest = isLatestAddStaKeyResponse(input);
-    const bool retainSubmit = isLatestAddStaKeySubmit(input);
     Slot *latestSlot = retainLatest ? &ring->latest_add_sta_key_response :
-        (retainSubmit ? &ring->latest_add_sta_key_submit : nullptr);
+        (retainSubmit ? &ring->latest_add_sta_key_submit : keySequenceSlot);
     bool latestLocked = false;
     if (latestSlot) {
         uint32_t expectedWriter = 0;
@@ -550,13 +721,16 @@ inline uint32_t record(TraceRing *ring, const Entry &input)
     if (serial == 0) {
         if (latestLocked)
             __atomic_store_n(&latestSlot->writer, 0U, __ATOMIC_RELEASE);
+        if (keySequenceSlot)
+            recordKeySequenceDrop(keySequenceDroppedCount,
+                                  keySequenceDroppedSerial, 0U);
         __atomic_add_fetch(&ring->dropped_count, 1U, __ATOMIC_RELAXED);
         return 0;
     }
     if (latestSlot && !latestLocked) {
         if (retainLatest) {
             recordLatestAddStaKeyDrop(ring, serial);
-        } else {
+        } else if (retainSubmit) {
             __atomic_add_fetch(&ring->latest_add_sta_key_submit_dropped_count,
                                1U, __ATOMIC_RELAXED);
             // Bounded even under contention. Count changes invalidate a read;
@@ -568,6 +742,9 @@ inline uint32_t record(TraceRing *ring, const Entry &input)
                         &ring->latest_add_sta_key_submit_dropped_serial,
                         &missed, serial, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
                     break;
+        } else {
+            recordKeySequenceDrop(keySequenceDroppedCount,
+                                  keySequenceDroppedSerial, serial);
         }
     }
 

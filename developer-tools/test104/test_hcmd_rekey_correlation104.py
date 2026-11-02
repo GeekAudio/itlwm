@@ -113,6 +113,21 @@ def gtk_submit(*, index=64, mono_us=1_001_000, generation=5,
 
 
 class HcmdRekeyCorrelationTests(unittest.TestCase):
+    def test_test110_key_sequence_phases_do_not_break_existing_correlation(self):
+        rows = [
+            hcmd_row(100, PHASE_COMMAND_SUBMITTED, SOURCE_HOST_COMMAND,
+                     mono=1_000_000_000),
+            hcmd_row(101, 14, SOURCE_HOST_COMMAND, mono=1_000_000_001),
+            hcmd_row(102, 15, SOURCE_HOST_COMMAND, mono=1_000_000_002),
+            hcmd_row(103, 16, SOURCE_HOST_COMMAND, mono=1_000_000_003),
+        ]
+        result = correlate_key_lifecycle(
+            stable_decoded(rows), stable_auth([gtk_submit()]))
+        self.assertNotEqual(result["status"], "hcmd_rows_invalid_or_unordered")
+        self.assertEqual(result["lifecycles"][0]["hcmd_submit_serial"], 100)
+        self.assertEqual(result["lifecycles"][0]["response_status"],
+                         "no_matching_response_row_in_visible_cut")
+
     def test_same_tuple_command_response_retire_and_later_deauth(self):
         rows = [
             hcmd_row(100, PHASE_COMMAND_SUBMITTED, SOURCE_HOST_COMMAND,

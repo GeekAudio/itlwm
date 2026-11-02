@@ -109,6 +109,13 @@ enum IwxStaAuthSubmitState {
     IWX_STA_SUBMIT_SOFTWARE_CRYPTO = 4
 };
 
+enum IwxStaKeySequenceStatus {
+    IWX_STA_KEY_SEQUENCE_NOT_APPLICABLE = 0,
+    IWX_STA_KEY_SEQUENCE_READY = 1,
+    IWX_STA_KEY_SEQUENCE_UNSUPPORTED_API = 2,
+    IWX_STA_KEY_SEQUENCE_INVALID_PN = 3
+};
+
 enum IwxStaAuthSnapshotFlags {
     IWX_STA_SNAPSHOT_FIRST_TRIGGER_LOST = 1u << 0
 };
@@ -121,6 +128,12 @@ struct IwxStaAuthSubmitReceipt {
     uint32_t queue_index;
     int32_t raw_command_result;
     int32_t key_callback_result;
+    /* Internal handoff to the Tahoe HCMD trace; never published as key bytes. */
+    uint32_t key_sequence_api_version;
+    uint32_t key_sequence_status;
+    uint32_t key_sequence_max_tid;
+    uint64_t key_sequence_rx_pn;
+    uint64_t key_sequence_tx_pn;
 };
 
 struct IwxStaAuthTraceEvent {
