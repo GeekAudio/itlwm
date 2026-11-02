@@ -20,27 +20,27 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "ec3f3fbdac2ad9eda4d59e10b78322ec1595d3cd9ecb577d563c550e0f28aae2"
+      "sha256": "b0d5a652c46b0499f4caafe45be41c53c53a4441c5c78445e95d4cddc34f6466"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "634b6bb9a8bd7a01d1e50447926ef0c77a41770459b259f064412578a7821bdf"
+      "sha256": "41dbef67fe9f0be033e5d5cb149532c2762627700faaf799cf86378ea5d74d36"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "947d5c6bb0d8b5bef86dbd05125250d40c87e0ff9391e862cc95108dc8516d7a"
+      "sha256": "a4adef5541394a557086b8d5797eb9e6f49e4bf60770d81c61d41714cc4c9923"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "947d5c6bb0d8b5bef86dbd05125250d40c87e0ff9391e862cc95108dc8516d7a"
+      "sha256": "a4adef5541394a557086b8d5797eb9e6f49e4bf60770d81c61d41714cc4c9923"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "79824a97d8dfdff9888d1b8e3e45c01074da2270819c0e7f36a488fc9a80ce16"
+      "sha256": "eae2fa96d44aeb052c9ea705d5a33ac4268b8f15d6fbc8dcd1d8b9b84a778bcc"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
@@ -85,10 +85,10 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-02T16:34:00.521786+08:00",
-  "runtime_scope": "Test111本轮8通过、2部分、1未通过、29未覆盖。GTK后短暂断链仍复现；P2P资源命令ACK与channel6 START/END已确认；native UDP前进入隔离，AWDL回包和AirDrop未证明。",
-  "running_candidate": "25G332-Test111",
-  "next_candidate": "25G332-Test112",
+  "updated_at": "2026-11-02T17:14:47.536988+08:00",
+  "runtime_scope": "Test112本轮8通过、2部分、1未通过、29未覆盖。GTK断链约6秒后恢复；BindOrigin在START后326微秒拒绝，已定位锁内/锁外检查矛盾。AWDL回包和AirDrop未证明。",
+  "running_candidate": "25G332-Test112",
+  "next_candidate": "25G332-Test113",
   "website_delivery": "Version manifest per visit; self-contained snapshot; publication and public readback hashes",
-  "deployment_state": "test112_deployed_waiting_reboot"
+  "deployment_state": "test113_deployed_waiting_reboot"
 }
