@@ -24,6 +24,7 @@
 #include <IOKit/IOUserClient.h>
 #include <libkern/c++/OSData.h>
 #include <libkern/c++/OSNumber.h>
+#include <libkern/c++/OSCollectionIterator.h>
 #include <kern/clock.h>
 #include <kern/task.h>
 #endif
@@ -109,6 +110,37 @@ static bool directedPrepareRx149DataInputProfileEnabled(
     auto profile = OSDynamicCast(OSNumber, controller->getProperty(
         "NativeP2PRx149DataInputProfileEnabled"));
     return profile && profile->unsigned64BitValue() == 1;
+}
+
+static bool validDirectedDataLocalIpv6(OSObject *object)
+{
+    auto address = OSDynamicCast(OSData, object);
+    if (!address || address->getLength() != 16)
+        return false;
+    const auto bytes = static_cast<const uint8_t *>(address->getBytesNoCopy());
+    if (!bytes || bytes[0] != 0xfe || bytes[1] != 0x80)
+        return false;
+    for (unsigned index = 2; index < 8; ++index)
+        if (bytes[index] != 0)
+            return false;
+    uint8_t any = 0;
+    for (unsigned index = 8; index < 16; ++index)
+        any |= bytes[index];
+    return any != 0;
+}
+
+static bool validDirectedDataNonce(OSObject *object)
+{
+    auto nonce = OSDynamicCast(OSData, object);
+    if (!nonce || nonce->getLength() != 8)
+        return false;
+    const auto bytes = static_cast<const uint8_t *>(nonce->getBytesNoCopy());
+    if (!bytes)
+        return false;
+    uint8_t any = 0;
+    for (unsigned index = 0; index < 8; ++index)
+        any |= bytes[index];
+    return any != 0;
 }
 
 struct NativeRx149ArmContext {
@@ -205,6 +237,77 @@ IOReturn armNativeP2PDirectedPrepareOnMainGate(
     }
     return kIOReturnSuccess;
 }
+
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+static bool directedDataHasReadonlyKeys(OSDictionary *request)
+{
+    if (!request)
+        return false;
+    auto iterator = OSCollectionIterator::withCollection(request);
+    if (!iterator)
+        return true;
+    static const char prefix[] = "NativeP2PDirectedData";
+    bool blocked = false;
+    while (OSObject *object = iterator->getNextObject()) {
+        auto key = OSDynamicCast(OSString, object);
+        const char *name = key ? key->getCStringNoCopy() : nullptr;
+        if (!name) {
+            blocked = true;
+            break;
+        }
+        if (strncmp(name, prefix, sizeof(prefix) - 1) != 0)
+            continue;
+        if (strcmp(name, "NativeP2PDirectedDataOnce") &&
+            strcmp(name, "NativeP2PDirectedDataPeerMAC") &&
+            strcmp(name, "NativeP2PDirectedDataLocalIPv6") &&
+            strcmp(name, "NativeP2PDirectedDataNonce") &&
+            strcmp(name, "NativeP2PDirectedDataRunToken")) {
+            blocked = true;
+            break;
+        }
+    }
+    iterator->release();
+    return blocked;
+}
+
+struct NativeP2PDirectedDataArmContext {
+    TahoeP2PDirectedDataArm arm;
+    OSString *runToken;
+};
+
+IOReturn armNativeP2PDirectedDataOnMainGate(
+    OSObject *target, void *argument, void *, void *, void *)
+{
+    auto controller = OSDynamicCast(AirportItlwm, target);
+    auto context = static_cast<NativeP2PDirectedDataArmContext *>(argument);
+    auto hal = controller ? OSDynamicCast(ItlIwx, controller->fHalService) : nullptr;
+    if (!controller || !context || !hal || !_fCommandGate ||
+        hal->tahoeP2pCommandGate() != _fCommandGate)
+        return kIOReturnNotReady;
+    if (controller->getProperty("NativeP2PDirectedDataCompiled") != kOSBooleanTrue ||
+        controller->getProperty("NativeP2PDirectedDataEnabled") != kOSBooleanTrue ||
+        controller->getProperty("NativeAwdlResidentEnabled") != kOSBooleanTrue ||
+        controller->getProperty("NativeP2PManualTrigger") != kOSBooleanTrue ||
+        controller->getProperty("NativeP2PProbe") != kOSBooleanTrue ||
+        controller->getProperty("NativeP2PRx149ObservationOnly") != kOSBooleanTrue ||
+        !directedPrepareRx149DataInputProfileEnabled(controller) ||
+        controller->getProperty("NativeP2PRocProbe") != kOSBooleanFalse ||
+        controller->getProperty("NativeP2PTxProbe") != kOSBooleanFalse ||
+        controller->getProperty("NativeP2PAwdlPsfObservationOnly") != kOSBooleanFalse ||
+        controller->getProperty("NativeP2PAwdlMifFollowup") != kOSBooleanFalse)
+        return kIOReturnUnsupported;
+    controller->removeProperty("NativeP2PDirectedDataAcceptedRunToken");
+    const IOReturn result = hal->nativeP2pArmDirectedData(context->arm);
+    if (result != kIOReturnSuccess)
+        return result;
+    if (!controller->setProperty("NativeP2PDirectedDataAcceptedRunToken", context->runToken) ||
+        controller->getProperty("NativeP2PDirectedDataAcceptedRunToken") != context->runToken) {
+        controller->removeProperty("NativeP2PDirectedDataAcceptedRunToken");
+        return kIOReturnNoMemory; // Arm may already be consumed; never retry automatically.
+    }
+    return kIOReturnSuccess;
+}
+#endif
 
 struct NativePowerActionContext {
     apple80211_power_data request;
@@ -482,6 +585,10 @@ bool AirportItlwm::init(OSDictionary *properties)
 IOReturn AirportItlwm::setProperties(OSObject *properties)
 {
     OSDictionary *request = OSDynamicCast(OSDictionary, properties);
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    if (directedDataHasReadonlyKeys(request))
+        return kIOReturnUnsupported;
+#endif
     // These values describe the signed test profile or read-only status.
     // Do not allow the parent property setter to bypass the manual gate.
     if (request && (request->getObject("NativeP2PManualTrigger") ||
@@ -502,6 +609,10 @@ IOReturn AirportItlwm::setProperties(OSObject *properties)
                     request->getObject("NativeP2PDirectedPrepareEnabled") ||
                     request->getObject("NativeP2PDirectedPrepareCompiled") ||
                     request->getObject("NativeP2PDirectedPrepareAcceptedRunToken") ||
+                    request->getObject("NativeP2PDirectedDataEnabled") ||
+                    request->getObject("NativeP2PDirectedDataCompiled") ||
+                    request->getObject("NativeP2PDirectedDataAcceptedRunToken") ||
+                    request->getObject("NativeP2PDirectedDataReady") ||
                     request->getObject("NativeP2PTxProbeEverDoorbelled") ||
                     request->getObject("NativeP2PAwdlActionFramesSubmitted") ||
                     request->getObject("NativeP2PAwdlPsfFrameSubmitted") ||
@@ -527,24 +638,34 @@ IOReturn AirportItlwm::setProperties(OSObject *properties)
         request->getObject("NativeP2PDirectedPreparePeerMAC") : nullptr;
     OSObject *directedToken = request ?
         request->getObject("NativeP2PDirectedPrepareRunToken") : nullptr;
+    OSObject *dataArm = request ? request->getObject("NativeP2PDirectedDataOnce") : nullptr;
+    OSObject *dataPeer = request ? request->getObject("NativeP2PDirectedDataPeerMAC") : nullptr;
+    OSObject *dataLocal = request ? request->getObject("NativeP2PDirectedDataLocalIPv6") : nullptr;
+    OSObject *dataNonce = request ? request->getObject("NativeP2PDirectedDataNonce") : nullptr;
+    OSObject *dataToken = request ? request->getObject("NativeP2PDirectedDataRunToken") : nullptr;
+    const bool hasDataFields = dataArm || dataPeer || dataLocal || dataNonce || dataToken;
     const bool hasDirectedFields = directedArm || directedPeer || directedToken;
-    if (!arm && !rxArm && !hasDirectedFields) {
+    if (!arm && !rxArm && !hasDirectedFields && !hasDataFields) {
         if (rxToken)
             return kIOReturnUnsupported;
         return super::setProperties(properties);
     }
     const bool legacyArmRequest = request && arm && !rxArm &&
-        !hasDirectedFields && request->getCount() == 1 &&
+        !hasDirectedFields && !hasDataFields && request->getCount() == 1 &&
         arm == kOSBooleanTrue;
     const bool rxArmRequest = request && rxArm && !arm &&
-        !hasDirectedFields && request->getCount() == 2 &&
+        !hasDirectedFields && !hasDataFields && request->getCount() == 2 &&
         rxArm == kOSBooleanTrue && validRx149RunToken(rxToken);
     const bool directedArmRequest = request && directedArm && !arm && !rxArm &&
-        request->getCount() == 3 &&
+        !hasDataFields && request->getCount() == 3 &&
         directedArm == kOSBooleanTrue &&
         validDirectedPreparePeer(directedPeer) &&
         validDirectedPrepareRunToken(directedToken);
-    if (!legacyArmRequest && !rxArmRequest && !directedArmRequest)
+    const bool dataArmRequest = request && dataArm && !arm && !rxArm &&
+        !hasDirectedFields && request->getCount() == 5 && dataArm == kOSBooleanTrue &&
+        validDirectedPreparePeer(dataPeer) && validDirectedDataLocalIpv6(dataLocal) &&
+        validDirectedDataNonce(dataNonce) && validDirectedPrepareRunToken(dataToken);
+    if (!legacyArmRequest && !rxArmRequest && !directedArmRequest && !dataArmRequest)
         return kIOReturnBadArgument;
     IOReturn privilege = IOUserClient::clientHasPrivilege(
         current_task(), kIOClientPrivilegeAdministrator);
@@ -552,6 +673,28 @@ IOReturn AirportItlwm::setProperties(OSObject *properties)
         return privilege;
     if (!fHalService)
         return kIOReturnNotReady;
+    if (dataArmRequest) {
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+        if (!_fCommandGate || !_fWorkloop)
+            return kIOReturnNotReady;
+        NativeP2PDirectedDataArmContext context {};
+        auto peer = OSDynamicCast(OSData, dataPeer);
+        auto local = OSDynamicCast(OSData, dataLocal);
+        auto nonce = OSDynamicCast(OSData, dataNonce);
+        context.runToken = OSDynamicCast(OSString, dataToken);
+        if (!peer || !local || !nonce || !context.runToken)
+            return kIOReturnBadArgument;
+        memcpy(context.arm.peerMac, peer->getBytesNoCopy(), sizeof(context.arm.peerMac));
+        memcpy(context.arm.localIpv6, local->getBytesNoCopy(), sizeof(context.arm.localIpv6));
+        memcpy(context.arm.nonce, nonce->getBytesNoCopy(), sizeof(context.arm.nonce));
+        memcpy(context.arm.runToken, context.runToken->getCStringNoCopy(), 32);
+        if (_fWorkloop->inGate())
+            return armNativeP2PDirectedDataOnMainGate(this, &context, nullptr, nullptr, nullptr);
+        return _fCommandGate->runAction(armNativeP2PDirectedDataOnMainGate, &context);
+#else
+        return kIOReturnUnsupported;
+#endif
+    }
     const bool receive149Profile =
         getProperty("NativeP2PRx149ObservationOnly") == kOSBooleanTrue;
     if (directedArm) {

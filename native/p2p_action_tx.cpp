@@ -167,6 +167,13 @@ Result CompletionTracker::firmwareDrained(uint32_t newGeneration)
     return Result::kReady;
 }
 
+Result CompletionTracker::firmwareStoppedAndDrained()
+{
+    memset(&ticket_, 0, sizeof(ticket_));
+    quarantined_ = false;
+    return Result::kReady;
+}
+
 Ticket CompletionTracker::snapshot() const
 {
     return ticket_;

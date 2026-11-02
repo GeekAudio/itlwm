@@ -8,6 +8,12 @@
 #include "p2p_rx149_data_input.hpp"
 #include "rx149_capture_diagnostics.hpp"
 #include "awdl_reply_shadow.hpp"
+#ifndef ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+#define ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332 0
+#endif
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+#include "awdl_directed_origin_tx.hpp"
+#endif
 namespace NativeAwdlBSD {
 enum Counter : unsigned {
     Attached, Closing, Detached, LinkReady, TxAccepted, TxRejected,
@@ -201,4 +207,24 @@ void completed(uint64_t token,bool success);
 void cancelQueued();
 Snapshot snapshot();
 void gateObservation(uint32_t blockers);
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+// Test107-only one-shot active UDP origin. openDirectedOriginTx binds the
+// caller's START/owner tuple to this live BSD interface; ifindex, interface
+// incarnation, and source MAC are captured here and never accepted from the
+// caller. Call these APIs outside IOSimpleLock/main-gate critical sections.
+bool openDirectedOriginTx(
+    const NativeAwdlDirectedOriginTx::OpenRequest &request,
+    NativeAwdlDirectedOriginTx::Ticket *out);
+bool closeDirectedOriginTx(
+    const NativeAwdlDirectedOriginTx::Ticket &ticket);
+void revokeDirectedOriginTx();
+// The returned mbuf contains exactly one 96-byte 802.11 MPDU (no FCS), and
+// ownership transfers to the caller. The original BSD output mbuf is freed by
+// this call on both encode success and failure; token equals ticketSerial.
+mbuf_t popDirectedOriginTx(
+    const NativeAwdlDirectedOriginTx::Ticket &ticket,
+    uint16_t wifiSequence,uint16_t awdlSequence,uint64_t *token);
+void snapshotDirectedOriginTx(
+    NativeAwdlDirectedOriginTx::Snapshot *out);
+#endif
 }

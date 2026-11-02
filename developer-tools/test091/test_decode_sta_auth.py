@@ -56,6 +56,12 @@ int main(int argc, char **argv) {
         IWX_STA_FLAG_GROUP2_SCAN_PHASE_PRESENT;
     input.detail = 2; /* Tahoe scan phase: DRAINING */
     iwx_sta_auth_trace_record(&trace, &input);
+    const uint8_t replay[8] = {1};
+    input.kind = IWX_STA_TRACE_GROUP2_RESULT;
+    input.stage = IWX_STA_STAGE_GROUP2_OUTPUT;
+    input.flags = iwx_sta_auth_replay_echo_flags(replay, replay);
+    input.detail = 0;
+    iwx_sta_auth_trace_record(&trace, &input);
     IwxStaAuthTraceSnapshot snapshot{};
     if (!iwx_sta_auth_trace_snapshot(&trace, &snapshot)) return 2;
     FILE *out = std::fopen(argv[1], "wb");
@@ -105,6 +111,25 @@ int main(int argc, char **argv) {
         self.assertEqual(decoder.extract_saved_blob(raw, prop), self.raw)
         with self.assertRaises(ValueError):
             decoder.extract_saved_blob(plistlib.dumps([{prop: self.raw}, {prop: self.raw}]), prop)
+
+    def test_replay_echo_bits_from_current_schema_do_not_reject_record(self):
+        result = decoder.decode(self.raw)
+        live = next(row for row in result['live']
+                    if row['event'] == 'group2_local_output_result')
+        self.assertEqual(live['replay_echo']['result'], 'equal')
+        self.assertTrue(live['replay_echo']['checked'])
+        fields = list(decoder.RECORD.unpack_from(self.raw, decoder.HEADER.size))
+        fields[7] = 5
+        for flags, expected in ((0x3000, 'equal'), (0x5000, 'mismatch'),
+                                (0, 'unknown'), (0x7000, 'unknown'), (0x2000, 'unknown')):
+            with self.subTest(flags=flags):
+                fields[12] = flags
+                row = decoder.decode_record(decoder.RECORD.pack(*fields))
+                self.assertEqual(row['replay_echo']['result'], expected)
+                self.assertIn('not MIC', row['replay_echo']['scope'])
+        fields[12] = 0x8000
+        with self.assertRaises(ValueError):
+            decoder.decode_record(decoder.RECORD.pack(*fields))
 
     def test_torn_revision_rejected(self):
         raw = bytearray(self.raw)

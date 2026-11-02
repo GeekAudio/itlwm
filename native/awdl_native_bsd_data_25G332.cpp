@@ -1,9 +1,19 @@
 // SPDX-License-Identifier: GPL-2.0-only
 // Actual BSD Ethernet/IPv6 -> Intel MPDU and Intel MPDU -> native awdl0 bridge.
 // A packet is never looped back or counted as radio receipt by this module.
+#ifndef ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+#define ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332 0
+#endif
 #if defined(ITL_NATIVE_AWDL_REPLY_SHADOW_25G332) && \
     (!defined(ITL_NATIVE_AWDL_RESIDENT_25G332) || !defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332))
 #error "Reply Shadow requires the unchanged receive-only RX149 profile"
+#endif
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332 && \
+    (!defined(ITL_NATIVE_AWDL_RESIDENT_25G332) || \
+     !defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332) || \
+     !ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332 || \
+     defined(ITL_NATIVE_AWDL_REPLY_SHADOW_25G332))
+#error "Directed origin TX requires the RX149 resident profile without Reply Shadow"
 #endif
 #if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
 #include "awdl_native_bsd_data_25G332.hpp"
@@ -73,6 +83,11 @@ Rx149InputReceipt rx149Receipt{};
 Rx149InputGateState::Word rx149InputGateState=0;
 Rx149CaptureDiagnostics::Ledger rx149CaptureLedger;
 uint32_t rx149RecoveryPreparedFaultSerial=0;
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+NativeAwdlDirectedOriginTx::Ledger directedOriginGate;
+mbuf_t directedOriginPacket=nullptr;
+uint32_t directedOriginOperations=0;
+#endif
 #if defined(ITL_NATIVE_AWDL_REPLY_SHADOW_25G332)
 NativeAwdlReplyShadow::Ledger replyShadow;
 uint32_t replyShadowOutputCalls=0;
@@ -507,8 +522,186 @@ void observeReplyShadowOutput(ifnet_t dev,protocol_family_t family,mbuf_t packet
     IOSimpleLockUnlockEnableInterrupt(stateLock,irq);
 }
 #endif
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+bool readLiveLinkLocal(ifnet_t dev,const uint8_t expected[16],
+                       uint8_t actual[16]) {
+    const uint32_t currentIfindex=dev?ifnet_index(dev):0;
+    if(!dev||!expected||!actual||!currentIfindex)return false;
+    ifaddr_t *addresses=nullptr;
+    if(ifnet_get_address_list_family(dev,&addresses,AF_INET6)!=0||!addresses)
+        return false;
+    bool found=false;
+    for(unsigned index=0;addresses[index];++index) {
+        sockaddr_in6 value{};
+        if(ifaddr_address(addresses[index],
+              reinterpret_cast<sockaddr *>(&value),sizeof(value))!=0||
+           value.sin6_family!=AF_INET6||
+           value.sin6_addr.s6_addr[0]!=0xfe||
+           (value.sin6_addr.s6_addr[1]&0xc0u)!=0x80u)
+            continue;
+        // Apple XNU stores scoped link-local addresses in KAME embedded form
+        // in the address list returned through some KPIs. Accept only an
+        // absent scope or the live interface's exact index, then compare the
+        // canonical address. Never erase an unknown zone and turn it into a
+        // match. The packet/wire validator deliberately does not use this.
+        const uint16_t embeddedScope=static_cast<uint16_t>(
+            (uint16_t(value.sin6_addr.s6_addr[2])<<8)|
+             value.sin6_addr.s6_addr[3]);
+        if((value.sin6_scope_id!=0&&value.sin6_scope_id!=currentIfindex)||
+           (embeddedScope!=0&&embeddedScope!=currentIfindex))
+            continue;
+        uint8_t canonical[16];
+        memcpy(canonical,value.sin6_addr.s6_addr,sizeof(canonical));
+        canonical[2]=0;
+        canonical[3]=0;
+        if(!memcmp(canonical,expected,sizeof(canonical))) {
+            memcpy(actual,canonical,sizeof(canonical));
+            found=true;
+            break;
+        }
+    }
+    ifnet_free_address_list(addresses);
+    return found;
+}
+
+bool directedOriginReadyLocked(ifnet_t dev) {
+    return dev&&interface==dev&&!closing&&!detached&&radio&&
+        __atomic_load_n(&closingRequested,__ATOMIC_ACQUIRE)==0&&
+        __atomic_load_n(&counters[Attached],__ATOMIC_ACQUIRE)!=0;
+}
+
+mbuf_t takeDirectedOriginPacketLocked() {
+    mbuf_t packet=directedOriginPacket;
+    directedOriginPacket=nullptr;
+    return packet;
+}
+
+void freeDirectedOriginPacket(mbuf_t packet) {
+    if(packet)mbuf_freem(packet);
+}
+
+errno_t directedOriginOutput(ifnet_t dev,protocol_family_t family,
+                             mbuf_t *packet) {
+    if(!packet||!*packet)return EINVAL;
+    if(!bridgeLock())return EOPNOTSUPP;
+
+    NativeAwdlDirectedOriginTx::Ticket ticket{};
+    NativeAwdlDirectedOriginTx::OpenRequest request{};
+    uint8_t ownAddress[6]{};
+    uint64_t incarnation=0;
+    uint32_t generation=0;
+    auto irq=IOSimpleLockLockDisableInterrupt(lock);
+    ticket=directedOriginGate.ticket();
+    const uint64_t now=nowUs();
+    const bool ready=directedOriginReadyLocked(dev)&&
+        directedOriginGate.canAcceptOutput(ticket,now,true,radioGeneration,
+                                           interfaceIncarnation);
+    if(!ready||directedOriginPacket||
+       directedOriginOperations==UINT32_MAX) {
+        directedOriginGate.noteRejected(
+            directedOriginPacket?NativeAwdlDirectedOriginTx::Reason::QueueFull:
+                                NativeAwdlDirectedOriginTx::Reason::WrongOwner);
+        IOSimpleLockUnlockEnableInterrupt(lock,irq);
+        add(TxRejected);
+        return EOPNOTSUPP;
+    }
+    request=directedOriginGate.request();
+    memcpy(ownAddress,own,sizeof(ownAddress));
+    incarnation=interfaceIncarnation;
+    generation=radioGeneration;
+    ++directedOriginOperations; // close pins this output through finalize/copy.
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+
+    NativeAwdlDirectedOriginTx::Reason reason=
+        NativeAwdlDirectedOriginTx::Reason::PacketShape;
+    uint8_t bytes[NativeAwdlDirectedOriginTx::kEthernetLength]{};
+    uint8_t liveMac[6]{},liveIp[16]{};
+    const bool liveContextMatches=
+        ifnet_lladdr_copy_bytes(dev,liveMac,sizeof(liveMac))==0&&
+        !memcmp(liveMac,ownAddress,sizeof(liveMac))&&
+        ifnet_index(dev)==ticket.ifindex&&
+        readLiveLinkLocal(dev,request.sourceIPv6,liveIp);
+    size_t length=0;
+    bool shape=liveContextMatches&&family==AF_INET6&&
+        (mbuf_flags(*packet)&MBUF_PKTHDR)!=0;
+    if(!liveContextMatches)
+        reason=NativeAwdlDirectedOriginTx::Reason::WrongSource;
+    if(shape) {
+        length=mbuf_pkthdr_len(*packet);
+        shape=length==sizeof(bytes)&&
+            mbuf_copydata(*packet,0,length,bytes)==0;
+    }
+    if(shape) {
+        reason=NativeAwdlDirectedOriginTx::validateEthernet(
+            request,ownAddress,bytes,length,false);
+        shape=reason==NativeAwdlDirectedOriginTx::Reason::None;
+    }
+    if(shape) {
+        // This may materialize deferred checksums; it must remain outside the
+        // simple lock. The in-flight pin keeps detach/close from releasing the
+        // interface until the final acceptance check has completed.
+        mbuf_outbound_finalize(*packet,AF_INET6,14);
+        shape=mbuf_pkthdr_len(*packet)==length&&
+            mbuf_copydata(*packet,0,length,bytes)==0;
+        if(shape) {
+            reason=NativeAwdlDirectedOriginTx::validateEthernet(
+                request,ownAddress,bytes,length,true);
+            shape=reason==NativeAwdlDirectedOriginTx::Reason::None;
+        } else {
+            reason=NativeAwdlDirectedOriginTx::Reason::PacketShape;
+        }
+        if(shape) {
+            const auto observation=NativeAwdlData::observeAwdlTxPacket(
+                bytes,length,ownAddress);
+            shape=observation.ipv6PacketWellFormed&&
+                observation.sourceIsLinkLocal&&
+                observation.udpChecksumStatus==
+                    NativeAwdlData::UdpChecksumStatus::Valid&&
+                observation.ethernetMulticastMappingMatches;
+            if(!shape)reason=NativeAwdlDirectedOriginTx::Reason::UdpChecksum;
+        }
+    } else if(family!=AF_INET6) {
+        reason=NativeAwdlDirectedOriginTx::Reason::PacketShape;
+    }
+
+    mbuf_t expired=nullptr;
+    bool accepted=false;
+    irq=IOSimpleLockLockDisableInterrupt(lock);
+    const uint64_t finalNow=nowUs();
+    const bool current=directedOriginReadyLocked(dev)&&
+        radioGeneration==generation&&interfaceIncarnation==incarnation;
+    if(shape&&current&&!directedOriginPacket) {
+        accepted=directedOriginGate.acceptsOutput(ticket,finalNow,true,
+            radioGeneration,interfaceIncarnation);
+        if(accepted) {
+            directedOriginPacket=*packet;
+            *packet=nullptr; // EJUSTRETURN transfers caller ownership once.
+        }
+    } else {
+        directedOriginGate.noteRejected(
+            shape?NativeAwdlDirectedOriginTx::Reason::WrongOwner:reason);
+    }
+    if(directedOriginGate.expire(finalNow))
+        expired=takeDirectedOriginPacketLocked();
+    if(directedOriginOperations)--directedOriginOperations;
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+    freeDirectedOriginPacket(expired);
+    if(accepted) {
+        add(TxAccepted);
+        return EJUSTRETURN;
+    }
+    add(TxRejected);
+    return EOPNOTSUPP; // Every rejection preserves caller ownership.
+}
+#endif
 errno_t output(void *,ifnet_t dev,protocol_family_t family,mbuf_t *packet) {
-#if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    // The Test107 profile has one exact BSD-origin exception. No unrelated
+    // traffic can enter the legacy 32-entry queue or nextTx path.
+    (void)nextToken;
+    (void)dataSequence;
+    return directedOriginOutput(dev,family,packet);
+#elif defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
     // This isolated profile is receive-only for its entire lifetime. The
     // runtime experiment flag controls RX admission but can never open TX.
     (void)nextToken;
@@ -566,6 +759,10 @@ void detachedCallback(void *,ifnet_t) {
     auto stateLock=bridgeLock();if(!stateLock)return;
     auto irq=IOSimpleLockLockDisableInterrupt(stateLock);
     detached=true;filter=nullptr;set(Detached,1);
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    (void)directedOriginGate.revoke(
+        nowUs(),NativeAwdlDirectedOriginTx::Reason::InterfaceStopped);
+#endif
     IOSimpleLockUnlockEnableInterrupt(stateLock,irq);
 }
 }
@@ -934,6 +1131,9 @@ void poll(bool ready,uint32_t generation) {
     // generation. Freeing remains outside IOSimpleLock; a later output call
     // can enqueue new-generation packets without a post-unlock flush racing it.
     Ring<Tx,QueueDepth> retiredTx{};
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    mbuf_t retiredOrigin=nullptr;
+#endif
     bool discardQueued=false;
     auto irq=IOSimpleLockLockDisableInterrupt(lock);
     const bool changed=radioGeneration&&radioGeneration!=generation;
@@ -950,6 +1150,16 @@ void poll(bool ready,uint32_t generation) {
         __atomic_load_n(&closingRequested,__ATOMIC_ACQUIRE)==0&&
         __atomic_load_n(&counters[Attached],__ATOMIC_ACQUIRE)!=0;
     set(LinkReady,radio?1:0);
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    const uint64_t originNow=nowUs();
+    if(!radio||changed) {
+        (void)directedOriginGate.revoke(
+            originNow,NativeAwdlDirectedOriginTx::Reason::InterfaceStopped);
+        retiredOrigin=takeDirectedOriginPacketLocked();
+    } else if(directedOriginGate.expire(originNow)) {
+        retiredOrigin=takeDirectedOriginPacketLocked();
+    }
+#endif
 #if defined(ITL_NATIVE_AWDL_REPLY_SHADOW_25G332)
     maintainReplyShadowLocked(nowUs());
 #endif
@@ -958,6 +1168,12 @@ void poll(bool ready,uint32_t generation) {
     if(dev&&!closing&&!detached)++inputCalls;else dev=nullptr;
     IOSimpleLockUnlockEnableInterrupt(lock,irq);
     Tx retired{};
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    if(retiredOrigin) {
+        mbuf_freem(retiredOrigin);
+        add(TxExpired);
+    }
+#endif
     while(retiredTx.pop(&retired)) {
         mbuf_freem(retired.packet);add(TxExpired);
     }
@@ -1587,6 +1803,200 @@ void completed(uint64_t token,bool success) {
         inFlightToken=0;inFlightMdnsClass=NativeAwdlData::MdnsQueryClass::Unknown;}
     IOSimpleLockUnlockEnableInterrupt(lock,irq);
 }
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+bool openDirectedOriginTx(
+    const NativeAwdlDirectedOriginTx::OpenRequest &request,
+    NativeAwdlDirectedOriginTx::Ticket *out) {
+    using namespace NativeAwdlDirectedOriginTx;
+    if(out)*out=Ticket{};
+    if(!out||!bridgeLock())return false;
+
+    ifnet_t dev=nullptr;
+    uint8_t expectedMac[6]{};
+    uint64_t incarnation=0;
+    uint32_t generation=0;
+    auto irq=IOSimpleLockLockDisableInterrupt(lock);
+    const bool ready=directedOriginReadyLocked(interface)&&
+        interfaceIncarnation!=0&&directedOriginOperations!=UINT32_MAX;
+    if(ready) {
+        dev=interface;
+        memcpy(expectedMac,own,sizeof(expectedMac));
+        incarnation=interfaceIncarnation;
+        generation=radioGeneration;
+        ++directedOriginOperations; // pins the ctx across external KPI reads.
+    } else {
+        directedOriginGate.noteRejected(Reason::WrongInterface);
+    }
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+    if(!ready)return false;
+
+    uint8_t actualMac[6]{},actualIp[16]{};
+    const bool macRead=ifnet_lladdr_copy_bytes(
+        dev,actualMac,sizeof(actualMac))==0&&
+        !memcmp(actualMac,expectedMac,sizeof(actualMac));
+    const uint32_t ifindex=ifnet_index(dev);
+    const bool ipRead=macRead&&readLiveLinkLocal(
+        dev,request.sourceIPv6,actualIp);
+
+    mbuf_t expired=nullptr;
+    bool opened=false;
+    irq=IOSimpleLockLockDisableInterrupt(lock);
+    const uint64_t now=nowUs();
+    const bool current=macRead&&ipRead&&directedOriginReadyLocked(dev)&&
+        interfaceIncarnation==incarnation&&radioGeneration==generation&&
+        generation==request.epochs.power&&directedOriginOperations==1;
+    if(current) {
+        if(directedOriginGate.expire(now))
+            expired=takeDirectedOriginPacketLocked();
+        opened=directedOriginGate.open(request,now,radioGeneration,
+            interfaceIncarnation,ifindex,actualMac,actualIp,out);
+    } else {
+        directedOriginGate.noteRejected(
+            macRead&&ipRead?Reason::WrongEpoch:Reason::WrongSource);
+    }
+    if(directedOriginOperations)--directedOriginOperations;
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+    freeDirectedOriginPacket(expired);
+    return opened;
+}
+
+bool closeDirectedOriginTx(
+    const NativeAwdlDirectedOriginTx::Ticket &ticket) {
+    if(!bridgeLock())return false;
+    mbuf_t packet=nullptr;
+    auto irq=IOSimpleLockLockDisableInterrupt(lock);
+    const bool closed=directedOriginGate.close(ticket,nowUs());
+    if(closed)packet=takeDirectedOriginPacketLocked();
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+    freeDirectedOriginPacket(packet);
+    return closed;
+}
+
+void revokeDirectedOriginTx() {
+    if(!bridgeLock())return;
+    mbuf_t packet=nullptr;
+    auto irq=IOSimpleLockLockDisableInterrupt(lock);
+    (void)directedOriginGate.revoke(
+        nowUs(),NativeAwdlDirectedOriginTx::Reason::InterfaceStopped);
+    packet=takeDirectedOriginPacketLocked();
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+    freeDirectedOriginPacket(packet);
+}
+
+mbuf_t popDirectedOriginTx(
+    const NativeAwdlDirectedOriginTx::Ticket &ticket,
+    uint16_t wifiSequence,uint16_t awdlSequence,uint64_t *token) {
+    using namespace NativeAwdlDirectedOriginTx;
+    if(token)*token=0;
+    if(!token||!bridgeLock())return nullptr;
+
+    mbuf_t sourcePacket=nullptr,expired=nullptr;
+    ifnet_t dev=nullptr;
+    OpenRequest request{};
+    uint8_t sourceMac[6]{};
+    uint64_t incarnation=0;
+    uint32_t generation=0;
+    auto irq=IOSimpleLockLockDisableInterrupt(lock);
+    const uint64_t now=nowUs();
+    if(directedOriginOperations<UINT32_MAX&&directedOriginPacket&&
+       directedOriginReadyLocked(interface)&&
+       directedOriginGate.beginPop(ticket,now,true,radioGeneration,
+                                   interfaceIncarnation)) {
+        dev=interface;
+        sourcePacket=takeDirectedOriginPacketLocked();
+        request=directedOriginGate.request();
+        memcpy(sourceMac,ticket.sourceMac,sizeof(sourceMac));
+        incarnation=interfaceIncarnation;
+        generation=radioGeneration;
+        ++directedOriginOperations; // close waits for encode and final recheck.
+    } else {
+        (void)directedOriginGate.expire(now);
+        const NativeAwdlDirectedOriginTx::Snapshot state=
+            directedOriginGate.snapshot(now,true);
+        if(state.state==State::Expired)
+            expired=takeDirectedOriginPacketLocked();
+        if(directedOriginOperations>=UINT32_MAX)
+            directedOriginGate.noteRejected(Reason::CounterExhausted);
+    }
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+    freeDirectedOriginPacket(expired);
+    if(!sourcePacket)return nullptr;
+
+    uint8_t currentMac[6]{},currentIp[16]{};
+    const bool liveContextMatches=dev&&
+        ifnet_lladdr_copy_bytes(dev,currentMac,sizeof(currentMac))==0&&
+        !memcmp(currentMac,sourceMac,sizeof(currentMac))&&
+        ifnet_index(dev)==ticket.ifindex&&
+        readLiveLinkLocal(dev,request.sourceIPv6,currentIp);
+    uint8_t ethernet[kEthernetLength]{};
+    bool valid=liveContextMatches&&
+        (mbuf_flags(sourcePacket)&MBUF_PKTHDR)!=0&&
+        mbuf_pkthdr_len(sourcePacket)==sizeof(ethernet)&&
+        mbuf_copydata(sourcePacket,0,sizeof(ethernet),ethernet)==0&&
+        validateEthernet(request,sourceMac,ethernet,sizeof(ethernet),true)==
+            Reason::None;
+    uint8_t raw[kMpduLength]{};
+    size_t written=0;
+    if(valid) {
+        NativeAwdlData::EncodeInput input{};
+        memcpy(input.destinationAddress,request.peerMac,6);
+        memcpy(input.sourceAddress,sourceMac,6);
+        input.wifiSequenceNumber=wifiSequence;
+        input.awdlSequenceNumber=awdlSequence;
+        input.ipv6Packet=ethernet+14;
+        input.ipv6Length=kIpv6Length;
+        valid=NativeAwdlData::encodeIpv6DataMpdu(
+            &input,raw,sizeof(raw),&written)==NativeAwdlData::Status::Ok&&
+            written==kMpduLength;
+    }
+    mbuf_t encodedPacket=valid?packetWithHeader():nullptr;
+    if(encodedPacket) {
+        memcpy(mbuf_data(encodedPacket),raw,sizeof(raw));
+        mbuf_setlen(encodedPacket,sizeof(raw));
+        mbuf_pkthdr_setlen(encodedPacket,sizeof(raw));
+    } else {
+        valid=false;
+    }
+    mbuf_freem(sourcePacket); // Original BSD output ownership ends at pop.
+
+    bool transferred=false;
+    irq=IOSimpleLockLockDisableInterrupt(lock);
+    const uint64_t finalNow=nowUs();
+    const bool ready=directedOriginReadyLocked(interface)&&
+        radioGeneration==generation&&interfaceIncarnation==incarnation;
+    transferred=directedOriginGate.finishPop(ticket,finalNow,ready,
+        radioGeneration,interfaceIncarnation,valid&&encodedPacket!=nullptr);
+    if(directedOriginOperations)--directedOriginOperations;
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+
+    if(!transferred) {
+        freeDirectedOriginPacket(encodedPacket);
+        if(!valid)add(TxExpired);
+        return nullptr;
+    }
+    *token=ticket.ticketSerial;
+    add(TxEncoded);
+    return encodedPacket; // Caller/HAL owns the exact 96-byte MPDU mbuf.
+}
+
+void snapshotDirectedOriginTx(
+    NativeAwdlDirectedOriginTx::Snapshot *out) {
+    using namespace NativeAwdlDirectedOriginTx;
+    if(!out)return;
+    *out=NativeAwdlDirectedOriginTx::Snapshot{};
+    out->profileCompiled=true;
+    if(!bridgeLock())return;
+    mbuf_t expired=nullptr;
+    auto irq=IOSimpleLockLockDisableInterrupt(lock);
+    const uint64_t now=nowUs();
+    if(directedOriginGate.expire(now))
+        expired=takeDirectedOriginPacketLocked();
+    *out=directedOriginGate.snapshot(now,true);
+    out->packetQueued=directedOriginPacket!=nullptr;
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+    freeDirectedOriginPacket(expired);
+}
+#endif
 void gateObservation(uint32_t blockers) {
     add(GateChecks);set(GateLastBlockers,blockers);
     __atomic_fetch_or(&counters[GateReasonsSeen],uint64_t(blockers),__ATOMIC_RELAXED);
@@ -1600,11 +2010,17 @@ bool close() {
     auto ref=filter;IOSimpleLockUnlockEnableInterrupt(lock,irq);
     if(ref)iflt_detach(ref);
     cancelQueued();
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    revokeDirectedOriginTx();
+#endif
     for(unsigned i=0;i<2000;++i) {
         irq=IOSimpleLockLockDisableInterrupt(lock);
         const bool done=(!interface||detached)&&inputCalls==0&&inFlightToken==0
 #if defined(ITL_NATIVE_AWDL_REPLY_SHADOW_25G332)
             &&replyShadowOutputCalls==0
+#endif
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+            &&directedOriginOperations==0
 #endif
             ;
         ifnet_t dev=done?interface:nullptr;
@@ -1619,6 +2035,12 @@ void publishClosing() {
     if(!bridgeLock())return;
     auto irq=IOSimpleLockLockDisableInterrupt(lock);
     closing=true;radio=false;set(Closing,1);set(LinkReady,0);
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    // This is a short main-gate publication point: invalidate authority but
+    // leave any queued mbuf for close()/revoke to free outside this lock.
+    (void)directedOriginGate.revoke(
+        nowUs(),NativeAwdlDirectedOriginTx::Reason::Closed);
+#endif
 #if defined(ITL_NATIVE_AWDL_REPLY_SHADOW_25G332)
     replyShadow.retire(NativeAwdlReplyShadow::Reason::Closing);
 #endif

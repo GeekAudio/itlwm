@@ -169,6 +169,7 @@
 #include "../../native/iwx_live_key_publish.hpp"
 #include "ItlIwxP2PTx.hpp"
 #include "ItlIwxP2PAction.hpp"
+#include "ItlIwxP2PData.hpp"
 #endif
 
 /* A command-local value snapshot. Never retains ic pointers or user storage. */
@@ -529,6 +530,10 @@ public:
     IOReturn nativeP2pArmProbe() override;
     IOReturn nativeP2pArmDirectedPrepare(const uint8_t peer[6],
                                          const char runToken[33]);
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    IOReturn nativeP2pArmDirectedData(
+        const TahoeP2PDirectedDataArm &arm);
+#endif
     bool nativeP2pCommandAllowed() const;
     void tahoeP2pInitializeTask();
     int tahoeP2pStopBeforeReset(struct iwx_softc *);
@@ -636,6 +641,11 @@ public:
     uint8_t nativeP2pDirectedPreparePeer_[6] {};
     char nativeP2pDirectedPrepareRunToken_[33] {};
     uint32_t nativeP2pDirectedPrepareArmed_ {0};
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    TahoeP2PDirectedDataContext nativeP2pDirectedDataTx_;
+    TahoeP2PDirectedDataArm nativeP2pDirectedDataArmInput_ {};
+    uint32_t nativeP2pDirectedDataArmed_ {0};
+#endif
     uint32_t nativeP2pRx149LiveSnapshotRevision_ {0};
     uint64_t nativeP2pRx149LiveSnapshotOwnerSerial_ {0};
     uint32_t nativeP2pRx149LiveSnapshotValid_ {0};

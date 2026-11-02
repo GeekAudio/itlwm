@@ -1452,6 +1452,9 @@ static int removeP2pStationRole(ItlIwx *owner, struct iwx_softc *sc,
         return ESTALE;
     }
     lease->state = TahoeP2PResourceState::kAbsent;
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    lease->allocationSerial = 0;
+#endif
     *resourceMayExist = false;
     return 0;
 }
@@ -2301,6 +2304,10 @@ int iwx_tahoe_p2p_tvqm_abort_unsubmitted(
     queueLease->pendingRing = nullptr;
     queueLease->queueId = IWX_INVALID_QUEUE;
     queueLease->firmwareWritePointer = 0;
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    stationLease->allocationSerial = 0;
+    queueLease->allocationSerial = 0;
+#endif
     queueLease->unsubmittedAbortInProgress = false;
     syncQueueState(queueLease);
     unlockQueueLease(queueLease, interruptState);
@@ -2506,6 +2513,10 @@ static int abortIdleP2pQueue(
     queueLease->submissionBusy = false;
     queueLease->submissionDescriptorIndex = IWX_INVALID_QUEUE;
     queueLease->firmwareWritePointer = 0;
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    stationLease->allocationSerial = 0;
+    queueLease->allocationSerial = 0;
+#endif
     queueLease->idleAbortAfterEndInProgress = false;
     unlockQueueLease(queueLease, interruptState);
 
@@ -2818,10 +2829,174 @@ int iwx_tahoe_p2p_tvqm_confirm_drained(ItlIwx *owner, struct iwx_softc *sc,
     lease->queueId = IWX_INVALID_QUEUE;
     lease->pendingRing = nullptr;
     lease->submissionBusy = false;
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    lease->allocationSerial = 0;
+#endif
     unlockQueueLease(lease, interruptState);
     *resourceMayExist = false;
     return 0;
 }
+
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+int iwx_tahoe_p2p_tvqm_bind_allocation_serials(
+    struct iwx_softc *sc, TahoeP2PStationLease *stationLease,
+    TahoeP2PTxQueueLease *queueLease, uint64_t stationAllocationSerial,
+    uint64_t queueAllocationSerial)
+{
+    if (!sc || !stationLease || !queueLease ||
+        !stationAllocationSerial || !queueAllocationSerial ||
+        stationAllocationSerial == queueAllocationSerial ||
+        stationLease->role != TahoeP2PStationRole::kDirectedPeerLink ||
+        stationLease->state != TahoeP2PResourceState::kActive ||
+        stationLease->generation != static_cast<uint32_t>(sc->sc_generation) ||
+        queueLease->stationRole != TahoeP2PStationRole::kDirectedPeerLink ||
+        queueLease->firmwareTid != 0 ||
+        queueLease->stationId != stationLease->stationId ||
+        queueLease->generation != stationLease->generation)
+        return EINVAL;
+
+    IOInterruptState interruptState;
+    if (!lockQueueLease(queueLease, &interruptState))
+        return EBUSY;
+    const IntelP2PTx::QueueSnapshot snapshot =
+        queueLease->lifecycle.snapshot();
+    struct iwx_tx_ring *ring = nullptr;
+    if (queueLease->queueId < nitems(sc->txq))
+        ring = &sc->txq[queueLease->queueId];
+    const bool active = queueLease->state == TahoeP2PResourceState::kActive &&
+        snapshot.state == IntelP2PTx::QueueState::kActive &&
+        snapshot.generation == stationLease->generation &&
+        snapshot.stationId == stationLease->stationId &&
+        snapshot.queueId == queueLease->queueId &&
+        snapshot.outstandingTx == 0 && !snapshot.completionObserved &&
+        !queueLease->everDoorbelled && !queueLease->submissionBusy &&
+        queueLeaseHasInstalledRingLocked(sc, queueLease) &&
+        queueBindingMatchesStation(sc, stationLease, queueLease) && ring &&
+        ring->qid == queueLease->queueId && ring->ring_count >= 8 &&
+        ring->queued == 0 && ring->cur == ring->tail;
+    if (!active ||
+        (stationLease->allocationSerial != 0 &&
+         stationLease->allocationSerial != stationAllocationSerial) ||
+        (queueLease->allocationSerial != 0 &&
+         queueLease->allocationSerial != queueAllocationSerial)) {
+        unlockQueueLease(queueLease, interruptState);
+        return EBUSY;
+    }
+    stationLease->allocationSerial = stationAllocationSerial;
+    queueLease->allocationSerial = queueAllocationSerial;
+    unlockQueueLease(queueLease, interruptState);
+    return 0;
+}
+
+int iwx_tahoe_p2p_tvqm_release_after_directed_data_hardstop(
+    ItlIwx *owner, struct iwx_softc *sc,
+    TahoeP2PStationLease *stationLease,
+    TahoeP2PTxQueueLease *queueLease,
+    const TahoeP2PDirectedDataContext *dataContext)
+{
+    if (!owner || !sc || sc != &owner->com || !stationLease ||
+        !queueLease || !dataContext)
+        return EBUSY;
+    TahoeP2PDirectedDataSnapshot data{};
+    if (!iwx_tahoe_p2p_directed_data_snapshot(owner, dataContext, &data, true) ||
+        (data.stopProofMask & kTahoeP2PDirectedDataRequiredStopProofs) !=
+            kTahoeP2PDirectedDataRequiredStopProofs ||
+        data.queueId >= nitems(sc->txq) ||
+        data.queueId != queueLease->queueId ||
+        data.queueAllocationSerial == 0 ||
+        data.stationAllocationSerial == 0 ||
+        queueLease->allocationSerial != data.queueAllocationSerial ||
+        stationLease->allocationSerial != data.stationAllocationSerial ||
+        queueLease->stationRole != TahoeP2PStationRole::kDirectedPeerLink ||
+        queueLease->firmwareTid != 0 ||
+        stationLease->role != TahoeP2PStationRole::kDirectedPeerLink ||
+        stationLease->stationType != IWX_STA_LINK ||
+        queueLease->stationId != data.stationId ||
+        stationLease->stationId != data.stationId ||
+        queueLease->generation != data.generation ||
+        stationLease->generation != data.generation ||
+        static_cast<uint32_t>(sc->sc_generation) ==
+            data.generation)
+        return EBUSY;
+
+    if (!queueLease->stateLock)
+        queueLease->stateLock = owner->nativeP2pTxLock_;
+    IOInterruptState interruptState;
+    if (!lockQueueLease(queueLease, &interruptState))
+        return EBUSY;
+    struct iwx_tx_ring *ring = &sc->txq[data.queueId];
+    bool releasable =
+        (queueLease->state == TahoeP2PResourceState::kActive ||
+         queueLease->state == TahoeP2PResourceState::kRemoving ||
+         queueLease->state == TahoeP2PResourceState::kUnknown) &&
+        !queueLease->pendingRing &&
+        ring->qid == data.queueId && ring->ring_count >= 8 &&
+        ring->ring_count <= IWX_TFD_QUEUE_SIZE_MAX &&
+        (ring->ring_count & (ring->ring_count - 1)) == 0 &&
+        ring->desc && ring->cmd && ring->desc_dma.vaddr == ring->desc &&
+        ring->cmd_dma.vaddr == ring->cmd && ring->bc_tbl.vaddr &&
+        ring->queued == 0 && ring->cur == ring->tail;
+    const IntelP2PTx::QueueSnapshot lifecycle =
+        queueLease->lifecycle.snapshot();
+    releasable = releasable && lifecycle.generation ==
+        data.generation &&
+        lifecycle.queueId == data.queueId &&
+        lifecycle.stationId == data.stationId;
+    for (uint32_t slot = 0; releasable && slot < ring->ring_count; ++slot) {
+        if (!ring->data[slot].map || ring->data[slot].m ||
+            ring->data[slot].in)
+            releasable = false;
+    }
+    if (!releasable) {
+        unlockQueueLease(queueLease, interruptState);
+        return EBUSY;
+    }
+    queueLease->state = TahoeP2PResourceState::kReleasing;
+    queueLease->submissionBusy = false;
+    unlockQueueLease(queueLease, interruptState);
+
+    owner->iwx_free_tx_ring(sc, ring);
+    memset(ring, 0, sizeof(*ring));
+    ring->qid = IWX_INVALID_QUEUE;
+
+    if (!lockQueueLease(queueLease, &interruptState))
+        return EBUSY;
+    const uint32_t newGeneration = static_cast<uint32_t>(sc->sc_generation);
+    const IntelP2PTx::Result queueReset =
+        queueLease->lifecycle.resetAfterFirmwareDrain(newGeneration);
+    IntelP2PTx::Result stationReset = IntelP2PTx::Result::kSuccess;
+    const auto stationSnapshot = owner->nativeP2pStationRegistry_.snapshot();
+    if (queueReset == IntelP2PTx::Result::kSuccess &&
+        stationSnapshot.generation != 0 &&
+        stationSnapshot.generation != newGeneration) {
+        stationReset = owner->nativeP2pStationRegistry_.resetAfterFirmwareDrain(
+            newGeneration, stationSnapshot.count, true, true, true);
+    }
+    if (queueReset != IntelP2PTx::Result::kSuccess ||
+        stationReset != IntelP2PTx::Result::kSuccess) {
+        queueLease->state = TahoeP2PResourceState::kUnknown;
+        stationLease->state = TahoeP2PResourceState::kUnknown;
+        unlockQueueLease(queueLease, interruptState);
+        return EBUSY;
+    }
+    stationLease->state = TahoeP2PResourceState::kAbsent;
+    stationLease->generation = newGeneration;
+    stationLease->allocationSerial = 0;
+    queueLease->state = TahoeP2PResourceState::kAbsent;
+    queueLease->queueId = IWX_INVALID_QUEUE;
+    queueLease->stationId = stationLease->stationId;
+    queueLease->generation = newGeneration;
+    queueLease->pendingRing = nullptr;
+    queueLease->submissionBusy = false;
+    queueLease->submissionDescriptorIndex = IWX_INVALID_QUEUE;
+    queueLease->everDoorbelled = false;
+    queueLease->firmwareWritePointer = 0;
+    queueLease->allocationSerial = 0;
+    unlockQueueLease(queueLease, interruptState);
+    publishRetainedRingDiagnostic(owner, queueLease);
+    return 0;
+}
+#endif // ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
 
 #endif // AIRPORT_TAHOE
 

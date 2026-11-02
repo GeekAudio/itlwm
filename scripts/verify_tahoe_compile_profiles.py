@@ -6,7 +6,7 @@ import shlex
 import subprocess
 
 UNITS = ('ItlIwx.cpp', 'ItlIwxP2PProbe.cpp', 'ItlIwxP2PRoc.cpp',
-         'ItlIwxP2PRx.cpp', 'ItlIwxP2PTx.cpp', 'AirportItlwmV2.cpp',
+         'ItlIwxP2PRx.cpp', 'ItlIwxP2PTx.cpp', 'ItlIwxP2PAction.cpp', 'AirportItlwmV2.cpp',
          'awdl_native_bsd_data_25G332.cpp')
 PROFILES = {
     'ordinary_wifi': (),
@@ -17,6 +17,7 @@ PROFILES = {
     'rx149_preowner': ('LIFECYCLE', 'RESIDENT', 'TX_EVIDENCE', 'DISCOVERY_EXPERIMENT', 'RX149_OBSERVATION', 'RX149_DATA_INPUT'),
     'rx149_reply_shadow': ('LIFECYCLE', 'RESIDENT', 'TX_EVIDENCE', 'DISCOVERY_EXPERIMENT', 'RX149_OBSERVATION', 'RX149_DATA_INPUT', 'REPLY_SHADOW'),
     'rx149_directed_prepare': ('LIFECYCLE', 'RESIDENT', 'TX_EVIDENCE', 'DISCOVERY_EXPERIMENT', 'RX149_OBSERVATION', 'RX149_DATA_INPUT', 'DIRECTED_PREPARE'),
+    'directed_data_tx': ('LIFECYCLE', 'RESIDENT', 'TX_EVIDENCE', 'DISCOVERY_EXPERIMENT', 'RX149_OBSERVATION', 'RX149_DATA_INPUT', 'DIRECTED_PREPARE', 'DIRECTED_DATA_TX'),
 }
 
 def expand_response_files(arguments):

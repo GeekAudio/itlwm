@@ -1826,7 +1826,8 @@ bool ItlIwx::nativeP2pResourcesRetained()
         kStopBlockedByStation = 1u << 2,
         kStopBlockedByP2pMac = 1u << 3,
         kStopBlockedByBinding = 1u << 4,
-        kStopBlockedByPhy = 1u << 5
+        kStopBlockedByPhy = 1u << 5,
+        kStopBlockedByDirectedData = 1u << 6
     };
 
     const bool workerBusy = nativeP2pBusy();
@@ -1838,6 +1839,11 @@ bool ItlIwx::nativeP2pResourcesRetained()
     uint32_t macState = UINT32_MAX, bindingState = UINT32_MAX;
     uint32_t phyLeased = UINT32_MAX, firmwareGeneration = UINT32_MAX;
     uint32_t queuePending = UINT32_MAX;
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    uint32_t directedDataState = UINT32_MAX;
+    uint32_t directedDataReason = UINT32_MAX;
+    uint32_t directedDataFlags = UINT32_MAX;
+#endif
 
     if (!workerBusy) {
         TahoeP2PResourceState localQueueState;
@@ -1888,6 +1894,39 @@ bool ItlIwx::nativeP2pResourcesRetained()
             reason |= kStopBlockedByBinding;
         if (com.sc_p2p.phy_leased)
             reason |= kStopBlockedByPhy;
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+        TahoeP2PDirectedDataSnapshot data{};
+        const bool dataSnapshotValid = iwx_tahoe_p2p_directed_data_snapshot(
+            this, &nativeP2pDirectedDataTx_, &data, true);
+        const bool dataRetained = !dataSnapshotValid ||
+            data.state == TahoeP2PDirectedDataState::kArmed ||
+            data.state == TahoeP2PDirectedDataState::kTicketBound ||
+            data.state == TahoeP2PDirectedDataState::kPermitIssued ||
+            data.state == TahoeP2PDirectedDataState::kInFlight ||
+            data.state == TahoeP2PDirectedDataState::kQuarantined ||
+            (data.originTicketBound && !data.originClosed) ||
+            (!data.hardStopDrained && data.doorbellIssued &&
+             !data.completionObserved) ||
+            (data.completionArmed && !data.completionObserved) ||
+            data.mbufHeldByRing;
+        directedDataState = dataSnapshotValid ?
+            static_cast<uint32_t>(data.state) :
+            static_cast<uint32_t>(TahoeP2PDirectedDataState::kQuarantined);
+        directedDataReason = dataSnapshotValid ?
+            static_cast<uint32_t>(data.reason) :
+            static_cast<uint32_t>(TahoeP2PDirectedDataReason::kDrainMismatch);
+        directedDataFlags = (dataSnapshotValid && data.originTicketBound ? 1u : 0u) |
+            (dataSnapshotValid && data.originClosed ? 1u << 1 : 0u) |
+            (dataSnapshotValid && data.doorbellIssued ? 1u << 2 : 0u) |
+            (dataSnapshotValid && data.completionObserved ? 1u << 3 : 0u) |
+            (dataSnapshotValid && data.mbufHeldByRing ? 1u << 4 : 0u) |
+            (dataSnapshotValid && data.completionArmed ? 1u << 5 : 0u) |
+            (dataSnapshotValid && data.completionObserved ? 1u << 6 : 0u) |
+            (dataSnapshotValid && data.hardStopDrained ? 1u << 7 : 0u) |
+            (!dataSnapshotValid ? 1u << 31 : 0u);
+        if (dataRetained)
+            reason |= kStopBlockedByDirectedData;
+#endif
     }
 
     const bool retained = reason != 0;
@@ -1911,6 +1950,11 @@ bool ItlIwx::nativeP2pResourcesRetained()
     mix(bindingState);
     mix(phyLeased);
     mix(firmwareGeneration);
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    mix(directedDataState);
+    mix(directedDataReason);
+    mix(directedDataFlags);
+#endif
     const uint64_t previous = retained ? __atomic_exchange_n(
         &nativeP2pStopRejectFingerprint_, fingerprint, __ATOMIC_ACQ_REL) : 0;
 
@@ -2708,6 +2752,17 @@ detach(IOPCIDevice *device)
         if (stopError != 0 || nativeP2pTxQueue_.retainedRing) {
             XYLog("retained P2P DMA could not be retired during detach; preserving device resources\n");
             retain(); // Keep the only DMA owner reachable until a safe restart.
+            return;
+        }
+    }
+#endif
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    for (int txq_i = 0; txq_i < nitems(sc->txq); ++txq_i) {
+        if (iwx_tahoe_p2p_directed_data_defer_tx_ring_reset(
+                this, &nativeP2pDirectedDataTx_, &nativeP2pTxQueue_,
+                static_cast<uint16_t>(txq_i))) {
+            XYLog("directed P2P data DMA remains owned during detach; preserving device resources\n");
+            retain();
             return;
         }
     }
@@ -6115,14 +6170,32 @@ iwx_stop_device(struct iwx_softc *sc)
 #endif
     XYLog("%s\n", __FUNCTION__);
     int qid;
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    bool directedDataRingResetDeferred = false;
+    TahoeP2PDirectedDataSnapshot directedDataBeforeStop{};
+    const bool directedDataSnapshotValid =
+        iwx_tahoe_p2p_directed_data_snapshot(
+            this, &nativeP2pDirectedDataTx_, &directedDataBeforeStop, true);
+    const uint16_t directedDataQueueId = directedDataSnapshotValid ?
+        directedDataBeforeStop.queueId : IWX_INVALID_QUEUE;
+#endif
     
     iwx_disable_interrupts(sc);
     sc->sc_flags &= ~IWX_FLAG_USE_ICT;
     
     iwx_disable_rx_dma(sc);
     iwx_reset_rx_ring(sc, &sc->rxq);
-    for (qid = 0; qid < nitems(sc->txq); qid++)
+    for (qid = 0; qid < nitems(sc->txq); qid++) {
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+        if (iwx_tahoe_p2p_directed_data_defer_tx_ring_reset(
+                this, &nativeP2pDirectedDataTx_, &nativeP2pTxQueue_,
+                static_cast<uint16_t>(qid))) {
+            directedDataRingResetDeferred = true;
+            continue;
+        }
+#endif
         iwx_reset_tx_ring(sc, &sc->txq[qid]);
+    }
     
     /* Make sure (redundant) we've released our request to stay awake */
     IWX_CLRBITS(sc, IWX_CSR_GP_CNTRL,
@@ -6134,10 +6207,47 @@ iwx_stop_device(struct iwx_softc *sc)
     
     /* Stop the device, and put it in low power state */
     const int masterDisableError = iwx_apm_stop(sc);
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    if (masterDisableError == 0)
+        iwx_tahoe_p2p_directed_data_record_stop_proof(
+            &nativeP2pDirectedDataTx_,
+            TahoeP2PDirectedDataStopProof::kMasterDisabledObserved);
+#endif
     
     /* Reset the on-board processor. */
     IWX_SETBITS(sc, IWX_CSR_RESET, IWX_CSR_RESET_REG_FLAG_SW_RESET);
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    iwx_tahoe_p2p_directed_data_record_stop_proof(
+        &nativeP2pDirectedDataTx_,
+        TahoeP2PDirectedDataStopProof::kSwResetIssued);
+#endif
     DELAY(5000);
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    int directedDataDrainError = 0;
+    if (directedDataRingResetDeferred) {
+        if (masterDisableError != 0 ||
+            directedDataQueueId >= nitems(sc->txq)) {
+            directedDataDrainError = EBUSY;
+        } else {
+            // The exact queue was deliberately skipped by the generic
+            // pre-stop reset loop. Reset it only after checked master disable
+            // and SW_RESET have both been observed on this stop path.
+            iwx_reset_tx_ring(sc, &sc->txq[directedDataQueueId]);
+            iwx_tahoe_p2p_directed_data_record_stop_proof(
+                &nativeP2pDirectedDataTx_,
+                TahoeP2PDirectedDataStopProof::kOwnedTxRingResetAfterStop);
+            directedDataDrainError =
+                iwx_tahoe_p2p_directed_data_drain_after_hardstop(
+                    this, sc, &nativeP2pStation_, &nativeP2pTxQueue_,
+                    &nativeP2pDirectedDataTx_);
+        }
+        if (getController())
+            getController()->setProperty("NativeP2PDirectedDataHardStopDrain",
+                uint32_t(directedDataDrainError), 32);
+    }
+#else
+    const int directedDataDrainError = 0;
+#endif
 #ifdef AIRPORT_TAHOE
     // Displaced rings are deliberately outside sc->txq, so the earlier
     // software reset loop cannot touch their DMA. Retire them only after
@@ -6182,7 +6292,8 @@ iwx_stop_device(struct iwx_softc *sc)
     // been reset. Serialize with the notification consumer before retiring
     // the old scan lease; merely receiving READY cannot prove this drain.
     tahoeScanResetComplete();
-    if (masterDisableError == 0 && retainedReleaseError == 0) {
+    if (masterDisableError == 0 && retainedReleaseError == 0 &&
+        directedDataDrainError == 0) {
         iwx_tahoe_p2p_action_tx_firmware_drained(
             &nativeP2pActionTx_, uint32_t(sc->sc_generation), true);
         tahoeP2pResetDrained(sc, uint32_t(sc->sc_generation));
@@ -9833,10 +9944,16 @@ iwx_rx_tx_ba_notif(struct iwx_softc *sc, struct iwx_rx_packet *pkt, struct iwx_r
 
 #ifdef AIRPORT_TAHOE
     if (ic->ic_opmode == IEEE80211_M_STA && ba_res->sta_id != IWX_STATION_ID) {
-        for (uint16_t entry = 0; entry < tfdCount; ++entry)
+        for (uint16_t entry = 0; entry < tfdCount; ++entry) {
+            const uint16_t queueId = le16toh(ba_res->tfd[entry].q_num);
             (void)iwx_tahoe_p2p_action_reject_ba_queue(
                 &nativeP2pTxQueue_, &nativeP2pActionTx_,
-                le16toh(ba_res->tfd[entry].q_num));
+                queueId);
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+            (void)iwx_tahoe_p2p_directed_data_reject_ba(
+                &nativeP2pTxQueue_, &nativeP2pDirectedDataTx_, queueId);
+#endif
+        }
         baCompletion.setReason(IWX_TX_COMPLETION_BA_STA_ID_MISMATCH);
         return;
     }
@@ -9972,6 +10089,13 @@ iwx_rx_tx_ba_notif(struct iwx_softc *sc, struct iwx_rx_packet *pkt, struct iwx_r
             tfdCompletion.setReason(IWX_TX_COMPLETION_BA_TFD_P2P_OWNED);
             continue;
         }
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+        if (iwx_tahoe_p2p_directed_data_reject_ba(
+                &nativeP2pTxQueue_, &nativeP2pDirectedDataTx_, queueId)) {
+            tfdCompletion.setReason(IWX_TX_COMPLETION_BA_TFD_P2P_OWNED);
+            continue;
+        }
+#endif
 #endif
         qid = static_cast<uint8_t>(queueId);
         ring = &sc->txq[qid];
@@ -19764,6 +19888,27 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
                         IWX_TX_PROGRESS_RESPONSE_DISPATCH,
                         IWX_TX_PROGRESS_RESPONSE_TX_RSP, responsePresent,
                         responseQid, 0, 0, 0, 0, 0, false);
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+                    if (iwx_tahoe_p2p_directed_data_tx_response(this, sc,
+                            &nativeP2pStation_, &nativeP2pTxQueue_,
+                            &nativeP2pDirectedDataTx_, pkt, data)) {
+                        iwx_tx_completion_event_input completionEvent =
+                            txCompletionRxInput(
+                                IWX_TX_COMPLETION_TX_RSP,
+                                IWX_TX_COMPLETION_STAGE_TX_RSP_TERMINAL,
+                                IWX_TX_COMPLETION_TX_RSP_P2P_OWNER_CONSUMED,
+                                pkt);
+                        txCompletionSetTxRspFacts(&completionEvent, pkt,
+                                                  responseLength);
+                        recordTxCompletionEvent(sc, completionEvent);
+                        recordTxProgressEvent(sc,
+                            IWX_TX_PROGRESS_RESPONSE_DISPATCH,
+                            IWX_TX_PROGRESS_RESPONSE_P2P_CONSUMED,
+                            responsePresent, responseQid, 0, 0, 0, 0, 0,
+                            false);
+                        break;
+                    }
+#endif
                     if (iwx_tahoe_p2p_action_tx_response(this, sc,
                             &nativeP2pTxQueue_, &nativeP2pActionTx_, pkt,
                             data)) {

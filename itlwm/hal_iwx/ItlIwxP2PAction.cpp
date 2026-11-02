@@ -9,6 +9,11 @@
 #include "../../native/awdl_action_encode.hpp"
 #include "../../native/awdl_advertisement_identity.hpp"
 #include "../../native/awdl_mif_encode.hpp"
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+#include "ItlIwxP2PData.hpp"
+#include "../../native/awdl_native_bsd_data_25G332.hpp"
+#include "../../native/awdl_data_frame.hpp"
+#endif
 #if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
 #include "../../native/awdl_native_bsd_data_25G332.hpp"
 #include "../../native/awdl_data_frame.hpp"
@@ -2367,5 +2372,1588 @@ void iwx_tahoe_p2p_action_tx_mark_evidence_unknown(
     markP2PTxEvidenceUnknown(context, additionalFlags);
 }
 #endif
+
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+namespace {
+
+static uint64_t directedDataMonotonicUs()
+{
+    uint64_t uptime = 0, nanoseconds = 0;
+    clock_get_uptime(&uptime);
+    absolutetime_to_nanoseconds(uptime, &nanoseconds);
+    return nanoseconds / 1000ULL;
+}
+
+static uint16_t directedDataReadLe16(const uint8_t *bytes)
+{
+    return static_cast<uint16_t>(bytes[0] |
+        (static_cast<uint16_t>(bytes[1]) << 8));
+}
+
+static bool directedDataSameEpochs(
+    const TahoeP2PDirectedDataEpochs &left,
+    const TahoeP2PDirectedDataEpochs &right)
+{
+    return NativeAwdlDirectedOriginTx::sameEpochs(left, right);
+}
+
+static bool directedDataCurrent(ItlIwx *owner, struct iwx_softc *sc,
+    const TahoeP2PDirectedDataContext *context, bool requireRoc)
+{
+    if (!owner || !sc || sc != &owner->com || !context ||
+        !owner->nativeP2pCommandAllowed())
+        return false;
+    const auto &binding = context->binding;
+    if (!binding.ownerSerial || !binding.runSerial ||
+        !NativeAwdlDirectedOriginTx::validEpochs(binding.epochs) ||
+        binding.generation != binding.epochs.power ||
+        binding.epochs.context != owner->nativeP2pProbeGeneration_ ||
+        binding.epochs.power != static_cast<uint32_t>(sc->sc_generation) ||
+        binding.epochs.station != __atomic_load_n(
+            &sc->sc_tx_rate_generation, __ATOMIC_ACQUIRE) ||
+        !binding.p2pFirmwareGeneration ||
+        sc->sc_p2p.fw_generation != binding.p2pFirmwareGeneration ||
+        !sc->sc_p2p.initialized ||
+        sc->sc_p2p.mac_state != IWX_P2P_RESOURCE_ACTIVE ||
+        sc->sc_p2p.binding_state != IWX_P2P_RESOURCE_ACTIVE ||
+        !sc->sc_p2p.phy_leased ||
+        sc->sc_ic.ic_state != IEEE80211_S_RUN || !sc->sc_ic.ic_bss ||
+        owner->nativeAwdlRxEventOwnerSerial_ != binding.ownerSerial)
+        return false;
+
+    const NativeAwdlRxTrace::Snapshot trace =
+        owner->nativeAwdlRxEventTimeline_.snapshot();
+    const NativeAwdlRxTrace::Epochs expected{
+        binding.epochs.context, binding.epochs.power,
+        binding.epochs.station, binding.epochs.roc};
+    if (!trace.ownerPresent || !trace.active || trace.producerClosed ||
+        trace.ownerSerial != binding.ownerSerial ||
+        !NativeAwdlRxTrace::sameEpochs(trace.epochs, expected))
+        return false;
+    if (!requireRoc)
+        return true;
+    return context->originWindowBound && binding.rocToken != 0 &&
+        binding.rocToken == binding.epochs.roc &&
+        sc->sc_p2p_roc.token == binding.rocToken &&
+        sc->sc_p2p_roc.fw_generation == binding.p2pFirmwareGeneration &&
+        sc->sc_p2p_roc.roc_channel &&
+        sc->sc_p2p_roc.roc_channel->ic_freq == 2437 &&
+        ieee80211_chan2ieee(&sc->sc_ic,
+            sc->sc_p2p_roc.roc_channel) == 6 &&
+        sc->sc_p2p_roc.phase == IWX_P2P_ROC_SESSION_ACKED;
+}
+
+struct DirectedDataGateCheck {
+    TahoeP2PDirectedDataContext *context;
+    bool valid;
+};
+
+static bool directedDataMainGateCheck(ItlIwx *owner,
+    TahoeP2PDirectedDataContext *context)
+{
+    if (!owner || !context || !owner->tahoeP2pOnMainGate())
+        return false;
+    struct iwx_softc *sc = &owner->com;
+    if (!directedDataCurrent(owner, sc, context, true))
+        return false;
+
+    const uint32_t noticeBefore = __atomic_load_n(
+        &sc->sc_native_mcc_notice_generation, __ATOMIC_ACQUIRE);
+    const uint32_t responsePresent = sc->sc_native_mcc_response_present;
+    const uint32_t responseNotice = sc->sc_native_mcc_response_notice_generation;
+    const uint32_t responseGeneration =
+        sc->sc_native_mcc_response_firmware_generation;
+    const uint32_t responseStatus = sc->sc_native_mcc_response_status;
+    const uint32_t appliedNotice = sc->sc_native_mcc_applied_notice_generation;
+    const uint32_t appliedGeneration =
+        sc->sc_native_mcc_applied_firmware_generation;
+    const uint32_t pending = __atomic_load_n(
+        &sc->sc_native_mcc_pending, __ATOMIC_ACQUIRE);
+    const uint32_t noticeAfter = __atomic_load_n(
+        &sc->sc_native_mcc_notice_generation, __ATOMIC_ACQUIRE);
+    const uint32_t generation = static_cast<uint32_t>(sc->sc_generation);
+    const struct ieee80211_channel *channel = &sc->sc_ic.ic_channels[6];
+    const bool channelAllowed = channel->ic_freq == 2437 &&
+        channel->ic_flags != 0 &&
+        (channel->ic_flags & IEEE80211_CHAN_2GHZ) != 0 &&
+        (channel->ic_flags & (IEEE80211_CHAN_PASSIVE | IEEE80211_CHAN_DFS)) == 0 &&
+        ieee80211_chan2ieee(&sc->sc_ic,
+            const_cast<struct ieee80211_channel *>(channel)) == 6;
+    return noticeBefore != 0 && (noticeBefore & 1u) == 0 &&
+        noticeBefore == noticeAfter && responsePresent == 1 &&
+        responseNotice == noticeBefore && responseGeneration == generation &&
+        responseStatus == 0 && appliedNotice == noticeBefore &&
+        appliedGeneration == generation && pending == 0 && channelAllowed;
+}
+
+static IOReturn directedDataMainGateCheckAction(
+    OSObject *, void *ownerArg, void *checkArg, void *, void *)
+{
+    auto *owner = static_cast<ItlIwx *>(ownerArg);
+    auto *check = static_cast<DirectedDataGateCheck *>(checkArg);
+    if (!owner || !check || !check->context ||
+        !owner->tahoeP2pOnMainGate())
+        return kIOReturnBadArgument;
+    check->valid = directedDataMainGateCheck(owner, check->context);
+    return check->valid ? kIOReturnSuccess : kIOReturnNotReady;
+}
+
+static bool directedDataFreshMccAndRoc(ItlIwx *owner,
+    TahoeP2PDirectedDataContext *context)
+{
+    if (!owner || !context)
+        return false;
+    DirectedDataGateCheck check{context, false};
+    if (owner->tahoeP2pOnMainGate())
+        return directedDataMainGateCheck(owner, context);
+    IOCommandGate *gate = owner->tahoeP2pCommandGate();
+    return gate && gate->attemptAction(directedDataMainGateCheckAction,
+        owner, &check, nullptr, nullptr) == kIOReturnSuccess && check.valid;
+}
+
+using DirectedDataGateAction = IOReturn (*)(OSObject *, void *, void *,
+                                              void *, void *);
+
+static IOReturn directedDataRunMainGateAction(
+    ItlIwx *owner, DirectedDataGateAction action, void *argument,
+    bool tryOnly = false)
+{
+    if (!owner || !action)
+        return kIOReturnBadArgument;
+    if (owner->tahoeP2pOnMainGate())
+        return action(owner, owner, argument, nullptr, nullptr);
+    IOCommandGate *gate = owner->tahoeP2pCommandGate();
+    if (!gate)
+        return kIOReturnNotReady;
+    return tryOnly ? gate->attemptAction(action, owner, argument, nullptr,
+        nullptr) : gate->runAction(action, owner, argument, nullptr, nullptr);
+}
+
+struct DirectedDataSerialAction {
+    TahoeP2PDirectedDataContext *context;
+    uint64_t serial;
+    int result;
+};
+
+static IOReturn directedDataNextAllocationSerialAction(
+    OSObject *, void *ownerArg, void *actionArg, void *, void *)
+{
+    auto *owner = static_cast<ItlIwx *>(ownerArg);
+    auto *action = static_cast<DirectedDataSerialAction *>(actionArg);
+    if (!owner || !action || !action->context ||
+        !owner->tahoeP2pOnMainGate())
+        return kIOReturnBadArgument;
+    if (action->context->allocationSerialHighWater == UINT64_MAX) {
+        action->result = EOVERFLOW;
+        return kIOReturnSuccess;
+    }
+    action->serial = ++action->context->allocationSerialHighWater;
+    action->result = 0;
+    return kIOReturnSuccess;
+}
+
+static bool directedDataTicketMatchesBinding(
+    const TahoeP2PDirectedDataContext *context,
+    const TahoeP2PDirectedDataOriginTicket &ticket)
+{
+    if (!context || !context->originWindowBound ||
+        !context->binding.ownerSerial || !context->binding.runSerial ||
+        !ticket.ticketSerial || !ticket.interfaceIncarnation || !ticket.ifindex)
+        return false;
+    const auto &binding = context->binding;
+    return ticket.ownerSerial == binding.ownerSerial &&
+        ticket.runSerial == binding.runSerial &&
+        directedDataSameEpochs(ticket.epochs, binding.epochs) &&
+        ticket.rocStartUs == binding.rocStartUs &&
+        ticket.deadlineUs == binding.deadlineUs &&
+        NativeAwdlDirectedOriginTx::validUnicastMac(ticket.sourceMac);
+}
+
+static bool directedDataDecodeMbuf(
+    const TahoeP2PDirectedDataContext *context,
+    const TahoeP2PDirectedDataOriginTicket &ticket, mbuf_t packet,
+    uint8_t raw[NativeAwdlDirectedOriginTx::kMpduLength],
+    NativeAwdlData::DecodedFrame *decoded)
+{
+    using namespace NativeAwdlDirectedOriginTx;
+    if (!context || !packet || !raw || !decoded ||
+        (mbuf_flags(packet) & MBUF_PKTHDR) == 0 ||
+        mbuf_pkthdr_len(packet) != kMpduLength ||
+        mbuf_copydata(packet, 0, static_cast<int>(kMpduLength),
+                      reinterpret_cast<caddr_t>(raw)) != 0 ||
+        NativeAwdlData::decodeIpv6DataMpdu(raw, kMpduLength, decoded) !=
+            NativeAwdlData::Status::Ok)
+        return false;
+
+    if (decoded->frameControl != 0x0008 || decoded->qosData ||
+        decoded->packetCount != 1 || decoded->packets[0].ipv6Length !=
+            kIpv6Length || memcmp(raw + 4, context->arm.peerMac, 6) != 0 ||
+        memcmp(raw + 10, ticket.sourceMac, 6) != 0 ||
+        !context->sequenceReservationValid ||
+        decoded->wifiSequenceNumber != context->reservedWifiSequence ||
+        decoded->packets[0].awdlSequenceNumber !=
+            context->reservedAwdlSequence ||
+        (directedDataReadLe16(raw + 22) & 0x000f) != 0)
+        return false;
+
+    const uint8_t *ipv6 = decoded->packets[0].ipv6Packet;
+    if (!ipv6 || (ipv6[0] >> 4) != 6 ||
+        NativeAwdlDirectedOriginTx::readBe16(ipv6 + 4) != kUdpLength ||
+        ipv6[6] != 17 || ipv6[7] != 1 ||
+        memcmp(ipv6 + 8, context->arm.localIpv6, 16) != 0)
+        return false;
+    static const uint8_t allNodes[16] = {
+        0xff, 0x02, 0, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 1
+    };
+    if (memcmp(ipv6 + 24, allNodes, sizeof(allNodes)) != 0)
+        return false;
+    const uint8_t *udp = ipv6 + 40;
+    if (NativeAwdlDirectedOriginTx::readBe16(udp) != kSourcePort ||
+        NativeAwdlDirectedOriginTx::readBe16(udp + 2) != kDestinationPort ||
+        NativeAwdlDirectedOriginTx::readBe16(udp + 4) != kUdpLength ||
+        memcmp(udp + 8, context->arm.nonce, kNonceLength) != 0)
+        return false;
+    uint32_t sum = uint32_t(kUdpLength) + 17u;
+    for (size_t i = 8; i < 40; i += 2)
+        sum += NativeAwdlDirectedOriginTx::readBe16(ipv6 + i);
+    for (size_t i = 40; i < kIpv6Length; i += 2)
+        sum += NativeAwdlDirectedOriginTx::readBe16(ipv6 + i);
+    while (sum >> 16)
+        sum = (sum & 0xffffu) + (sum >> 16);
+    return NativeAwdlDirectedOriginTx::readBe16(udp + 6) != 0 &&
+        sum == 0xffffu;
+}
+
+static void directedDataClearDescriptor(struct iwx_tfh_tfd *descriptor)
+{
+    if (!descriptor)
+        return;
+    const uint16_t used = le16toh(descriptor->num_tbs) & 0x1f;
+    for (uint16_t i = 0; i < used; ++i)
+        memset(&descriptor->tbs[i], 0, sizeof(descriptor->tbs[i]));
+    descriptor->num_tbs = 0;
+}
+
+static void directedDataMarkCompletedClosed(
+    TahoeP2PDirectedDataContext *context)
+{
+    if (context && context->state == TahoeP2PDirectedDataState::kCompleted &&
+        context->completionObserved && !context->mbufHeldByRing)
+        context->state = TahoeP2PDirectedDataState::kClosed;
+}
+
+static void directedDataClearSlot(struct iwx_tx_ring *ring, uint16_t index)
+{
+    if (!ring || index >= ring->ring_count)
+        return;
+    directedDataClearDescriptor(ring->desc ? &ring->desc[index] : nullptr);
+    ring->data[index].m = nullptr;
+    ring->data[index].in = nullptr;
+    ring->data[index].type = 0;
+}
+
+static bool directedDataPermitMatches(
+    const TahoeP2PDirectedDataContext *context,
+    const TahoeP2PDirectedDataPermit *permit,
+    const TahoeP2PStationLease *stationLease,
+    const TahoeP2PTxQueueLease *queueLease)
+{
+    if (!context || !permit || !stationLease || !queueLease || !permit->valid)
+        return false;
+    const auto &saved = context->permit;
+    return context->permitIssued && saved.valid &&
+        permit->permitSerial == saved.permitSerial &&
+        permit->armSerial == saved.armSerial &&
+        permit->ticketSerial == saved.ticketSerial &&
+        permit->packetToken == saved.packetToken &&
+        permit->ownerSerial == saved.ownerSerial &&
+        permit->runSerial == saved.runSerial &&
+        permit->interfaceIncarnation == saved.interfaceIncarnation &&
+        permit->stationAllocationSerial == saved.stationAllocationSerial &&
+        permit->queueAllocationSerial == saved.queueAllocationSerial &&
+        permit->ifindex == saved.ifindex &&
+        directedDataSameEpochs(permit->epochs, saved.epochs) &&
+        permit->generation == saved.generation &&
+        permit->p2pFirmwareGeneration == saved.p2pFirmwareGeneration &&
+        permit->rocToken == saved.rocToken &&
+        permit->deadlineUs == saved.deadlineUs &&
+        permit->queueId == saved.queueId &&
+        permit->stationId == saved.stationId &&
+        context->stationAllocationSerial == stationLease->allocationSerial &&
+        context->queueAllocationSerial == queueLease->allocationSerial &&
+        context->queueId == queueLease->queueId &&
+        context->stationId == stationLease->stationId;
+}
+
+static int directedDataFailBeforeDoorbell(
+    TahoeP2PDirectedDataContext *context,
+    TahoeP2PDirectedDataReason reason, mbuf_t packet, int error)
+{
+    if (packet)
+        mbuf_freem(packet);
+    if (context && !context->doorbellIssued &&
+        context->state != TahoeP2PDirectedDataState::kQuarantined) {
+        context->reason = reason;
+        context->state = TahoeP2PDirectedDataState::kClosed;
+        context->permitIssued = false;
+        context->permit.valid = false;
+    }
+    return error;
+}
+
+} // namespace
+
+uint64_t iwx_tahoe_p2p_directed_data_next_allocation_serial(
+    ItlIwx *owner, TahoeP2PDirectedDataContext *context)
+{
+    if (!owner || !context)
+        return 0;
+    DirectedDataSerialAction action{context, 0, EBUSY};
+    if (directedDataRunMainGateAction(owner,
+            directedDataNextAllocationSerialAction, &action) !=
+        kIOReturnSuccess)
+        return 0;
+    return action.result == 0 ? action.serial : 0;
+}
+
+int iwx_tahoe_p2p_directed_data_arm(
+    ItlIwx *owner, struct iwx_softc *sc,
+    TahoeP2PDirectedDataContext *context,
+    const TahoeP2PDirectedDataArm *arm, uint64_t ownerSerial,
+    const TahoeP2PDirectedDataEpochs *epochs, uint32_t generation,
+    TahoeP2PStationLease *stationLease,
+    TahoeP2PTxQueueLease *queueLease,
+    TahoeP2PDirectedDataBinding *bindingOut)
+{
+    if (bindingOut)
+        *bindingOut = {};
+    if (!owner || !sc || sc != &owner->com ||
+        !owner->tahoeP2pOnMainGate() || !context || !arm ||
+        !ownerSerial || !epochs || !stationLease || !queueLease ||
+        !bindingOut || !generation || !NativeAwdlDirectedOriginTx::validEpochs(
+            *epochs) || epochs->power != generation ||
+        !NativeAwdlDirectedOriginTx::validUnicastMac(arm->peerMac) ||
+        !NativeAwdlDirectedOriginTx::nonzeroNonce(arm->nonce) ||
+        !NativeAwdlDirectedOriginTx::isLinkLocal(arm->localIpv6) ||
+        sc->sc_p2p.fw_generation == 0 ||
+        !sc->sc_p2p.initialized ||
+        sc->sc_p2p.mac_state != IWX_P2P_RESOURCE_ACTIVE ||
+        sc->sc_p2p.binding_state != IWX_P2P_RESOURCE_ACTIVE ||
+        !sc->sc_p2p.phy_leased ||
+        arm->runToken[32] != '\0' || arm->runToken[0] == '\0' ||
+        (context->state != TahoeP2PDirectedDataState::kIdle &&
+         context->state != TahoeP2PDirectedDataState::kClosed) ||
+        context->doorbellIssued || context->mbufHeldByRing ||
+        (context->completion.snapshot().armed &&
+         !context->completion.snapshot().completed))
+        return EINVAL;
+    if (context->armSerialHighWater == UINT64_MAX)
+        return EOVERFLOW;
+    const uint32_t currentGeneration = static_cast<uint32_t>(sc->sc_generation);
+    if (generation != currentGeneration || epochs->context !=
+            owner->nativeP2pProbeGeneration_ || epochs->station !=
+            __atomic_load_n(&sc->sc_tx_rate_generation, __ATOMIC_ACQUIRE) ||
+        ownerSerial != owner->nativeAwdlRxEventOwnerSerial_ ||
+        stationLease->state != TahoeP2PResourceState::kActive ||
+        stationLease->generation != generation ||
+        stationLease->role != TahoeP2PStationRole::kDirectedPeerLink ||
+        stationLease->stationType != IWX_STA_LINK ||
+        memcmp(stationLease->address, arm->peerMac, 6) != 0 ||
+        queueLease->state != TahoeP2PResourceState::kActive ||
+        queueLease->generation != generation ||
+        queueLease->stationId != stationLease->stationId ||
+        queueLease->stationRole != TahoeP2PStationRole::kDirectedPeerLink ||
+        queueLease->firmwareTid != 0)
+        return ESTALE;
+    const NativeAwdlRxTrace::Snapshot trace =
+        owner->nativeAwdlRxEventTimeline_.snapshot();
+    const NativeAwdlRxTrace::Epochs expected{
+        epochs->context, epochs->power, epochs->station, epochs->roc};
+    if (!trace.ownerPresent || !trace.active || trace.producerClosed ||
+        trace.ownerSerial != ownerSerial ||
+        !NativeAwdlRxTrace::sameEpochs(trace.epochs, expected))
+        return ESTALE;
+
+    uint64_t stationSerial = stationLease->allocationSerial;
+    uint64_t queueSerial = queueLease->allocationSerial;
+    if (!stationSerial)
+        stationSerial = iwx_tahoe_p2p_directed_data_next_allocation_serial(
+            owner, context);
+    if (!queueSerial)
+        queueSerial = iwx_tahoe_p2p_directed_data_next_allocation_serial(
+            owner, context);
+    if (!stationSerial || !queueSerial || stationSerial == queueSerial)
+        return EOVERFLOW;
+    const int serialError = iwx_tahoe_p2p_tvqm_bind_allocation_serials(
+        sc, stationLease, queueLease, stationSerial, queueSerial);
+    if (serialError)
+        return serialError;
+
+    ++context->armSerialHighWater;
+    memset(&context->arm, 0, sizeof(context->arm));
+    memcpy(&context->arm, arm, sizeof(context->arm));
+    memset(&context->binding, 0, sizeof(context->binding));
+    context->binding.ownerSerial = ownerSerial;
+    context->binding.runSerial = context->armSerialHighWater;
+    context->binding.epochs = *epochs;
+    context->binding.generation = generation;
+    context->binding.p2pFirmwareGeneration = sc->sc_p2p.fw_generation;
+    memset(&context->originTicket, 0, sizeof(context->originTicket));
+    memset(&context->permit, 0, sizeof(context->permit));
+    context->reason = TahoeP2PDirectedDataReason::kNone;
+    context->stationAllocationSerial = stationSerial;
+    context->queueAllocationSerial = queueSerial;
+    context->packetToken = 0;
+    context->interfaceIncarnation = 0;
+    context->ifindex = 0;
+    context->queueId = queueLease->queueId;
+    context->stationId = stationLease->stationId;
+    context->descriptorIndex = 0xffff;
+    context->ringSize = 0;
+    context->sequenceControl = 0;
+    context->frameControl = 0;
+    context->byteCount = 0;
+    context->expectedNextSsn = 0xffff;
+    context->firmwareStatus = 0xffff;
+    __atomic_store_n(&context->stopProofMask, 0u, __ATOMIC_RELEASE);
+    context->ticketBound = false;
+    context->originWindowBound = false;
+    context->originClosed = false;
+    context->permitIssued = false;
+    context->doorbellIssued = false;
+    context->completionObserved = false;
+    context->frameAttemptSucceeded = false;
+    context->mbufHeldByRing = false;
+    context->hardStopDrained = false;
+    context->sequenceReservationValid = false;
+    context->reservedWifiSequence = 0;
+    context->reservedAwdlSequence = 0;
+    context->state = TahoeP2PDirectedDataState::kArmed;
+    *bindingOut = context->binding;
+    return 0;
+}
+
+struct DirectedDataWindowAction {
+    TahoeP2PDirectedDataContext *context;
+    uint64_t rocToken;
+    uint64_t rocStartUs;
+    uint64_t deadlineUs;
+    int result;
+};
+
+static IOReturn directedDataBindOriginWindowAction(
+    OSObject *, void *ownerArg, void *actionArg, void *, void *)
+{
+    auto *owner = static_cast<ItlIwx *>(ownerArg);
+    auto *action = static_cast<DirectedDataWindowAction *>(actionArg);
+    TahoeP2PDirectedDataContext *context = action ? action->context : nullptr;
+    if (!owner || !action || !context || !owner->tahoeP2pOnMainGate())
+        return kIOReturnBadArgument;
+    if (!context || context->state != TahoeP2PDirectedDataState::kArmed ||
+        context->ticketBound || !action->rocToken ||
+        action->rocToken != context->binding.epochs.roc ||
+        !action->rocStartUs || !action->deadlineUs ||
+        action->deadlineUs <= action->rocStartUs ||
+        action->rocStartUs > UINT64_MAX -
+            NativeAwdlDirectedOriginTx::kMaximumWindowUs ||
+        action->deadlineUs > action->rocStartUs +
+            NativeAwdlDirectedOriginTx::kMaximumWindowUs)
+        action->result = EINVAL;
+    else {
+    const uint64_t nowUs = directedDataMonotonicUs();
+        if (nowUs < action->rocStartUs || nowUs >= action->deadlineUs) {
+            action->result = ETIMEDOUT;
+        } else {
+            context->binding.rocToken = action->rocToken;
+            context->binding.rocStartUs = action->rocStartUs;
+            context->binding.deadlineUs = action->deadlineUs;
+            context->originWindowBound = true;
+            action->result = 0;
+        }
+    }
+    return kIOReturnSuccess;
+}
+
+int iwx_tahoe_p2p_directed_data_bind_origin_window(
+    ItlIwx *owner, TahoeP2PDirectedDataContext *context, uint64_t rocToken,
+    uint64_t rocStartUs, uint64_t deadlineUs)
+{
+    if (!owner || !context)
+        return EINVAL;
+    DirectedDataWindowAction action{context, rocToken, rocStartUs,
+        deadlineUs, EBUSY};
+    const IOReturn gateResult = directedDataRunMainGateAction(owner,
+        directedDataBindOriginWindowAction, &action);
+    return gateResult == kIOReturnSuccess ? action.result : EBUSY;
+}
+
+struct DirectedDataSequenceAction {
+    TahoeP2PDirectedDataContext *context;
+    uint16_t wifiSequence;
+    uint16_t awdlSequence;
+    bool valid;
+};
+
+static IOReturn directedDataReserveSequencesAction(
+    OSObject *, void *ownerArg, void *actionArg, void *, void *)
+{
+    auto *owner = static_cast<ItlIwx *>(ownerArg);
+    auto *action = static_cast<DirectedDataSequenceAction *>(actionArg);
+    TahoeP2PDirectedDataContext *context = action ? action->context : nullptr;
+    if (!owner || !action || !context || !owner->tahoeP2pOnMainGate())
+        return kIOReturnBadArgument;
+    if (context->state != TahoeP2PDirectedDataState::kTicketBound ||
+        !context->ticketBound || context->originClosed ||
+        context->sequenceReservationValid ||
+        directedDataMonotonicUs() >= context->binding.deadlineUs)
+        return kIOReturnNotReady;
+    action->wifiSequence = context->wifiSequenceHighWater & 0x0fff;
+    action->awdlSequence = context->awdlSequenceHighWater;
+    context->reservedWifiSequence = action->wifiSequence;
+    context->reservedAwdlSequence = action->awdlSequence;
+    context->sequenceReservationValid = true;
+    context->wifiSequenceHighWater = static_cast<uint16_t>(
+        (context->wifiSequenceHighWater + 1u) & 0x0fffu);
+    context->awdlSequenceHighWater = static_cast<uint16_t>(
+        context->awdlSequenceHighWater + 1u);
+    action->valid = true;
+    return kIOReturnSuccess;
+}
+
+bool iwx_tahoe_p2p_directed_data_reserve_sequences(
+    ItlIwx *owner, TahoeP2PDirectedDataContext *context,
+    uint16_t *wifiSequence, uint16_t *awdlSequence)
+{
+    if (!owner || !context || !wifiSequence || !awdlSequence)
+        return false;
+    DirectedDataSequenceAction action{context, 0, 0, false};
+    if (directedDataRunMainGateAction(owner,
+            directedDataReserveSequencesAction, &action) !=
+        kIOReturnSuccess || !action.valid)
+        return false;
+    *wifiSequence = action.wifiSequence;
+    *awdlSequence = action.awdlSequence;
+    return true;
+}
+
+struct DirectedDataTicketAction {
+    TahoeP2PDirectedDataContext *context;
+    TahoeP2PDirectedDataOriginTicket ticket;
+    uint8_t liveAddress[6];
+    int result;
+};
+
+static IOReturn directedDataBindOriginTicketAction(
+    OSObject *, void *ownerArg, void *actionArg, void *, void *)
+{
+    auto *owner = static_cast<ItlIwx *>(ownerArg);
+    auto *action = static_cast<DirectedDataTicketAction *>(actionArg);
+    TahoeP2PDirectedDataContext *context = action ? action->context : nullptr;
+    if (!owner || !action || !context || !owner->tahoeP2pOnMainGate())
+        return kIOReturnBadArgument;
+    const auto &ticket = action->ticket;
+    if (
+        context->state != TahoeP2PDirectedDataState::kArmed ||
+        !context->originWindowBound || context->ticketBound)
+        action->result = EINVAL;
+    else if (!directedDataMainGateCheck(owner, context) ||
+        !directedDataTicketMatchesBinding(context, ticket) ||
+        directedDataMonotonicUs() < ticket.rocStartUs ||
+        directedDataMonotonicUs() >= ticket.deadlineUs)
+        action->result = ESTALE;
+    else if (memcmp(action->liveAddress, ticket.sourceMac, 6) != 0 ||
+        memcmp(action->liveAddress, owner->com.sc_p2p.mac_address, 6) != 0)
+        action->result = EADDRNOTAVAIL;
+    else {
+        context->originTicket = ticket;
+        context->ticketBound = true;
+        context->originClosed = false;
+        context->interfaceIncarnation = ticket.interfaceIncarnation;
+        context->ifindex = ticket.ifindex;
+        context->packetToken = 0;
+        context->state = TahoeP2PDirectedDataState::kTicketBound;
+        action->result = 0;
+    }
+    return kIOReturnSuccess;
+}
+
+int iwx_tahoe_p2p_directed_data_bind_origin_ticket(
+    ItlIwx *owner, TahoeP2PDirectedDataContext *context,
+    const TahoeP2PDirectedDataOriginTicket *ticket)
+{
+    if (!owner || !context || !ticket)
+        return EINVAL;
+    if (owner->tahoeP2pOnMainGate())
+        return EBUSY;
+    // The BSD address query is bounded and lock-local. Keep it outside the
+    // command gate, then bind its value only after the gate revalidates the
+    // current owner, epochs, ROC, and exact ticket.
+    DirectedDataTicketAction action{};
+    action.context = context;
+    action.ticket = *ticket;
+    action.result = EBUSY;
+    if (!NativeAwdlBSD::address(ticket->epochs.power, action.liveAddress))
+        return EADDRNOTAVAIL;
+    const IOReturn gateResult = directedDataRunMainGateAction(owner,
+        directedDataBindOriginTicketAction, &action);
+    return gateResult == kIOReturnSuccess ? action.result : EBUSY;
+}
+
+struct DirectedDataPermitAction {
+    TahoeP2PDirectedDataContext *context;
+    TahoeP2PDirectedDataOriginPacket origin;
+    mbuf_t encodedMpdu;
+    TahoeP2PDirectedDataPermit *permit;
+    int result;
+};
+
+static IOReturn directedDataMakePermitAction(
+    OSObject *, void *ownerArg, void *actionArg, void *, void *);
+
+static int directedDataMakePermitOnMainGate(
+    ItlIwx *owner, TahoeP2PDirectedDataContext *context,
+    const TahoeP2PDirectedDataOriginPacket *origin, mbuf_t encodedMpdu,
+    TahoeP2PDirectedDataPermit *permit)
+{
+    if (permit)
+        *permit = {};
+    if (!owner || !context || !origin || !encodedMpdu || !permit ||
+        !owner->tahoeP2pOnMainGate() ||
+        context->state != TahoeP2PDirectedDataState::kTicketBound ||
+        !context->ticketBound || context->originClosed ||
+        context->permitIssued)
+        return EINVAL;
+    if (!directedDataFreshMccAndRoc(owner, context) ||
+        !NativeAwdlDirectedOriginTx::sameTicket(
+            context->originTicket, origin->ticket) ||
+        !origin->packetToken ||
+        origin->packetToken != origin->ticket.ticketSerial ||
+        !directedDataTicketMatchesBinding(context, origin->ticket) ||
+        directedDataMonotonicUs() < context->binding.rocStartUs ||
+        directedDataMonotonicUs() >= context->binding.deadlineUs)
+        return ESTALE;
+
+    uint8_t raw[NativeAwdlDirectedOriginTx::kMpduLength]{};
+    NativeAwdlData::DecodedFrame decoded{};
+    if (!directedDataDecodeMbuf(context, origin->ticket, encodedMpdu,
+                                raw, &decoded)) {
+        context->reason = TahoeP2PDirectedDataReason::kWrongPacketShape;
+        context->state = TahoeP2PDirectedDataState::kClosed;
+        return EPROTO;
+    }
+    if (!directedDataFreshMccAndRoc(owner, context) ||
+        directedDataMonotonicUs() < context->binding.rocStartUs ||
+        directedDataMonotonicUs() >= context->binding.deadlineUs)
+        return ESTALE;
+    if (context->permitSerialHighWater == UINT64_MAX)
+        return EOVERFLOW;
+
+    TahoeP2PDirectedDataPermit value{};
+    value.permitSerial = ++context->permitSerialHighWater;
+    value.armSerial = context->armSerialHighWater;
+    value.ticketSerial = origin->ticket.ticketSerial;
+    value.packetToken = origin->packetToken;
+    value.ownerSerial = context->binding.ownerSerial;
+    value.runSerial = context->binding.runSerial;
+    value.interfaceIncarnation = origin->ticket.interfaceIncarnation;
+    value.stationAllocationSerial = context->stationAllocationSerial;
+    value.queueAllocationSerial = context->queueAllocationSerial;
+    value.ifindex = origin->ticket.ifindex;
+    value.epochs = context->binding.epochs;
+    value.generation = context->binding.generation;
+    value.p2pFirmwareGeneration = context->binding.p2pFirmwareGeneration;
+    value.rocToken = context->binding.rocToken;
+    value.deadlineUs = context->binding.deadlineUs;
+    value.queueId = context->queueId;
+    value.stationId = static_cast<uint8_t>(context->stationId);
+    value.valid = true;
+    context->permit = value;
+    context->permitIssued = true;
+    context->packetToken = origin->packetToken;
+    context->sequenceControl = directedDataReadLe16(raw + 22);
+    context->frameControl = decoded.frameControl;
+    context->byteCount = static_cast<uint16_t>(
+        NativeAwdlDirectedOriginTx::kMpduLength);
+    context->state = TahoeP2PDirectedDataState::kPermitIssued;
+    *permit = value;
+    return 0;
+}
+
+static IOReturn directedDataMakePermitAction(
+    OSObject *, void *ownerArg, void *actionArg, void *, void *)
+{
+    auto *owner = static_cast<ItlIwx *>(ownerArg);
+    auto *action = static_cast<DirectedDataPermitAction *>(actionArg);
+    if (!owner || !action || !action->context || !action->encodedMpdu ||
+        !action->permit || !owner->tahoeP2pOnMainGate())
+        return kIOReturnBadArgument;
+    action->result = directedDataMakePermitOnMainGate(owner,
+        action->context, &action->origin, action->encodedMpdu,
+        action->permit);
+    return kIOReturnSuccess;
+}
+
+int iwx_tahoe_p2p_directed_data_make_permit(
+    ItlIwx *owner, TahoeP2PDirectedDataContext *context,
+    const TahoeP2PDirectedDataOriginPacket *origin, mbuf_t encodedMpdu,
+    TahoeP2PDirectedDataPermit *permit)
+{
+    if (permit)
+        *permit = {};
+    if (!owner || !context || !origin || !encodedMpdu || !permit)
+        return EINVAL;
+    DirectedDataPermitAction action{context, *origin, encodedMpdu, permit,
+        EBUSY};
+    const IOReturn gateResult = directedDataRunMainGateAction(owner,
+        directedDataMakePermitAction, &action);
+    return gateResult == kIOReturnSuccess ? action.result : EBUSY;
+}
+
+static int directedDataTxSubmitOnMainGate(
+    ItlIwx *owner, struct iwx_softc *sc,
+    TahoeP2PStationLease *stationLease,
+    TahoeP2PTxQueueLease *queueLease,
+    TahoeP2PDirectedDataContext *context,
+    TahoeP2PDirectedDataPermit *permit, mbuf_t encodedMpdu)
+{
+    if (!encodedMpdu)
+        return EINVAL;
+    if (!owner || !sc || sc != &owner->com || !stationLease ||
+        !queueLease || !context || !permit ||
+        !owner->tahoeP2pOnMainGate() ||
+        context->state != TahoeP2PDirectedDataState::kPermitIssued ||
+        context->doorbellIssued || context->mbufHeldByRing ||
+        !directedDataPermitMatches(context, permit, stationLease,
+                                   queueLease))
+        return directedDataFailBeforeDoorbell(context,
+            TahoeP2PDirectedDataReason::kPermitMismatch, encodedMpdu,
+            EBUSY);
+
+    if (!directedDataFreshMccAndRoc(owner, context) ||
+        directedDataMonotonicUs() < context->binding.rocStartUs ||
+        directedDataMonotonicUs() >= context->binding.deadlineUs ||
+        !directedDataTicketMatchesBinding(context, context->originTicket) ||
+        permit->armSerial != context->armSerialHighWater ||
+        permit->generation != static_cast<uint32_t>(sc->sc_generation) ||
+        permit->p2pFirmwareGeneration != sc->sc_p2p.fw_generation ||
+        stationLease->role != TahoeP2PStationRole::kDirectedPeerLink ||
+        stationLease->stationType != IWX_STA_LINK ||
+        stationLease->state != TahoeP2PResourceState::kActive ||
+        stationLease->generation != permit->generation ||
+        queueLease->state != TahoeP2PResourceState::kActive ||
+        queueLease->stationRole != TahoeP2PStationRole::kDirectedPeerLink ||
+        queueLease->firmwareTid != 0 ||
+        queueLease->generation != permit->generation ||
+        queueLease->stationId != stationLease->stationId ||
+        queueLease->queueId != permit->queueId ||
+        queueLease->everDoorbelled ||
+        memcmp(stationLease->address, context->arm.peerMac, 6) != 0 ||
+        memcmp(queueLease->peerAddress, context->arm.peerMac, 6) != 0 ||
+        queueLease->allocationSerial != context->queueAllocationSerial ||
+        stationLease->allocationSerial != context->stationAllocationSerial) {
+        return directedDataFailBeforeDoorbell(context,
+            TahoeP2PDirectedDataReason::kStaleEpoch, encodedMpdu, ESTALE);
+    }
+
+    const IntelP2PFirmware::TxLayout layout = fw68TxLayout(owner, sc);
+    if (layout == IntelP2PFirmware::TxLayout::kUnsupported)
+        return directedDataFailBeforeDoorbell(context,
+            TahoeP2PDirectedDataReason::kWrongOwnerOrGate, encodedMpdu,
+            EOPNOTSUPP);
+    const uint32_t rate = actionRate6Mbps(owner, sc);
+    if (!rate)
+        return directedDataFailBeforeDoorbell(context,
+            TahoeP2PDirectedDataReason::kWrongOwnerOrGate, encodedMpdu,
+            EOPNOTSUPP);
+
+    uint8_t raw[NativeAwdlDirectedOriginTx::kMpduLength]{};
+    NativeAwdlData::DecodedFrame decoded{};
+    if (!directedDataDecodeMbuf(context, context->originTicket,
+            encodedMpdu, raw, &decoded) ||
+        context->packetToken != permit->packetToken ||
+        context->byteCount != NativeAwdlDirectedOriginTx::kMpduLength ||
+        context->sequenceControl != directedDataReadLe16(raw + 22) ||
+        context->frameControl != decoded.frameControl)
+        return directedDataFailBeforeDoorbell(context,
+            TahoeP2PDirectedDataReason::kWrongPacketShape, encodedMpdu,
+            EPROTO);
+
+    uint8_t liveAddress[6]{};
+    if (!NativeAwdlBSD::address(context->binding.generation, liveAddress) ||
+        memcmp(liveAddress, context->originTicket.sourceMac, 6) != 0 ||
+        memcmp(liveAddress, sc->sc_p2p.mac_address, 6) != 0)
+        return directedDataFailBeforeDoorbell(context,
+            TahoeP2PDirectedDataReason::kWrongOriginTicket, encodedMpdu,
+            EADDRNOTAVAIL);
+
+    struct iwx_tx_ring *ring = nullptr;
+    uint16_t index = 0;
+    int error = iwx_tahoe_p2p_tvqm_begin_tx(sc, queueLease, &ring, &index);
+    if (error)
+        return directedDataFailBeforeDoorbell(context,
+            TahoeP2PDirectedDataReason::kQueueUnavailable, encodedMpdu,
+            error);
+
+    const auto cancelBeforeDoorbell = [&](int result) -> int {
+        directedDataClearSlot(ring, index);
+        const int cancelError = iwx_tahoe_p2p_tvqm_cancel_tx_submit(queueLease);
+        mbuf_freem(encodedMpdu);
+        if (cancelError) {
+            context->reason = TahoeP2PDirectedDataReason::kDrainMismatch;
+            context->state = TahoeP2PDirectedDataState::kQuarantined;
+            context->mbufHeldByRing = false;
+            return cancelError;
+        }
+        return result;
+    };
+
+    if (!ring || ring->qid < 0 || ring->qid > 0xff ||
+        ring->qid != permit->queueId || ring->ring_count < 8 ||
+        ring->ring_count > IWX_TFD_QUEUE_SIZE_MAX ||
+        (ring->ring_count & (ring->ring_count - 1)) != 0 ||
+        index >= ring->ring_count || ring->cur != index ||
+        ring->tail != index || ring->queued != 0 ||
+        ring->data[index].m || ring->data[index].in ||
+        !ring->data[index].map || !ring->data[index].map->cursor ||
+        !ring->desc || !ring->cmd)
+        return cancelBeforeDoorbell(EIO);
+
+    struct iwx_tx_data *txData = &ring->data[index];
+    struct iwx_tfh_tfd *descriptor = &ring->desc[index];
+    struct iwx_device_cmd *deviceCommand = &ring->cmd[index];
+    // The MPDU is 96 bytes: the unencrypted 24-byte header is copied into the
+    // TX command, leaving the exact 72-byte IPv6/UDP payload for the DMA map.
+    mbuf_adj(encodedMpdu, 24);
+    IOPhysicalSegment segments[IWX_TFH_NUM_TBS - 2];
+    const int segmentCount = txData->map->cursor->getPhysicalSegmentsWithCoalesce(
+        encodedMpdu, segments, IWX_TFH_NUM_TBS - 2);
+    if (segmentCount <= 0 || segmentCount > IWX_TFH_NUM_TBS - 2)
+        return cancelBeforeDoorbell(ENOMEM);
+    uint16_t segmentLengths[IWX_TFH_NUM_TBS - 2]{};
+    uint32_t payloadBytes = 0;
+    for (int segment = 0; segment < segmentCount; ++segment) {
+        if (!segments[segment].length || segments[segment].length > 0xffff)
+            return cancelBeforeDoorbell(EMSGSIZE);
+        segmentLengths[segment] = static_cast<uint16_t>(
+            segments[segment].length);
+        payloadBytes += segmentLengths[segment];
+    }
+    if (payloadBytes != NativeAwdlDirectedOriginTx::kMpduLength - 24)
+        return cancelBeforeDoorbell(EMSGSIZE);
+
+    IntelP2PActionFrame::TfdPlan plan{};
+    const size_t txCommandLength = layout ==
+        IntelP2PFirmware::TxLayout::kGen2 ?
+            sizeof(struct iwx_tx_cmd_gen2) : sizeof(struct iwx_tx_cmd_gen3);
+    if (!IntelP2PActionFrame::buildTfdPlan(
+            sizeof(struct iwx_cmd_header), txCommandLength, 24,
+            segmentLengths, static_cast<size_t>(segmentCount),
+            NativeAwdlDirectedOriginTx::kMpduLength, &plan))
+        return cancelBeforeDoorbell(EINVAL);
+
+    const uint32_t generation = context->binding.generation;
+    const IntelP2PActionTx::Result armResult = context->completion.arm(
+        generation, static_cast<uint16_t>(ring->qid),
+        static_cast<uint16_t>(ring->ring_count), index,
+        context->sequenceControl, NativeAwdlDirectedOriginTx::kMpduLength,
+        context->frameControl);
+    if (armResult != IntelP2PActionTx::Result::kReady)
+        return cancelBeforeDoorbell(EBUSY);
+
+    memset(descriptor, 0, sizeof(*descriptor));
+    memset(deviceCommand, 0, sizeof(*deviceCommand));
+    deviceCommand->hdr.cmd = IWX_TX_CMD;
+    deviceCommand->hdr.group_id = 0;
+    deviceCommand->hdr.qid = static_cast<uint8_t>(ring->qid);
+    deviceCommand->hdr.idx = static_cast<uint8_t>(index);
+    const uint32_t txFlags = IWX_TX_FLAGS_CMD_RATE |
+        IWX_TX_FLAGS_ENCRYPT_DIS;
+    const uint32_t offloadAssist = IWX_TX_CMD_OFFLD_MH_SIZE(12);
+    if (layout == IntelP2PFirmware::TxLayout::kGen2) {
+        auto *txCommand = reinterpret_cast<struct iwx_tx_cmd_gen2 *>(
+            deviceCommand->data);
+        memset(txCommand, 0, sizeof(*txCommand));
+        txCommand->len = htole16(NativeAwdlDirectedOriginTx::kMpduLength);
+        txCommand->offload_assist = htole16(
+            static_cast<uint16_t>(offloadAssist));
+        txCommand->flags = htole32(txFlags);
+        txCommand->rate_n_flags = htole32(rate);
+        memcpy(reinterpret_cast<uint8_t *>(txCommand) + sizeof(*txCommand),
+               raw, 24);
+    } else {
+        auto *txCommand = reinterpret_cast<struct iwx_tx_cmd_gen3 *>(
+            deviceCommand->data);
+        memset(txCommand, 0, sizeof(*txCommand));
+        txCommand->len = htole16(NativeAwdlDirectedOriginTx::kMpduLength);
+        txCommand->flags = htole16(static_cast<uint16_t>(txFlags));
+        txCommand->offload_assist = htole32(offloadAssist);
+        txCommand->rate_n_flags = htole32(rate);
+        memcpy(reinterpret_cast<uint8_t *>(txCommand) + sizeof(*txCommand),
+               raw, 24);
+    }
+
+    descriptor->num_tbs = htole16(plan.numTbs);
+    descriptor->tbs[0].tb_len = htole16(plan.firstTbLength);
+    uint64_t physicalAddress = htole64(txData->cmd_paddr);
+    memcpy(&descriptor->tbs[0].addr, &physicalAddress,
+           sizeof(physicalAddress));
+    descriptor->tbs[1].tb_len = htole16(plan.commandTailLength);
+    physicalAddress = htole64(txData->cmd_paddr + plan.firstTbLength);
+    memcpy(&descriptor->tbs[1].addr, &physicalAddress,
+           sizeof(physicalAddress));
+    for (int segment = 0; segment < segmentCount; ++segment) {
+        descriptor->tbs[segment + 2].tb_len = htole16(
+            segmentLengths[segment]);
+        physicalAddress = htole64(segments[segment].location);
+        memcpy(&descriptor->tbs[segment + 2].addr, &physicalAddress,
+               sizeof(physicalAddress));
+    }
+    txData->m = encodedMpdu;
+    txData->in = nullptr;
+    txData->type = IEEE80211_FC0_TYPE_DATA;
+    owner->iwx_tx_update_byte_tbl(sc, ring, index, plan.frameByteCount,
+                                  plan.numTbs);
+
+    // The queue is already bound to the unicast RA and firmware TID 0. Keep
+    // this final main-gate MCC/channel/ROC sample adjacent to the doorbell.
+    const uint64_t finalSubmitUs = directedDataMonotonicUs();
+    if (finalSubmitUs < context->binding.rocStartUs ||
+        finalSubmitUs >= context->binding.deadlineUs ||
+        !directedDataMainGateCheck(owner, context)) {
+        const auto cancelled = context->completion.cancelUnsubmitted(
+            generation, static_cast<uint16_t>(ring->qid), index);
+        if (cancelled != IntelP2PActionTx::Result::kCancelled) {
+            context->mbufHeldByRing = true;
+            context->state = TahoeP2PDirectedDataState::kQuarantined;
+            context->reason = TahoeP2PDirectedDataReason::kDrainMismatch;
+            return ESTALE;
+        }
+        return cancelBeforeDoorbell(ESTALE);
+    }
+
+    ring->cur = (index + 1) % ring->ring_count;
+    ++ring->queued;
+    error = iwx_tahoe_p2p_tvqm_mark_doorbell(
+        sc, queueLease, ring, index);
+    if (error) {
+        const auto cancelled = context->completion.cancelUnsubmitted(
+            generation, static_cast<uint16_t>(ring->qid), index);
+        if (cancelled != IntelP2PActionTx::Result::kCancelled) {
+            context->mbufHeldByRing = true;
+            context->state = TahoeP2PDirectedDataState::kQuarantined;
+            context->reason = TahoeP2PDirectedDataReason::kDrainMismatch;
+            return error;
+        }
+        ring->cur = index;
+        --ring->queued;
+        return cancelBeforeDoorbell(error);
+    }
+
+    context->queueId = static_cast<uint16_t>(ring->qid);
+    context->descriptorIndex = index;
+    context->ringSize = static_cast<uint16_t>(ring->ring_count);
+    context->expectedNextSsn = static_cast<uint16_t>(
+        (index + 1) & (ring->ring_count - 1));
+    context->doorbellIssued = true;
+    context->mbufHeldByRing = true;
+    context->sequenceReservationValid = false;
+    context->state = TahoeP2PDirectedDataState::kInFlight;
+    permit->valid = false; // A permit can authorize exactly one doorbell.
+    IWX_WRITE(sc, IWX_HBUS_TARG_WRPTR, ring->qid << 16 | ring->cur);
+    error = iwx_tahoe_p2p_tvqm_finish_tx_submit(queueLease);
+    if (error) {
+        context->state = TahoeP2PDirectedDataState::kQuarantined;
+        context->reason = TahoeP2PDirectedDataReason::kDoorbellUnknown;
+        return error;
+    }
+    return 0;
+}
+
+struct DirectedDataSubmitAction {
+    TahoeP2PStationLease *stationLease;
+    TahoeP2PTxQueueLease *queueLease;
+    TahoeP2PDirectedDataContext *context;
+    TahoeP2PDirectedDataPermit *permit;
+    mbuf_t encodedMpdu;
+    int result;
+    bool called;
+};
+
+static IOReturn directedDataTxSubmitAction(
+    OSObject *, void *ownerArg, void *actionArg, void *, void *)
+{
+    auto *owner = static_cast<ItlIwx *>(ownerArg);
+    auto *action = static_cast<DirectedDataSubmitAction *>(actionArg);
+    if (!owner || !action)
+        return kIOReturnBadArgument;
+    action->called = true;
+    action->result = directedDataTxSubmitOnMainGate(owner, &owner->com,
+        action->stationLease, action->queueLease, action->context,
+        action->permit, action->encodedMpdu);
+    return kIOReturnSuccess;
+}
+
+int iwx_tahoe_p2p_directed_data_tx_submit(
+    ItlIwx *owner, struct iwx_softc *sc,
+    TahoeP2PStationLease *stationLease,
+    TahoeP2PTxQueueLease *queueLease,
+    TahoeP2PDirectedDataContext *context,
+    TahoeP2PDirectedDataPermit *permit, mbuf_t encodedMpdu)
+{
+    if (!encodedMpdu)
+        return EINVAL;
+    if (!owner || !sc || sc != &owner->com) {
+        mbuf_freem(encodedMpdu);
+        return EINVAL;
+    }
+    if (owner->tahoeP2pOnMainGate())
+        return directedDataTxSubmitOnMainGate(owner, sc, stationLease,
+            queueLease, context, permit, encodedMpdu);
+    IOCommandGate *gate = owner->tahoeP2pCommandGate();
+    if (!gate) {
+        mbuf_freem(encodedMpdu);
+        return EBUSY;
+    }
+    DirectedDataSubmitAction action{stationLease, queueLease, context,
+        permit, encodedMpdu, EBUSY, false};
+    const IOReturn gateResult = gate->attemptAction(
+        directedDataTxSubmitAction, owner, &action, nullptr, nullptr);
+    if (!action.called) {
+        mbuf_freem(encodedMpdu);
+        return gateResult == kIOReturnSuccess ? EBUSY : EIO;
+    }
+    return action.result;
+}
+
+bool iwx_tahoe_p2p_directed_data_tx_response(
+    ItlIwx *owner, struct iwx_softc *sc,
+    TahoeP2PStationLease *stationLease,
+    TahoeP2PTxQueueLease *queueLease,
+    TahoeP2PDirectedDataContext *context,
+    struct iwx_rx_packet *packet, struct iwx_rx_data *rxData)
+{
+    if (!owner || !owner->tahoeP2pOnMainGate())
+        return false;
+    if (!sc || !stationLease || !queueLease || !context || !packet ||
+        !rxData || !context->binding.runSerial || !context->doorbellIssued)
+        return false;
+    const size_t payloadLength = iwx_rx_packet_payload_len(packet);
+    if (payloadLength < offsetof(struct iwx_tx_resp, tx_queue) +
+                            sizeof(uint16_t))
+        return false; // No trustworthy payload qid; leave ordinary STA alone.
+    bus_dmamap_sync(sc->sc_dmat, rxData->map, 0, IWX_RBUF_SIZE,
+                    BUS_DMASYNC_POSTREAD);
+    const uint8_t *payload = reinterpret_cast<const uint8_t *>(packet->data);
+    uint16_t responseQueue = 0;
+    if (!IntelP2PActionTx::extractTxResponseQueueId(payload, payloadLength,
+            offsetof(struct iwx_tx_resp, tx_queue), &responseQueue))
+        return false;
+    if (responseQueue != context->queueId)
+        return false;
+
+    const bool allocationMatches =
+        queueLease->allocationSerial == context->queueAllocationSerial &&
+        stationLease->allocationSerial == context->stationAllocationSerial &&
+        queueLease->queueId == context->queueId &&
+        queueLease->stationId == context->stationId &&
+        queueLease->stationRole == TahoeP2PStationRole::kDirectedPeerLink &&
+        queueLease->firmwareTid == 0;
+    const bool responseHasStation = payloadLength >
+            offsetof(struct iwx_tx_resp, ra_tid) &&
+        IWX_TX_RES_GET_RA(payload[offsetof(struct iwx_tx_resp, ra_tid)]) ==
+            context->stationId &&
+        IWX_TX_RES_GET_TID(payload[offsetof(struct iwx_tx_resp, ra_tid)]) == 0;
+    const auto previousTicket = context->completion.snapshot();
+    const bool liveOwned = allocationMatches &&
+        queueLease->state == TahoeP2PResourceState::kActive &&
+        context->state == TahoeP2PDirectedDataState::kInFlight &&
+        previousTicket.armed && !previousTicket.completed;
+    // A qid/RA-TID tombstone catches duplicate and late owned replies after
+    // queue cleanup. ticketPresent in BSD diagnostics is ledger history, not
+    // a live hardware resource; this host tombstone is independent of it.
+    const bool terminalTombstone = !allocationMatches && responseHasStation;
+    if (!liveOwned) {
+        if (!allocationMatches && !terminalTombstone)
+            return false;
+        iwx_tahoe_p2p_directed_data_quarantine(context,
+            previousTicket.completed ?
+                TahoeP2PDirectedDataReason::kResponseDuplicate :
+                TahoeP2PDirectedDataReason::kResponseForeign);
+        return true;
+    }
+
+    struct iwx_tx_ring *ring = nullptr;
+    IOInterruptState interruptState = 0;
+    if (!iwx_tahoe_p2p_tvqm_lock_completion(
+            sc, queueLease, responseQueue, &ring, &interruptState)) {
+        iwx_tahoe_p2p_directed_data_quarantine(context,
+            TahoeP2PDirectedDataReason::kRingMismatch);
+        return true;
+    }
+    if (!owner->tahoeP2pOnMainGate() ||
+        !supportedFw68Tx(owner, sc) ||
+        context->binding.generation != static_cast<uint32_t>(sc->sc_generation) ||
+        context->binding.p2pFirmwareGeneration != sc->sc_p2p.fw_generation) {
+        iwx_tahoe_p2p_tvqm_unlock(queueLease, interruptState);
+        iwx_tahoe_p2p_directed_data_quarantine(context,
+            TahoeP2PDirectedDataReason::kStaleEpoch);
+        return true;
+    }
+    const uint16_t index = context->descriptorIndex;
+    if (!ring || ring->qid != responseQueue ||
+        ring->ring_count != context->ringSize || index >= ring->ring_count ||
+        ring->tail != index || ring->queued != 1 ||
+        ring->cur != (index + 1) % ring->ring_count ||
+        ring->data[index].m == nullptr || ring->data[index].in != nullptr ||
+        ring->data[index].type != IEEE80211_FC0_TYPE_DATA ||
+        context->byteCount != NativeAwdlDirectedOriginTx::kMpduLength ||
+        !responseHasStation) {
+        iwx_tahoe_p2p_tvqm_unlock(queueLease, interruptState);
+        iwx_tahoe_p2p_directed_data_quarantine(context,
+            TahoeP2PDirectedDataReason::kRingMismatch);
+        return true;
+    }
+
+    const auto result = context->completion.complete(
+        context->binding.generation, payload, payloadLength,
+        offsetof(struct iwx_tx_resp, status),
+        offsetof(struct iwx_tx_resp, seq_ctl),
+        offsetof(struct iwx_tx_resp, byte_cnt),
+        offsetof(struct iwx_tx_resp, frame_ctrl),
+        offsetof(struct iwx_tx_resp, tx_queue),
+        offsetof(struct iwx_tx_resp, status) +
+            sizeof(struct iwx_agg_tx_status));
+    if (result != IntelP2PActionTx::Result::kCompletion &&
+        result != IntelP2PActionTx::Result::kFrameFailed) {
+        iwx_tahoe_p2p_tvqm_unlock(queueLease, interruptState);
+        iwx_tahoe_p2p_directed_data_quarantine(context,
+            TahoeP2PDirectedDataReason::kResponseMismatch);
+        return true;
+    }
+    if (iwx_tahoe_p2p_tvqm_tx_completed_locked(sc, queueLease) != 0) {
+        iwx_tahoe_p2p_tvqm_unlock(queueLease, interruptState);
+        iwx_tahoe_p2p_directed_data_quarantine(context,
+            TahoeP2PDirectedDataReason::kDrainMismatch);
+        return true;
+    }
+
+    mbuf_t completedMbuf = ring->data[index].m;
+    ring->data[index].m = nullptr;
+    ring->data[index].in = nullptr;
+    directedDataClearDescriptor(&ring->desc[index]);
+    ring->tail = (index + 1) % ring->ring_count;
+    --ring->queued;
+    const auto completion = context->completion.snapshot();
+    context->firmwareStatus = completion.status;
+    context->completionObserved = completion.completed;
+    context->frameAttemptSucceeded = completion.frameAttemptSucceeded;
+    context->mbufHeldByRing = false;
+    context->state = TahoeP2PDirectedDataState::kCompleted;
+    context->reason = completion.frameAttemptSucceeded ?
+        TahoeP2PDirectedDataReason::kNone :
+        TahoeP2PDirectedDataReason::kCompletionFailure;
+    iwx_tahoe_p2p_tvqm_unlock(queueLease, interruptState);
+    if (completedMbuf)
+        mbuf_freem(completedMbuf);
+    return true;
+}
+
+bool iwx_tahoe_p2p_directed_data_reject_ba(
+    TahoeP2PTxQueueLease *queueLease,
+    TahoeP2PDirectedDataContext *context, uint16_t queueId)
+{
+    if (!queueLease || !context || !context->binding.runSerial ||
+        queueId != context->queueId)
+        return false;
+    const bool currentAllocation = queueLease->queueId == queueId &&
+        queueLease->allocationSerial == context->queueAllocationSerial &&
+        queueLease->stationRole == TahoeP2PStationRole::kDirectedPeerLink &&
+        queueLease->firmwareTid == 0;
+    if (!currentAllocation && !context->doorbellIssued)
+        return false;
+    iwx_tahoe_p2p_directed_data_quarantine(context,
+        TahoeP2PDirectedDataReason::kResponseForeign);
+    return true;
+}
+
+void iwx_tahoe_p2p_directed_data_quarantine(
+    TahoeP2PDirectedDataContext *context,
+    TahoeP2PDirectedDataReason reason)
+{
+    if (!context)
+        return;
+    context->reason = reason;
+    context->state = TahoeP2PDirectedDataState::kQuarantined;
+}
+
+struct DirectedDataCloseIdentity {
+    TahoeP2PDirectedDataContext *context;
+    TahoeP2PDirectedDataOriginTicket ticket;
+    uint64_t armSerial;
+    uint64_t ownerSerial;
+    uint64_t runSerial;
+    bool ticketBound;
+    bool originClosed;
+};
+
+static IOReturn directedDataCaptureCloseIdentityAction(
+    OSObject *, void *ownerArg, void *actionArg, void *, void *)
+{
+    auto *owner = static_cast<ItlIwx *>(ownerArg);
+    auto *identity = static_cast<DirectedDataCloseIdentity *>(actionArg);
+    TahoeP2PDirectedDataContext *context = identity ? identity->context : nullptr;
+    if (!owner || !identity || !context || !owner->tahoeP2pOnMainGate())
+        return kIOReturnBadArgument;
+    identity->armSerial = context->armSerialHighWater;
+    identity->ownerSerial = context->binding.ownerSerial;
+    identity->runSerial = context->binding.runSerial;
+    identity->ticketBound = context->ticketBound;
+    identity->originClosed = context->originClosed;
+    if (context->ticketBound)
+        identity->ticket = context->originTicket;
+    return kIOReturnSuccess;
+}
+
+struct DirectedDataCloseCommit {
+    DirectedDataCloseIdentity identity;
+    TahoeP2PDirectedDataReason reason;
+    bool bsdCloseSucceeded;
+    bool originInactive;
+    int result;
+};
+
+static IOReturn directedDataCommitCloseAction(
+    OSObject *, void *ownerArg, void *actionArg, void *, void *)
+{
+    auto *owner = static_cast<ItlIwx *>(ownerArg);
+    auto *commit = static_cast<DirectedDataCloseCommit *>(actionArg);
+    auto *identity = commit ? &commit->identity : nullptr;
+    TahoeP2PDirectedDataContext *context = identity ? identity->context : nullptr;
+    if (!owner || !commit || !identity || !context ||
+        !owner->tahoeP2pOnMainGate())
+        return kIOReturnBadArgument;
+    const bool sameRun = context->armSerialHighWater == identity->armSerial &&
+        context->binding.ownerSerial == identity->ownerSerial &&
+        context->binding.runSerial == identity->runSerial &&
+        context->ticketBound == identity->ticketBound &&
+        (!identity->ticketBound || NativeAwdlDirectedOriginTx::sameTicket(
+            context->originTicket, identity->ticket));
+    if (!sameRun) {
+        commit->result = ESTALE;
+        return kIOReturnSuccess;
+    }
+    if (!identity->originClosed && identity->ticketBound &&
+        (!commit->bsdCloseSucceeded || !commit->originInactive)) {
+        iwx_tahoe_p2p_directed_data_quarantine(context,
+            TahoeP2PDirectedDataReason::kTicketFailure);
+        commit->result = commit->bsdCloseSucceeded ? EBUSY : EIO;
+        return kIOReturnSuccess;
+    }
+
+    context->originClosed = true;
+    if (commit->reason != TahoeP2PDirectedDataReason::kNone &&
+        context->reason == TahoeP2PDirectedDataReason::kNone)
+        context->reason = commit->reason;
+    if (context->doorbellIssued &&
+        (!context->completionObserved || context->mbufHeldByRing)) {
+        iwx_tahoe_p2p_directed_data_quarantine(context,
+            TahoeP2PDirectedDataReason::kDoorbellUnknown);
+        commit->result = EBUSY;
+        return kIOReturnSuccess;
+    }
+    if (!context->doorbellIssued &&
+        context->state != TahoeP2PDirectedDataState::kQuarantined)
+        context->state = TahoeP2PDirectedDataState::kClosed;
+    directedDataMarkCompletedClosed(context);
+    commit->result = 0;
+    return kIOReturnSuccess;
+}
+
+int iwx_tahoe_p2p_directed_data_close(
+    ItlIwx *owner, TahoeP2PDirectedDataContext *context,
+    TahoeP2PDirectedDataReason reason)
+{
+    if (!owner || !context)
+        return EINVAL;
+    DirectedDataCloseIdentity identity{};
+    identity.context = context;
+    if (directedDataRunMainGateAction(owner,
+            directedDataCaptureCloseIdentityAction, &identity) !=
+        kIOReturnSuccess)
+        return EBUSY;
+
+    DirectedDataCloseCommit commit{};
+    commit.identity = identity;
+    commit.reason = reason;
+    commit.bsdCloseSucceeded = true;
+    commit.originInactive = true;
+    commit.result = EBUSY;
+    if (identity.ticketBound && !identity.originClosed) {
+        // BSD close may wait for output/pop completion. Keep it outside the
+        // work-loop gate, then commit only if this exact HAL run still owns it.
+        if (owner->tahoeP2pOnMainGate())
+            return EBUSY;
+        commit.bsdCloseSucceeded =
+            NativeAwdlBSD::closeDirectedOriginTx(identity.ticket);
+        NativeAwdlDirectedOriginTx::Snapshot origin{};
+        NativeAwdlBSD::snapshotDirectedOriginTx(&origin);
+        commit.originInactive =
+            origin.state != NativeAwdlDirectedOriginTx::State::Open &&
+            origin.state != NativeAwdlDirectedOriginTx::State::Queued &&
+            origin.state != NativeAwdlDirectedOriginTx::State::Popping &&
+            !origin.packetQueued && !origin.packetPopping;
+    }
+    const IOReturn gateResult = directedDataRunMainGateAction(owner,
+        directedDataCommitCloseAction, &commit);
+    return gateResult == kIOReturnSuccess ? commit.result : EBUSY;
+}
+
+bool iwx_tahoe_p2p_directed_data_never_armed(
+    ItlIwx *owner, const TahoeP2PDirectedDataContext *context)
+{
+    if (!context)
+        return true;
+    TahoeP2PDirectedDataSnapshot snapshot{};
+    return iwx_tahoe_p2p_directed_data_snapshot(owner, context, &snapshot) &&
+        !snapshot.completionArmed && !snapshot.doorbellIssued &&
+        !snapshot.mbufHeldByRing;
+}
+
+bool iwx_tahoe_p2p_directed_data_defer_tx_ring_reset(
+    ItlIwx *owner, const TahoeP2PDirectedDataContext *context,
+    const TahoeP2PTxQueueLease *queueLease, uint16_t queueId)
+{
+    if (!owner || !context || !queueLease)
+        return false;
+    uint16_t leaseQueueId;
+    uint64_t leaseAllocationSerial;
+    TahoeP2PStationRole leaseStationRole;
+    uint8_t leaseTid;
+    if (queueLease->stateLock) {
+        IOInterruptState interruptState = IOSimpleLockLockDisableInterrupt(
+            queueLease->stateLock);
+        leaseQueueId = queueLease->queueId;
+        leaseAllocationSerial = queueLease->allocationSerial;
+        leaseStationRole = queueLease->stationRole;
+        leaseTid = queueLease->firmwareTid;
+        IOSimpleLockUnlockEnableInterrupt(queueLease->stateLock,
+                                           interruptState);
+    } else {
+        leaseQueueId = queueLease->queueId;
+        leaseAllocationSerial = queueLease->allocationSerial;
+        leaseStationRole = queueLease->stationRole;
+        leaseTid = queueLease->firmwareTid;
+    }
+    if (queueId != leaseQueueId)
+        return false;
+
+    TahoeP2PDirectedDataSnapshot snapshot{};
+    if (!iwx_tahoe_p2p_directed_data_snapshot(owner, context, &snapshot, true))
+        return leaseStationRole == TahoeP2PStationRole::kDirectedPeerLink &&
+            leaseTid == 0;
+    if (!snapshot.runSerial || queueId != snapshot.queueId ||
+        leaseAllocationSerial != snapshot.queueAllocationSerial ||
+        leaseStationRole != TahoeP2PStationRole::kDirectedPeerLink ||
+        leaseTid != 0)
+        return false;
+    return !snapshot.hardStopDrained &&
+        (snapshot.doorbellIssued || snapshot.mbufHeldByRing ||
+         (snapshot.completionArmed && !snapshot.completionObserved) ||
+         snapshot.state == TahoeP2PDirectedDataState::kQuarantined);
+}
+
+void iwx_tahoe_p2p_directed_data_record_stop_proof(
+    TahoeP2PDirectedDataContext *context,
+    TahoeP2PDirectedDataStopProof proof)
+{
+    if (!context)
+        return;
+    switch (proof) {
+    case TahoeP2PDirectedDataStopProof::kMasterDisabledObserved:
+        __atomic_fetch_or(&context->stopProofMask,
+            kTahoeP2PDirectedDataStopMasterDisabled, __ATOMIC_ACQ_REL);
+        break;
+    case TahoeP2PDirectedDataStopProof::kSwResetIssued:
+        __atomic_fetch_or(&context->stopProofMask,
+            kTahoeP2PDirectedDataStopSwReset, __ATOMIC_ACQ_REL);
+        break;
+    case TahoeP2PDirectedDataStopProof::kOwnedTxRingResetAfterStop:
+        __atomic_fetch_or(&context->stopProofMask,
+            kTahoeP2PDirectedDataStopOwnedRingReset, __ATOMIC_ACQ_REL);
+        break;
+    }
+}
+
+struct DirectedDataHardStopFinalize {
+    TahoeP2PDirectedDataContext *context;
+    uint64_t armSerial;
+    uint64_t ownerSerial;
+    uint64_t runSerial;
+    uint64_t stationAllocationSerial;
+    uint64_t queueAllocationSerial;
+    uint32_t requiredStopProofs;
+    bool queueReleased;
+    int result;
+};
+
+static IOReturn directedDataHardStopFinalizeAction(
+    OSObject *, void *ownerArg, void *actionArg, void *, void *)
+{
+    auto *owner = static_cast<ItlIwx *>(ownerArg);
+    auto *finalize = static_cast<DirectedDataHardStopFinalize *>(actionArg);
+    TahoeP2PDirectedDataContext *context = finalize ? finalize->context : nullptr;
+    if (!owner || !finalize || !context || !owner->tahoeP2pOnMainGate())
+        return kIOReturnBadArgument;
+    const uint32_t stopProofs = __atomic_load_n(&context->stopProofMask,
+                                                __ATOMIC_ACQUIRE);
+    if (context->armSerialHighWater != finalize->armSerial ||
+        context->binding.ownerSerial != finalize->ownerSerial ||
+        context->binding.runSerial != finalize->runSerial ||
+        context->stationAllocationSerial !=
+            finalize->stationAllocationSerial ||
+        context->queueAllocationSerial != finalize->queueAllocationSerial ||
+        (stopProofs & finalize->requiredStopProofs) !=
+            finalize->requiredStopProofs ||
+        (context->ticketBound && !context->originClosed) ||
+        (!finalize->queueReleased && (context->mbufHeldByRing ||
+         (context->doorbellIssued && !context->completionObserved)))) {
+        finalize->result = EBUSY;
+        return kIOReturnSuccess;
+    }
+    // Never erase the completion identity until the exact allocation has
+    // passed its checked hard-stop ring release above.
+    if (context->completion.snapshot().armed) {
+        const auto result = context->completion.firmwareStoppedAndDrained();
+        if (result != IntelP2PActionTx::Result::kReady) {
+            finalize->result = EBUSY;
+            return kIOReturnSuccess;
+        }
+    }
+    context->mbufHeldByRing = false;
+    context->completionObserved = context->completionObserved ||
+        context->firmwareStatus != 0xffff;
+    context->state = TahoeP2PDirectedDataState::kClosed;
+    context->hardStopDrained = finalize->queueReleased;
+    finalize->result = 0;
+    return kIOReturnSuccess;
+}
+
+int iwx_tahoe_p2p_directed_data_drain_after_hardstop(
+    ItlIwx *owner, struct iwx_softc *sc,
+    TahoeP2PStationLease *stationLease,
+    TahoeP2PTxQueueLease *queueLease,
+    TahoeP2PDirectedDataContext *context)
+{
+    if (!owner || !sc || sc != &owner->com || !stationLease ||
+        !queueLease || !context)
+        return EBUSY;
+    TahoeP2PDirectedDataSnapshot before{};
+    if (!iwx_tahoe_p2p_directed_data_snapshot(owner, context, &before, true) ||
+        (before.stopProofMask & kTahoeP2PDirectedDataRequiredStopProofs) !=
+            kTahoeP2PDirectedDataRequiredStopProofs ||
+        (before.originTicketBound && !before.originClosed) ||
+        (before.doorbellIssued && !before.completionObserved &&
+         !before.mbufHeldByRing))
+        return EBUSY;
+    const bool queueMayExist = iwx_tahoe_p2p_tvqm_may_exist(queueLease);
+    if (queueMayExist) {
+        const int releaseError =
+            iwx_tahoe_p2p_tvqm_release_after_directed_data_hardstop(
+                owner, sc, stationLease, queueLease, context);
+        if (releaseError)
+            return releaseError;
+    }
+    DirectedDataHardStopFinalize finalize{
+        context, before.armSerial, before.ownerSerial, before.runSerial,
+        before.stationAllocationSerial, before.queueAllocationSerial,
+        kTahoeP2PDirectedDataRequiredStopProofs, queueMayExist, EBUSY};
+    const IOReturn gateResult = directedDataRunMainGateAction(owner,
+        directedDataHardStopFinalizeAction, &finalize, true);
+    return gateResult == kIOReturnSuccess ? finalize.result : EBUSY;
+}
+
+static bool directedDataCaptureSnapshot(
+    const TahoeP2PDirectedDataContext *context,
+    TahoeP2PDirectedDataSnapshot *snapshot)
+{
+    if (!context || !snapshot)
+        return false;
+    const auto completion = context->completion.snapshot();
+    TahoeP2PDirectedDataSnapshot value{};
+    value.state = context->state;
+    value.reason = context->reason;
+    value.armSerial = context->armSerialHighWater;
+    value.ticketSerial = context->originTicket.ticketSerial;
+    value.packetToken = context->packetToken;
+    value.ownerSerial = context->binding.ownerSerial;
+    value.runSerial = context->binding.runSerial;
+    value.interfaceIncarnation = context->interfaceIncarnation;
+    value.stationAllocationSerial = context->stationAllocationSerial;
+    value.queueAllocationSerial = context->queueAllocationSerial;
+    value.rocToken = context->binding.rocToken;
+    value.deadlineUs = context->binding.deadlineUs;
+    value.generation = context->binding.generation;
+    value.p2pFirmwareGeneration = context->binding.p2pFirmwareGeneration;
+    value.ifindex = context->ifindex;
+    value.queueId = context->queueId;
+    value.stationId = context->stationId;
+    value.descriptorIndex = context->descriptorIndex;
+    value.ringSize = context->ringSize;
+    value.sequenceControl = context->sequenceControl;
+    value.frameControl = context->frameControl;
+    value.byteCount = context->byteCount;
+    value.expectedNextSsn = context->expectedNextSsn;
+    value.reservedWifiSequence = context->reservedWifiSequence;
+    value.reservedAwdlSequence = context->reservedAwdlSequence;
+    value.firmwareStatus = context->firmwareStatus;
+    value.stopProofMask = __atomic_load_n(&context->stopProofMask,
+                                          __ATOMIC_ACQUIRE);
+    value.originWindowBound = context->originWindowBound;
+    value.originTicketBound = context->ticketBound;
+    value.originClosed = context->originClosed;
+    value.completionArmed = completion.armed;
+    value.sequenceReservationValid = context->sequenceReservationValid;
+    value.permitIssued = context->permitIssued;
+    value.doorbellIssued = context->doorbellIssued;
+    value.completionObserved = context->completionObserved;
+    value.frameAttemptSucceeded = context->frameAttemptSucceeded;
+    value.mbufHeldByRing = context->mbufHeldByRing;
+    value.hardStopDrained = context->hardStopDrained;
+    *snapshot = value;
+    return true;
+}
+
+struct DirectedDataSnapshotAction {
+    const TahoeP2PDirectedDataContext *context;
+    TahoeP2PDirectedDataSnapshot *snapshot;
+    bool valid;
+};
+
+static IOReturn directedDataSnapshotAction(
+    OSObject *, void *ownerArg, void *actionArg, void *, void *)
+{
+    auto *owner = static_cast<ItlIwx *>(ownerArg);
+    auto *action = static_cast<DirectedDataSnapshotAction *>(actionArg);
+    if (!owner || !action || !action->context || !action->snapshot ||
+        !owner->tahoeP2pOnMainGate())
+        return kIOReturnBadArgument;
+    action->valid = directedDataCaptureSnapshot(action->context,
+                                                 action->snapshot);
+    return action->valid ? kIOReturnSuccess : kIOReturnNotReady;
+}
+
+bool iwx_tahoe_p2p_directed_data_snapshot(
+    ItlIwx *owner, const TahoeP2PDirectedDataContext *context,
+    TahoeP2PDirectedDataSnapshot *snapshot, bool tryOnly)
+{
+    if (!owner || !context || !snapshot)
+        return false;
+    DirectedDataSnapshotAction action{context, snapshot, false};
+    return directedDataRunMainGateAction(owner, directedDataSnapshotAction,
+        &action, tryOnly) == kIOReturnSuccess && action.valid;
+}
+
+#endif // ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
 
 #endif // AIRPORT_TAHOE

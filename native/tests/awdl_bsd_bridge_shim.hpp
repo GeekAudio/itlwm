@@ -24,17 +24,18 @@
 #define SIOCAIFADDR_IN6 0x1234
 using errno_t=int;
 using protocol_family_t=unsigned;
-struct FakeIf {unsigned refs=0;bool ipv6=false;uint8_t lladdr[6]{};uint8_t address[16]{};};using ifnet_t=FakeIf *;
+struct FakeIf {unsigned refs=0;bool ipv6=false;uint32_t addressScopeId=0;uint8_t lladdr[6]{};uint8_t address[16]{};};using ifnet_t=FakeIf *;
 struct FakeMbuf {uint8_t bytes[2048]{};size_t offset=0,length=0,total=0;unsigned flags=0;void *header=nullptr;FakeIf *receiveIf=nullptr;};
 using mbuf_t=FakeMbuf *;
-using IOSimpleLock=std::mutex;using IOInterruptState=unsigned;
+struct IOSimpleLock {std::mutex mutex;};using IOInterruptState=unsigned;
+inline unsigned &hostSimpleLockDepth(){static thread_local unsigned value=0;return value;}
 extern std::atomic<unsigned> allocated,freed,delivered,finalized,socketsOpen,socketsClosed;extern uint64_t fakeTime;
 extern bool allocateFail,inputFail,detachDelay,offloadFail;
 extern bool ipv6Fail,socketFail,packetHeaderMissing;
 extern bool lladdrFail;
 inline IOSimpleLock *IOSimpleLockAlloc(){return new IOSimpleLock;}
-inline IOInterruptState IOSimpleLockLockDisableInterrupt(IOSimpleLock *l){l->lock();return 0;}
-inline void IOSimpleLockUnlockEnableInterrupt(IOSimpleLock *l,IOInterruptState){l->unlock();}
+inline IOInterruptState IOSimpleLockLockDisableInterrupt(IOSimpleLock *l){l->mutex.lock();++hostSimpleLockDepth();return 0;}
+inline void IOSimpleLockUnlockEnableInterrupt(IOSimpleLock *l,IOInterruptState){assert(hostSimpleLockDepth());--hostSimpleLockDepth();l->mutex.unlock();}
 inline void clock_get_uptime(uint64_t *p){*p=fakeTime;}
 inline void absolutetime_to_nanoseconds(uint64_t a,uint64_t *n){*n=a*1000;}
 inline void IOSleep(unsigned){}
@@ -44,7 +45,7 @@ inline int mbuf_getcluster(int,int,size_t n,mbuf_t *m){if(allocateFail||n>2048)r
 inline int mbuf_getpacket(int,mbuf_t *m){if(allocateFail){*m=nullptr;return ENOMEM;}*m=new FakeMbuf;(*m)->flags=packetHeaderMissing?0:MBUF_PKTHDR;++allocated;return 0;}
 inline unsigned mbuf_flags(mbuf_t m){return m->flags;}
 inline void *mbuf_data(mbuf_t m){return m->bytes+m->offset;}
-inline void mbuf_freem(mbuf_t m){assert(m);delete m;++freed;}
+inline void mbuf_freem(mbuf_t m){assert(hostSimpleLockDepth()==0&&"mbuf_freem under IOSimpleLock");assert(m);delete m;++freed;}
 inline void mbuf_setlen(mbuf_t m,size_t n){m->length=n;}
 inline void mbuf_pkthdr_setlen(mbuf_t m,size_t n){m->total=n;}
 inline void mbuf_pkthdr_setrcvif(mbuf_t m,ifnet_t dev){m->receiveIf=dev;}
@@ -52,9 +53,9 @@ inline void mbuf_pkthdr_setheader(mbuf_t m,void *p){m->header=p;}
 inline void mbuf_adj(mbuf_t m,int n){m->offset+=n;m->length-=n;if(m->flags&MBUF_PKTHDR)m->total-=n;}
 using FakeFinalizeObserver=void (*)(mbuf_t);
 inline FakeFinalizeObserver &fakeFinalizeObserver(){static FakeFinalizeObserver value=nullptr;return value;}
-inline void mbuf_outbound_finalize(mbuf_t packet,unsigned family,size_t offset){assert(family==AF_INET6&&offset==14);++finalized;if(fakeFinalizeObserver())fakeFinalizeObserver()(packet);}
+inline void mbuf_outbound_finalize(mbuf_t packet,unsigned family,size_t offset){assert(hostSimpleLockDepth()==0&&"mbuf_outbound_finalize under IOSimpleLock");assert(family==AF_INET6&&offset==14);++finalized;if(fakeFinalizeObserver())fakeFinalizeObserver()(packet);}
 inline int ifnet_reference(ifnet_t p){++p->refs;return 0;}
-inline void ifnet_release(ifnet_t p){assert(p->refs);--p->refs;}
+inline void ifnet_release(ifnet_t p){assert(hostSimpleLockDepth()==0&&"ifnet_release under IOSimpleLock");assert(p->refs);--p->refs;}
 inline int ifnet_lladdr_copy_bytes(ifnet_t p,void *out,size_t length){if(lladdrFail||!p||length!=sizeof(p->lladdr))return EINVAL;memcpy(out,p->lladdr,length);return 0;}
 inline int ifnet_set_offload(ifnet_t,unsigned){return offloadFail?EIO:0;}
 inline int ifnet_set_mtu(ifnet_t,unsigned){return 0;}
@@ -69,9 +70,9 @@ struct sockaddr_in6 {uint8_t sin6_len=0,sin6_family=0;uint16_t port=0;uint32_t f
 struct in6_addrlifetime {uint32_t ia6t_vltime=0,ia6t_pltime=0;};
 struct in6_aliasreq {char ifra_name[16]{};sockaddr_in6 ifra_addr{},ifra_dstaddr{},ifra_prefixmask{};int ifra_flags=0;in6_addrlifetime ifra_lifetime{};};
 using ifaddr_t=FakeIf *;
-inline int ifnet_get_address_list_family(ifnet_t p,ifaddr_t **out,unsigned family){assert(family==AF_INET6);static ifaddr_t list[2]{};list[0]=p->ipv6?p:nullptr;list[1]=nullptr;*out=list;return 0;}
+inline int ifnet_get_address_list_family(ifnet_t p,ifaddr_t **out,unsigned family){assert(hostSimpleLockDepth()==0&&"ifnet address list under IOSimpleLock");assert(family==AF_INET6);static thread_local ifaddr_t list[2]{};list[0]=p->ipv6?p:nullptr;list[1]=nullptr;*out=list;return 0;}
 inline void ifnet_free_address_list(ifaddr_t *){}
-inline int ifaddr_address(ifaddr_t p,sockaddr *out,size_t length){assert(length==sizeof(sockaddr_in6));sockaddr_in6 value{};value.sin6_family=AF_INET6;memcpy(value.sin6_addr.s6_addr,p->address,16);memcpy(out,&value,length);return 0;}
+inline int ifaddr_address(ifaddr_t p,sockaddr *out,size_t length){assert(length==sizeof(sockaddr_in6));sockaddr_in6 value{};value.sin6_family=AF_INET6;value.sin6_scope_id=p->addressScopeId;memcpy(value.sin6_addr.s6_addr,p->address,16);memcpy(out,&value,length);return 0;}
 struct iff_filter {
     void *iff_cookie=nullptr;const char *iff_name=nullptr;unsigned iff_protocol=0;
     void *iff_input=nullptr;int (*iff_output)(void *,ifnet_t,unsigned,mbuf_t *)=nullptr;
@@ -81,7 +82,7 @@ struct iff_filter {
 using interface_filter_t=iff_filter *;
 extern iff_filter installed;extern ifnet_t filterIf;
 inline int iflt_attach(ifnet_t p,const iff_filter *f,interface_filter_t *r){installed=*f;filterIf=p;*r=&installed;return 0;}
-inline void iflt_detach(interface_filter_t f){if(!detachDelay)f->iff_detached(f->iff_cookie,filterIf);}
+inline void iflt_detach(interface_filter_t f){assert(hostSimpleLockDepth()==0&&"iflt_detach under IOSimpleLock");if(!detachDelay)f->iff_detached(f->iff_cookie,filterIf);}
 using FakeInputObserver=void (*)(ifnet_t,mbuf_t);
 inline FakeInputObserver &fakeInputObserver(){static FakeInputObserver value=nullptr;return value;}
 inline int ifnet_input(ifnet_t dev,mbuf_t m,void *){

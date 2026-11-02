@@ -39,7 +39,9 @@ SOURCES = {
     2: 'local_group1', 3: 'driver_cleanup', 4: 'hal_command',
     5: 'software_crypto',
 }
-KNOWN_FLAGS_MASK = 0xFFF
+# IwxStaAuthTraceFlags in native/iwx_sta_auth_trace.h (schema 1).
+KNOWN_FLAGS_MASK = 0x7FFF
+GROUP2_REPLAY_FLAGS = {'checked': 1 << 12, 'equal': 1 << 13, 'mismatch': 1 << 14}
 GROUP2_CALLSITE_FLAGS = {
     'tx_mgmt_only': 1 << 9,
     'background_scan': 1 << 10,
@@ -66,6 +68,16 @@ def decode_record(raw: bytes) -> dict:
     row['event'] = KINDS[row['kind']]
     row['stage_label'] = STAGES[row['stage']]
     row['source_label'] = SOURCES[row['source']]
+    if row['kind'] == 5:
+        checked = bool(row['flags'] & GROUP2_REPLAY_FLAGS['checked'])
+        equal = bool(row['flags'] & GROUP2_REPLAY_FLAGS['equal'])
+        mismatch = bool(row['flags'] & GROUP2_REPLAY_FLAGS['mismatch'])
+        row['replay_echo'] = {
+            'checked': checked,
+            'result': ('equal' if equal else 'mismatch')
+                      if checked and equal != mismatch else 'unknown',
+            'scope': 'local replay-field comparison only; not MIC, key installation, TX or peer acceptance proof',
+        }
     if row['kind'] == 14:
         row['observation_scope'] = (
             'pre-enqueue callsite before send_group_msg2; does not prove '

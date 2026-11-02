@@ -7,9 +7,16 @@
 #include <IOKit/IOLocks.h>
 #include "../../native/p2p_tx_resources.hpp"
 
+#ifndef ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+#define ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332 0
+#endif
+
 class ItlIwx;
 struct iwx_softc;
 struct iwx_tx_ring;
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+struct TahoeP2PDirectedDataContext;
+#endif
 
 enum class TahoeP2PResourceState : uint8_t {
     kAbsent,
@@ -43,6 +50,11 @@ struct TahoeP2PStationLease {
     uint8_t stationType;
     uint8_t addCommandVersion;
     uint8_t addNotificationVersion;
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    // HAL-issued owner-persistent identity for the exact LINK station
+    // allocation. This is independent of station ID and power generation.
+    uint64_t allocationSerial {0};
+#endif
 };
 
 struct TahoeP2PTxQueueLease {
@@ -72,6 +84,11 @@ struct TahoeP2PTxQueueLease {
     uint16_t firmwareWritePointer;
     bool unsubmittedAbortInProgress;
     bool idleAbortAfterEndInProgress;
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    // HAL-issued owner-persistent identity for the exact TID0 queue
+    // allocation. This is independent of qid and generation.
+    uint64_t allocationSerial {0};
+#endif
     // Portable lifecycle model is also used by the native tests. Do not copy
     // or memset this lease after construction.
     IntelP2PTx::QueueLease lifecycle;
@@ -111,6 +128,21 @@ int iwx_tahoe_p2p_tvqm_allocate(ItlIwx *owner, struct iwx_softc *sc,
                                 bool *resourceMayExist,
                                 TahoeP2PQueueUse use =
                                     TahoeP2PQueueUse::kManagementTid15);
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+int iwx_tahoe_p2p_tvqm_bind_allocation_serials(
+    struct iwx_softc *sc, TahoeP2PStationLease *stationLease,
+    TahoeP2PTxQueueLease *queueLease, uint64_t stationAllocationSerial,
+    uint64_t queueAllocationSerial);
+// Hard-stop-only retirement for the exact directed LINK/TID0 allocation.
+// The Data context carries the proofs recorded at the real MASTER_DISABLED,
+// SW_RESET, and post-stop owned-ring reset sites; this helper never accepts
+// caller-supplied booleans as substitute evidence.
+int iwx_tahoe_p2p_tvqm_release_after_directed_data_hardstop(
+    ItlIwx *owner, struct iwx_softc *sc,
+    TahoeP2PStationLease *stationLease,
+    TahoeP2PTxQueueLease *queueLease,
+    const TahoeP2PDirectedDataContext *dataContext);
+#endif
 int iwx_tahoe_p2p_tvqm_remove(ItlIwx *owner, struct iwx_softc *sc,
                               TahoeP2PStationLease *stationLease,
                               TahoeP2PTxQueueLease *queueLease,

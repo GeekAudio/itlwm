@@ -17,6 +17,15 @@ PROJECT = Path(__file__).resolve().parents[1]
 def receive149_profile_errors(args):
     data_input = getattr(args, 'native_awdl_rx149_data_input', False)
     directed_prepare = getattr(args, 'native_awdl_directed_prepare', False)
+    directed_data = getattr(args, 'native_awdl_directed_data_tx', False)
+    if directed_data and getattr(args, 'native_awdl_reply_shadow', False):
+        return ['Directed data TX excludes the separate Reply Shadow output gate']
+    if directed_data and not (
+            directed_prepare and data_input and
+            args.native_awdl_rx149_observation_only and
+            args.native_awdl_resident_data and args.p2p_probe and
+            args.p2p_manual_trigger):
+        return ['Directed data TX requires the manual resident directed-prepare profile']
     if directed_prepare and not (
             data_input and args.native_awdl_rx149_observation_only and
             args.native_awdl_resident_data and args.p2p_probe and
@@ -64,6 +73,8 @@ def resident_build_flags(args):
         flags += ' -DITL_NATIVE_AWDL_REPLY_SHADOW_25G332=1'
     if getattr(args, 'native_awdl_directed_prepare', False):
         flags += ' -DITL_NATIVE_AWDL_DIRECTED_PREPARE_25G332=1'
+    if getattr(args, 'native_awdl_directed_data_tx', False):
+        flags += ' -DITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332=1'
     return flags
 
 
@@ -93,6 +104,8 @@ def apply_artifact_profile(personality, args):
         # artifact, and the driver still requires an administrator one-shot.
         'NativeP2PDirectedPrepareCompiled': bool(getattr(args, 'native_awdl_directed_prepare', False)),
         'NativeP2PDirectedPrepareEnabled': bool(getattr(args, 'native_awdl_directed_prepare', False)),
+        'NativeP2PDirectedDataCompiled': bool(getattr(args, 'native_awdl_directed_data_tx', False)),
+        'NativeP2PDirectedDataEnabled': bool(getattr(args, 'native_awdl_directed_data_tx', False)),
     })
 
 
@@ -148,6 +161,8 @@ def main():
                         help='Test105: compile disarmed request/reply association; no firmware TX or automatic runtime enable')
     parser.add_argument('--native-awdl-directed-prepare', action='store_true',
                         help='Test105: compile one administrator-armed peer LINK/TID0 prepare-only experiment; no data doorbell')
+    parser.add_argument('--native-awdl-directed-data-tx', action='store_true',
+                        help='Test107: compile one administrator-armed native UDP/LINK-TID0 data attempt on active channel 6')
     args = parser.parse_args()
     for error in receive149_profile_errors(args):
         parser.error(error)
@@ -277,6 +292,8 @@ def main():
                           'native_awdl_reply_shadow_enabled': False,
                           'native_awdl_directed_prepare_compiled': args.native_awdl_directed_prepare,
                           'native_awdl_directed_prepare_enabled': args.native_awdl_directed_prepare,
+                          'native_awdl_directed_data_compiled': args.native_awdl_directed_data_tx,
+                          'native_awdl_directed_data_enabled': args.native_awdl_directed_data_tx,
                           'test_build': build_tag, 'mach_o_uuid': match.group(1),
                           'log': str(log_path)}, ensure_ascii=False))
 

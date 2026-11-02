@@ -1,0 +1,154 @@
+#!/usr/bin/env python3
+"""Check Test107 worker failure reporting and retirement contracts.
+
+The policy classifier is compiled from the production source. The remaining
+checks bind the worker's fault/retire ordering to the actual HAL and queue APIs;
+this is a source-contract test, not a hardware TX simulation.
+"""
+
+from pathlib import Path
+import subprocess
+import tempfile
+
+
+ROOT = Path(__file__).resolve().parents[2]
+PROBE_PATH = ROOT / "itlwm/hal_iwx/ItlIwxP2PProbe.cpp"
+SOURCE = PROBE_PATH.read_text()
+
+
+def extract(source: str, marker: str) -> str:
+    start = source.index(marker)
+    opening = source.index("{", start)
+    depth = 1
+    end = opening + 1
+    while depth:
+        depth += (source[end] == "{") - (source[end] == "}")
+        end += 1
+    return source[start:end]
+
+
+stage_enum = extract(SOURCE, "enum DirectedDataStage : uint32_t {")
+failure_classifier = extract(
+    SOURCE, "struct DirectedDataFailureDisposition {")
+failure_function = extract(
+    SOURCE, "static DirectedDataFailureDisposition directedDataFailureDisposition(")
+
+fixture = r"""
+#include <cassert>
+#include <cerrno>
+#include <cstdint>
+""" + stage_enum + ";\n" + failure_classifier + ";\n" + failure_function + r"""
+int main() {
+    const auto cleaned = directedDataFailureDisposition(EIO, true);
+    assert(cleaned.stage == kDirectedDataFailedCleaned);
+    assert(cleaned.dataResult == EIO);
+    assert(cleaned.workerResult == 0);
+    assert(cleaned.cleanupAck && cleaned.resourcesAbsent);
+
+    const auto timeout = directedDataFailureDisposition(ETIMEDOUT, true);
+    assert(timeout.stage == kDirectedDataFailedCleaned);
+    assert(timeout.dataResult == ETIMEDOUT);
+    assert(timeout.workerResult == 0);
+
+    const auto retained = directedDataFailureDisposition(EIO, false);
+    assert(retained.stage == kDirectedDataQuarantined);
+    assert(retained.dataResult == EIO);
+    assert(retained.workerResult == EIO);
+    assert(!retained.cleanupAck && !retained.resourcesAbsent);
+
+    const auto invalid = directedDataFailureDisposition(0, false);
+    assert(invalid.stage == kDirectedDataQuarantined);
+    assert(invalid.dataResult == EIO && invalid.workerResult == EIO);
+}
+"""
+with tempfile.TemporaryDirectory(prefix="test107-data-worker-") as tmp:
+    source = Path(tmp) / "failure_disposition.cpp"
+    binary = Path(tmp) / "failure_disposition"
+    source.write_text(fixture)
+    compiled = subprocess.run(
+        ["c++", "-std=c++14", "-Wall", "-Wextra", "-Werror",
+         str(source), "-o", str(binary)],
+        text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+    )
+    if compiled.returncode:
+        raise SystemExit(compiled.stdout)
+    subprocess.run([str(binary)], check=True)
+
+
+worker = extract(SOURCE, "static int exerciseDirectedDataTx(P2PProbeRun *probe)")
+worker_flat = " ".join(worker.split())
+failure_path = extract(
+    worker, "auto recordFailure = [&](int error, uint32_t stage) {")
+assert "directedDataInnerResourcesAbsent(owner)" in failure_path
+assert "directedDataFailureDisposition(error, absent)" in failure_path
+assert "return disposition.workerResult;" in failure_path
+assert "kDirectedDataQuarantined" in SOURCE
+
+# Keep the first local failure (for example malformed BSD MPDU / rejected
+# permit) across later END polling and teardown. A safe cleanup is generic
+# completion only; DataResult remains the original errno.
+assert "auto rememberPreSubmitFailure = [&](int error)" in worker
+assert "rememberPreSubmitFailure(failure);" in worker
+assert "preSubmitFailure != 0 ? preSubmitFailure : ETIMEDOUT" in worker
+assert "probe->directedDataResult = failure;" in worker
+
+# A submitted mbuf transfers ownership exactly once to HAL. This path cannot
+# retry, free, or resubmit it after the call.
+submit = "iwx_tahoe_p2p_directed_data_tx_submit("
+assert worker.count(submit) == 1
+after_submit = worker[worker.index(submit):]
+assert "mbuf_freem(encodedMpdu)" not in after_submit
+assert "iwx_tahoe_p2p_directed_data_tx_submit(" not in after_submit[len(submit):]
+
+# Normal retirement waits for exact firmware station removal and ring drain;
+# an unarmed path is eligible only after canonical END and the HAL never-armed
+# proof. Unknown doorbell/completion state returns through quarantine.
+remove = worker.index("iwx_tahoe_p2p_tvqm_remove(")
+drained = worker.index("iwx_tahoe_p2p_tvqm_confirm_drained(", remove)
+assert remove < drained
+assert "iwx_tahoe_p2p_directed_data_never_armed(" in worker
+assert "iwx_tahoe_p2p_tvqm_abort_idle_after_end(" in worker
+assert "&owner->nativeP2pTxQueue_, sessionEnded, neverArmed," in worker
+assert "if (data.doorbellIssued && !data.completionObserved)" in worker
+assert worker.count("if (data.doorbellIssued && !data.completionObserved)") == 1
+
+# Stage 8 requires successful local firmware completion and complete cleanup.
+# Completion is explicitly not presented as a peer ACK.
+assert "!finalData.completionObserved || !finalData.frameAttemptSucceeded" in worker_flat
+assert "probe->directedDataCleanupAck = directedDataInnerResourcesAbsent(owner);" in worker
+assert "if (!probe->directedDataCleanupAck)" in worker
+assert "nativeP2pDirectedDataTx_.completion.snapshot()" not in worker
+assert "nativeP2pDirectedDataTx_.state" not in worker
+assert "owner, &owner->nativeP2pDirectedDataTx_, &finalData" in worker_flat
+assert '"NativeP2PDirectedDataFirmwareAttemptSucceeded"' in SOURCE
+assert '"NativeP2PDirectedDataPeerAcknowledged"' not in SOURCE
+for field in ("HalState", "HalReason", "QueueId", "StationId",
+              "DescriptorIndex", "FrameControl", "SequenceControl",
+              "ByteCount", "ExpectedNextSsn"):
+    assert f'"NativeP2PDirectedData{field}"' in SOURCE
+for field in ("PeerMAC", "LocalIPv6", "Nonce", "RunToken"):
+    assert f'"NativeP2PDirectedData{field}"' not in SOURCE
+
+for helper_marker in (
+        "static void publishDirectedDataState(",
+        "static bool directedDataStationQueueDataAbsent(",
+        "static bool directedDataHasNoDoorbell("):
+    helper = extract(SOURCE, helper_marker)
+    assert "iwx_tahoe_p2p_directed_data_snapshot(" in helper
+    assert "nativeP2pDirectedDataTx_.completion.snapshot()" not in helper
+
+assert "iwx_tahoe_p2p_directed_data_never_armed( owner," in worker_flat
+
+# ROC submission runs outside the command gate. HAL arm mutates the shared
+# Data Context only on the main gate, so the ROC arm callback must marshal the
+# short arm action before returning to the caller that sends the firmware
+# command. The firmware command itself must remain outside that gate action.
+arm_action = extract(SOURCE, "static IOReturn directedDataArmAction(")
+arm_callback = extract(SOURCE, "static bool tahoeP2pArmDirectedDataRoc(")
+assert "owner->tahoeP2pOnMainGate()" in arm_action
+assert "iwx_tahoe_p2p_directed_data_arm(" in arm_action
+assert "gate->runAction(directedDataArmAction, &run)" in arm_callback
+assert "iwx_tahoe_p2p_directed_data_arm(" not in arm_callback
+assert "tahoeP2pRocSubmit(" not in arm_action
+
+print("Test107 directed data worker failure/retire contract passed")

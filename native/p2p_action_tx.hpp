@@ -77,6 +77,11 @@ public:
     // Empty or completed tickets retire idempotently; a live ticket requires
     // a nonzero generation different from the ticket's generation.
     Result firmwareDrained(uint32_t newGeneration);
+    // Use only after the HAL has independently proved hardware stop, RX/TX
+    // quiescence, and reclamation of the exact owned ring. Unlike the ordinary
+    // generation transition helper, this proof does not rely on a new software
+    // generation number having already been published.
+    Result firmwareStoppedAndDrained();
     Ticket snapshot() const;
 
 private:
