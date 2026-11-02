@@ -20,27 +20,27 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "b0d00614ea9be003b9971cb08071994bd976c3e487484f4ac9801eacda6dffd5"
+      "sha256": "e6adbf291cb54158d944ee99769c1c0b4ceb014c431bdb5b5fecedc8d95663c0"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "0e65ef06ecb2aef9e1399ed54c5b2054332c5b5efd0d819c990c6a391834a191"
+      "sha256": "ef99c09679ffdf3d351b2295175a1ca313e8fb747f082193f7e2118a92c0a26d"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "9e92047215268760d7d25751243b2b81dd6e24f5defcf8725b4302a21be593e5"
+      "sha256": "3724abf352120802758b223d8e7ab3bc687769d9eec3c3b14f26a5b69802da84"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "9e92047215268760d7d25751243b2b81dd6e24f5defcf8725b4302a21be593e5"
+      "sha256": "3724abf352120802758b223d8e7ab3bc687769d9eec3c3b14f26a5b69802da84"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "a9b49a8ef7e81ee51ed6473ef24eee08e8784a922a7c027fb687f83766dcff3f"
+      "sha256": "6882acad83e35fb31ef762507e1c8f7cc9d8707ec436eb38faaef701b156144f"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
@@ -85,8 +85,8 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-03T01:53:31.667459+08:00",
-  "runtime_scope": "Test119 controlled OpenWrt-to-awdl0 UDP input verified; native cleanup quarantined; Wi-Fi switch UI and scan count under investigation",
+  "updated_at": "2026-11-03T02:49:04.642806+08:00",
+  "runtime_scope": "Test119 controlled RX evidence and unresolved hotspot; Test120 cleanup fix deployed, awaiting reboot",
   "running_candidate": "25G332-Test119",
   "next_candidate": null,
   "website_delivery": "reviewed public-safe snapshot",
