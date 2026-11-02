@@ -110,6 +110,38 @@ static ExerciseRecoveryProof knownUnsubmittedRestoredProof(int32_t error)
     return p;
 }
 
+static ExerciseRecoveryProof rx149SubmittedFailedEndCleanupProof()
+{
+    ExerciseRecoveryProof p{};
+    p.snapshotValid = true;
+    p.snapshotStable = true;
+    p.ownerMatches = true;
+    p.contextGenerationMatches = true;
+    p.powerGenerationMatches = true;
+    p.firmwareGenerationMatches = true;
+    p.p2pFirmwareGenerationMatches = true;
+    p.stationGenerationMatches = true;
+    p.fullyRestored = true;
+    p.bindingAbsent = true;
+    p.phyUnleased = true;
+    p.rocIdle = true;
+    p.restoreComplete = true;
+    p.sessionProtectionSubmitReached = true;
+    p.sessionOutcomeUnknown = false;
+    p.txResourcesPresent = false;
+    p.cleanupErrno = 0;
+    p.attemptSerial = 27;
+    p.snapshotRevision = 4;
+    p.rx149SubmittedEndCleanup = true;
+    p.rx149SessionSubmitted = true;
+    p.rx149CanonicalFailedEnd = true;
+    p.rx149ProducerClosedAndDrained = true;
+    p.rx149TxQuiescent = true;
+    p.rx149BindingRemoveAcknowledged = true;
+    p.rx149PhyRestoreAcknowledged = true;
+    return p;
+}
+
 static Admission readyAdmission()
 {
     Admission a{};
@@ -387,6 +419,80 @@ static void testDirectedDataFailureNeedsCanonicalEndAndDrainProof()
     assert(commands.removeCalls == 1);
 }
 
+static void testRx149SubmittedFailedEndNeedsExplicitCleanupProof()
+{
+    ExerciseRecoveryProof proof = rx149SubmittedFailedEndCleanupProof();
+    assert(safeToRemoveAfterExerciseFailure(EPROTO, proof));
+
+    const auto reject = [&](ExerciseRecoveryProof p) {
+        assert(!safeToRemoveAfterExerciseFailure(EPROTO, p));
+    };
+    { auto p = proof; p.rx149SubmittedEndCleanup = false; reject(p); }
+    { auto p = proof; p.rx149SessionSubmitted = false; reject(p); }
+    { auto p = proof; p.rx149CanonicalFailedEnd = false; reject(p); }
+    { auto p = proof; p.rx149ProducerClosedAndDrained = false; reject(p); }
+    { auto p = proof; p.rx149TxQuiescent = false; reject(p); }
+    { auto p = proof; p.rx149BindingRemoveAcknowledged = false; reject(p); }
+    { auto p = proof; p.rx149PhyRestoreAcknowledged = false; reject(p); }
+    { auto p = proof; p.snapshotValid = false; reject(p); }
+    { auto p = proof; p.snapshotStable = false; reject(p); }
+    { auto p = proof; p.ownerMatches = false; reject(p); }
+    { auto p = proof; p.contextGenerationMatches = false; reject(p); }
+    { auto p = proof; p.powerGenerationMatches = false; reject(p); }
+    { auto p = proof; p.firmwareGenerationMatches = false; reject(p); }
+    { auto p = proof; p.p2pFirmwareGenerationMatches = false; reject(p); }
+    { auto p = proof; p.stationGenerationMatches = false; reject(p); }
+    { auto p = proof; p.sessionProtectionSubmitReached = false; reject(p); }
+    { auto p = proof; p.fullyRestored = false; reject(p); }
+    { auto p = proof; p.bindingAbsent = false; reject(p); }
+    { auto p = proof; p.phyUnleased = false; reject(p); }
+    { auto p = proof; p.rocIdle = false; p.restoreComplete = false; reject(p); }
+    { auto p = proof; p.sessionOutcomeUnknown = true; reject(p); }
+    { auto p = proof; p.txResourcesPresent = true; reject(p); }
+    { auto p = proof; p.cleanupErrno = EBUSY; reject(p); }
+    { auto p = proof; p.attemptSerial = 0; reject(p); }
+    { auto p = proof; p.snapshotRevision = 0; reject(p); }
+    { auto p = proof; p.snapshotRevision = 5; reject(p); }
+
+    // A submitted failed END is accepted only under its own typed variant and
+    // only for the exact platform EPROTO result.
+    assert(!safeToRemoveAfterExerciseFailure(0, proof));
+    assert(!safeToRemoveAfterExerciseFailure(ESTALE, proof));
+    assert(!safeToRemoveAfterExerciseFailure(EIO, proof));
+    { auto p = proof; p.directedDataRecovery = true; reject(p); }
+    { auto p = proof; p.directedDataCanonicalEnd = true; reject(p); }
+    { auto p = proof; p.prepareAttemptMatches = true; reject(p); }
+    { auto p = proof; p.prepareErrorMatches = true; reject(p); }
+    { auto p = proof; p.knownNotSubmittedSafeToAbort = true; reject(p); }
+    { auto p = proof; p.prepareStep = 1; reject(p); }
+    { auto p = proof; p.prepareErrno = EPROTO; reject(p); }
+
+    // An RX149 detail without its selector is malformed and cannot fall
+    // through to the legacy prepare-abort branch.
+    { auto p = proof; p.rx149SubmittedEndCleanup = false;
+      p.prepareAttemptMatches = true; p.prepareErrorMatches = true;
+      p.knownNotSubmittedSafeToAbort = true; p.prepareStep = 1;
+      p.prepareErrno = EPROTO; reject(p); }
+
+    Controller recovered;
+    FakeCommands commands;
+    commands.exerciseResult = EPROTO;
+    commands.exerciseProof = proof;
+    auto operations = commands.operations();
+    operations.exercise = FakeCommands::exercise;
+    operations.exerciseRecovery = FakeCommands::exerciseRecovery;
+    assert(recovered.tryQueue(readyAdmission()));
+    assert(recovered.executeOnce(operations) ==
+           RunResult::kExerciseFailedCleaned);
+    const Snapshot snapshot = recovered.snapshot();
+    assert(snapshot.state == kExerciseFailedCleaned);
+    assert(snapshot.blocked == kExerciseFailureRecovered);
+    assert(snapshot.exerciseResult == EPROTO);
+    assert(snapshot.exerciseRecoveryProofAccepted == 1);
+    assert(snapshot.removeResult == 0 && snapshot.resourceMayExist == 0);
+    assert(commands.removeCalls == 1);
+}
+
 static void testFailedOrStaleRecoveryKeepsMacLeaseQuarantined()
 {
     const int32_t originalPrepareError = 60;
@@ -528,6 +634,7 @@ int main()
 
     testExerciseFailureNeedsCompleteMatchingCleanupProof();
     testDirectedDataFailureNeedsCanonicalEndAndDrainProof();
+    testRx149SubmittedFailedEndNeedsExplicitCleanupProof();
     testFailedOrStaleRecoveryKeepsMacLeaseQuarantined();
 
     Controller exerciseSuccess;

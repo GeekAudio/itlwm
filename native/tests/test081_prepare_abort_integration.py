@@ -74,7 +74,8 @@ def extend_shim(shim: str) -> str:
     shim = shim.replace(
         '#include "native/iwx_p2p_roc_prepare_trace.h"',
         '#include "native/iwx_p2p_roc_prepare_trace.h"\n'
-        '#include "native/p2p_hal_probe.hpp"',
+        '#include "native/p2p_hal_probe.hpp"\n'
+        '#include "native/awdl_rx_event_timeline.hpp"',
         1,
     )
     shim = shim.replace(
@@ -85,12 +86,36 @@ class IOWorkLoop;
 class OSObject;
 using IOReturn = int;
 
+namespace IntelROCEvent {
+struct SessionSnapshot {
+ uint32_t generation=0,configuration=0,commandResult=0,startStatus=0,endStatus=0;
+ uint64_t startObservedMonotonicUs=0,endObservedMonotonicUs=0;
+ bool submitted=false,commandReturned=false,startSeen=false,endSeen=false;
+ bool cleanupAllowed=false,observedScheduledPair=false,outcomeUnknown=false;
+};
+class SessionTracker {
+public:
+ SessionSnapshot current{};
+ SessionSnapshot snapshot() const { return current; }
+};
+}
+struct TahoeP2PRxLease {
+ uint32_t contextGeneration=0,currentContextGeneration=0;
+ uint32_t powerGeneration=0,currentPowerGeneration=0;
+ uint32_t stationGeneration=0,currentStationGeneration=0;
+ uint32_t macIdAndColor=0;
+ bool active=false;
+};
+
 struct ItlIwx {
  iwx_softc com{}; bool allowed=true;
  IOEthernetController *controller_=nullptr;
  IOCommandGate *commandGate_=nullptr;
  IOWorkLoop *workLoop_=nullptr;
  NativeP2PProbe::Controller nativeP2pProbe_{};
+ NativeAwdlRxTrace::Timeline nativeAwdlRxEventTimeline_{};
+ IntelROCEvent::SessionTracker nativeP2pRocEvents_{};
+ TahoeP2PRxLease tahoe_p2p_rx_lease_{};
  void *nativeP2pProbeOwner_=nullptr;
  uint32_t nativeP2pProbeGeneration_=0;
  uint32_t nativeP2pPowerGeneration_=0;
@@ -98,6 +123,8 @@ struct ItlIwx {
  uint32_t nativeP2pRocDurationMs_=0,nativeP2pRocConfiguration_=0;
  uint32_t nativeP2pRocResult_=0,nativeP2pRocGeneration_=0;
  uint32_t nativeP2pProbeGenerationForFixture_=0;
+ uint64_t nativeAwdlRxEventOwnerSerial_=0;
+ volatile uint32_t nativeP2pCancelRequested_=0;
  bool probeBusy_=false,onMainGate_=true,txHistoryQuiescent_=true;
  bool changeStationEpochOnBindingAdd=false;
  bool changeCapturedPowerGenerationOnBindingAdd=false;
@@ -231,6 +258,12 @@ def main() -> None:
     base_shim, low_level_markers = base_shim_and_hal_markers()
     shim = extend_shim(base_shim)
     production_markers = low_level_markers + [
+        ("itlwm/hal_iwx/ItlIwxP2PProbe.cpp", "static bool rx149FailureTimelineOwnerMatches("),
+        ("itlwm/hal_iwx/ItlIwxP2PProbe.cpp", "static bool rx149FailureBoundaryCanonical("),
+        ("itlwm/hal_iwx/ItlIwxP2PProbe.cpp", "static bool rx149FailureTimelineAnomalyFree("),
+        ("itlwm/hal_iwx/ItlIwxP2PProbe.cpp", "static bool rx149PostCleanupOwnerEpochTokenMatches("),
+        ("itlwm/hal_iwx/ItlIwxP2PProbe.cpp", "static NativeP2PRx149Observation::CleanupReceiptPayload\ncaptureRx149FailedEndCleanupReceipt("),
+        ("itlwm/hal_iwx/ItlIwxP2PProbe.cpp", "static bool sealRx149FailedEndCleanupReceipt("),
         ("itlwm/hal_iwx/ItlIwxP2PProbe.cpp", "static bool readPrepareTraceSnapshot("),
         ("itlwm/hal_iwx/ItlIwxP2PProbe.cpp", "static void publishPrepareTraceSnapshot("),
         ("itlwm/hal_iwx/ItlIwxP2PProbe.cpp", "static void drainRx149NativeDataOutsideMainGate("),

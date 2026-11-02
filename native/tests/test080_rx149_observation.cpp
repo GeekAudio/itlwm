@@ -20,6 +20,61 @@ NativeP2PRx149Observation::RocEvidence activeWindow()
             true, true, true, true, true, false, false, false};
 }
 
+NativeP2PRx149Observation::FailedEndCleanupEvidence failedEnd()
+{
+    auto roc = activeWindow();
+    roc.endSeen = true;
+    return {roc, true, 1, 2, 1, 1, 2, 0, true, true, false,
+            true, true, true, true, true, false,
+            8, 13, 1000, 101000, true, true, 1, 0};
+}
+
+NativeP2PRx149Observation::CleanupReceiptPayload validCleanupReceipt()
+{
+    using NativeP2PRx149Observation::CleanupReceiptPayload;
+    CleanupReceiptPayload p{};
+    p.ownerSerial = 7;
+    p.startNotificationSerial = 8;
+    p.endNotificationSerial = 13;
+    p.startMonotonicUs = 1000;
+    p.endMonotonicUs = 101000;
+    p.timelineRevision = 42;
+    p.attemptSerial = 53;
+    p.contextGeneration = 53;
+    p.powerGeneration = 41;
+    p.stationGeneration = 59;
+    p.firmwareGeneration = 41;
+    p.p2pFirmwareGeneration = 41;
+    p.sessionToken = 53;
+    p.configuration = 2;
+    p.commandApiVersion = 1;
+    p.notificationApiVersion = 2;
+    p.notificationRecordApi = 1;
+    p.macIdAndColor = 0x1001;
+    p.startStatus = 1;
+    p.endStatus = 0;
+    p.exerciseErrno = EPROTO;
+    p.commandResult = 0;
+    p.cleanupErrno = 0;
+    p.commandSubmitted = 1;
+    p.commandAcknowledged = 1;
+    p.cleanupAllowed = 1;
+    p.ownerEpochTokenMatch = 1;
+    p.startCanonical = 1;
+    p.endCanonical = 1;
+    p.anomalyFree = 1;
+    p.observedInBoundedRead = 1;
+    p.producerClosedAndDrained = 1;
+    p.txQuiescent = 1;
+    p.bindingActiveBeforeCleanup = 1;
+    p.phyLeasedBeforeCleanup = 1;
+    p.cleanupCalled = 1;
+    p.bindingAbsentAfterCleanup = 1;
+    p.phyUnleasedAfterCleanup = 1;
+    p.rocRestoredAfterCleanup = 1;
+    return p;
+}
+
 struct Transaction {
     NativeP2PRx149Observation::RocEvidence evidence;
     uint32_t removeCalls;
@@ -134,6 +189,103 @@ int main()
     assert(!mayReleaseAfterEnd(active));
     assert(!nativeDataPathAllowed(true));
     assert(nativeDataPathAllowed(false));
+
+    const auto failed = failedEnd();
+    assert(mayCleanupAfterFailedEnd(failed));
+    assert(!mayReleaseAfterEnd(failed.roc));
+
+    // The failed-END cleanup route requires exact current-session identity,
+    // command/notification APIs, canonical ordered boundaries, and a bounded
+    // successful read. A failed or missing item never weakens the normal
+    // successful-END predicate.
+    auto rejectFailedEnd = [&](FailedEndCleanupEvidence invalid) {
+        assert(!mayCleanupAfterFailedEnd(invalid));
+    };
+    { auto e = failed; e.roc.profileSelected = false; rejectFailedEnd(e); }
+    { auto e = failed; e.roc.receiveObservationOnly = false; rejectFailedEnd(e); }
+    { auto e = failed; e.roc.requestedChannel149 = false; rejectFailedEnd(e); }
+    { auto e = failed; e.roc.actualRocChannel149 = false; rejectFailedEnd(e); }
+    { auto e = failed; e.roc.leaseActive = false; rejectFailedEnd(e); }
+    { auto e = failed; e.roc.ownerCurrent = false; rejectFailedEnd(e); }
+    { auto e = failed; e.roc.epochsMatch = false; rejectFailedEnd(e); }
+    { auto e = failed; e.roc.tokenMatches = false; rejectFailedEnd(e); }
+    { auto e = failed; e.roc.commandReturned = false; rejectFailedEnd(e); }
+    { auto e = failed; e.roc.commandSucceeded = false; rejectFailedEnd(e); }
+    { auto e = failed; e.roc.deviceDiscoveryConfiguration = false; rejectFailedEnd(e); }
+    { auto e = failed; e.roc.startSeen = false; rejectFailedEnd(e); }
+    { auto e = failed; e.roc.startSucceeded = false; rejectFailedEnd(e); }
+    { auto e = failed; e.roc.endSeen = false; rejectFailedEnd(e); }
+    { auto e = failed; e.roc.endConfirmed = true; rejectFailedEnd(e); }
+    { auto e = failed; e.roc.outcomeUnknown = true; rejectFailedEnd(e); }
+    { auto e = failed; e.sessionSubmitted = false; rejectFailedEnd(e); }
+    { auto e = failed; e.commandApiVersion = 0; rejectFailedEnd(e); }
+    { auto e = failed; e.notificationApiVersion = 1; rejectFailedEnd(e); }
+    { auto e = failed; e.notificationRecordApi = 2; rejectFailedEnd(e); }
+    { auto e = failed; e.macIdAndColor = 2; rejectFailedEnd(e); }
+    { auto e = failed; e.configuration = 3; rejectFailedEnd(e); }
+    { auto e = failed; e.commandResult = EBUSY; rejectFailedEnd(e); }
+    { auto e = failed; e.commandAckRecorded = false; rejectFailedEnd(e); }
+    { auto e = failed; e.cleanupAllowed = false; rejectFailedEnd(e); }
+    { auto e = failed; e.observedScheduledPair = true; rejectFailedEnd(e); }
+    { auto e = failed; e.timelineOwnerEpochAndTokenMatch = false; rejectFailedEnd(e); }
+    { auto e = failed; e.startCanonical = false; rejectFailedEnd(e); }
+    { auto e = failed; e.endCanonical = false; rejectFailedEnd(e); }
+    { auto e = failed; e.anomalyFree = false; rejectFailedEnd(e); }
+    { auto e = failed; e.observedInBoundedRead = false; rejectFailedEnd(e); }
+    { auto e = failed; e.expiredOrCanceled = true; rejectFailedEnd(e); }
+    { auto e = failed; e.endNotificationSerial = e.startNotificationSerial; rejectFailedEnd(e); }
+    { auto e = failed; e.startMonotonicPresent = false; rejectFailedEnd(e); }
+    { auto e = failed; e.endMonotonicPresent = false; rejectFailedEnd(e); }
+    { auto e = failed; e.startMonotonicUs = 0; rejectFailedEnd(e); }
+    { auto e = failed; e.endMonotonicUs = e.startMonotonicUs; rejectFailedEnd(e); }
+    { auto e = failed; e.startStatus = 0; rejectFailedEnd(e); }
+    { auto e = failed; e.endStatus = 1; rejectFailedEnd(e); }
+
+    using namespace NativeP2PRx149Observation;
+    constexpr uint32_t expectedMacIdAndColor = 0x1001;
+    CleanupReceipt receipt{};
+    auto first = validCleanupReceipt();
+    auto second = first;
+    assert(publishCleanupReceipt(&receipt, first, second, EPROTO,
+                                 expectedMacIdAndColor));
+    assert(receipt.revision == 2);
+    CleanupReceiptPayload copied{};
+    uint32_t revision = 0;
+    assert(readCleanupReceipt(&receipt, &copied, &revision));
+    assert(revision == 2 && sameCleanupReceiptPayload(copied, first));
+    assert(validCleanupReceiptPayload(copied, EPROTO,
+                                      expectedMacIdAndColor));
+    assert(cleanupReceiptIdentityMatches(
+        copied, 7, 53, 53, 41, 59, 41, 53));
+    assert(!cleanupReceiptIdentityMatches(
+        copied, 7, 53, 53, 41, 60, 41, 53)); // station epoch changed
+
+    { auto changed = second; changed.timelineRevision++;
+      assert(!publishCleanupReceipt(&receipt, first, changed, EPROTO,
+                                    expectedMacIdAndColor)); }
+    { auto failedCleanup = second; failedCleanup.cleanupErrno = EBUSY;
+      assert(!publishCleanupReceipt(&receipt, first, failedCleanup, EPROTO,
+                                    expectedMacIdAndColor)); }
+    { auto postStateMismatch = second; postStateMismatch.bindingAbsentAfterCleanup = 0;
+      assert(!publishCleanupReceipt(&receipt, first, postStateMismatch, EPROTO,
+                                    expectedMacIdAndColor)); }
+    { auto expired = second; expired.expiredOrCanceled = 1;
+      assert(!publishCleanupReceipt(&receipt, first, expired, EPROTO,
+                                    expectedMacIdAndColor)); }
+    { auto outsideWindow = second; outsideWindow.observedInBoundedRead = 0;
+      assert(!publishCleanupReceipt(&receipt, first, outsideWindow, EPROTO,
+                                    expectedMacIdAndColor)); }
+    { auto lateEnd = second; lateEnd.endMonotonicUs = lateEnd.startMonotonicUs;
+      assert(!publishCleanupReceipt(&receipt, first, lateEnd, EPROTO,
+                                    expectedMacIdAndColor)); }
+
+    // Simulate a writer changing the sequence after the reader copied the
+    // payload. A torn read is inconclusive and cannot become a cleanup proof.
+    copied = {};
+    revision = 0;
+    assert(!readCleanupReceipt(&receipt, &copied, &revision, [&] {
+        __atomic_store_n(&receipt.revision, 3u, __ATOMIC_RELEASE);
+    }));
 
     // Every owner, epoch, channel, mode, command, START, and END prerequisite
     // is independently required; a prior/foreign event cannot gain authority

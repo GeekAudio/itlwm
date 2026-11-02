@@ -1,0 +1,23 @@
+{
+  "schema": "test120-reused-sender-offline-validation/v1",
+  "candidate": "25G332-Test120",
+  "reused_from": "25G332-Test119",
+  "validated_offline": true,
+  "newly_compiled_for_test120": false,
+  "rf_tested": false,
+  "source": {
+    "repo_path": "developer-tools/test119/awdl_unicast_sender_test119.c",
+    "sha256": "4f1139f52e941112df8d5af1f48e5d709e54cfc9acc94c117d416aea92903492"
+  },
+  "protocol": {
+    "repo_path": "developer-tools/test119/dual_sender_protocol_test119.py",
+    "schema": "test119-dual-socket-sender/v1",
+    "sha256": "a84c1612ad91418e4e54b98d0e6b7e07a3c6e493e5f481a85b69fd961cef7dfe"
+  },
+  "binary": {
+    "private_receipt": "RuntimeTest119/research/runtime-1793637912-private/awdl-preparation/sender-build-private.json",
+    "target": "aarch64-linux-musl",
+    "sha256": "1b0f7cf2d9e45b7ad62503658b061ab5f5dbbd01a9fff8a020561b47f183838b",
+    "exit_code": 0
+  }
+}

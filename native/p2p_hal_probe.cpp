@@ -1,17 +1,70 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "p2p_hal_probe.hpp"
 
+#include <sys/errno.h>
+
 namespace NativeP2PProbe {
 namespace {
 
 constexpr int32_t kNotRun = -1;
+
+bool hasRx149CleanupEvidence(const ExerciseRecoveryProof &p)
+{
+    return p.rx149SessionSubmitted || p.rx149CanonicalFailedEnd ||
+           p.rx149ProducerClosedAndDrained || p.rx149TxQuiescent ||
+           p.rx149BindingRemoveAcknowledged ||
+           p.rx149PhyRestoreAcknowledged;
+}
+
+bool hasDirectedDataEvidence(const ExerciseRecoveryProof &p)
+{
+    return p.directedDataSessionSubmitted || p.directedDataCanonicalEnd ||
+           p.directedDataNoDoorbell || p.directedDataTicketClosed ||
+           p.directedDataQueueDrained || p.directedDataResourcesAbsent;
+}
+
+bool hasPrepareAbortEvidence(const ExerciseRecoveryProof &p)
+{
+    return p.prepareAttemptMatches || p.prepareErrorMatches ||
+           p.knownNotSubmittedSafeToAbort || p.prepareStep != 0 ||
+           p.prepareErrno != 0;
+}
 
 } // namespace
 
 bool safeToRemoveAfterExerciseFailure(
     int32_t exerciseErrno, const ExerciseRecoveryProof &p)
 {
+    if (p.rx149SubmittedEndCleanup) {
+        // This is an independent proof shape. It certifies cleanup after a
+        // submitted session failed canonical END validation, not success of
+        // the exercise and not the older unsubmitted-abort/directed-data
+        // recovery paths.
+        return !p.directedDataRecovery && !hasDirectedDataEvidence(p) &&
+            !hasPrepareAbortEvidence(p) && exerciseErrno == EPROTO &&
+            p.snapshotValid && p.snapshotStable && p.ownerMatches &&
+            p.contextGenerationMatches && p.powerGenerationMatches &&
+            p.firmwareGenerationMatches &&
+            p.p2pFirmwareGenerationMatches && p.stationGenerationMatches &&
+            p.sessionProtectionSubmitReached &&
+            p.rx149SessionSubmitted && p.rx149CanonicalFailedEnd &&
+            p.rx149ProducerClosedAndDrained && p.rx149TxQuiescent &&
+            p.rx149BindingRemoveAcknowledged &&
+            p.rx149PhyRestoreAcknowledged && p.fullyRestored &&
+            p.bindingAbsent && p.phyUnleased && (p.rocIdle || p.restoreComplete) &&
+            !p.sessionOutcomeUnknown && !p.txResourcesPresent &&
+            p.cleanupErrno == 0 && p.attemptSerial != 0 &&
+            p.snapshotRevision != 0 && (p.snapshotRevision & 1u) == 0;
+    }
+
+    // A detail flag without its matching typed variant selector is malformed;
+    // never let partially populated evidence fall through to another proof.
+    if (hasRx149CleanupEvidence(p))
+        return false;
+
     if (p.directedDataRecovery) {
+        if (hasPrepareAbortEvidence(p))
+            return false;
         return exerciseErrno != 0 && p.snapshotValid && p.snapshotStable &&
             p.ownerMatches && p.contextGenerationMatches &&
             p.powerGenerationMatches && p.firmwareGenerationMatches &&
@@ -25,6 +78,8 @@ bool safeToRemoveAfterExerciseFailure(
             p.cleanupErrno == 0 && p.attemptSerial != 0 &&
             p.snapshotRevision != 0 && (p.snapshotRevision & 1u) == 0;
     }
+    if (hasDirectedDataEvidence(p))
+        return false;
     return exerciseErrno != 0 && p.snapshotValid && p.snapshotStable &&
         p.prepareAttemptMatches && p.prepareErrorMatches &&
         p.ownerMatches && p.contextGenerationMatches &&

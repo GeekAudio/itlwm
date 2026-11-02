@@ -4,17 +4,40 @@
 #include <cstdio>
 #include <string>
 
+#ifndef IWX_FLAG_RFKILL
+#define IWX_FLAG_RFKILL 0x02
+#endif
+#ifndef IWX_FLAG_HW_ERR
+#define IWX_FLAG_HW_ERR 0x80
+#endif
+#ifndef IWX_FLAG_SHUTDOWN
+#define IWX_FLAG_SHUTDOWN 0x100
+#endif
+
 using NativeP2PProbe::BlockedReason;
 using NativeP2PProbe::ExerciseRecoveryProof;
 
 struct P2PProbeRun {
     ItlIwx *owner = nullptr;
     bool rx149ObservationOnly = true;
+    bool directedPrepareOnly = false;
     bool txProbeEnabled = false;
     bool awdlPsfProbeEnabled = false;
     bool awdlMifFollowupEnabled = false;
     bool prepareTraceBaselineValid = false;
     bool sessionSubmitReached = false;
+    volatile uint32_t rx149FailedEndReadObserved = 0;
+    volatile uint32_t rx149FailedEndInvalidated = 0;
+    uint32_t rx149FailedEndReadGeneration = 0;
+    uint64_t rx149FailedEndReadStartUs = 0;
+    uint64_t rx149FailedEndReadEndUs = 0;
+    uint32_t fixtureCleanupScenario = 0;
+    volatile uint32_t rx149FailedEndCleanupGateValidated = 0;
+    volatile uint32_t rx149FailedEndCleanupCalled = 0;
+    volatile int32_t rx149FailedEndCleanupResult = 0;
+    uint32_t rx149FailedEndCleanupPreBindingActive = 0;
+    uint32_t rx149FailedEndCleanupPrePhyLeased = 0;
+    NativeP2PRx149Observation::CleanupReceipt rx149CleanupReceipt{};
     bool canceled = false;
     uint32_t contextGeneration = 53;
     uint32_t powerGeneration = 41;
@@ -24,6 +47,7 @@ struct P2PProbeRun {
     uint32_t prepareTraceSerialBefore = 0;
     uint32_t prepareTraceSerialExpected = 0;
     void *workerThread = nullptr;
+    void *fixtureContext = nullptr;
     uint8_t address[6]{};
 };
 
@@ -39,18 +63,11 @@ enum RocEventOperation {
     kRocCommandReturned,
     kRocRead,
     kRocExpire,
-    kRocCloseRx149
+    kRocCloseRx149,
+    kRocCloseRx149FailedEnd,
+    kRocSealRx149FailedEndReceipt
 };
 
-namespace IntelROCEvent {
-struct SessionSnapshot {
-    bool endSeen = false;
-    bool outcomeUnknown = false;
-    bool cleanupAllowed = false;
-    bool observedScheduledPair = false;
-    uint32_t configuration = 0;
-};
-}
 struct P2PTxDiagnosticSnapshot {};
 
 struct RocEventRun {
@@ -66,6 +83,8 @@ struct RocEventRun {
     P2PTxDiagnosticSnapshot txSnapshot{};
     bool txSnapshotValid = false;
     bool rxDrainComplete = false;
+    bool failedEndCleanupEligible = false;
+    bool failedEndReceiptSealed = false;
 };
 
 static bool rx149ArmModeSelected(ItlIwx *) { return true; }
@@ -94,6 +113,7 @@ static NativeP2PRx149Observation::RocEvidence rx149RocEvidence(
 }
 static void IOSleep(unsigned) {}
 static int exerciseTxProbe(P2PProbeRun *) { return ENOTSUP; }
+static int exerciseDirectedPrepare(P2PProbeRun *) { return ENOTSUP; }
 
 class OSObject {};
 using IOReturn = int;
@@ -234,6 +254,7 @@ static void setupFixture(Fixture &fixture)
     sc->sc_phyctxt[2].channel = originalP2pChannel;
 
     fixture.run.owner = &owner;
+    fixture.run.fixtureContext = &fixture;
     fixture.run.workerThread = &fixture.run;
     fixture.run.rx149ObservationOnly = true;
     fixture.run.txProbeEnabled = false;
@@ -327,6 +348,185 @@ static NativeP2PProbe::RunResult execute(Fixture &fixture)
         &run, revalidate, configure, add, remove, publishLease,
         ItlIwx::tahoeP2pExerciseRoc,
         ItlIwx::tahoeP2pExerciseRecovery
+    };
+    return probe.executeOnce(operations);
+}
+
+static void recordFailureEndTimeline(Fixture &fixture)
+{
+    auto &owner = fixture.owner;
+    const NativeAwdlRxTrace::Epochs epochs{
+        fixture.run.contextGeneration, fixture.run.powerGeneration,
+        fixture.run.stationGeneration, fixture.run.contextGeneration};
+    owner.nativeAwdlRxEventOwnerSerial_ = 7;
+    require(owner.nativeAwdlRxEventTimeline_.beginOwner(7, epochs),
+            "could not begin fixture RX owner");
+    NativeAwdlRxTrace::SessionProtection16 notification{};
+    notification.hostMonotonicPresent = 1;
+    notification.rawLength = 16;
+    notification.ownerSessionToken = fixture.run.contextGeneration;
+    notification.macIdAndColor = IWX_FW_CMD_ID_AND_COLOR(1, 0);
+    notification.configuration = 2;
+    notification.reducerResultPresent = 1;
+    notification.reducerReturnedTrue = 1;
+    notification.reducerResult = 1;
+    notification.canonicalTransitionPresent = 1;
+    notification.canonicalTransition = 1;
+    notification.hostMonotonicUs = 1000;
+    notification.rawStatus = 1;
+    notification.rawStartFlag = 1;
+    require(owner.nativeAwdlRxEventTimeline_.recordSessionProtection(
+                notification, epochs, 7), "could not record START fixture");
+    notification.hostMonotonicUs = 101000;
+    notification.rawStatus = 0;
+    notification.rawStartFlag = 0;
+    require(owner.nativeAwdlRxEventTimeline_.recordSessionProtection(
+                notification, epochs, 7), "could not record END fixture");
+    require(owner.nativeAwdlRxEventTimeline_.closeProducer(7, epochs, 5),
+            "could not close fixture RX producer");
+}
+
+static int exerciseFailedEndCleanup(void *opaque)
+{
+    auto *run = static_cast<P2PProbeRun *>(opaque);
+    if (!run || !run->owner)
+        return EINVAL;
+    ItlIwx *owner = run->owner;
+    auto *sc = &owner->com;
+    run->sessionSubmitReached = true;
+    run->rx149FailedEndReadGeneration = run->contextGeneration;
+    run->rx149FailedEndReadStartUs = 1000;
+    run->rx149FailedEndReadEndUs = 101000;
+    __atomic_store_n(&run->rx149FailedEndReadObserved, 1u, __ATOMIC_RELEASE);
+
+    sc->sc_p2p.binding_state = IWX_P2P_RESOURCE_ACTIVE;
+    sc->sc_p2p.initialized = 1;
+    sc->sc_p2p.mac_state = IWX_P2P_RESOURCE_ACTIVE;
+    sc->sc_p2p.mac_id = 1;
+    sc->sc_p2p.mac_color = 0;
+    sc->sc_p2p.fw_generation = run->scGeneration;
+    sc->sc_p2p.phy_id = 1;
+    sc->sc_p2p.phy_color = 4;
+    sc->sc_p2p.binding_id = 1;
+    sc->sc_p2p.binding_color = 4;
+    sc->sc_p2p.phy_leased = 1;
+    sc->sc_p2p_roc.token = run->contextGeneration;
+    sc->sc_p2p_roc.fw_generation = run->powerGeneration;
+    sc->sc_p2p_roc.session_conf_id = 2;
+    sc->sc_p2p_roc.session_submit_seen = 1;
+    sc->sc_p2p_roc.session_submit_result = 0;
+    sc->sc_p2p_roc.phase = IWX_P2P_ROC_SESSION_ACKED;
+    sc->sc_p2p_roc.phy_id = 1;
+    sc->sc_p2p_roc.phy_color = 4;
+    sc->sc_p2p_roc.station_phy_id = 0;
+    sc->sc_p2p_roc.station_phy_color = 3;
+    sc->sc_p2p_roc.station_epoch = run->stationGeneration;
+    sc->sc_p2p_roc.station_bss = sc->sc_ic.ic_bss;
+    sc->sc_p2p_roc.roc_channel = &sc->sc_ic.ic_channels[149];
+    sc->sc_p2p_roc.original_phy_channel = sc->sc_phyctxt[1].channel;
+    sc->sc_p2p_roc.station_phy_channel = sc->sc_phyctxt[0].channel;
+    sc->sc_p2p_roc.receive_observation_only = 1;
+    sc->sc_phyctxt[1].channel = sc->sc_p2p_roc.roc_channel;
+    owner->nativeP2pRocGeneration_ = run->contextGeneration;
+    owner->tahoe_p2p_rx_lease_.active = true;
+    owner->tahoe_p2p_rx_lease_.contextGeneration = run->contextGeneration;
+    owner->tahoe_p2p_rx_lease_.currentContextGeneration = run->contextGeneration;
+    owner->tahoe_p2p_rx_lease_.powerGeneration = run->powerGeneration;
+    owner->tahoe_p2p_rx_lease_.currentPowerGeneration = run->powerGeneration;
+    owner->tahoe_p2p_rx_lease_.stationGeneration = run->stationGeneration;
+    owner->tahoe_p2p_rx_lease_.currentStationGeneration = run->stationGeneration;
+    owner->tahoe_p2p_rx_lease_.macIdAndColor = IWX_FW_CMD_ID_AND_COLOR(1, 0);
+
+    auto *fixture = static_cast<Fixture *>(run->fixtureContext);
+    if (!fixture)
+        return EINVAL;
+    recordFailureEndTimeline(*fixture);
+    auto &session = owner->nativeP2pRocEvents_.current;
+    session.generation = run->contextGeneration;
+    session.configuration = 2;
+    session.commandResult = 0;
+    session.startStatus = 1;
+    session.endStatus = 0;
+    session.startObservedMonotonicUs = 1000;
+    session.endObservedMonotonicUs = 101000;
+    session.submitted = true;
+    session.commandReturned = true;
+    session.startSeen = true;
+    session.endSeen = true;
+    session.cleanupAllowed = true;
+    session.observedScheduledPair = false;
+    session.outcomeUnknown = false;
+
+    run->rx149FailedEndCleanupPreBindingActive = 1;
+    run->rx149FailedEndCleanupPrePhyLeased = 1;
+    __atomic_store_n(&run->rx149FailedEndCleanupGateValidated, 1u,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&run->rx149FailedEndCleanupCalled, 1u, __ATOMIC_RELEASE);
+    const int cleanupError = run->fixtureCleanupScenario == 1 ? EBUSY : 0;
+    __atomic_store_n(&run->rx149FailedEndCleanupResult, cleanupError,
+                     __ATOMIC_RELEASE);
+    if (cleanupError == 0) {
+        // Model the state left by the original acknowledged REMOVE + PHY
+        // restore/release contract. The production capture function must read
+        // these fields; no synthetic receipt payload is supplied by the test.
+        sc->sc_p2p.binding_state = run->fixtureCleanupScenario == 2
+            ? IWX_P2P_RESOURCE_ACTIVE : IWX_P2P_RESOURCE_ABSENT;
+        sc->sc_p2p.phy_leased = 0;
+        sc->sc_p2p.phy_id = 0xff;
+        sc->sc_p2p.phy_color = 0;
+        sc->sc_p2p.binding_id = 0xff;
+        sc->sc_p2p.binding_color = 0;
+        sc->sc_phyctxt[1].channel = run->fixtureCleanupScenario == 6
+            ? sc->sc_p2p_roc.roc_channel
+            : sc->sc_p2p_roc.original_phy_channel;
+        sc->sc_p2p_roc.phase = IWX_P2P_ROC_COMPLETE;
+        // Binding removal clears its active bit; the harness's legacy bit
+        // layout aliases that synthetic bit with the production RFKILL mask.
+        sc->sc_flags = IWX_FLAG_MAC_ACTIVE;
+    }
+    if (run->fixtureCleanupScenario == 5)
+        __atomic_store_n(&run->rx149FailedEndInvalidated, 1u,
+                         __ATOMIC_RELEASE);
+    const bool published = cleanupError == 0 &&
+        sealRx149FailedEndCleanupReceipt(run);
+    if (!published && run->fixtureCleanupScenario == 0)
+        return EPROTO;
+    if (run->fixtureCleanupScenario == 3) {
+        // Simulate an epoch change after publication but before the reader.
+        ++sc->sc_tx_rate_generation;
+    } else if (run->fixtureCleanupScenario == 4) {
+        // Exercise the production acquire/read/acquire primitive with a
+        // revision change between its two reads, then leave a torn receipt so
+        // the actual recovery callback also fails closed.
+        NativeP2PRx149Observation::CleanupReceiptPayload racedPayload{};
+        uint32_t racedRevision = 0;
+        const bool stableRead =
+            NativeP2PRx149Observation::readCleanupReceipt(
+                &run->rx149CleanupReceipt, &racedPayload, &racedRevision,
+                [&] {
+                    const uint32_t current = __atomic_load_n(
+                        &run->rx149CleanupReceipt.revision, __ATOMIC_ACQUIRE);
+                    __atomic_store_n(&run->rx149CleanupReceipt.revision,
+                                     current + 2u, __ATOMIC_RELEASE);
+                });
+        require(!stableRead,
+                "receipt double-read accepted a changing revision");
+        __atomic_store_n(&run->rx149CleanupReceipt.revision, 3u,
+                         __ATOMIC_RELEASE);
+    }
+    return EPROTO;
+}
+
+static NativeP2PProbe::RunResult executeFailedEndCleanup(Fixture &fixture,
+                                                         uint32_t scenario)
+{
+    fixture.run.fixtureCleanupScenario = scenario;
+    auto &run = fixture.run;
+    auto &probe = fixture.owner.nativeP2pProbe_;
+    require(probe.tryQueue(admissionFor(run)), "failed-END admission rejected");
+    NativeP2PProbe::Operations operations{
+        &run, revalidate, configure, add, remove, publishLease,
+        exerciseFailedEndCleanup, ItlIwx::tahoeP2pExerciseRecovery
     };
     return probe.executeOnce(operations);
 }
@@ -870,6 +1070,40 @@ static void testLegacyPrepareRemainsAvailable()
             "legacy ROC cleanup left firmware resources behind");
 }
 
+static void testFailedEndCleanupReceiptControllerPath()
+{
+    {
+        Fixture fixture;
+        setupFixture(fixture);
+        require(executeFailedEndCleanup(fixture, 0) ==
+                    NativeP2PProbe::RunResult::kExerciseFailedCleaned,
+                "acknowledged failed-END cleanup did not finish cleanly");
+        const auto snapshot = fixture.owner.nativeP2pProbe_.snapshot();
+        require(snapshot.exerciseResult == EPROTO &&
+                snapshot.exerciseRecoveryAttempted == 1 &&
+                snapshot.exerciseRecoveryProofAccepted == 1 &&
+                snapshot.state == NativeP2PProbe::kExerciseFailedCleaned &&
+                snapshot.resourceMayExist == 0 &&
+                fixture.owner.fixtureRemoveCalls_ == 1,
+                "failed END was reported as success or outer MAC was not removed");
+    }
+    for (uint32_t scenario = 1; scenario <= 6; ++scenario) {
+        Fixture fixture;
+        setupFixture(fixture);
+        require(executeFailedEndCleanup(fixture, scenario) ==
+                    NativeP2PProbe::RunResult::kQuarantined,
+                "invalid failed-END receipt authorized outer removal");
+        const auto snapshot = fixture.owner.nativeP2pProbe_.snapshot();
+        require(snapshot.exerciseResult == EPROTO &&
+                snapshot.exerciseRecoveryAttempted == 1 &&
+                snapshot.exerciseRecoveryProofAccepted == 0 &&
+                snapshot.state == NativeP2PProbe::kQuarantined &&
+                snapshot.resourceMayExist == 1 &&
+                fixture.owner.fixtureRemoveCalls_ == 0,
+                "failed cleanup/post-state/epoch/torn receipt did not quarantine");
+    }
+}
+
 int main()
 {
     testVersionGates();
@@ -882,6 +1116,7 @@ int main()
     testReleaseFailureKeepsPrepareErrnoSeparate();
     testEpochChangeQuarantines();
     testRecoveryCallbackGenerationDomains();
+    testFailedEndCleanupReceiptControllerPath();
     testLegacyPrepareRemainsAvailable();
     std::puts("Test081 production caller-chain Prepare/recovery integration passed");
 }

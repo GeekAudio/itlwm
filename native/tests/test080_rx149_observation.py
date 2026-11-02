@@ -61,12 +61,28 @@ def check_source_contract() -> None:
     event_action = function_body(
         probe, "IOReturn ItlIwx::tahoeP2pRocEventAction(")
     close = function_body(probe, "static int exerciseRx149Observation(")
+    post_cleanup_owner = function_body(
+        probe, "static bool rx149PostCleanupOwnerEpochTokenMatches(")
+    receipt_capture = function_body(
+        probe, "captureRx149FailedEndCleanupReceipt(")
+    receipt_seal = function_body(
+        probe, "static bool sealRx149FailedEndCleanupReceipt(")
     assert "kRocCloseRx149" in event_action
     assert event_action.index("closeProducer(") < event_action.index(
         "tahoeP2pRxConsume();")
     assert "untrackedPendingIdentityOverflowCount == 0" in event_action
     assert "tahoeP2pPublishRxEventTimeline(controller)" in event_action
     assert close.index("rxDrainComplete") < close.index("tahoeP2pRocCleanup")
+    assert "rx149StationAndPhyOwnerCurrent" not in post_cleanup_owner
+    assert "roc.station_epoch != probe->stationGeneration" in post_cleanup_owner
+    assert "roc.token != probe->contextGeneration" in post_cleanup_owner
+    assert "rx149PostCleanupOwnerEpochTokenMatches" in receipt_capture
+    assert "sc.sc_p2p.binding_state == IWX_P2P_RESOURCE_ABSENT" in receipt_capture
+    assert "sc.sc_phyctxt[sc.sc_p2p_roc.phy_id].channel" in receipt_capture
+    assert receipt_seal.count("captureRx149FailedEndCleanupReceipt(probe)") == 2
+    assert "publishCleanupReceipt" in receipt_seal
+    assert "mayCleanupAfterFailedEnd" in event_action
+    assert "mayReleaseAfterEnd" in event_action
 
     worker = function_body(probe, "void ItlIwx::tahoeP2pProbeTask(")
     selected = worker.index("run.rx149ObservationOnly")

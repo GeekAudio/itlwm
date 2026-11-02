@@ -397,6 +397,17 @@ struct P2PProbeRun {
     uint32_t prepareTraceSerialExpected;
     bool prepareTraceBaselineValid;
     bool sessionSubmitReached;
+    volatile uint32_t rx149FailedEndReadObserved;
+    volatile uint32_t rx149FailedEndInvalidated;
+    uint32_t rx149FailedEndReadGeneration;
+    uint64_t rx149FailedEndReadStartUs;
+    uint64_t rx149FailedEndReadEndUs;
+    volatile uint32_t rx149FailedEndCleanupGateValidated;
+    volatile uint32_t rx149FailedEndCleanupCalled;
+    volatile int32_t rx149FailedEndCleanupResult;
+    uint32_t rx149FailedEndCleanupPreBindingActive;
+    uint32_t rx149FailedEndCleanupPrePhyLeased;
+    NativeP2PRx149Observation::CleanupReceipt rx149CleanupReceipt;
     uint8_t address[6];
     NativeP2PProbe::BlockedReason blocked;
 };
@@ -622,7 +633,9 @@ enum RocEventOperation {
     kRocCommandReturned,
     kRocRead,
     kRocExpire,
-    kRocCloseRx149
+    kRocCloseRx149,
+    kRocCloseRx149FailedEnd,
+    kRocSealRx149FailedEndReceipt
 };
 struct RocEventRun {
     P2PProbeRun *probe;
@@ -637,6 +650,8 @@ struct RocEventRun {
     P2PTxDiagnosticSnapshot txSnapshot;
     bool txSnapshotValid;
     bool rxDrainComplete;
+    bool failedEndCleanupEligible;
+    bool failedEndReceiptSealed;
 #if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
     NativeP2PRx149DataInput::Lease rx149DataLease{};
 #endif
@@ -6397,6 +6412,338 @@ static NativeP2PRx149Observation::RocEvidence rx149RocEvidence(
     return evidence;
 }
 
+static bool rx149FailureTimelineOwnerMatches(
+    const P2PProbeRun *probe, const NativeAwdlRxTrace::Snapshot &trace)
+{
+    if (!probe || !probe->owner || !trace.ownerPresent ||
+        trace.ownerSerial == 0 ||
+        trace.ownerSerial != probe->owner->nativeAwdlRxEventOwnerSerial_)
+        return false;
+    const NativeAwdlRxTrace::Epochs expected{
+        probe->contextGeneration, probe->powerGeneration,
+        probe->stationGeneration, probe->contextGeneration};
+    const auto &start = trace.rocStart;
+    const auto &end = trace.rocEnd;
+    return NativeAwdlRxTrace::sameEpochs(trace.epochs, expected) &&
+        start.present && end.present &&
+        start.ownerSerial == trace.ownerSerial &&
+        end.ownerSerial == trace.ownerSerial &&
+        NativeAwdlRxTrace::sameEpochs(start.epochs, expected) &&
+        NativeAwdlRxTrace::sameEpochs(end.epochs, expected) &&
+        start.ownerSessionToken == probe->contextGeneration &&
+        end.ownerSessionToken == probe->contextGeneration;
+}
+
+static bool rx149FailureBoundaryCanonical(
+    const NativeAwdlRxTrace::BoundarySlot &slot, bool isStart,
+    uint32_t expectedMacIdAndColor, uint32_t expectedConfiguration)
+{
+    return slot.present &&
+        slot.api == NativeAwdlRxTrace::NotificationApi::SessionProtection16 &&
+        slot.notificationSerial != 0 && slot.hostMonotonicPresent &&
+        slot.hostMonotonicUs != 0 && slot.rawLength == 16 &&
+        slot.ownerSessionToken != 0 &&
+        slot.macIdAndColor == expectedMacIdAndColor &&
+        slot.configuration == expectedConfiguration &&
+        slot.reducerResultPresent && slot.reducerReturnedTrue &&
+        slot.canonicalTransitionPresent && slot.canonicalTransition &&
+        slot.rawStartFlag == (isStart ? 1u : 0u) &&
+        slot.rawStatus == (isStart ? 1u : 0u);
+}
+
+static bool rx149FailureTimelineAnomalyFree(
+    const NativeAwdlRxTrace::Snapshot &trace)
+{
+    return trace.sessionAnomalyCount == 0 &&
+        trace.sessionNotificationAcceptedCount == 2 &&
+        trace.sessionNotificationIgnoredCount == 0 &&
+        trace.sessionNotificationDuplicateCount == 0 &&
+        trace.sessionNotificationConflictingCount == 0 &&
+        trace.sessionNotificationLateCount == 0 &&
+        trace.sessionNotificationMalformedCount == 0 &&
+        trace.sessionNotificationForeignCount == 0 &&
+        trace.sessionBoundaryOrderInvalid == 0 &&
+        trace.staleNotificationCount == 0 &&
+        trace.sessionCanonicalTransitionCount == 2;
+}
+
+// This predicate intentionally does not reuse rx149StationAndPhyOwnerCurrent
+// or rx149RocEvidence::epochsMatch. Those describe the pre-cleanup state where
+// PHY 1 is leased to the P2P binding and points at the ROC channel. A successful
+// cleanup removes that binding, releases PHY 1, and restores its original
+// channel; owner/STA/token identity must still be checked against the retained
+// transaction and station contexts after those resources are gone.
+static bool rx149PostCleanupOwnerEpochTokenMatches(
+    const P2PProbeRun *probe,
+    const IntelROCEvent::SessionSnapshot &session,
+    const NativeAwdlRxTrace::Snapshot &trace)
+{
+    if (!probe || !probe->owner || !probe->workerThread)
+        return false;
+    ItlIwx *owner = probe->owner;
+    auto &sc = owner->com;
+    const auto &roc = sc.sc_p2p_roc;
+    const uint32_t stationEpoch = __atomic_load_n(
+        &sc.sc_tx_rate_generation, __ATOMIC_ACQUIRE);
+    const bool currentOwner = owner->nativeP2pBusy() && !probe->canceled &&
+        __atomic_load_n(&owner->nativeP2pProbeOwner_, __ATOMIC_ACQUIRE) ==
+            reinterpret_cast<void *>(probe->workerThread) &&
+        owner->nativeP2pProbeGeneration_ == probe->contextGeneration &&
+        __atomic_load_n(&owner->nativeP2pCancelRequested_,
+                        __ATOMIC_ACQUIRE) == 0;
+    if (!currentOwner || sc.sc_ic.ic_state != IEEE80211_S_RUN ||
+        (sc.sc_flags & (IWX_FLAG_SHUTDOWN | IWX_FLAG_HW_ERR |
+                        IWX_FLAG_RFKILL)) != 0 ||
+        sc.sc_ic.ic_bss == nullptr ||
+        uint32_t(sc.sc_generation) != probe->powerGeneration ||
+        owner->nativeP2pPowerGeneration_ != probe->powerGeneration ||
+        stationEpoch != probe->stationGeneration ||
+        roc.fw_generation != probe->powerGeneration ||
+        roc.station_epoch != probe->stationGeneration ||
+        roc.station_bss != static_cast<void *>(sc.sc_ic.ic_bss) ||
+        roc.station_phy_id != 0 || roc.station_phy_id >= IWX_NUM_PHY_CTX ||
+        roc.phy_id != 1 || roc.phy_id >= IWX_NUM_PHY_CTX ||
+        roc.station_phy_channel == nullptr || roc.original_phy_channel == nullptr ||
+        roc.roc_channel == nullptr || roc.token != probe->contextGeneration ||
+        roc.session_conf_id != IWX_SESSION_PROTECT_CONF_P2P_DEVICE_DISCOV ||
+        __atomic_load_n(&owner->nativeP2pRocGeneration_, __ATOMIC_ACQUIRE) !=
+            probe->contextGeneration ||
+        session.generation != probe->contextGeneration ||
+        __atomic_load_n(&roc.receive_observation_only, __ATOMIC_ACQUIRE) == 0 ||
+        !rx149FailureTimelineOwnerMatches(probe, trace))
+        return false;
+
+    const auto *station = reinterpret_cast<const struct iwx_node *>(
+        sc.sc_ic.ic_bss);
+    const auto *stationPhy = &sc.sc_phyctxt[roc.station_phy_id];
+    return station->in_phyctxt == stationPhy &&
+        station->in_phyctxt->id == roc.station_phy_id &&
+        station->in_phyctxt->color == roc.station_phy_color &&
+        station->in_ni.ni_chan == roc.station_phy_channel &&
+        stationPhy->id == roc.station_phy_id &&
+        stationPhy->color == roc.station_phy_color &&
+        stationPhy->channel == roc.station_phy_channel &&
+        sc.sc_p2p.initialized &&
+        sc.sc_p2p.fw_generation == probe->p2pFirmwareGeneration &&
+        probe->p2pFirmwareGeneration == probe->scGeneration &&
+        probe->scGeneration == probe->powerGeneration &&
+        sc.sc_p2p.mac_state == IWX_P2P_RESOURCE_ACTIVE &&
+        sc.sc_p2p.mac_id == 1 &&
+        roc.session_submit_seen == 1 && roc.session_submit_result == 0;
+}
+
+static NativeP2PRx149Observation::FailedEndCleanupEvidence
+rx149FailedEndCleanupEvidence(
+    P2PProbeRun *probe, const IntelROCEvent::SessionSnapshot &session,
+    const NativeAwdlRxTrace::Snapshot &trace)
+{
+    NativeP2PRx149Observation::FailedEndCleanupEvidence evidence{};
+    if (!probe || !probe->owner)
+        return evidence;
+    ItlIwx *owner = probe->owner;
+    auto &sc = owner->com;
+    const auto &start = trace.rocStart;
+    const auto &end = trace.rocEnd;
+    const uint32_t expectedMacIdAndColor = IWX_FW_CMD_ID_AND_COLOR(1, 0);
+    const uint32_t expectedConfiguration =
+        IWX_SESSION_PROTECT_CONF_P2P_DEVICE_DISCOV;
+    evidence.roc = rx149RocEvidence(probe, session);
+    evidence.sessionSubmitted = probe->sessionSubmitReached &&
+        sc.sc_p2p_roc.session_submit_seen == 1 &&
+        sc.sc_p2p_roc.session_submit_result == 0;
+    evidence.commandApiVersion = owner->iwx_lookup_cmd_ver(
+        &sc, IWX_MAC_CONF_GROUP, IWX_SESSION_PROTECTION_CMD);
+    evidence.notificationApiVersion = owner->iwx_lookup_notif_ver(
+        &sc, IWX_MAC_CONF_GROUP, IWX_SESSION_PROTECTION_NOTIF);
+    evidence.notificationRecordApi = start.api ==
+            NativeAwdlRxTrace::NotificationApi::SessionProtection16 &&
+        end.api == NativeAwdlRxTrace::NotificationApi::SessionProtection16
+            ? 1u : 0u;
+    evidence.macIdAndColor = start.macIdAndColor;
+    evidence.configuration = session.configuration;
+    evidence.commandResult = session.commandResult;
+    evidence.commandAckRecorded = session.commandReturned &&
+        session.commandResult == 0 &&
+        sc.sc_p2p_roc.session_submit_seen == 1 &&
+        sc.sc_p2p_roc.session_submit_result == 0;
+    evidence.cleanupAllowed = session.cleanupAllowed;
+    evidence.observedScheduledPair = session.observedScheduledPair;
+    evidence.timelineOwnerEpochAndTokenMatch =
+        rx149FailureTimelineOwnerMatches(probe, trace) &&
+        start.macIdAndColor == expectedMacIdAndColor &&
+        end.macIdAndColor == expectedMacIdAndColor &&
+        start.configuration == expectedConfiguration &&
+        end.configuration == expectedConfiguration;
+    evidence.startCanonical = rx149FailureBoundaryCanonical(
+        start, true, expectedMacIdAndColor, expectedConfiguration) &&
+        start.ownerSessionToken == probe->contextGeneration;
+    evidence.endCanonical = rx149FailureBoundaryCanonical(
+        end, false, expectedMacIdAndColor, expectedConfiguration) &&
+        end.ownerSessionToken == probe->contextGeneration;
+    evidence.anomalyFree = rx149FailureTimelineAnomalyFree(trace);
+    evidence.observedInBoundedRead =
+        __atomic_load_n(&probe->rx149FailedEndReadObserved,
+                        __ATOMIC_ACQUIRE) != 0 &&
+        probe->rx149FailedEndReadGeneration == probe->contextGeneration &&
+        probe->rx149FailedEndReadStartUs == session.startObservedMonotonicUs &&
+        probe->rx149FailedEndReadEndUs == session.endObservedMonotonicUs;
+    evidence.expiredOrCanceled =
+        __atomic_load_n(&probe->rx149FailedEndInvalidated,
+                        __ATOMIC_ACQUIRE) != 0 || probe->canceled ||
+        __atomic_load_n(&owner->nativeP2pCancelRequested_,
+                        __ATOMIC_ACQUIRE) != 0 ||
+        owner->nativeP2pProbeGeneration_ != probe->contextGeneration ||
+        uint32_t(sc.sc_generation) != probe->powerGeneration ||
+        __atomic_load_n(&sc.sc_tx_rate_generation, __ATOMIC_ACQUIRE) !=
+            probe->stationGeneration;
+    evidence.startNotificationSerial = start.notificationSerial;
+    evidence.endNotificationSerial = end.notificationSerial;
+    evidence.startMonotonicUs = start.hostMonotonicUs;
+    evidence.endMonotonicUs = end.hostMonotonicUs;
+    evidence.startMonotonicPresent = start.hostMonotonicPresent != 0;
+    evidence.endMonotonicPresent = end.hostMonotonicPresent != 0;
+    evidence.startStatus = start.rawStatus;
+    evidence.endStatus = end.rawStatus;
+    return evidence;
+}
+
+static NativeP2PRx149Observation::CleanupReceiptPayload
+captureRx149FailedEndCleanupReceipt(P2PProbeRun *probe)
+{
+    NativeP2PRx149Observation::CleanupReceiptPayload payload{};
+    if (!probe || !probe->owner)
+        return payload;
+    ItlIwx *owner = probe->owner;
+    auto &sc = owner->com;
+    const auto session = owner->nativeP2pRocEvents_.snapshot();
+    const auto trace = owner->nativeAwdlRxEventTimeline_.snapshot();
+    const auto &start = trace.rocStart;
+    const auto &end = trace.rocEnd;
+    P2PTxDiagnosticSnapshot txSnapshot{};
+    const bool txQuiet = rx149TxHistoryQuiescent(owner, &txSnapshot);
+    payload.ownerSerial = trace.ownerSerial;
+    payload.startNotificationSerial = start.notificationSerial;
+    payload.endNotificationSerial = end.notificationSerial;
+    payload.startMonotonicUs = start.hostMonotonicUs;
+    payload.endMonotonicUs = end.hostMonotonicUs;
+    payload.timelineRevision = trace.revision;
+    payload.attemptSerial = probe->contextGeneration;
+    payload.contextGeneration = probe->contextGeneration;
+    payload.powerGeneration = probe->powerGeneration;
+    payload.stationGeneration = probe->stationGeneration;
+    payload.firmwareGeneration = uint32_t(sc.sc_generation);
+    payload.p2pFirmwareGeneration = sc.sc_p2p.fw_generation;
+    payload.sessionToken = session.generation;
+    payload.configuration = session.configuration;
+    payload.commandApiVersion = owner->iwx_lookup_cmd_ver(
+        &sc, IWX_MAC_CONF_GROUP, IWX_SESSION_PROTECTION_CMD);
+    payload.notificationApiVersion = owner->iwx_lookup_notif_ver(
+        &sc, IWX_MAC_CONF_GROUP, IWX_SESSION_PROTECTION_NOTIF);
+    payload.notificationRecordApi =
+        start.api == NativeAwdlRxTrace::NotificationApi::SessionProtection16 &&
+        end.api == NativeAwdlRxTrace::NotificationApi::SessionProtection16
+            ? 1u : 0u;
+    payload.macIdAndColor = start.macIdAndColor;
+    payload.startStatus = start.rawStatus;
+    payload.endStatus = end.rawStatus;
+    payload.exerciseErrno = EPROTO;
+    payload.commandResult = session.commandResult;
+    payload.cleanupErrno = __atomic_load_n(
+        &probe->rx149FailedEndCleanupResult, __ATOMIC_ACQUIRE);
+    payload.commandSubmitted = probe->sessionSubmitReached &&
+        sc.sc_p2p_roc.session_submit_seen == 1 ? 1u : 0u;
+    payload.commandAcknowledged = session.commandReturned &&
+        session.commandResult == 0 &&
+        sc.sc_p2p_roc.session_submit_seen == 1 &&
+        sc.sc_p2p_roc.session_submit_result == 0 ? 1u : 0u;
+    payload.cleanupAllowed = session.cleanupAllowed ? 1u : 0u;
+    payload.ownerEpochTokenMatch =
+        rx149PostCleanupOwnerEpochTokenMatches(probe, session, trace)
+            ? 1u : 0u;
+    const uint32_t expectedMacIdAndColor = IWX_FW_CMD_ID_AND_COLOR(1, 0);
+    const uint32_t expectedConfiguration =
+        IWX_SESSION_PROTECT_CONF_P2P_DEVICE_DISCOV;
+    payload.startCanonical = rx149FailureBoundaryCanonical(
+        start, true, expectedMacIdAndColor, expectedConfiguration) &&
+        start.ownerSessionToken == probe->contextGeneration ? 1u : 0u;
+    payload.endCanonical = rx149FailureBoundaryCanonical(
+        end, false, expectedMacIdAndColor, expectedConfiguration) &&
+        end.ownerSessionToken == probe->contextGeneration ? 1u : 0u;
+    payload.anomalyFree = rx149FailureTimelineAnomalyFree(trace) ? 1u : 0u;
+    payload.observedInBoundedRead =
+        __atomic_load_n(&probe->rx149FailedEndReadObserved,
+                        __ATOMIC_ACQUIRE) != 0 &&
+        probe->rx149FailedEndReadGeneration == probe->contextGeneration &&
+        probe->rx149FailedEndReadStartUs == session.startObservedMonotonicUs &&
+        probe->rx149FailedEndReadEndUs == session.endObservedMonotonicUs
+            ? 1u : 0u;
+    payload.expiredOrCanceled =
+        __atomic_load_n(&probe->rx149FailedEndInvalidated,
+                        __ATOMIC_ACQUIRE) != 0 || probe->canceled ||
+        __atomic_load_n(&owner->nativeP2pCancelRequested_,
+                        __ATOMIC_ACQUIRE) != 0 ||
+        owner->nativeP2pProbeGeneration_ != probe->contextGeneration ||
+        uint32_t(sc.sc_generation) != probe->powerGeneration ||
+        __atomic_load_n(&sc.sc_tx_rate_generation, __ATOMIC_ACQUIRE) !=
+            probe->stationGeneration ? 1u : 0u;
+    payload.producerClosedAndDrained =
+        __atomic_load_n(&probe->rx149FailedEndCleanupGateValidated,
+                        __ATOMIC_ACQUIRE) != 0 &&
+        trace.ownerPresent && trace.ownerSerial ==
+            owner->nativeAwdlRxEventOwnerSerial_ && !trace.active &&
+        trace.producerClosed && trace.pendingDrainCount == 0 &&
+        trace.untrackedPendingDrainCount == 0 &&
+        trace.untrackedPendingIdentityOverflowCount == 0 &&
+        trace.droppedEventCount == 0 && trace.staleCompletionCount == 0 &&
+        trace.sourceTableFullCount == 0 && trace.sessionBoundaryOrderInvalid == 0
+            ? 1u : 0u;
+    payload.txQuiescent = txQuiet ? 1u : 0u;
+    payload.bindingActiveBeforeCleanup =
+        probe->rx149FailedEndCleanupPreBindingActive;
+    payload.phyLeasedBeforeCleanup =
+        probe->rx149FailedEndCleanupPrePhyLeased;
+    payload.cleanupCalled = __atomic_load_n(
+        &probe->rx149FailedEndCleanupCalled, __ATOMIC_ACQUIRE);
+    payload.bindingAbsentAfterCleanup = sc.sc_p2p.binding_state ==
+        IWX_P2P_RESOURCE_ABSENT ? 1u : 0u;
+    payload.phyUnleasedAfterCleanup = !sc.sc_p2p.phy_leased ? 1u : 0u;
+    payload.rocRestoredAfterCleanup =
+        (sc.sc_p2p_roc.phase == IWX_P2P_ROC_COMPLETE ||
+         sc.sc_p2p_roc.phase == IWX_P2P_ROC_IDLE) &&
+        !sc.sc_p2p.phy_leased &&
+        sc.sc_p2p.binding_state == IWX_P2P_RESOURCE_ABSENT &&
+        (sc.sc_p2p_roc.phase != IWX_P2P_ROC_COMPLETE ||
+         (sc.sc_p2p_roc.phy_id < IWX_NUM_PHY_CTX &&
+          sc.sc_p2p_roc.original_phy_channel != nullptr &&
+          sc.sc_phyctxt[sc.sc_p2p_roc.phy_id].channel ==
+              sc.sc_p2p_roc.original_phy_channel)) ? 1u : 0u;
+    payload.sessionOutcomeUnknown = session.outcomeUnknown ||
+        sc.sc_p2p_roc.phase == IWX_P2P_ROC_SESSION_SUBMIT_UNKNOWN ? 1u : 0u;
+    payload.txResourcesPresent = txQuiet ? 0u : 1u;
+    return payload;
+}
+
+static bool sealRx149FailedEndCleanupReceipt(P2PProbeRun *probe)
+{
+    if (!probe || !probe->owner || !probe->rx149ObservationOnly ||
+        __atomic_load_n(&probe->rx149FailedEndCleanupGateValidated,
+                        __ATOMIC_ACQUIRE) == 0 ||
+        __atomic_load_n(&probe->rx149FailedEndCleanupCalled,
+                        __ATOMIC_ACQUIRE) == 0 ||
+        __atomic_load_n(&probe->rx149FailedEndCleanupResult,
+                        __ATOMIC_ACQUIRE) != 0 ||
+        __atomic_load_n(&probe->rx149FailedEndInvalidated,
+                        __ATOMIC_ACQUIRE) != 0 || probe->canceled ||
+        __atomic_load_n(&probe->owner->nativeP2pCancelRequested_,
+                        __ATOMIC_ACQUIRE) != 0)
+        return false;
+    const auto first = captureRx149FailedEndCleanupReceipt(probe);
+    const auto second = captureRx149FailedEndCleanupReceipt(probe);
+    return NativeP2PRx149Observation::publishCleanupReceipt(
+        &probe->rx149CleanupReceipt, first, second, EPROTO,
+        IWX_FW_CMD_ID_AND_COLOR(1, 0));
+}
+
 static int rx149LiveTokenNibble(char value)
 {
     if (value >= '0' && value <= '9')
@@ -9817,6 +10164,9 @@ IOReturn ItlIwx::tahoeP2pRocEventAction(OSObject *, void *opaque,
         __atomic_load_n(&owner->com.sc_tx_rate_generation, __ATOMIC_ACQUIRE) ==
             probe->stationGeneration;
     if (!currentOwner) {
+        if (probe->rx149ObservationOnly)
+            __atomic_store_n(&probe->rx149FailedEndInvalidated, 1u,
+                             __ATOMIC_RELEASE);
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
         if (probe->directedDataOnly && owner->tahoeP2pOnMainGate()) {
             probe->directedDataReady = false;
@@ -9848,6 +10198,24 @@ IOReturn ItlIwx::tahoeP2pRocEventAction(OSObject *, void *opaque,
         action->armed = tracker.begin(probe->contextGeneration, 1,
                                        action->configuration);
         if (action->armed) {
+            if (probe->rx149ObservationOnly) {
+                __atomic_store_n(&probe->rx149FailedEndReadObserved, 0u,
+                                 __ATOMIC_RELEASE);
+                __atomic_store_n(&probe->rx149FailedEndInvalidated, 0u,
+                                 __ATOMIC_RELEASE);
+                __atomic_store_n(&probe->rx149FailedEndCleanupGateValidated,
+                                 0u, __ATOMIC_RELEASE);
+                __atomic_store_n(&probe->rx149FailedEndCleanupCalled, 0u,
+                                 __ATOMIC_RELEASE);
+                __atomic_store_n(&probe->rx149FailedEndCleanupResult, 0,
+                                 __ATOMIC_RELEASE);
+                probe->rx149FailedEndReadGeneration = 0;
+                probe->rx149FailedEndReadStartUs = 0;
+                probe->rx149FailedEndReadEndUs = 0;
+                probe->rx149FailedEndCleanupPreBindingActive = 0;
+                probe->rx149FailedEndCleanupPrePhyLeased = 0;
+                probe->rx149CleanupReceipt = {};
+            }
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
             if (probe->directedDataOnly) {
                 NativeAwdlBSD::revokeDirectedDataRxInput();
@@ -9884,6 +10252,14 @@ IOReturn ItlIwx::tahoeP2pRocEventAction(OSObject *, void *opaque,
         owner->tahoeP2pSyncRxDiagnosticOwner(false);
     } else if (action->operation == kRocExpire) {
         tracker.expire(probe->contextGeneration);
+        if (probe->rx149ObservationOnly) {
+            __atomic_store_n(&probe->rx149FailedEndInvalidated, 1u,
+                             __ATOMIC_RELEASE);
+            __atomic_store_n(&probe->rx149FailedEndReadObserved, 0u,
+                             __ATOMIC_RELEASE);
+            __atomic_store_n(&probe->rx149FailedEndCleanupGateValidated, 0u,
+                             __ATOMIC_RELEASE);
+        }
         owner->tahoeP2pSyncRxDiagnosticOwner(true);
     }
     action->snapshot = tracker.snapshot();
@@ -9899,6 +10275,8 @@ IOReturn ItlIwx::tahoeP2pRocEventAction(OSObject *, void *opaque,
             action->snapshot.outcomeUnknown ||
             action->operation == kRocExpire ||
             action->operation == kRocCloseRx149 ||
+            action->operation == kRocCloseRx149FailedEnd ||
+            action->operation == kRocSealRx149FailedEndReceipt ||
             (action->operation == kRocCommandReturned &&
              action->snapshot.commandReturned &&
              action->snapshot.commandResult != 0);
@@ -10178,6 +10556,90 @@ IOReturn ItlIwx::tahoeP2pRocEventAction(OSObject *, void *opaque,
             (void)owner->tahoePublishFirmwareDiagnostics(
                 controller, &owner->com, true);
         if (!action->rxDrainComplete)
+            return kIOReturnNotReady;
+    } else if (action->operation == kRocCloseRx149FailedEnd) {
+        auto &sc = owner->com;
+        const auto session = tracker.snapshot();
+        const auto before = owner->nativeAwdlRxEventTimeline_.snapshot();
+        const auto beforeEvidence = rx149FailedEndCleanupEvidence(
+            probe, session, before);
+        const bool resourcesActive = probe->rx149ObservationOnly &&
+            sc.sc_p2p.initialized &&
+            sc.sc_p2p.mac_state == IWX_P2P_RESOURCE_ACTIVE &&
+            sc.sc_p2p.binding_state == IWX_P2P_RESOURCE_ACTIVE &&
+            sc.sc_p2p.phy_leased && sc.sc_p2p.mac_id == 1 &&
+            sc.sc_p2p_roc.token == probe->contextGeneration &&
+            sc.sc_p2p_roc.fw_generation == probe->powerGeneration &&
+            sc.sc_p2p_roc.phase == IWX_P2P_ROC_SESSION_ACKED &&
+            sc.sc_p2p_roc.session_submit_seen == 1 &&
+            sc.sc_p2p_roc.session_submit_result == 0;
+        if (!resourcesActive ||
+            __atomic_load_n(&owner->nativeP2pCancelRequested_,
+                            __ATOMIC_ACQUIRE) != 0 ||
+            __atomic_load_n(&probe->rx149FailedEndInvalidated,
+                            __ATOMIC_ACQUIRE) != 0 ||
+            !NativeP2PRx149Observation::mayCleanupAfterFailedEnd(
+                beforeEvidence))
+            return kIOReturnNotReady;
+
+        // A canonical END may have closed the producer at notification time.
+        // Closing again is idempotent, but the owner/epoch must still match.
+        const NativeAwdlRxTrace::Epochs epochs{
+            probe->contextGeneration, probe->powerGeneration,
+            probe->stationGeneration, probe->contextGeneration};
+        if (!before.ownerPresent ||
+            before.ownerSerial != owner->nativeAwdlRxEventOwnerSerial_ ||
+            !NativeAwdlRxTrace::sameEpochs(before.epochs, epochs) ||
+            (!before.producerClosed &&
+             !owner->nativeAwdlRxEventTimeline_.closeProducer(
+                 before.ownerSerial, epochs, 5u)))
+            return kIOReturnNotReady;
+        owner->tahoeP2pRxConsume();
+        const auto drained = owner->nativeAwdlRxEventTimeline_.snapshot();
+        P2PTxDiagnosticSnapshot finalTxSnapshot{};
+        const bool txStillQuiescent =
+            rx149TxHistoryQuiescent(owner, &finalTxSnapshot);
+        action->rxDrainComplete = drained.ownerPresent &&
+            drained.ownerSerial == before.ownerSerial &&
+            NativeAwdlRxTrace::sameEpochs(drained.epochs, epochs) &&
+            !drained.active && drained.producerClosed &&
+            drained.pendingDrainCount == 0 &&
+            drained.untrackedPendingDrainCount == 0 &&
+            drained.untrackedPendingIdentityOverflowCount == 0 &&
+            drained.droppedEventCount == 0 &&
+            drained.staleCompletionCount == 0 &&
+            drained.sourceTableFullCount == 0 &&
+            drained.sessionBoundaryOrderInvalid == 0 &&
+            txStillQuiescent;
+        const auto drainedSession = tracker.snapshot();
+        const auto drainedEvidence = rx149FailedEndCleanupEvidence(
+            probe, drainedSession, drained);
+        action->failedEndCleanupEligible = action->rxDrainComplete &&
+            NativeP2PRx149Observation::mayCleanupAfterFailedEnd(
+                drainedEvidence) && resourcesActive &&
+            __atomic_load_n(&owner->nativeP2pCancelRequested_,
+                            __ATOMIC_ACQUIRE) == 0 &&
+            __atomic_load_n(&probe->rx149FailedEndInvalidated,
+                            __ATOMIC_ACQUIRE) == 0;
+        if (action->failedEndCleanupEligible) {
+            probe->rx149FailedEndCleanupPreBindingActive =
+                sc.sc_p2p.binding_state == IWX_P2P_RESOURCE_ACTIVE ? 1u : 0u;
+            probe->rx149FailedEndCleanupPrePhyLeased =
+                sc.sc_p2p.phy_leased ? 1u : 0u;
+            __atomic_store_n(&probe->rx149FailedEndCleanupGateValidated,
+                             1u, __ATOMIC_RELEASE);
+        }
+        if (auto *controller = owner->tahoeP2pController())
+            owner->tahoeP2pPublishRxEventTimeline(controller);
+        if (auto *controller = owner->tahoeP2pController())
+            (void)owner->tahoePublishFirmwareDiagnostics(
+                controller, &owner->com, true);
+        if (!action->failedEndCleanupEligible)
+            return kIOReturnNotReady;
+    } else if (action->operation == kRocSealRx149FailedEndReceipt) {
+        action->failedEndReceiptSealed =
+            sealRx149FailedEndCleanupReceipt(probe);
+        if (!action->failedEndReceiptSealed)
             return kIOReturnNotReady;
     } else if (action->operation == kRocRead) {
         if (!probe->rx149ObservationOnly &&
@@ -10524,6 +10986,20 @@ static int exerciseRx149Observation(P2PProbeRun *probe)
             drainRx149NativeDataOutsideMainGate(probe, event);
         if (error)
             break;
+        if (event.snapshot.endSeen && event.snapshot.endStatus == 0 &&
+            event.snapshot.commandReturned &&
+            event.snapshot.commandResult == 0 &&
+            event.snapshot.cleanupAllowed &&
+            !event.snapshot.outcomeUnknown) {
+            probe->rx149FailedEndReadGeneration =
+                event.snapshot.generation;
+            probe->rx149FailedEndReadStartUs =
+                event.snapshot.startObservedMonotonicUs;
+            probe->rx149FailedEndReadEndUs =
+                event.snapshot.endObservedMonotonicUs;
+            __atomic_store_n(&probe->rx149FailedEndReadObserved, 1u,
+                             __ATOMIC_RELEASE);
+        }
         if (event.snapshot.endSeen || event.snapshot.outcomeUnknown) {
             ended = event.snapshot.endSeen;
             break;
@@ -10547,6 +11023,41 @@ static int exerciseRx149Observation(P2PProbeRun *probe)
         !NativeP2PRx149Observation::mayReleaseAfterEnd(evidence)))
         error = EPROTO;
     if (error) {
+        if (error == EPROTO && event.snapshot.endSeen &&
+            event.snapshot.endStatus == 0 &&
+            __atomic_load_n(&probe->rx149FailedEndReadObserved,
+                            __ATOMIC_ACQUIRE) != 0 &&
+            __atomic_load_n(&probe->rx149FailedEndInvalidated,
+                            __ATOMIC_ACQUIRE) == 0) {
+            event.operation = kRocCloseRx149FailedEnd;
+            event.rxDrainComplete = false;
+            event.failedEndCleanupEligible = false;
+            if (gate && gate->runAction(ItlIwx::tahoeP2pRocEventAction,
+                                        &event) == kIOReturnSuccess &&
+                event.rxDrainComplete && event.failedEndCleanupEligible &&
+                event.snapshot.cleanupAllowed) {
+                const int cleanupError = owner->tahoeP2pRocCleanup(
+                    sc, probe->contextGeneration, configuration,
+                    event.snapshot.cleanupAllowed);
+                __atomic_store_n(&probe->rx149FailedEndCleanupCalled, 1u,
+                                 __ATOMIC_RELEASE);
+                __atomic_store_n(&probe->rx149FailedEndCleanupResult,
+                                 cleanupError, __ATOMIC_RELEASE);
+                if (cleanupError == 0) {
+                    event.operation = kRocSealRx149FailedEndReceipt;
+                    event.failedEndReceiptSealed = false;
+                    if (gate->runAction(ItlIwx::tahoeP2pRocEventAction,
+                                        &event) == kIOReturnSuccess &&
+                        event.failedEndReceiptSealed) {
+                        __atomic_store_n(&owner->nativeP2pRocResult_,
+                                         uint32_t(EPROTO), __ATOMIC_RELAXED);
+                        __atomic_store_n(&owner->nativeP2pRocStage_, 5u,
+                                         __ATOMIC_RELEASE);
+                        return EPROTO; // END=0 remains a failed exercise.
+                    }
+                }
+            }
+        }
         __atomic_store_n(&owner->nativeP2pRocResult_, uint32_t(error),
                          __ATOMIC_RELAXED);
         __atomic_store_n(&owner->nativeP2pRocStage_, 6u, __ATOMIC_RELEASE);
@@ -10811,6 +11322,149 @@ IOReturn ItlIwx::tahoeP2pExerciseRecoveryAction(
         return kIOReturnSuccess;
     }
 #endif
+
+    if (run->rx149ObservationOnly && run->sessionSubmitReached) {
+        // A submitted session must use its own post-cleanup receipt. Never
+        // fall through to the Prepare-trace abort proof after END or timeout.
+        action->snapshotRead = true;
+        if (action->exerciseErrno != EPROTO || run->canceled ||
+            __atomic_load_n(&run->rx149FailedEndInvalidated,
+                            __ATOMIC_ACQUIRE) != 0 ||
+            __atomic_load_n(&owner->nativeP2pCancelRequested_,
+                            __ATOMIC_ACQUIRE) != 0)
+            return kIOReturnSuccess;
+
+        NativeP2PRx149Observation::CleanupReceiptPayload receipt{};
+        uint32_t receiptRevision = 0;
+        if (!NativeP2PRx149Observation::readCleanupReceipt(
+                &run->rx149CleanupReceipt, &receipt, &receiptRevision) ||
+            !NativeP2PRx149Observation::validCleanupReceiptPayload(
+                receipt, EPROTO, IWX_FW_CMD_ID_AND_COLOR(1, 0)))
+            return kIOReturnSuccess;
+
+        const auto liveSession = owner->nativeP2pRocEvents_.snapshot();
+        const auto liveTrace = owner->nativeAwdlRxEventTimeline_.snapshot();
+        const NativeP2PProbe::Snapshot halSnapshot =
+            owner->nativeP2pProbe_.snapshot();
+        const bool currentOwner = owner->nativeP2pBusy() &&
+            __atomic_load_n(&owner->nativeP2pProbeOwner_, __ATOMIC_ACQUIRE) ==
+                reinterpret_cast<void *>(run->workerThread) &&
+            owner->nativeP2pProbeGeneration_ == run->contextGeneration &&
+            !run->canceled &&
+            __atomic_load_n(&owner->nativeP2pCancelRequested_,
+                            __ATOMIC_ACQUIRE) == 0;
+        const bool currentEpochs =
+            halSnapshot.contextGeneration == run->contextGeneration &&
+            halSnapshot.powerGeneration == run->powerGeneration &&
+            halSnapshot.stationGeneration == run->stationGeneration &&
+            uint32_t(sc->sc_generation) == run->powerGeneration &&
+            __atomic_load_n(&sc->sc_tx_rate_generation, __ATOMIC_ACQUIRE) ==
+                run->stationGeneration &&
+            sc->sc_p2p.fw_generation == run->p2pFirmwareGeneration &&
+            run->p2pFirmwareGeneration == run->scGeneration &&
+            run->scGeneration == run->powerGeneration;
+        const bool currentSession = liveSession.generation ==
+                receipt.sessionToken &&
+            liveSession.configuration == receipt.configuration &&
+            liveSession.commandReturned && liveSession.commandResult == 0 &&
+            liveSession.startSeen && liveSession.startStatus == 1 &&
+            liveSession.endSeen && liveSession.endStatus == 0 &&
+            liveSession.cleanupAllowed && !liveSession.observedScheduledPair &&
+            !liveSession.outcomeUnknown &&
+            liveSession.startObservedMonotonicUs == receipt.startMonotonicUs &&
+            liveSession.endObservedMonotonicUs == receipt.endMonotonicUs;
+        const bool currentTimeline =
+            rx149FailureTimelineOwnerMatches(run, liveTrace) &&
+            liveTrace.revision == receipt.timelineRevision &&
+            liveTrace.producerClosed && !liveTrace.active &&
+            liveTrace.pendingDrainCount == 0 &&
+            liveTrace.untrackedPendingDrainCount == 0 &&
+            liveTrace.untrackedPendingIdentityOverflowCount == 0 &&
+            liveTrace.droppedEventCount == 0 &&
+            liveTrace.staleCompletionCount == 0 &&
+            liveTrace.sourceTableFullCount == 0 &&
+            liveTrace.sessionBoundaryOrderInvalid == 0 &&
+            rx149FailureTimelineAnomalyFree(liveTrace) &&
+            liveTrace.rocStart.notificationSerial ==
+                receipt.startNotificationSerial &&
+            liveTrace.rocEnd.notificationSerial ==
+                receipt.endNotificationSerial &&
+            liveTrace.rocStart.hostMonotonicUs == receipt.startMonotonicUs &&
+            liveTrace.rocEnd.hostMonotonicUs == receipt.endMonotonicUs;
+        const bool currentPostState =
+            sc->sc_p2p.binding_state == IWX_P2P_RESOURCE_ABSENT &&
+            !sc->sc_p2p.phy_leased &&
+            (sc->sc_p2p_roc.phase == IWX_P2P_ROC_COMPLETE ||
+             sc->sc_p2p_roc.phase == IWX_P2P_ROC_IDLE) &&
+            (sc->sc_p2p_roc.phase != IWX_P2P_ROC_COMPLETE ||
+             (sc->sc_p2p_roc.phy_id < IWX_NUM_PHY_CTX &&
+              sc->sc_p2p_roc.original_phy_channel != nullptr &&
+              sc->sc_phyctxt[sc->sc_p2p_roc.phy_id].channel ==
+                  sc->sc_p2p_roc.original_phy_channel));
+        P2PTxDiagnosticSnapshot txSnapshot{};
+        const bool txStillQuiescent = rx149TxHistoryQuiescent(
+            owner, &txSnapshot);
+        const bool receiptIdentity =
+            NativeP2PRx149Observation::cleanupReceiptIdentityMatches(
+                receipt, owner->nativeAwdlRxEventOwnerSerial_,
+                run->contextGeneration, run->contextGeneration,
+                run->powerGeneration, run->stationGeneration,
+                run->scGeneration, run->contextGeneration);
+        if (!(currentOwner && currentEpochs && currentSession &&
+              currentTimeline && currentPostState && txStillQuiescent &&
+              receiptIdentity))
+            return kIOReturnSuccess;
+
+        proof->snapshotValid = true;
+        proof->snapshotStable = receiptRevision != 0 &&
+            (receiptRevision & 1u) == 0;
+        proof->ownerMatches = currentOwner && receiptIdentity;
+        proof->contextGenerationMatches =
+            receipt.contextGeneration == run->contextGeneration;
+        proof->powerGenerationMatches = currentEpochs &&
+            receipt.powerGeneration == run->powerGeneration;
+        proof->firmwareGenerationMatches = currentEpochs &&
+            receipt.firmwareGeneration == run->scGeneration;
+        proof->p2pFirmwareGenerationMatches = currentEpochs &&
+            receipt.p2pFirmwareGeneration == run->p2pFirmwareGeneration;
+        proof->stationGenerationMatches = currentEpochs &&
+            receipt.stationGeneration == run->stationGeneration;
+        proof->fullyRestored = currentPostState &&
+            receipt.rocRestoredAfterCleanup != 0;
+        proof->bindingAbsent = currentPostState &&
+            receipt.bindingAbsentAfterCleanup != 0;
+        proof->phyUnleased = currentPostState &&
+            receipt.phyUnleasedAfterCleanup != 0;
+        proof->rocIdle = sc->sc_p2p_roc.phase == IWX_P2P_ROC_IDLE;
+        proof->restoreComplete = proof->fullyRestored;
+        proof->sessionProtectionSubmitReached = true;
+        proof->sessionOutcomeUnknown = liveSession.outcomeUnknown;
+        proof->txResourcesPresent = !txStillQuiescent ||
+            receipt.txResourcesPresent != 0;
+        proof->cleanupErrno = receipt.cleanupErrno;
+        proof->attemptSerial = receipt.attemptSerial;
+        proof->snapshotRevision = receiptRevision;
+        proof->rx149SubmittedEndCleanup = true;
+        proof->rx149SessionSubmitted = receipt.commandSubmitted != 0 &&
+            receipt.commandAcknowledged != 0 &&
+            receipt.commandResult == 0;
+        proof->rx149CanonicalFailedEnd =
+            receipt.startCanonical != 0 && receipt.endCanonical != 0 &&
+            receipt.startStatus == 1 && receipt.endStatus == 0;
+        proof->rx149ProducerClosedAndDrained =
+            receipt.producerClosedAndDrained != 0 && currentTimeline;
+        proof->rx149TxQuiescent = receipt.txQuiescent != 0 &&
+            txStillQuiescent;
+        proof->rx149BindingRemoveAcknowledged =
+            receipt.cleanupCalled != 0 && receipt.cleanupErrno == 0 &&
+            receipt.bindingAbsentAfterCleanup != 0 && currentPostState;
+        proof->rx149PhyRestoreAcknowledged =
+            receipt.cleanupCalled != 0 && receipt.cleanupErrno == 0 &&
+            receipt.phyUnleasedAfterCleanup != 0 &&
+            receipt.rocRestoredAfterCleanup != 0 && currentPostState;
+        action->snapshotRead = true;
+        return kIOReturnSuccess;
+    }
 
     struct iwx_p2p_roc_prepare_trace_snapshot trace{};
     uint32_t revisionBegin = 0;

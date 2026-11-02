@@ -17,9 +17,9 @@ enum State : uint32_t {
     kComplete = 7,
     kQuarantined = 8,
     kResetDrained = 9,
-    // The diagnostic exercise failed, but a stable proof showed that it
-    // never submitted a session and all ROC resources were restored. The
-    // outer MAC lease was removed safely; this is still a failed exercise.
+    // The diagnostic exercise failed, but a stable cleanup proof showed that
+    // ROC resources were restored. The outer MAC lease was removed safely;
+    // this remains a failed exercise, whether or not a session was submitted.
     kExerciseFailedCleaned = 10
 };
 
@@ -124,10 +124,10 @@ struct Snapshot {
     uint32_t exerciseRecoveryProofAccepted;
 };
 
-// Evidence used only after an exercise returns an error. A nonzero errno is
-// preserved separately from proof that the failed operation can be cleaned
-// up. Every identity/state field is required; absent or unknown evidence is
-// represented as false and keeps the outer MAC lease quarantined.
+// Evidence used only after an exercise returns an error. The exercise errno
+// is preserved separately from proof that its resources can be cleaned up.
+// Every identity/state field is required; absent or unknown evidence is false
+// and keeps the outer MAC lease quarantined.
 struct ExerciseRecoveryProof {
     bool snapshotValid;
     bool snapshotStable;
@@ -163,6 +163,17 @@ struct ExerciseRecoveryProof {
     bool directedDataTicketClosed;
     bool directedDataQueueDrained;
     bool directedDataResourcesAbsent;
+    // Independent proof shape for a submitted RX149 session whose canonical
+    // END failed with EPROTO, but whose same-owner producer/TX/binding/PHY
+    // resources were explicitly drained and acknowledged. This is not the
+    // unsubmitted prepare-abort proof or the directed-data no-doorbell proof.
+    bool rx149SubmittedEndCleanup;
+    bool rx149SessionSubmitted;
+    bool rx149CanonicalFailedEnd;
+    bool rx149ProducerClosedAndDrained;
+    bool rx149TxQuiescent;
+    bool rx149BindingRemoveAcknowledged;
+    bool rx149PhyRestoreAcknowledged;
 };
 
 bool safeToRemoveAfterExerciseFailure(
@@ -181,7 +192,8 @@ struct Operations {
     // Optional independent hardware exercise after MAC ADD. Zero certifies
     // its resources were drained/released, so the MAC may be removed. Any
     // error retains the MAC lease unless the optional recovery callback
-    // supplies the complete, matching cleanup proof below.
+    // supplies the complete, matching cleanup proof below, including a
+    // submitted-session failed-END cleanup proof where applicable.
     int (*exercise)(void *) {nullptr};
     // Called only after exercise returns nonzero. The callback may perform
     // only the cleanup already authorized by its production protocol, then
