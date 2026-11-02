@@ -5,6 +5,7 @@ import Darwin
 import CoreFoundation
 import CryptoKit
 import IORegistryBooleanFlag107
+import Test114RxLease
 
 // Argument-only by default. The explicit run sends exactly one native UDP
 // datagram after the kernel publishes its matching 100 ms ROC START gate.
@@ -29,14 +30,19 @@ var peerReturnDatagramsSeen: UInt32 = 0
 var peerReturnDatagramsRejected: UInt32 = 0
 var peerReturnError: Int32 = 0
 var peerReturnElapsedUs: UInt64 = 0
+var rxLeasePollTrace = Test114RxLeasePollTrace()
 func stop(_ text: String, _ code: Int32 = 1) -> Never {
-    emit(["schema": 1, "phase": phase, "error": text,
-          "arm_may_have_changed": armMayHaveChanged, "arm_accepted": accepted,
-          "native_udp_attempted": udpAttempted, "native_udp_bytes": udpBytes,
-          "matched_peer_return_proven": false, "ifnet_delivery_proven": false,
-          "peer_return_status": "not_proven", "peer_receipt_proven": false,
-          "airdrop_proven": false,
-          "automatic_retry_allowed": false])
+    var result: [String: Any] = ["schema": 1, "phase": phase, "error": text,
+                                "arm_may_have_changed": armMayHaveChanged, "arm_accepted": accepted,
+                                "native_udp_attempted": udpAttempted, "native_udp_bytes": udpBytes,
+                                "matched_peer_return_proven": false, "ifnet_delivery_proven": false,
+                                "peer_return_status": "not_proven", "peer_receipt_proven": false,
+                                "airdrop_proven": false,
+                                "automatic_retry_allowed": false]
+    if rxLeasePollTrace.checkCount > 0 {
+        result["rx_lease_poll"] = rxLeasePollTrace.jsonObject
+    }
+    emit(result)
     exit(code)
 }
 @_silgen_name("t110_prepare_existing_socket")
@@ -73,7 +79,7 @@ let requiredOptions: Set<String> = ["--expect-build", "--expect-uuid", "--peer-m
 guard optionIndex == optionArguments.count,
       Set(options.keys).isSuperset(of: requiredOptions),
       let build = options["--expect-build"],
-      ["25G332-Test107", "25G332-Test108", "25G332-Test109", "25G332-Test110", "25G332-Test111", "25G332-Test112", "25G332-Test113"].contains(build),
+      ["25G332-Test107", "25G332-Test108", "25G332-Test109", "25G332-Test110", "25G332-Test111", "25G332-Test112", "25G332-Test113", "25G332-Test114"].contains(build),
       let expectedUUID = options["--expect-uuid"],
       matches(expectedUUID, "^[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}$"),
       let peerMACText = options["--peer-mac"],
@@ -83,12 +89,12 @@ guard optionIndex == optionArguments.count,
       nonceText.contains(where: { $0 != "0" }),
       let runToken = options["--run-token"], matches(runToken, "^[0-9a-f]{32}$"),
       runToken.contains(where: { $0 != "0" }) else {
-    stop("Usage: --expect-build 25G332-Test107|25G332-Test108|25G332-Test109|25G332-Test110|25G332-Test111|25G332-Test112|25G332-Test113 --expect-uuid UUID --peer-mac MAC --local-ipv6 fe80::ADDRESS --nonce 16hex --run-token 32hex [--peer-ipv6 fe80::ADDRESS --peer-ready-file PRIVATE_JSON] [--run]")
+    stop("Usage: --expect-build 25G332-Test107|25G332-Test108|25G332-Test109|25G332-Test110|25G332-Test111|25G332-Test112|25G332-Test113|25G332-Test114 --expect-uuid UUID --peer-mac MAC --local-ipv6 fe80::ADDRESS --nonce 16hex --run-token 32hex [--peer-ipv6 fe80::ADDRESS --peer-ready-file PRIVATE_JSON] [--run]")
 }
-let matchedReturnBuild = ["25G332-Test110", "25G332-Test111", "25G332-Test112", "25G332-Test113"].contains(build)
+let matchedReturnBuild = ["25G332-Test110", "25G332-Test111", "25G332-Test112", "25G332-Test113", "25G332-Test114"].contains(build)
 guard matchedReturnBuild == (options["--peer-ipv6"] != nil),
       matchedReturnBuild == (options["--peer-ready-file"] != nil) else {
-    stop("Test110-Test113 require peer IPv6 and fresh peer READY file; older identities do not accept them")
+    stop("Test110-Test114 require peer IPv6 and fresh peer READY file; older identities do not accept them")
 }
 let peer = peerMACText.split(separator: ":").compactMap { UInt8($0, radix: 16) }
 guard peer.count == 6, peer[0] & 1 == 0, peer.contains(where: { $0 != 0 }) else {
@@ -120,11 +126,6 @@ if matchedReturnBuild && peerIPv6 == nil { stop("Peer must be canonical unicast 
 
 struct PeerReadyEvidence {
     let windowExpiresAtUptimeNs: UInt64
-}
-
-struct Test110RxLease {
-    let startUs: UInt64
-    let deadlineUs: UInt64
 }
 
 func hex(_ bytes: [UInt8]) -> String {
@@ -269,6 +270,8 @@ if !run {
           "native_udp_count": 1, "native_udp_payload_bytes": 8,
           "peer_ready_required": matchedReturnBuild, "peer_ready_file_read": false,
           "matched_return_capture_max_ms": matchedReturnBuild ? 100 : 0,
+          "rx_lease_poll_within_original_window": build == "25G332-Test114",
+          "rx_lease_max_checks": build == "25G332-Test114" ? 128 : (matchedReturnBuild ? 1 : 0),
           "peer_receipt_proven": false, "ifnet_delivery_proven": false,
           "airdrop_proven": false, "automatic_retry_allowed": false])
     exit(0)
@@ -315,35 +318,32 @@ func number(_ d: [String: Any], _ k: String) -> UInt64? {
           CFGetTypeID(value) != CFBooleanGetTypeID() else { return nil }
     return value.uint64Value
 }
-func validTest110RxLease(_ d: [String: Any]) -> Test110RxLease? {
-    guard let begin = number(d, "NativeP2PDirectedDataRxLeaseRevisionBegin"),
-          let end = number(d, "NativeP2PDirectedDataRxLeaseRevisionEnd"),
-          begin != 0, begin == end, begin & 1 == 0,
-          number(d, "NativeP2PDirectedDataRxLeaseReady") == 1,
-          let owner = number(d, "NativeP2PDirectedDataRxLeaseOwnerSerial"), owner != 0,
-          let context = number(d, "NativeP2PDirectedDataRxLeaseContextGeneration"), context != 0,
-          let power = number(d, "NativeP2PDirectedDataRxLeasePowerGeneration"), power != 0,
-          let station = number(d, "NativeP2PDirectedDataRxLeaseStationGeneration"), station != 0,
-          let roc = number(d, "NativeP2PDirectedDataRxLeaseRocGeneration"), roc != 0,
-          context == roc,
-          let start = number(d, "NativeP2PDirectedDataRxLeaseStartUs"), start != 0,
-          let deadline = number(d, "NativeP2PDirectedDataRxLeaseDeadlineUs"),
-          deadline > start, deadline - start == 100_000,
-          let mccRevision = number(d, "NativeP2PDirectedDataRxLeaseMccRevision"),
-          mccRevision != 0, mccRevision & 1 == 0,
-          let mccNotice = number(d, "NativeP2PDirectedDataRxLeaseMccNoticeGeneration"),
-          mccNotice != 0,
-          number(d, "NativeP2PDirectedDataRxLeaseMccSourceGeneration") == power,
-          number(d, "NativeP2PDirectedDataRxLeaseMccAppliedNoticeGeneration") == mccNotice,
-          let mccStatus = number(d, "NativeP2PDirectedDataRxLeaseMccResponseStatus"),
-          mccStatus <= 1,
-          number(d, "NativeP2PDirectedDataRxLeaseMccResponseChannelCount") == 51,
-          number(d, "NativeP2PDirectedDataRxLeaseChannel") == 6,
-          number(d, "NativeP2PRocGeneration") == roc,
-          number(d, "NativeP2PRocActualChannel") == 6,
-          number(d, "NativeP2PRocStartSeen") == 1,
-          number(d, "NativeP2PRocEndSeen") == 0 else { return nil }
-    return Test110RxLease(startUs: start, deadlineUs: deadline)
+func pollForTest114RxLease(initial: [String: Any]) -> Test114RxLeaseWindow? {
+    let outcome = test114PollRxLease(
+        initial: initial, expectedRunToken: runToken, expectedBuild: build,
+        readProperties: { properties() },
+        monotonicUs: {
+            var nowUs: UInt64 = 0
+            return t110CurrentUptimeUs(&nowUs) == 0 ? nowUs : nil
+        },
+        sleepMicroseconds: { usleep($0) })
+    rxLeasePollTrace = outcome.trace
+    return outcome.window
+}
+func checkPriorMatchedReturnLeaseOnce(_ initial: [String: Any]) -> Test114RxLeaseWindow? {
+    let originalWindow = test114InitialWindow(initial)
+    let originalIdentity = test114InitialIdentity(initial)
+    var nowUs: UInt64 = 0
+    let monotonicUs = t110CurrentUptimeUs(&nowUs) == 0 ? nowUs : nil
+    let check = test114CheckRxLease(
+        initial, originalWindow: originalWindow, originalIdentity: originalIdentity,
+        monotonicUs: monotonicUs,
+        bindOriginAccepted: initial["NativeP2PDirectedDataAcceptedRunToken"] as? String == runToken,
+        buildMatches: initial["NativeTestBuild"] as? String == build,
+        stageReady: number(initial, "NativeP2PDirectedDataStage") == 4 &&
+                    number(initial, "NativeP2PDirectedDataReady") == 1)
+    rxLeasePollTrace.record(check)
+    return check.valid ? originalWindow : nil
 }
 phase = "profile"
 let before = properties()
@@ -413,9 +413,11 @@ while DispatchTime.now().uptimeNanoseconds < waitEnd {
 guard number(snapshot, "NativeP2PDirectedDataStage") == 4,
       number(snapshot, "NativeP2PDirectedDataReady") == 1,
       rocReadyObservedAt != 0 else { stop("No matching ROC START window") }
-let rxLease = matchedReturnBuild ? validTest110RxLease(snapshot) : nil
+let rxLease = matchedReturnBuild ?
+    (build == "25G332-Test114" ? pollForTest114RxLease(initial: snapshot) :
+                                checkPriorMatchedReturnLeaseOnce(snapshot)) : nil
 if matchedReturnBuild && rxLease == nil {
-    stop("Matching channel 6 kernel RX lease is not ready; no native UDP sent; do not retry")
+    stop("Matching channel 6 kernel RX lease did not become valid within its original 100 ms window; no native UDP sent; do not retry")
 }
 if let rxLease {
     var nowUs: UInt64 = 0
@@ -503,6 +505,7 @@ emit(["schema": 1, "mode": "explicit_run", "phase": phase, "build": build,
       "peer_return_datagrams_rejected": peerReturnDatagramsRejected,
       "peer_return_error": peerReturnError,
       "peer_return_elapsed_us": peerReturnElapsedUs,
+      "rx_lease_poll": rxLeasePollTrace.jsonObject,
       "peer_receipt_proven": false, "radio_ack_proven": false, "airdrop_proven": false,
       "automatic_retry_allowed": false])
 let complete = udpBytes == 8 && number(snapshot, "NativeP2PDirectedDataStage") == 8 &&

@@ -265,4 +265,153 @@ inline bool shouldPublishRxLeaseProperties(bool leaseValid,
                         previouslyPublished;
 }
 
+enum RxLeaseReject : uint32_t {
+    kRxLeaseRejectRxEpoch = 1u << 0,
+    kRxLeaseRejectResources = 1u << 1,
+    kRxLeaseRejectDataSnapshot = 1u << 2,
+    kRxLeaseRejectOwner = 1u << 3,
+    kRxLeaseRejectTrace = 1u << 4,
+    kRxLeaseRejectRadio = 1u << 5,
+    kRxLeaseRejectProfile = 1u << 6,
+    kRxLeaseRejectMcc = 1u << 7,
+    kRxLeaseRejectSession = 1u << 8,
+    kRxLeaseRejectWindow = 1u << 9,
+    kRxLeaseRejectChannel = 1u << 10,
+    kRxLeaseRejectAddress = 1u << 11,
+    kRxLeaseRejectPolicy = 1u << 12,
+    kRxLeaseRejectOutput = 1u << 13,
+    kRxLeaseRejectMainGate = 1u << 14
+};
+
+struct RxLeaseGateEvidence {
+    bool rxEpochCurrent = false;
+    bool resourcesCurrent = false;
+    bool dataSnapshotCurrent = false;
+    bool ownerCurrent = false;
+    bool traceCurrent = false;
+    bool radioReady = false;
+    bool profileReady = false;
+    bool mccCurrent = false;
+    bool sessionCurrent = false;
+    bool windowCurrent = false;
+    bool channelCurrent = false;
+    bool addressCurrent = false;
+    bool leasePolicyCurrent = false;
+    bool outputValid = false;
+    bool mainGateCurrent = false;
+};
+
+inline uint32_t rxLeaseRejectMask(const RxLeaseGateEvidence &evidence)
+{
+    uint32_t mask = 0;
+    if (!evidence.rxEpochCurrent) mask |= kRxLeaseRejectRxEpoch;
+    if (!evidence.resourcesCurrent) mask |= kRxLeaseRejectResources;
+    if (!evidence.dataSnapshotCurrent) mask |= kRxLeaseRejectDataSnapshot;
+    if (!evidence.ownerCurrent) mask |= kRxLeaseRejectOwner;
+    if (!evidence.traceCurrent) mask |= kRxLeaseRejectTrace;
+    if (!evidence.radioReady) mask |= kRxLeaseRejectRadio;
+    if (!evidence.profileReady) mask |= kRxLeaseRejectProfile;
+    if (!evidence.mccCurrent) mask |= kRxLeaseRejectMcc;
+    if (!evidence.sessionCurrent) mask |= kRxLeaseRejectSession;
+    if (!evidence.windowCurrent) mask |= kRxLeaseRejectWindow;
+    if (!evidence.channelCurrent) mask |= kRxLeaseRejectChannel;
+    if (!evidence.addressCurrent) mask |= kRxLeaseRejectAddress;
+    if (!evidence.leasePolicyCurrent) mask |= kRxLeaseRejectPolicy;
+    if (!evidence.outputValid) mask |= kRxLeaseRejectOutput;
+    if (!evidence.mainGateCurrent) mask |= kRxLeaseRejectMainGate;
+    return mask;
+}
+
+enum ReadyHandshakeReject : uint32_t {
+    kReadyRejectOwner = 1u << 0,
+    kReadyRejectOriginWindow = 1u << 1,
+    kReadyRejectOriginTicket = 1u << 2,
+    kReadyRejectLease = 1u << 3,
+    kReadyRejectLeasePublication = 1u << 4,
+    kReadyRejectLeaseIdentity = 1u << 5,
+    kReadyRejectRocSession = 1u << 6,
+    kReadyRejectRocMirrorPublication = 1u << 7,
+    kReadyRejectRocMirrorIdentity = 1u << 8,
+    kReadyRejectWindow = 1u << 9,
+    kReadyRejectStagePublication = 1u << 10
+};
+
+struct ReadyHandshakeEvidence {
+    bool ownerCurrent = false;
+    bool originWindowBound = false;
+    bool originTicketBound = false;
+    bool leaseCurrent = false;
+    bool leasePropertiesPublished = false;
+    bool leaseIdentityMatches = false;
+    bool rocSessionCurrent = false;
+    bool rocMirrorPublished = false;
+    bool rocMirrorMatches = false;
+    bool stagePublicationSucceeded = false;
+    uint64_t nowUs = 0;
+    uint64_t startUs = 0;
+    uint64_t deadlineUs = 0;
+};
+
+inline uint32_t readyHandshakeRejectMask(
+    const ReadyHandshakeEvidence &evidence)
+{
+    uint32_t mask = 0;
+    if (!evidence.ownerCurrent) mask |= kReadyRejectOwner;
+    if (!evidence.originWindowBound) mask |= kReadyRejectOriginWindow;
+    if (!evidence.originTicketBound) mask |= kReadyRejectOriginTicket;
+    if (!evidence.leaseCurrent) mask |= kReadyRejectLease;
+    if (!evidence.leasePropertiesPublished)
+        mask |= kReadyRejectLeasePublication;
+    if (!evidence.leaseIdentityMatches)
+        mask |= kReadyRejectLeaseIdentity;
+    if (!evidence.rocSessionCurrent) mask |= kReadyRejectRocSession;
+    if (!evidence.rocMirrorPublished)
+        mask |= kReadyRejectRocMirrorPublication;
+    if (!evidence.rocMirrorMatches)
+        mask |= kReadyRejectRocMirrorIdentity;
+    if (!evidence.startUs || evidence.startUs > UINT64_MAX - 100000ULL ||
+        evidence.deadlineUs != evidence.startUs + 100000ULL ||
+        evidence.nowUs < evidence.startUs ||
+        evidence.nowUs >= evidence.deadlineUs)
+        mask |= kReadyRejectWindow;
+    if (!evidence.stagePublicationSucceeded)
+        mask |= kReadyRejectStagePublication;
+    return mask;
+}
+
+inline bool mayPublishReady(const ReadyHandshakeEvidence &evidence)
+{
+    return readyHandshakeRejectMask(evidence) == 0;
+}
+
+enum NoDoorbellReject : uint32_t {
+    kNoDoorbellRejectSnapshot = 1u << 0,
+    kNoDoorbellRejectDoorbell = 1u << 1,
+    kNoDoorbellRejectMbufHeld = 1u << 2,
+    kNoDoorbellRejectCompletionArmed = 1u << 3
+};
+
+struct NoDoorbellEvidence {
+    bool snapshotValid = false;
+    bool doorbellIssued = false;
+    bool mbufHeldByRing = false;
+    bool completionArmed = false;
+};
+
+inline uint32_t noDoorbellRejectMask(const NoDoorbellEvidence &evidence)
+{
+    uint32_t mask = 0;
+    if (!evidence.snapshotValid) mask |= kNoDoorbellRejectSnapshot;
+    if (evidence.doorbellIssued) mask |= kNoDoorbellRejectDoorbell;
+    if (evidence.mbufHeldByRing) mask |= kNoDoorbellRejectMbufHeld;
+    if (evidence.completionArmed)
+        mask |= kNoDoorbellRejectCompletionArmed;
+    return mask;
+}
+
+inline bool provesNoDoorbell(const NoDoorbellEvidence &evidence)
+{
+    return noDoorbellRejectMask(evidence) == 0;
+}
+
 } // namespace NativeP2PDirectedDataControl

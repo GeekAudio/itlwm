@@ -565,7 +565,7 @@ public:
     bool tahoeP2pRx149DataLease(NativeP2PRx149DataInput::Lease *);
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
     bool tahoeP2pDirectedDataRxLease(
-        NativeP2PDirectedDataRxInput::Lease *);
+        NativeP2PDirectedDataRxInput::Lease *, uint32_t *rejectMask = nullptr);
 #endif
     void tahoeP2pRxConsume();
     void tahoeP2pRxDrain();

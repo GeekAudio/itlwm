@@ -251,6 +251,169 @@ static void testRxLeasePropertiesPublishOnlyOnIdentityChanges()
     assert(!shouldPublishRxLeaseProperties(false, published, false));
 }
 
+static NativeP2PDirectedDataControl::RxLeaseGateEvidence validRxLeaseGate()
+{
+    using NativeP2PDirectedDataControl::RxLeaseGateEvidence;
+    RxLeaseGateEvidence evidence{};
+    evidence.rxEpochCurrent = true;
+    evidence.resourcesCurrent = true;
+    evidence.dataSnapshotCurrent = true;
+    evidence.ownerCurrent = true;
+    evidence.traceCurrent = true;
+    evidence.radioReady = true;
+    evidence.profileReady = true;
+    evidence.mccCurrent = true;
+    evidence.sessionCurrent = true;
+    evidence.windowCurrent = true;
+    evidence.channelCurrent = true;
+    evidence.addressCurrent = true;
+    evidence.leasePolicyCurrent = true;
+    evidence.outputValid = true;
+    evidence.mainGateCurrent = true;
+    return evidence;
+}
+
+static void testRxLeaseRejectMaskNamesOnlyFailedGates()
+{
+    using namespace NativeP2PDirectedDataControl;
+    assert(rxLeaseRejectMask(RxLeaseGateEvidence{}) ==
+        (kRxLeaseRejectRxEpoch | kRxLeaseRejectResources |
+         kRxLeaseRejectDataSnapshot | kRxLeaseRejectOwner |
+         kRxLeaseRejectTrace | kRxLeaseRejectRadio |
+         kRxLeaseRejectProfile | kRxLeaseRejectMcc |
+         kRxLeaseRejectSession | kRxLeaseRejectWindow |
+         kRxLeaseRejectChannel | kRxLeaseRejectAddress |
+         kRxLeaseRejectPolicy | kRxLeaseRejectOutput |
+         kRxLeaseRejectMainGate));
+    auto evidence = validRxLeaseGate();
+    assert(rxLeaseRejectMask(evidence) == 0);
+    evidence.rxEpochCurrent = false;
+    assert(rxLeaseRejectMask(evidence) == kRxLeaseRejectRxEpoch);
+    evidence = validRxLeaseGate(); evidence.resourcesCurrent = false;
+    assert(rxLeaseRejectMask(evidence) == kRxLeaseRejectResources);
+    evidence = validRxLeaseGate(); evidence.dataSnapshotCurrent = false;
+    assert(rxLeaseRejectMask(evidence) == kRxLeaseRejectDataSnapshot);
+    evidence = validRxLeaseGate(); evidence.ownerCurrent = false;
+    assert(rxLeaseRejectMask(evidence) == kRxLeaseRejectOwner);
+    evidence = validRxLeaseGate(); evidence.traceCurrent = false;
+    assert(rxLeaseRejectMask(evidence) == kRxLeaseRejectTrace);
+    evidence = validRxLeaseGate(); evidence.radioReady = false;
+    assert(rxLeaseRejectMask(evidence) == kRxLeaseRejectRadio);
+    evidence = validRxLeaseGate(); evidence.profileReady = false;
+    assert(rxLeaseRejectMask(evidence) == kRxLeaseRejectProfile);
+    evidence = validRxLeaseGate(); evidence.mccCurrent = false;
+    assert(rxLeaseRejectMask(evidence) == kRxLeaseRejectMcc);
+    evidence = validRxLeaseGate(); evidence.sessionCurrent = false;
+    assert(rxLeaseRejectMask(evidence) == kRxLeaseRejectSession);
+    evidence = validRxLeaseGate(); evidence.windowCurrent = false;
+    assert(rxLeaseRejectMask(evidence) == kRxLeaseRejectWindow);
+    evidence = validRxLeaseGate(); evidence.channelCurrent = false;
+    assert(rxLeaseRejectMask(evidence) == kRxLeaseRejectChannel);
+    evidence = validRxLeaseGate(); evidence.addressCurrent = false;
+    assert(rxLeaseRejectMask(evidence) == kRxLeaseRejectAddress);
+    evidence = validRxLeaseGate(); evidence.leasePolicyCurrent = false;
+    assert(rxLeaseRejectMask(evidence) == kRxLeaseRejectPolicy);
+    evidence = validRxLeaseGate(); evidence.outputValid = false;
+    assert(rxLeaseRejectMask(evidence) == kRxLeaseRejectOutput);
+    evidence = validRxLeaseGate(); evidence.mainGateCurrent = false;
+    assert(rxLeaseRejectMask(evidence) == kRxLeaseRejectMainGate);
+
+    evidence = validRxLeaseGate();
+    evidence.resourcesCurrent = false;
+    evidence.mccCurrent = false;
+    assert(rxLeaseRejectMask(evidence) ==
+        (kRxLeaseRejectResources | kRxLeaseRejectMcc));
+}
+
+static NativeP2PDirectedDataControl::ReadyHandshakeEvidence readyHandshake()
+{
+    using NativeP2PDirectedDataControl::ReadyHandshakeEvidence;
+    ReadyHandshakeEvidence evidence{};
+    evidence.ownerCurrent = true;
+    evidence.originWindowBound = true;
+    evidence.originTicketBound = true;
+    evidence.leaseCurrent = true;
+    evidence.leasePropertiesPublished = true;
+    evidence.leaseIdentityMatches = true;
+    evidence.rocSessionCurrent = true;
+    evidence.rocMirrorPublished = true;
+    evidence.rocMirrorMatches = true;
+    evidence.stagePublicationSucceeded = true;
+    evidence.startUs = 100000;
+    evidence.deadlineUs = 200000;
+    evidence.nowUs = 199999;
+    return evidence;
+}
+
+static void testReadyRequiresSameOwnerLeaseAndCurrentRocMirror()
+{
+    using namespace NativeP2PDirectedDataControl;
+    const auto valid = readyHandshake();
+    assert(mayPublishReady(valid));
+    const auto reject = [](ReadyHandshakeEvidence changed,
+                           uint32_t expectedBit) {
+        const uint32_t mask = readyHandshakeRejectMask(changed);
+        assert((mask & expectedBit) != 0);
+        assert(!mayPublishReady(changed));
+    };
+    { auto e = valid; e.ownerCurrent = false;
+      reject(e, kReadyRejectOwner); }
+    { auto e = valid; e.originWindowBound = false;
+      reject(e, kReadyRejectOriginWindow); }
+    { auto e = valid; e.originTicketBound = false;
+      reject(e, kReadyRejectOriginTicket); }
+    { auto e = valid; e.leaseCurrent = false;
+      reject(e, kReadyRejectLease); }
+    { auto e = valid; e.leasePropertiesPublished = false;
+      reject(e, kReadyRejectLeasePublication); }
+    { auto e = valid; e.leaseIdentityMatches = false;
+      reject(e, kReadyRejectLeaseIdentity); }
+    { auto e = valid; e.rocSessionCurrent = false;
+      reject(e, kReadyRejectRocSession); }
+    { auto e = valid; e.rocMirrorPublished = false;
+      reject(e, kReadyRejectRocMirrorPublication); }
+    { auto e = valid; e.rocMirrorMatches = false;
+      reject(e, kReadyRejectRocMirrorIdentity); }
+    { auto e = valid; e.stagePublicationSucceeded = false;
+      reject(e, kReadyRejectStagePublication); }
+    { auto e = valid; e.nowUs = e.startUs - 1;
+      reject(e, kReadyRejectWindow); }
+    { auto e = valid; e.nowUs = e.deadlineUs;
+      reject(e, kReadyRejectWindow); }
+    { auto e = valid; e.deadlineUs++;
+      reject(e, kReadyRejectWindow); }
+    { auto e = valid; e.startUs = UINT64_MAX - 10;
+      reject(e, kReadyRejectWindow); }
+}
+
+static void testNoDoorbellProofReportsUnknownAndOwnershipBits()
+{
+    using namespace NativeP2PDirectedDataControl;
+    NoDoorbellEvidence evidence{};
+    evidence.snapshotValid = true;
+    assert(provesNoDoorbell(evidence));
+    evidence.doorbellIssued = true;
+    assert(noDoorbellRejectMask(evidence) == kNoDoorbellRejectDoorbell);
+    evidence = {};
+    evidence.snapshotValid = true;
+    evidence.mbufHeldByRing = true;
+    assert(noDoorbellRejectMask(evidence) == kNoDoorbellRejectMbufHeld);
+    evidence = {};
+    evidence.snapshotValid = true;
+    evidence.completionArmed = true;
+    assert(noDoorbellRejectMask(evidence) ==
+           kNoDoorbellRejectCompletionArmed);
+    evidence = {};
+    assert(noDoorbellRejectMask(evidence) == kNoDoorbellRejectSnapshot);
+    evidence.snapshotValid = true;
+    evidence.doorbellIssued = true;
+    evidence.mbufHeldByRing = true;
+    evidence.completionArmed = true;
+    assert(noDoorbellRejectMask(evidence) ==
+        (kNoDoorbellRejectDoorbell | kNoDoorbellRejectMbufHeld |
+         kNoDoorbellRejectCompletionArmed));
+}
+
 int main()
 {
     testGateSamplesTimeAfterQueueDelay();
@@ -261,4 +424,7 @@ int main()
     testCleanupIsAllowedOnlyAfterKnownEndWithoutDma();
     testPriorClosedOriginTicketDoesNotBlockCurrentPreTicketCleanup();
     testRxLeasePropertiesPublishOnlyOnIdentityChanges();
+    testRxLeaseRejectMaskNamesOnlyFailedGates();
+    testReadyRequiresSameOwnerLeaseAndCurrentRocMirror();
+    testNoDoorbellProofReportsUnknownAndOwnershipBits();
 }
