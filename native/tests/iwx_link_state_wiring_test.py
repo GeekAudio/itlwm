@@ -20,11 +20,12 @@ observation_class = section(
     "class NativeNewstateObservation {", "class NativeDeauthObservation {")
 destructor = observation_class[
     observation_class.index("~NativeNewstateObservation()"):
-    observation_class.index("// Called before splx(s)")]
+    observation_class.index("// Callers pass the state captured")]
 assert "sc_->sc_ic" not in destructor
-assert "sc_->sc_ic" in observation_class[
-    observation_class.index("void finish()"):
+finish_body = observation_class[
+    observation_class.index("void finish("):
     observation_class.index("// 0..65535")]
+assert "sc_->sc_ic" not in finish_body
 
 newstate_task = section(
     "void ItlIwx::\niwx_newstate_task(void *psc)",
@@ -33,7 +34,7 @@ after_observation = newstate_task[
     newstate_task.index("NativeNewstateObservation stateObservation"):
 ]
 for before_unlock in after_observation.split("splx(s);")[:-1]:
-    assert "stateObservation.finish();" in before_unlock, (
+    assert "stateObservation.finish(transition.finalState);" in before_unlock, (
         "every post-observation splx(s) needs an in-splnet finish()")
 
 stop = section(
@@ -60,4 +61,4 @@ assert "nativeLinkTransitionResetOldState_" not in header + source
 assert "nativeLinkTransitionResetReason_" not in header + source
 assert "kResetSkipped = 7" in trace_header
 
-print("PASS: reset events are sequence-bound and every observed newstate exit finishes under splnet")
+print("PASS: reset events are sequence-bound and newstate traces use a gate-captured state snapshot")

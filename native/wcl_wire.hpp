@@ -4,6 +4,7 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include "scan_ssid_targets.h"
 
 // Original bounded views of the 25G241 driver requests. These are kernel
 // buffers supplied by native IO80211, not user pointers or packed C++ objects.
@@ -12,6 +13,7 @@ constexpr size_t ScanWireSize = 0x1550;
 constexpr size_t JoinWireSize = 0x6f8;
 constexpr size_t MaximumIEBytes = 2048;
 enum class DecodeResult { Ok, Malformed, Unsupported };
+enum class Authentication : uint8_t { Open, Psk, PskSha256, Sae };
 
 struct ScanPlan {
     uint32_t identifier;
@@ -23,10 +25,12 @@ struct ScanPlan {
     uint8_t ssidLength;
     uint8_t ssid[32];
     uint8_t channels[32];
+    itl_scan_ssid_targets targets;
 };
 
 struct JoinPlan {
     uint32_t lowerAuth, upperAuth, allowedAuth;
+    Authentication authentication;
     uint8_t ssidLength;
     uint8_t ssid[32];
     uint8_t bssid[6];
@@ -36,6 +40,7 @@ struct JoinPlan {
     uint8_t pmk[32];
     uint8_t password[64], passwordLength;
     bool secured, derivePmk;
+    bool pmfCapable, pmfRequired;
 };
 
 DecodeResult decodeScan(const void *, size_t, ScanPlan &, uint32_t *rejectedField = nullptr);

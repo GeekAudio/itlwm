@@ -59,7 +59,8 @@ enum ieee80211_akm {
 	IEEE80211_AKM_8021X		= 0x00000001,
 	IEEE80211_AKM_PSK		= 0x00000002,
 	IEEE80211_AKM_SHA256_8021X	= 0x00000004,	/* 11w */
-	IEEE80211_AKM_SHA256_PSK	= 0x00000008	/* 11w */
+	IEEE80211_AKM_SHA256_PSK	= 0x00000008,	/* 11w */
+	IEEE80211_AKM_SAE		= 0x00000010	/* 11s */
 };
 
 #define IEEE80211_TKIP_HDRLEN	8
@@ -95,7 +96,8 @@ static __inline int
 ieee80211_is_sha256_akm(enum ieee80211_akm akm)
 {
 	return akm == IEEE80211_AKM_SHA256_8021X ||
-	    akm == IEEE80211_AKM_SHA256_PSK;
+	    akm == IEEE80211_AKM_SHA256_PSK ||
+	    akm == IEEE80211_AKM_SAE;
 }
 
 struct ieee80211_key {
@@ -106,6 +108,9 @@ struct ieee80211_key {
 #define IEEE80211_KEY_TX	0x00000002	/* Tx+Rx */
 #define IEEE80211_KEY_IGTK	0x00000004	/* integrity group key */
 #define IEEE80211_KEY_SWCRYPTO	0x00000080	/* loaded for software crypto */
+#define IEEE80211_KEY_FWMFP	0x00000100	/* firmware-installed MFP key */
+#define IEEE80211_KEY_FWPENDING	0x00000200	/* firmware key command pending */
+#define IEEE80211_KEY_FWACTIVE	0x00000400	/* firmware key ACK received */
 
 	u_int			k_len;
 	u_int64_t		k_rsc[IEEE80211_NUM_TID];

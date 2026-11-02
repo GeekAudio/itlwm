@@ -323,6 +323,64 @@ struct iwx_host_cmd {
 	uint16_t len[IWX_MAX_CMD_TBS_PER_TFD];
 	uint8_t dataflags[IWX_MAX_CMD_TBS_PER_TFD];
 	uint32_t id;
+	/* Optional ACK tracking for the Tahoe STA MFP key path. */
+	struct ieee80211_node *pmf_node;
+	struct ieee80211_key *pmf_key;
+	uint32_t pmf_node_epoch;
+	uint32_t pmf_key_incarnation;
+	uint8_t pmf_key_slot;
+	uint8_t pmf_command_kind;
+};
+
+#define IWX_PMF_KEY_SLOT_COUNT 7
+#define IWX_PMF_KEY_CMD_NONE 0
+#define IWX_PMF_KEY_CMD_ADD_STA 1
+#define IWX_PMF_KEY_CMD_IGTK 2
+
+struct iwx_pmf_key_cmd {
+	struct ieee80211_node *node;
+	struct ieee80211_key *key;
+	void *response_pkt;
+	size_t response_len;
+	uint32_t generation;
+	uint32_t node_epoch;
+	uint32_t incarnation;
+	uint32_t command_id;
+	uint32_t response_command_id;
+	uint8_t key_slot;
+	uint8_t command_kind;
+	uint8_t command_qid;
+	uint8_t command_index;
+	/* Snapshot of the firmware-specific IGTK status response ABI. */
+	uint8_t igtk_status1_abi;
+	uint8_t active;
+	uint8_t completed;
+	uint8_t timed_out;
+	uint64_t timeout_deadline_ns;
+};
+
+enum iwx_pmf_gate_operation {
+	IWX_PMF_GATE_COMPLETE,
+	IWX_PMF_GATE_INVALIDATE,
+	IWX_PMF_GATE_CANCEL_KEYS,
+	IWX_PMF_GATE_SET_KEY,
+	IWX_PMF_GATE_DELETE_KEY,
+	IWX_PMF_GATE_CLEAR_RESPONSES,
+	IWX_PMF_GATE_RESET,
+	IWX_PMF_GATE_RESET_VALIDATE,
+	IWX_PMF_GATE_RESET_COMPLETE
+};
+
+struct IwxStaAuthSubmitReceipt;
+struct iwx_pmf_gate_request {
+	enum iwx_pmf_gate_operation operation;
+	struct ieee80211com *ic;
+	struct ieee80211_node *node;
+	struct ieee80211_key *key;
+	struct IwxStaAuthSubmitReceipt *submit_receipt;
+	int result;
+	uint32_t reset_token;
+	uint32_t reset_node_epoch;
 };
 
 /*
@@ -896,6 +954,8 @@ struct iwx_softc {
 
 	const char *sc_fwname;
 	struct iwx_fw_info sc_fw;
+	/* Set only when the loaded firmware header matches the pinned SO68 IGTK ACK ABI. */
+	uint8_t sc_pmf_igtk_status1_abi;
 	struct iwx_dma_info fw_mon;
 	int sc_fw_phy_config;
 	struct iwx_tlv_calib_ctrl sc_default_calib[IWX_UCODE_TYPE_MAX];
@@ -917,6 +977,38 @@ struct iwx_softc {
 
 	uint8_t *sc_cmd_resp_pkt[IWX_TFD_QUEUE_SIZE_MAX_GEN3];	
 	size_t sc_cmd_resp_len[IWX_TFD_QUEUE_SIZE_MAX_GEN3];
+	/* PMF key ACK state. Only the STA MFP path uses these entries. */
+	struct task sc_pmf_key_task;
+	struct task sc_pmf_reset_task;
+	CTimeout *sc_pmf_key_timeout;
+	CTimeout *sc_pmf_reset_retry_timeout;
+	uint8_t sc_pmf_key_timeout_initialized;
+	uint8_t sc_pmf_reset_retry_timeout_initialized;
+	uint8_t sc_pmf_key_task_initialized;
+	uint8_t sc_pmf_reset_task_initialized;
+	struct iwx_pmf_key_cmd sc_pmf_key_cmd[IWX_PMF_KEY_SLOT_COUNT];
+	uint32_t sc_pmf_key_incarnation[IWX_PMF_KEY_SLOT_COUNT];
+	uint32_t sc_pmf_active_generation[IWX_PMF_KEY_SLOT_COUNT];
+	uint32_t sc_pmf_active_incarnation[IWX_PMF_KEY_SLOT_COUNT];
+	struct ieee80211_node *sc_pmf_current_node;
+	uint32_t sc_pmf_current_node_epoch;
+	uint8_t sc_pmf_key_failed;
+	uint8_t sc_pmf_timeout_fired;
+	uint8_t sc_pmf_reset_requested;
+	uint8_t sc_pmf_reset_attempt_inflight;
+	uint32_t sc_pmf_reset_attempt_token;
+	uint32_t sc_pmf_reset_attempt_node_epoch;
+	uint8_t sc_pmf_reset_task_queued;
+	uint32_t sc_pmf_reset_task_active;
+	uint32_t sc_pmf_reset_timeout_active;
+	uint8_t sc_pmf_reset_attempts;
+	uint32_t sc_pmf_reset_generation;
+	uint32_t sc_pmf_reset_node_epoch;
+	uint32_t sc_pmf_reset_token;
+	uint64_t sc_pmf_reset_deadline_ns;
+	struct ieee80211_node *sc_pmf_reset_node;
+	uint8_t sc_pmf_force_closed;
+	uint32_t sc_pmf_gate_waiters;
 	int sc_nic_locks;
 
 	struct taskq *sc_nswq;

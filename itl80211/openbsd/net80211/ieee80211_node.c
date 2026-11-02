@@ -68,6 +68,7 @@
 
 #include <net80211/ieee80211_var.h>
 #include <net80211/ieee80211_priv.h>
+#include <net80211/ieee80211_sae.h>
 
 struct ieee80211_node *ieee80211_node_alloc(struct ieee80211com *);
 void ieee80211_node_free(struct ieee80211com *, struct ieee80211_node *);
@@ -306,6 +307,10 @@ ieee80211_ess_setwpaparms(struct ieee80211_ess *ess,
         ess->rsnakms |= IEEE80211_AKM_8021X;
     if (wpa->i_akms & IEEE80211_WPA_AKM_SHA256_8021X)
         ess->rsnakms |= IEEE80211_AKM_SHA256_8021X;
+#ifdef AIRPORT_TAHOE
+    if (wpa->i_akms & IEEE80211_WPA_AKM_SAE)
+        ess->rsnakms |= IEEE80211_AKM_SAE;
+#endif
     if (ess->rsnakms == 0)	/* set to default (PSK) */
         ess->rsnakms = IEEE80211_AKM_PSK;
     
@@ -793,6 +798,9 @@ ieee80211_node_detach(struct _ifnet *ifp)
     struct ieee80211com *ic = (struct ieee80211com *)ifp;
     
     if (ic->ic_bss != NULL) {
+        /* The SAE exchange and password belong to this STA BSS owner. */
+        if (ic->ic_opmode == IEEE80211_M_STA)
+            ieee80211_sae_clear(ic);
         (*ic->ic_node_free)(ic, ic->ic_bss);
         ic->ic_bss = NULL;
     }
@@ -1053,6 +1061,8 @@ ieee80211_create_ibss(struct ieee80211com* ic, struct ieee80211_channel *chan)
         if (ic->ic_caps & IEEE80211_C_MFP) {
             ic->ic_igtk_kid = 4;
             k = &ic->ic_nw_keys[ic->ic_igtk_kid];
+            if (k->k_cipher != IEEE80211_CIPHER_NONE)
+                (*ic->ic_delete_key)(ic, ni, k);
             memset(k, 0, sizeof(*k));
             k->k_id = ic->ic_igtk_kid;
             k->k_cipher = ni->ni_rsngroupmgmtcipher;
@@ -1134,6 +1144,17 @@ ieee80211_match_bss(struct ieee80211com *ic, struct ieee80211_node *ni,
             fail |= IEEE80211_NODE_ASSOCFAIL_WPA_PROTO;
         if ((ni->ni_rsnakms & ic->ic_rsnakms) == 0)
             fail |= IEEE80211_NODE_ASSOCFAIL_WPA_PROTO;
+#ifdef AIRPORT_TAHOE
+        if ((ni->ni_rsnakms & ic->ic_rsnakms & IEEE80211_AKM_SAE) != 0 &&
+            ic->ic_sae_password_len == 0)
+            fail |= IEEE80211_NODE_ASSOCFAIL_WPA_PROTO;
+        if ((ni->ni_rsnakms & ic->ic_rsnakms & IEEE80211_AKM_SAE) != 0 &&
+            (ni->ni_rsnprotos != IEEE80211_PROTO_RSN ||
+             (ni->ni_rsncaps & IEEE80211_RSNCAP_MFPC) == 0 ||
+             ni->ni_rsngroupcipher != IEEE80211_CIPHER_CCMP ||
+             (ni->ni_rsnciphers & IEEE80211_CIPHER_CCMP) == 0))
+            fail |= IEEE80211_NODE_ASSOCFAIL_WPA_PROTO;
+#endif
         if ((ni->ni_rsnakms & ic->ic_rsnakms &
              ~(IEEE80211_AKM_PSK | IEEE80211_AKM_SHA256_PSK)) == 0) {
             /* AP only supports PSK AKMPs */
@@ -1650,6 +1671,12 @@ ieee80211_choose_rsnparams(struct ieee80211com *ic)
     /* filter out unsupported AKMPs */
     ni->ni_rsnakms &= ic->ic_rsnakms;
     /* prefer SHA-256 based AKMPs */
+#ifdef AIRPORT_TAHOE
+    if ((ni->ni_rsnakms & IEEE80211_AKM_SAE) &&
+        ic->ic_sae_password_len != 0) {
+        ni->ni_rsnakms = IEEE80211_AKM_SAE;
+    } else
+#endif
     if ((ic->ic_flags & IEEE80211_F_PSK) && (ni->ni_rsnakms &
                                              (IEEE80211_AKM_PSK | IEEE80211_AKM_SHA256_PSK))) {
         /* AP supports PSK AKMP and a PSK is configured */
@@ -1711,11 +1738,66 @@ ieee80211_node_alloc(struct ieee80211com *ic)
 }
 
 void
+ieee80211_pmf_keys_cancel(struct ieee80211com *ic,
+    struct ieee80211_node *ni)
+{
+	if (ni == NULL)
+		return;
+#ifdef IEEE80211_STA_ONLY
+	timeout_del(&ni->ni_sa_query_to);
+	ni->ni_flags &= ~(IEEE80211_NODE_SA_QUERY |
+	    IEEE80211_NODE_SA_QUERY_FAILED);
+	ni->ni_sa_query_count = 0;
+	ni->ni_sa_query_trid = 0;
+	memset(ni->ni_sa_query_trids, 0, sizeof(ni->ni_sa_query_trids));
+	memset(ni->ni_sa_query_bssid, 0, sizeof(ni->ni_sa_query_bssid));
+	memset(ni->ni_sa_query_local, 0, sizeof(ni->ni_sa_query_local));
+	memset(&ni->ni_sa_query_last_unprot, 0,
+	    sizeof(ni->ni_sa_query_last_unprot));
+#endif
+	if (++ni->ni_pmf_key_epoch == 0)
+		++ni->ni_pmf_key_epoch;
+	ni->ni_port_valid = 0;
+	ni->ni_flags &= ~(IEEE80211_NODE_RXMGMTPROT |
+	    IEEE80211_NODE_TXMGMTPROT);
+	ni->ni_pmf_link_pending =
+	    (ni->ni_flags & IEEE80211_NODE_MFP) != 0;
+	ni->ni_pmf_key_batch_ready = 0;
+	ni->ni_pmf_pending_key_ids = 0;
+	if (ic->ic_pmf_cancel_keys != NULL)
+		(*ic->ic_pmf_cancel_keys)(ic, ni);
+}
+
+
+/* STA teardown must be compiled independently of the AP node-leave path. */
+void
+ieee80211_sta_security_cleanup(struct ieee80211com *ic,
+    struct ieee80211_node *ni)
+{
+    if (ic->ic_opmode != IEEE80211_M_STA || ni == NULL || ni != ic->ic_bss)
+        return;
+    ieee80211_pmf_keys_cancel(ic, ni);
+    timeout_del(&ni->ni_eapol_to);
+    ni->ni_rsn_supp_state = RSNA_SUPP_INITIALIZE;
+    if (ni->ni_pairwise_key.k_cipher != IEEE80211_CIPHER_NONE)
+        (*ic->ic_delete_key)(ic, ni, &ni->ni_pairwise_key);
+    explicit_bzero(&ni->ni_pairwise_key, sizeof(ni->ni_pairwise_key));
+    explicit_bzero(&ni->ni_ptk, sizeof(ni->ni_ptk));
+    ieee80211_crypto_clear_groupkeys(ic);
+    ni->ni_flags &= ~IEEE80211_NODE_TXRXPROT;
+    ni->ni_replaycnt_ok = 0;
+    ic->ic_def_txkey = 0;
+    ic->ic_igtk_kid = 4;
+}
+
+void
 ieee80211_node_cleanup(struct ieee80211com *ic, struct ieee80211_node *ni)
 {
     if (ni == NULL) {
         return;
     }
+    if (ni == ic->ic_bss && ic->ic_opmode == IEEE80211_M_STA)
+        ieee80211_sta_security_cleanup(ic, ni);
     if (ni->ni_rsnie != NULL) {
         free(ni->ni_rsnie);
         ni->ni_rsnie = NULL;
@@ -1742,6 +1824,10 @@ void
 ieee80211_node_free(struct ieee80211com *ic, struct ieee80211_node *ni)
 {
     ieee80211_node_cleanup(ic, ni);
+#ifdef IEEE80211_STA_ONLY
+    timeout_del(&ni->ni_sa_query_to);
+    timeout_free(&ni->ni_sa_query_to);
+#endif
     free(ni);
 }
 
@@ -1750,7 +1836,24 @@ ieee80211_node_copy(struct ieee80211com *ic,
                     struct ieee80211_node *dst, const struct ieee80211_node *src)
 {
     ieee80211_node_cleanup(ic, dst);
+#ifdef IEEE80211_STA_ONLY
+    timeout_del(&dst->ni_sa_query_to);
+    timeout_free(&dst->ni_sa_query_to);
+#endif
     *dst = *src;
+#ifdef IEEE80211_STA_ONLY
+    /* Never share a timer or an in-flight query between cached and BSS nodes. */
+    dst->ni_sa_query_to = NULL;
+    dst->ni_flags &= ~(IEEE80211_NODE_SA_QUERY |
+                       IEEE80211_NODE_SA_QUERY_FAILED);
+    dst->ni_sa_query_trid = 0;
+    dst->ni_sa_query_count = 0;
+    memset(dst->ni_sa_query_trids, 0, sizeof(dst->ni_sa_query_trids));
+    memset(dst->ni_sa_query_bssid, 0, sizeof(dst->ni_sa_query_bssid));
+    memset(dst->ni_sa_query_local, 0, sizeof(dst->ni_sa_query_local));
+    memset(&dst->ni_sa_query_last_unprot, 0,
+        sizeof(dst->ni_sa_query_last_unprot));
+#endif
     dst->ni_rsnie = NULL;
     if (src->ni_rsnie != NULL)
         ieee80211_save_ie(src->ni_rsnie, &dst->ni_rsnie);
@@ -1802,8 +1905,8 @@ ieee80211_node_set_timeouts(struct ieee80211_node *ni)
     memset(ni->ni_addba_req_to, 0, sizeof(ni->ni_addba_req_to) * nitems(ni->ni_addba_req_to));
 #ifndef IEEE80211_STA_ONLY
     timeout_set(&ni->ni_eapol_to, ieee80211_eapol_timeout, ni);
-    timeout_set(&ni->ni_sa_query_to, ieee80211_sa_query_timeout, ni);
 #endif
+    timeout_set(&ni->ni_sa_query_to, ieee80211_sa_query_timeout, ni);
     timeout_set(&ni->ni_addba_req_to[EDCA_AC_BE],
                 ieee80211_node_addba_request_ac_be_to, ni);
     timeout_set(&ni->ni_addba_req_to[EDCA_AC_BK],
@@ -3044,6 +3147,9 @@ ieee80211_node_join_rsn(struct ieee80211com *ic, struct ieee80211_node *ni)
     
     ni->ni_key_count = 0;
     ni->ni_port_valid = 0;
+    ni->ni_pmf_link_pending = 0;
+    ni->ni_pmf_key_batch_ready = 0;
+    ni->ni_pmf_pending_key_ids = 0;
     ni->ni_flags &= ~IEEE80211_NODE_TXRXPROT;
     ni->ni_flags &= ~IEEE80211_NODE_RSN_NEW_PTK;
     ni->ni_replaycnt = -1;	/* XXX */
@@ -3263,6 +3369,7 @@ ieee80211_node_leave_ht(struct ieee80211com *ic, struct ieee80211_node *ni)
 /*
  * Handle a station leaving an RSN network.
  */
+
 void
 ieee80211_node_leave_rsn(struct ieee80211com *ic, struct ieee80211_node *ni)
 {
@@ -3283,11 +3390,20 @@ ieee80211_node_leave_rsn(struct ieee80211com *ic, struct ieee80211_node *ni)
     
     timeout_del(&ni->ni_eapol_to);
     timeout_del(&ni->ni_sa_query_to);
+
     
     ni->ni_rsn_retries = 0;
     ni->ni_flags &= ~IEEE80211_NODE_TXRXPROT;
-    ni->ni_port_valid = 0;
+    ieee80211_pmf_keys_cancel(ic, ni);
     (*ic->ic_delete_key)(ic, ni, &ni->ni_pairwise_key);
+
+    /* The STA BSS owns the shared GTK/IGTK table. Retire its host and
+     * firmware copies when the association ends, before clearing secrets. */
+    if (ic->ic_opmode == IEEE80211_M_STA && ni == ic->ic_bss) {
+        ieee80211_crypto_clear_groupkeys(ic);
+        ic->ic_def_txkey = 0;
+        ic->ic_igtk_kid = 4;
+    }
 }
 
 /*

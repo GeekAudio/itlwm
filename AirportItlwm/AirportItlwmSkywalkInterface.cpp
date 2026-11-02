@@ -14,6 +14,7 @@
 #include <net80211/ieee80211_ioctl.h>
 #include <net80211/ieee80211_priv.h>
 #ifdef AIRPORT_TAHOE
+#include <net80211/ieee80211_sae.h>
 #include "../itlwm/hal_iwx/IwxTxRate.hpp"
 #include "../native/key_material.hpp"
 #include "../native/runtime_guard.hpp"
@@ -415,7 +416,7 @@ init(IOService *provider)
     setInitMacAddress(hardware);
     NativeWifi::Operations operations {this, radioScan, radioJoin, radioLeave,
         emitNative, privateReady, radioCancelScan, scanMonotonicNanoseconds,
-        scanBusyDetail};
+        scanBusyDetail, radioClearCredentials};
     nativeBackend->initialize(operations);
     retain(); instance->retain(); nativeLease = true;
 #endif
@@ -1473,7 +1474,9 @@ IOReturn AirportItlwmSkywalkInterface::nativeRequest(OSObject *, void *object,
                 key->wowl_kck_len || key->wowl_kek_len ||
                 (key->key_cipher_type != APPLE80211_CIPHER_PMK &&
                  key->key_cipher_type != APPLE80211_CIPHER_PMKSA)) return kIOReturnUnsupported;
-            if (!backend->joining() || self->current_authtype_upper != APPLE80211_AUTHTYPE_WPA2_PSK)
+            if (!backend->joining() ||
+                (self->current_authtype_upper != APPLE80211_AUTHTYPE_WPA2_PSK &&
+                 self->current_authtype_upper != APPLE80211_AUTHTYPE_SHA256_PSK))
                 return kIOReturnNotReady;
             auto ic = self->fHalService->get80211Controller();
             memcpy(ic->ic_psk, key->key, 32); ic->ic_flags |= IEEE80211_F_PSK;
@@ -1810,6 +1813,14 @@ NativeWifi::Status AirportItlwmSkywalkInterface::radioScan(void *context,
         self->nativeScanBusyReasonCode = 3;
         return NativeWifi::Status::Busy;
     }
+    // A RUN node may still be waiting for PTK/GTK/IGTK completion. Keep its
+    // authentication/rekey window on the infrastructure channel.
+    if (ic->ic_state == IEEE80211_S_RUN && (ic->ic_flags & IEEE80211_F_RSNON) &&
+        (!ic->ic_bss || !ic->ic_bss->ni_port_valid ||
+         ic->ic_bss->ni_pmf_link_pending)) {
+        self->nativeScanBusyReasonCode = 5;
+        return NativeWifi::Status::Busy;
+    }
     uint8_t source[6] {};
     if (plan.privateAddressRequired && !NativeWifi::secureRandomScanAddress(
         source, ic->ic_myaddr, self->previousScanAddress)) return NativeWifi::Status::Failed;
@@ -1825,6 +1836,7 @@ NativeWifi::Status AirportItlwmSkywalkInterface::radioScan(void *context,
     memcpy(ic->ic_tahoe_scan_channels, plan.channels, 32);
     memcpy(ic->ic_tahoe_scan_ssid, plan.ssid, 32);
     ic->ic_tahoe_scan_ssid_len = plan.ssidLength;
+    ic->ic_tahoe_scan_targets = plan.targets;
     if (ic->ic_state == IEEE80211_S_RUN) {
         ieee80211_begin_cache_bgscan(&ic->ic_if);
         if (!(ic->ic_flags & IEEE80211_F_BGSCAN)) {
@@ -1931,26 +1943,53 @@ NativeWifi::Status AirportItlwmSkywalkInterface::radioJoin(void *context,
     if (ic->ic_tahoe_scan_state(ic) != 0) return NativeWifi::Status::Busy;
     if (self->addressWasRequested && !self->nativeAddressReady(false))
         return NativeWifi::Status::NotReady;
+    if (plan.pmfRequired && !(ic->ic_caps & IEEE80211_C_MFP))
+        return NativeWifi::Status::Unsupported;
+    if (!++self->nativeJoinEpoch) ++self->nativeJoinEpoch;
+    const uint32_t attemptedEpoch = self->nativeJoinEpoch;
+    ieee80211_sae_clear(ic);
     ieee80211_disable_rsn(ic); ieee80211_disable_wep(ic);
     NativeWifi::erase(ic->ic_psk, sizeof(ic->ic_psk));
-    ic->ic_flags &= ~(IEEE80211_F_AUTO_JOIN | IEEE80211_F_PSK);
+    ic->ic_flags &= ~(IEEE80211_F_AUTO_JOIN | IEEE80211_F_PSK | IEEE80211_F_MFPR);
+    if (plan.pmfRequired) ic->ic_flags |= IEEE80211_F_MFPR;
+    const auto failed = [self, ic, attemptedEpoch]() {
+        // Failure is radio-local: immediate admission has no pending backend
+        // Join whose finish callback could retire the desired network. Never
+        // erase a replacement Join or another controller's selection.
+        if (self->nativeJoinEpoch == attemptedEpoch &&
+            self->fHalService->get80211Controller() == ic) {
+            self->current_authtype_lower = 0;
+            self->current_authtype_upper = 0;
+            radioClearCredentials(self);
+        }
+        return NativeWifi::Status::Failed;
+    };
     if (plan.secured) {
         ieee80211_wpaparams parameters {};
         parameters.i_enabled = 1;
         parameters.i_protos = IEEE80211_WPA_PROTO_WPA2;
-        parameters.i_akms = IEEE80211_WPA_AKM_PSK;
+        parameters.i_akms = plan.authentication == NativeWifi::Authentication::Sae
+            ? IEEE80211_WPA_AKM_SAE
+            : (plan.authentication == NativeWifi::Authentication::PskSha256
+               ? IEEE80211_WPA_AKM_SHA256_PSK : IEEE80211_WPA_AKM_PSK);
         parameters.i_ciphers = IEEE80211_WPA_CIPHER_CCMP;
         parameters.i_groupcipher = IEEE80211_WPA_CIPHER_CCMP;
         int error = ieee80211_ioctl_setwpaparms(ic, &parameters);
-        if (error && error != ENETRESET) return NativeWifi::Status::Failed;
-        if (plan.derivePmk) {
+        if (error && error != ENETRESET) return failed();
+        if (plan.authentication == NativeWifi::Authentication::Sae) {
+            // SAE derives its PMK only after peer commit/confirm validation.
+            // The producer's auxiliary PMK bytes are not a SAE PMK.
+            if (ieee80211_sae_set_password(ic, plan.password,
+                                         plan.passwordLength) != 0)
+                return failed();
+        } else if (plan.derivePmk) {
             if (!NativeWifi::deriveWPA2Pmk(plan.password, plan.passwordLength,
                 plan.ssid, plan.ssidLength, ic->ic_psk)) {
-                NativeWifi::erase(ic->ic_psk, sizeof(ic->ic_psk));
-                return NativeWifi::Status::Failed;
+                return failed();
             }
         } else memcpy(ic->ic_psk, plan.pmk, 32);
-        ic->ic_flags |= IEEE80211_F_PSK;
+        if (plan.authentication != NativeWifi::Authentication::Sae)
+            ic->ic_flags |= IEEE80211_F_PSK;
     }
     ic->ic_des_esslen = plan.ssidLength;
     bzero(ic->ic_des_essid, sizeof(ic->ic_des_essid));
@@ -1963,20 +2002,33 @@ NativeWifi::Status AirportItlwmSkywalkInterface::radioJoin(void *context,
     self->current_authtype_upper = plan.upperAuth;
     if (ic->ic_state == IEEE80211_S_SCAN) ieee80211_begin_scan(&ic->ic_if);
     else if (ic->ic_newstate(ic, IEEE80211_S_SCAN, -1)) {
-        ic->ic_tahoe_join_requested = false;
-        NativeWifi::erase(ic->ic_psk, sizeof(ic->ic_psk));
-        return NativeWifi::Status::Failed;
+        return failed();
     }
     return NativeWifi::Status::Ok;
 }
+void AirportItlwmSkywalkInterface::radioClearCredentials(void *context) {
+    auto self = static_cast<AirportItlwmSkywalkInterface *>(context);
+    if (!++self->nativeJoinEpoch) ++self->nativeJoinEpoch;
+    auto ic = self->fHalService->get80211Controller();
+    ieee80211_sae_clear(ic);
+    NativeWifi::erase(ic->ic_psk, sizeof(ic->ic_psk));
+    ic->ic_tahoe_join_requested = false;
+    ic->ic_flags &= ~(IEEE80211_F_PSK | IEEE80211_F_MFPR | IEEE80211_F_DESBSSID);
+    ieee80211_disable_rsn(ic);
+    ic->ic_des_esslen = 0;
+    bzero(ic->ic_des_essid, sizeof(ic->ic_des_essid));
+    bzero(ic->ic_des_bssid, sizeof(ic->ic_des_bssid));
+}
 void AirportItlwmSkywalkInterface::radioLeave(void *context) {
     auto self = static_cast<AirportItlwmSkywalkInterface *>(context);
+    if (!++self->nativeJoinEpoch) ++self->nativeJoinEpoch;
     auto ic = self->fHalService->get80211Controller();
+    ieee80211_sae_clear(ic);
     ic->ic_tahoe_join_requested = false;
     if (ic->ic_state > IEEE80211_S_SCAN) ieee80211_new_state(ic, IEEE80211_S_SCAN, -1);
     ieee80211_disable_rsn(ic); ieee80211_disable_wep(ic);
     NativeWifi::erase(ic->ic_psk, sizeof(ic->ic_psk));
-    ic->ic_flags &= ~(IEEE80211_F_PSK | IEEE80211_F_DESBSSID);
+    ic->ic_flags &= ~(IEEE80211_F_PSK | IEEE80211_F_DESBSSID | IEEE80211_F_MFPR);
     ic->ic_des_esslen = 0;
     bzero(ic->ic_des_essid, sizeof(ic->ic_des_essid));
 }
@@ -1998,8 +2050,9 @@ void AirportItlwmSkywalkInterface::captureNativeEvent(
             node->ni_intval, node->ni_capinfo, uint8_t(channel),
             IWM_MIN_DBM + node->ni_rssi, int16_t(-fHalService->getDriverInfo()->getBSSNoise()), 0};
         nativeIngress->receive(beacon);
-    } else if (code == IEEE80211_EVT_STA_ASSOC_DONE) {
-        nativeIngress->signal(code, ic->ic_assoc_status, ic->ic_bss ? ic->ic_bss->ni_bssid : nullptr);
+    } else if (code == IEEE80211_EVT_STA_ASSOC_DONE || code == IEEE80211_EVT_STA_DEAUTH) {
+        nativeIngress->signal(code, code == IEEE80211_EVT_STA_ASSOC_DONE ? ic->ic_assoc_status : 0,
+            ic->ic_bss ? ic->ic_bss->ni_bssid : nullptr, nativeJoinEpoch);
     } else if (code == IEEE80211_EVT_SCAN_DONE || code == ITL_TAHOE_EVT_SCAN_RESET_DRAINED) {
         const auto event = static_cast<const itl_tahoe_scan_event *>(data);
         nativeIngress->signal(code, event ? event->generation : 0, nullptr,
@@ -2013,10 +2066,44 @@ void AirportItlwmSkywalkInterface::captureNativeEvent(
     } else nativeIngress->signal(unsigned(code));
 }
 void AirportItlwmSkywalkInterface::captureNativeAuthorization(bool up) {
-    if (nativeIngress) nativeIngress->signal(10, up ? 1 : 0);
+    if (!nativeIngress) return;
+    auto ic = fHalService->get80211Controller();
+    nativeIngress->signal(10, up ? 1 : 0,
+        ic->ic_bss ? ic->ic_bss->ni_bssid : nullptr, nativeJoinEpoch);
 }
 void AirportItlwmSkywalkInterface::captureNativeTick(uint32_t elapsed) {
     if (nativeIngress) nativeIngress->signal(9, elapsed);
+}
+bool AirportItlwmSkywalkInterface::consumeNativeSecurityEvent(void *context,
+    const NativeWifi::IngressEntry &entry) {
+    if (entry.kind != IEEE80211_EVT_STA_ASSOC_DONE &&
+        entry.kind != IEEE80211_EVT_STA_DEAUTH && entry.kind != 10)
+        return false;
+    auto self = static_cast<AirportItlwmSkywalkInterface *>(context);
+    auto backend = self->nativeBackend;
+    if (!backend || entry.detail != self->nativeJoinEpoch) return true;
+    auto ic = self->fHalService->get80211Controller();
+    auto ni = ic->ic_bss;
+    const bool currentBss = ni && !memcmp(entry.bssid, ni->ni_bssid, 6);
+    if (entry.kind == IEEE80211_EVT_STA_ASSOC_DONE) {
+        if (!backend->joining() || !ic->ic_tahoe_join_requested || !currentBss ||
+            uint16_t(entry.value) != ic->ic_assoc_status ||
+            (!entry.value && ic->ic_state != IEEE80211_S_RUN))
+            return true;
+        if (backend->observeAssociation(uint16_t(entry.value), entry.bssid))
+            ic->ic_tahoe_join_requested = false;
+    } else {
+        // Queued notifications do not prove current port authorization.
+        const bool authorized = currentBss && ic->ic_state == IEEE80211_S_RUN &&
+            (!(ic->ic_flags & IEEE80211_F_RSNON) ||
+             (ni->ni_port_valid && !ni->ni_pmf_link_pending));
+        const bool up = entry.kind == 10 && entry.value != 0;
+        if (up && !authorized) return true;
+        if (!up && authorized) return true;
+        if (entry.kind == IEEE80211_EVT_STA_DEAUTH && !currentBss) return true;
+        backend->observeAuthorization(up);
+    }
+    return true;
 }
 void AirportItlwmSkywalkInterface::consumeNative(void *context, const NativeWifi::IngressEntry &entry) {
     auto self = static_cast<AirportItlwmSkywalkInterface *>(context);
@@ -2024,13 +2111,9 @@ void AirportItlwmSkywalkInterface::consumeNative(void *context, const NativeWifi
     if (!backend) return;
     switch (entry.kind) {
         case IEEE80211_EVT_STA_ASSOC_DONE:
-            // A rejected/old target notification must not cancel the current
-            // radio join's BSS-selection flag. Backend also rejects an event
-            // whose synchronous emission was superseded by a new control call.
-            if (backend->observeAssociation(uint16_t(entry.value), entry.bssid))
-                self->fHalService->get80211Controller()->ic_tahoe_join_requested = false;
-            break;
-        case IEEE80211_EVT_STA_DEAUTH: backend->observeAuthorization(false); break;
+        case IEEE80211_EVT_STA_DEAUTH:
+        case 10:
+            consumeNativeSecurityEvent(context, entry); break;
         case IEEE80211_EVT_SCAN_DONE:
             self->setProperty("NativeScanTerminalGeneration", entry.value, 32);
             self->setProperty("NativeScanTerminalStatus", entry.detail, 32);
@@ -2110,7 +2193,6 @@ void AirportItlwmSkywalkInterface::consumeNative(void *context, const NativeWifi
             if (!self->instance->tickNativeAddressRestartNotification())
                 self->instance->postNativePowerChangedIfNeeded();
             break;
-        case 10: backend->observeAuthorization(entry.value != 0); break;
         case IEEE80211_EVT_COUNTRY_CODE_UPDATE:
             self->postMessage(APPLE80211_M_COUNTRY_CODE_CHANGED, nullptr, 0, false); break;
     }
@@ -2177,14 +2259,20 @@ void AirportItlwmSkywalkInterface::free() {
     IO80211InfraProtocol::free();
 }
 bool AirportItlwmSkywalkInterface::stopNative() {
-    if (!nativeIngress) return true;
-    if (!nativeIngress->shutdown()) return false;
-    if (nativeBackend) _fCommandGate->runAction(nativeRequest, this, reinterpret_cast<void *>(NativeStop));
+    if (nativeIngress && !nativeIngress->shutdown()) return false;
+    if (nativeBackend && !nativeBackend->stopped()) {
+        if (!_fCommandGate || _fCommandGate->runAction(nativeRequest, this,
+                reinterpret_cast<void *>(NativeStop)) != kIOReturnSuccess)
+            return false;
+    }
     return true;
 }
 void AirportItlwmSkywalkInterface::releaseNative() {
+    // The provider may already be detached here. Never clear credentials or
+    // mutate net80211 outside the successful, owned NativeStop action.
+    if (nativeBackend && !nativeBackend->stopped()) return;
     if (nativeIngress) { if (!nativeIngress->destroy()) return; delete nativeIngress; nativeIngress = nullptr; }
-    if (nativeBackend) { nativeBackend->stop(); delete nativeBackend; nativeBackend = nullptr; }
+    if (nativeBackend) { delete nativeBackend; nativeBackend = nullptr; }
     if (nativeLease) { nativeLease = false; instance->release(); release(); }
 }
 IOReturn AirportItlwmSkywalkInterface::getWCL_VALID_CHANNEL_COUNT(unsigned long *count) {

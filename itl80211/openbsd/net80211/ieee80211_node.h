@@ -241,6 +241,7 @@ struct ieee80211_rxinfo {
 #define IEEE80211_RXI_AMPDU_DONE	0x00000002
 #define IEEE80211_RXI_HWDEC_SAME_PN    0x00000004
 #define IEEE80211_RXI_SAME_SEQ         0x00000008
+#define IEEE80211_RXI_MFP_HWDEC        0x00000010
 
 /* Block Acknowledgement Record */
 struct ieee80211_tx_ba {
@@ -369,6 +370,8 @@ struct ieee80211_node {
 	enum ieee80211_cipher	ni_rsngroupcipher;
 	enum ieee80211_cipher	ni_rsngroupmgmtcipher;
 	u_int16_t		ni_rsncaps;
+	/* Set when the AP advertises SAE Hash-to-Element in its RSNXE. */
+	u_int8_t		ni_sae_h2e;
 	enum ieee80211_cipher	ni_rsncipher;
 	u_int8_t		ni_nonce[EAPOL_KEY_NONCE_LEN];
 	u_int8_t		ni_pmk[IEEE80211_PMK_LEN];
@@ -384,11 +387,28 @@ struct ieee80211_node {
 	struct ieee80211_ptk	ni_ptk;
 	u_int8_t		ni_key_count;
 	int			ni_port_valid;
+	/* MFP key install batch and association epoch, guarded by splnet. */
+	u_int32_t		ni_pmf_key_epoch;
+	u_int8_t		ni_pmf_link_pending;
+	u_int8_t		ni_pmf_key_batch_ready;
+	u_int8_t		ni_pmf_pending_key_ids;
+	u_int8_t		ni_pmf_pending_gtk_kid;
+	u_int8_t		ni_pmf_pending_igtk_kid;
+#define IEEE80211_PMF_PENDING_GTK	0x01
+#define IEEE80211_PMF_PENDING_IGTK	0x02
 
 	/* SA Query */
 	u_int16_t		ni_sa_query_trid;
 	CTimeout*		ni_sa_query_to;
 	int			ni_sa_query_count;
+#ifdef IEEE80211_STA_ONLY
+	/* Bounded STA initiator state, bound to the association that started it. */
+#define IEEE80211_SA_QUERY_STA_MAX_ATTEMPTS 5
+	u_int16_t		ni_sa_query_trids[IEEE80211_SA_QUERY_STA_MAX_ATTEMPTS];
+	u_int8_t		ni_sa_query_bssid[IEEE80211_ADDR_LEN];
+	u_int8_t		ni_sa_query_local[IEEE80211_ADDR_LEN];
+	struct timeval		ni_sa_query_last_unprot;
+#endif
 
 	/* HT capabilities */
 	uint16_t		ni_htcaps;

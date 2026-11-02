@@ -436,11 +436,14 @@ private:
     static NativeWifi::Status radioCancelScan(void *);
     static NativeWifi::Status radioJoin(void *, const NativeWifi::JoinPlan &);
     static void radioLeave(void *);
+    static void radioClearCredentials(void *);
     static void emitNative(void *, uint32_t, const void *, size_t);
     static bool privateReady(void *);
     static void consumeNative(void *, const NativeWifi::IngressEntry &);
+    static bool consumeNativeSecurityEvent(void *, const NativeWifi::IngressEntry &);
     NativeWifi::RegistrationState registrationState {};
     NativeWifi::Backend *nativeBackend {};
+    uint32_t nativeJoinEpoch {};
     NativeWifi::Ingress *nativeIngress {};
     uint8_t permanentAddress[6] {};
     uint8_t requestedAddress[6] {};

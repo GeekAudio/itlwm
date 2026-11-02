@@ -67,6 +67,8 @@
 
 #include <net80211/ieee80211_var.h>
 #include <net80211/ieee80211_priv.h>
+#include <net80211/ieee80211_sae.h>
+#include "../../../native/pmf_crypto_policy.h"
 
 mbuf_t ieee80211_input_hwdecrypt(struct ieee80211com *,
                                  struct ieee80211_node *, mbuf_t,
@@ -147,10 +149,8 @@ void    ieee80211_recv_delba(struct ieee80211com *, mbuf_t,
                              struct ieee80211_node *);
 void    ieee80211_recv_sa_query_req(struct ieee80211com *, mbuf_t,
                                     struct ieee80211_node *);
-#ifndef IEEE80211_STA_ONLY
 void    ieee80211_recv_sa_query_resp(struct ieee80211com *, mbuf_t,
                                      struct ieee80211_node *);
-#endif
 void    ieee80211_recv_action(struct ieee80211com *, mbuf_t,
                               struct ieee80211_node *);
 #ifndef IEEE80211_STA_ONLY
@@ -161,6 +161,55 @@ void    ieee80211_recv_bar(struct ieee80211com *, mbuf_t,
                            struct ieee80211_node *);
 void    ieee80211_bar_tid(struct ieee80211com *, struct ieee80211_node *,
                           u_int8_t, u_int16_t);
+
+#ifdef IEEE80211_STA_ONLY
+/*
+ * Consume unprotected unicast disconnect frames while an authorized STA PMF
+ * association is active. Reasons 6/7 start SA Query; all such clear robust
+ * disconnect frames are dropped instead of reaching the normal teardown path.
+ */
+static int
+ieee80211_sta_sa_query_unprotected_disconnect(struct ieee80211com *ic,
+    struct ieee80211_node *ni, const struct ieee80211_frame *wh, mbuf_t m,
+    int subtype)
+{
+	struct ieee80211_node *bss = ic->ic_bss;
+	struct timeval now, elapsed;
+	u_int16_t reason;
+
+	if ((subtype != IEEE80211_FC0_SUBTYPE_DEAUTH &&
+	    subtype != IEEE80211_FC0_SUBTYPE_DISASSOC) ||
+	    (wh->i_fc[1] & IEEE80211_FC1_PROTECTED) ||
+	    IEEE80211_IS_MULTICAST(wh->i_addr1) ||
+	    !IEEE80211_ADDR_EQ(wh->i_addr1, ic->ic_myaddr) ||
+	    bss == NULL || !ieee80211_sa_query_sta_authorized(ic, bss))
+		return 0;
+
+	/* A foreign transmitter must never tear down this protected association. */
+	if (ni != bss ||
+	    !IEEE80211_ADDR_EQ(wh->i_addr2, bss->ni_bssid) ||
+	    !IEEE80211_ADDR_EQ(wh->i_addr3, bss->ni_bssid) ||
+	    mbuf_len(m) < (int)sizeof(*wh) + 2)
+		return 1;
+
+	reason = LE_READ_2((const u_int8_t *)&wh[1]);
+	if (reason == IEEE80211_REASON_NOT_AUTHED ||
+	    reason == IEEE80211_REASON_NOT_ASSOCED) {
+		if (ni->ni_flags & IEEE80211_NODE_SA_QUERY)
+			return 1;
+		microuptime(&now);
+		if (ni->ni_sa_query_last_unprot.tv_sec != 0 ||
+		    ni->ni_sa_query_last_unprot.tv_usec != 0) {
+			timersub(&now, &ni->ni_sa_query_last_unprot, &elapsed);
+			if (elapsed.tv_sec < 10)
+				return 1;
+		}
+		ni->ni_sa_query_last_unprot = now;
+		ieee80211_sa_query_request(ic, bss);
+	}
+	return 1;
+}
+#endif
 
 
 /*
@@ -194,7 +243,17 @@ ieee80211_input_hwdecrypt(struct ieee80211com *ic, struct ieee80211_node *ni,
    int hdrlen;
 
    k = ieee80211_get_rxkey(ic, m, ni);
-   if (k == NULL)
+   if (k == NULL || (rxi->rxi_flags & IEEE80211_RXI_HWDEC) == 0 ||
+       (k->k_flags & IEEE80211_KEY_SWCRYPTO) != 0)
+       return NULL;
+
+   if ((rxi->rxi_flags & IEEE80211_RXI_MFP_HWDEC) &&
+       (k->k_cipher != IEEE80211_CIPHER_CCMP ||
+        (k->k_flags & IEEE80211_KEY_FWMFP) == 0 ||
+        (k->k_flags & (IEEE80211_KEY_FWPENDING |
+                       IEEE80211_KEY_FWACTIVE)) !=
+            IEEE80211_KEY_FWACTIVE ||
+        (ni->ni_flags & IEEE80211_NODE_MFP) == 0))
        return NULL;
 
    wh = mtod(m, struct ieee80211_frame *);
@@ -646,6 +705,15 @@ ieee80211_inputm(struct _ifnet *ifp, mbuf_t m, struct ieee80211_node *ni,
             return;
             
         case IEEE80211_FC0_TYPE_MGT:
+            {
+            uint8_t *category = (uint8_t *)&wh[1];
+            int has_action_category = subtype ==
+                IEEE80211_FC0_SUBTYPE_ACTION &&
+                mbuf_len(m) >= sizeof(*wh) + 1;
+            int robust = itl_pmf_is_robust_mgmt_rx(wh->i_fc[0],
+                wh->i_fc[1], has_action_category,
+                has_action_category ? category[0] : 0);
+
             if (dir != IEEE80211_FC1_DIR_NODS) {
                 ic->ic_stats.is_rx_wrongdir++;
                 goto err;
@@ -664,19 +732,72 @@ ieee80211_inputm(struct _ifnet *ifp, mbuf_t m, struct ieee80211_node *ni,
                     goto out;
                 }
             }
+
+#ifdef IEEE80211_STA_ONLY
+            if (robust &&
+                ieee80211_sta_sa_query_unprotected_disconnect(ic, ni,
+                    wh, m, subtype))
+                goto out;
+#endif
             
             if (ni->ni_flags & IEEE80211_NODE_RXMGMTPROT) {
                 /* MMPDU protection is on for Rx */
-                if (subtype == IEEE80211_FC0_SUBTYPE_DISASSOC ||
-                    subtype == IEEE80211_FC0_SUBTYPE_DEAUTH ||
-                    subtype == IEEE80211_FC0_SUBTYPE_ACTION) {
-                    if (!IEEE80211_IS_MULTICAST(wh->i_addr1) &&
-                        !(wh->i_fc[1] & IEEE80211_FC1_PROTECTED)) {
-                        /* unicast mgmt not encrypted */
+                if (robust) {
+                    if (ni->ni_pmf_link_pending)
                         goto out;
+                    int multicast = IEEE80211_IS_MULTICAST(wh->i_addr1);
+                    int protected_bit = (wh->i_fc[1] &
+                        IEEE80211_FC1_PROTECTED) != 0;
+
+                    if (!itl_pmf_group_mgmt_protected_bit_valid(robust,
+                        multicast, protected_bit))
+                        goto out;
+
+                    if (!multicast) {
+                        int hwdec = (rxi->rxi_flags &
+                            IEEE80211_RXI_HWDEC) != 0;
+                        int hw_mfp = (rxi->rxi_flags &
+                            IEEE80211_RXI_MFP_HWDEC) != 0;
+                        struct ieee80211_key *k =
+                            ieee80211_get_rxkey(ic, m, ni);
+                        int software_key = k != NULL &&
+                            (k->k_flags & IEEE80211_KEY_SWCRYPTO) != 0;
+
+                        if (!itl_pmf_unicast_mgmt_hw_proof_ok(
+                            protected_bit, hwdec, hw_mfp, software_key))
+                            goto out;
+                        if (k == NULL ||
+                            (k->k_flags & IEEE80211_KEY_FWPENDING) != 0 ||
+                            (ni->ni_flags & IEEE80211_NODE_MFP &&
+                             (k->k_flags & (IEEE80211_KEY_FWMFP |
+                                            IEEE80211_KEY_FWACTIVE)) !=
+                                 (IEEE80211_KEY_FWMFP |
+                                  IEEE80211_KEY_FWACTIVE)))
+                            goto out;
+
+                        if (hwdec) {
+                            mbuf_t original = m;
+                            m = ieee80211_input_hwdecrypt(ic, ni, m, rxi);
+                            if (m == NULL) {
+                                mbuf_freem(original);
+                                goto out;
+                            }
+                        } else
+                            m = ieee80211_decrypt(ic, m, ni);
+                    } else {
+                        /* BIP uses a clear Protected bit and software MIC/IPN. */
+                        struct ieee80211_key *k =
+                            ieee80211_get_rxkey(ic, m, ni);
+                        if (k == NULL ||
+                            (k->k_flags & IEEE80211_KEY_SWCRYPTO) == 0 ||
+                            (k->k_flags & (IEEE80211_KEY_FWMFP |
+                                           IEEE80211_KEY_FWACTIVE)) !=
+                                (IEEE80211_KEY_FWMFP |
+                                 IEEE80211_KEY_FWACTIVE) ||
+                            (k->k_flags & IEEE80211_KEY_FWPENDING) != 0)
+                            goto out;
+                        m = ieee80211_decrypt(ic, m, ni);
                     }
-                    /* do software decryption */
-                    m = ieee80211_decrypt(ic, m, ni);
                     if (m == NULL) {
                         /* XXX stats */
                         goto out;
@@ -703,6 +824,7 @@ ieee80211_inputm(struct _ifnet *ifp, mbuf_t m, struct ieee80211_node *ni,
             (*ic->ic_recv_mgmt)(ic, m, ni, rxi, subtype);
             mbuf_freem(m);
             return;
+            }
             
         case IEEE80211_FC0_TYPE_CTL:
             switch (subtype) {
@@ -1482,6 +1604,8 @@ ieee80211_parse_rsn_akm(const u_int8_t selector[4])
                 return IEEE80211_AKM_SHA256_8021X;
             case 6:    /* PSK with SHA256 KDF */
                 return IEEE80211_AKM_SHA256_PSK;
+            case 8:    /* SAE */
+                return IEEE80211_AKM_SAE;
         }
     }
     return IEEE80211_AKM_NONE;    /* ignore unknown AKMs */
@@ -1681,7 +1805,7 @@ ieee80211_recv_probe_resp(struct ieee80211com *ic, mbuf_t m,
     const struct ieee80211_frame *wh;
     const u_int8_t *frm, *efrm;
     const u_int8_t *tstamp, *ssid, *rates, *xrates, *edcaie, *wmmie;
-    const u_int8_t *rsnie, *wpaie, *htcaps, *htop;
+    const u_int8_t *rsnie, *wpaie, *rsnxe, *htcaps, *htop;
     const uint8_t *csa;
     const uint8_t *vhtcap;
     const uint8_t *vhtopmode;
@@ -1742,7 +1866,7 @@ ieee80211_recv_probe_resp(struct ieee80211com *ic, mbuf_t m,
     }
 #endif
     
-    ssid = rates = xrates = edcaie = wmmie = rsnie = wpaie = csa = vhtcap = vhtopmode = hecap = heopmode = NULL;
+    ssid = rates = xrates = edcaie = wmmie = rsnie = wpaie = rsnxe = csa = vhtcap = vhtopmode = hecap = heopmode = NULL;
     htcaps = htop = NULL;
     if (rxi->rxi_chan)
          bchan = rxi->rxi_chan;
@@ -1791,6 +1915,9 @@ ieee80211_recv_probe_resp(struct ieee80211com *ic, mbuf_t m,
                 break;
             case IEEE80211_ELEMID_RSN:
                 rsnie = frm;
+                break;
+            case IEEE80211_ELEMID_RSNX:
+                rsnxe = frm;
                 break;
             case IEEE80211_ELEMID_EDCAPARMS:
                 edcaie = frm;
@@ -2073,6 +2200,8 @@ ieee80211_recv_probe_resp(struct ieee80211com *ic, mbuf_t m,
         ni->ni_rsngroupcipher = (enum ieee80211_cipher)0;
         ni->ni_rsngroupmgmtcipher = (enum ieee80211_cipher)0;
         ni->ni_rsncaps = 0;
+        ni->ni_sae_h2e = (rsnxe != NULL && rsnxe[1] >= 1 &&
+            (rsnxe[2] & (1U << IEEE80211_RSNX_CAPAB_SAE_H2E)) != 0);
         
         if (rsnie != NULL &&
             ieee80211_parse_rsn(ic, rsnie, &rsn) == 0) {
@@ -2295,8 +2424,9 @@ ieee80211_recv_auth(struct ieee80211com *ic, mbuf_t m,
                     struct ieee80211_node *ni, struct ieee80211_rxinfo *rxi)
 {
     const struct ieee80211_frame *wh;
-    const u_int8_t *frm;
+    const u_int8_t *frm, *efrm;
     u_int16_t algo, seq, status;
+    int sae_result;
     
     /* make sure all mandatory fixed fields are present */
     if (mbuf_len(m) < sizeof(*wh) + 6) {
@@ -2305,6 +2435,7 @@ ieee80211_recv_auth(struct ieee80211com *ic, mbuf_t m,
     }
     wh = mtod(m, struct ieee80211_frame *);
     frm = (const u_int8_t *)&wh[1];
+    efrm = mtod(m, u_int8_t *) + mbuf_len(m);
     
     algo   = LE_READ_2(frm); frm += 2;
     seq    = LE_READ_2(frm); frm += 2;
@@ -2312,7 +2443,34 @@ ieee80211_recv_auth(struct ieee80211com *ic, mbuf_t m,
     DPRINTF(("auth %d seq %d from %s\n", algo, seq,
              ether_sprintf((u_int8_t *)wh->i_addr2)));
     
-    /* only "open" auth mode is supported */
+    if (algo == IEEE80211_AUTH_ALG_SAE) {
+#ifdef AIRPORT_TAHOE
+        if (ic->ic_opmode != IEEE80211_M_STA || ni != ic->ic_bss ||
+            ni->ni_rsnakms != IEEE80211_AKM_SAE ||
+            !IEEE80211_ADDR_EQ(wh->i_addr2, ni->ni_bssid) ||
+            !IEEE80211_ADDR_EQ(wh->i_addr3, ni->ni_bssid)) {
+            ic->ic_stats.is_rx_auth_unsupported++;
+            return;
+        }
+        sae_result = ieee80211_sae_input_auth(ic, ni, seq, status, frm,
+            (size_t)(efrm - frm));
+        if (sae_result == IEEE80211_SAE_AUTH_COMPLETE) {
+            ic->ic_deauth_reason = IEEE80211_REASON_UNSPECIFIED;
+            ic->ic_assoc_status = 0xffff;
+            ieee80211_new_state(ic, IEEE80211_S_ASSOC,
+                IEEE80211_FC0_SUBTYPE_AUTH);
+        } else if (sae_result == IEEE80211_SAE_AUTH_FAILED) {
+            ic->ic_stats.is_rx_auth_fail++;
+            ni->ni_fails++;
+            ieee80211_try_another_bss(ic);
+        }
+#else
+        ic->ic_stats.is_rx_auth_unsupported++;
+#endif
+        return;
+    }
+
+    /* only "open" auth mode is supported outside the Tahoe SAE path */
     if (algo != IEEE80211_AUTH_ALG_OPEN) {
         DPRINTF(("unsupported auth algorithm %d from %s\n",
                  algo, ether_sprintf((u_int8_t *)wh->i_addr2)));
@@ -2553,6 +2711,13 @@ ieee80211_recv_assoc_req(struct ieee80211com *ic, mbuf_t m,
             status = IEEE80211_STATUS_IE_INVALID;
             goto end;
         }
+#ifdef AIRPORT_TAHOE
+        /* This target implements SAE as a station, not as a software AP. */
+        if (rsn.rsn_akms & IEEE80211_AKM_SAE) {
+            status = IEEE80211_STATUS_BAD_AKMP;
+            goto end;
+        }
+#endif
         /*
          * The initiating STA's RSN IE shall include one authentication
          * and pairwise cipher suite among those advertised by the
@@ -3413,6 +3578,9 @@ ieee80211_recv_sa_query_req(struct ieee80211com *ic, mbuf_t m,
 {
     const struct ieee80211_frame *wh;
     const u_int8_t *frm;
+#ifdef IEEE80211_STA_ONLY
+    u_int16_t saved_trid;
+#endif
     
     if (ic->ic_opmode != IEEE80211_M_STA ||
         !(ni->ni_flags & IEEE80211_NODE_MFP)) {
@@ -3420,21 +3588,37 @@ ieee80211_recv_sa_query_req(struct ieee80211com *ic, mbuf_t m,
                  ether_sprintf(ni->ni_macaddr)));
         return;
     }
-    if (mbuf_len(m) < sizeof(*wh) + 4) {
+    if (mbuf_len(m) < (int)sizeof(*wh) + 4) {
         DPRINTF(("frame too short\n"));
         return;
     }
     wh = mtod(m, struct ieee80211_frame *);
     frm = (const u_int8_t *)&wh[1];
+
+#ifdef IEEE80211_STA_ONLY
+    if (!ieee80211_sa_query_sta_authorized(ic, ni) ||
+        !IEEE80211_ADDR_EQ(wh->i_addr1, ic->ic_myaddr) ||
+        !IEEE80211_ADDR_EQ(wh->i_addr2, ni->ni_bssid) ||
+        !IEEE80211_ADDR_EQ(wh->i_addr3, ni->ni_bssid))
+        return;
+#endif
     
     /* MLME-SAQuery.indication */
     
     /* save Transaction Identifier for SA Query Response */
+#ifdef IEEE80211_STA_ONLY
+    /* Preserve the initiator's outstanding ID while building the response. */
+    saved_trid = ni->ni_sa_query_trid;
     ni->ni_sa_query_trid = LE_READ_2(&frm[2]);
-    
+    (void)IEEE80211_SEND_ACTION(ic, ni, IEEE80211_CATEG_SA_QUERY,
+                                IEEE80211_ACTION_SA_QUERY_RESP, 0);
+    ni->ni_sa_query_trid = saved_trid;
+#else
+    ni->ni_sa_query_trid = LE_READ_2(&frm[2]);
     /* MLME-SAQuery.response */
     IEEE80211_SEND_ACTION(ic, ni, IEEE80211_CATEG_SA_QUERY,
                           IEEE80211_ACTION_SA_QUERY_RESP, 0);
+#endif
 }
 
 #ifndef IEEE80211_STA_ONLY
@@ -3472,6 +3656,52 @@ ieee80211_recv_sa_query_resp(struct ieee80211com *ic, mbuf_t m,
     /* MLME-SAQuery.confirm */
     timeout_del(&ni->ni_sa_query_to);
     ni->ni_flags &= ~IEEE80211_NODE_SA_QUERY;
+}
+#endif
+
+#ifdef IEEE80211_STA_ONLY
+/*
+ * STA confirmation accepts any transaction ID sent in the active exchange,
+ * as a response to an earlier retry may arrive after a newer request.
+ */
+void
+ieee80211_recv_sa_query_resp(struct ieee80211com *ic, mbuf_t m,
+                             struct ieee80211_node *ni)
+{
+    const struct ieee80211_frame *wh;
+    const u_int8_t *frm;
+    u_int16_t trid;
+    int i;
+
+    if (!(ni->ni_flags & IEEE80211_NODE_SA_QUERY) ||
+        !ieee80211_sa_query_sta_authorized(ic, ni))
+        return;
+    if (mbuf_len(m) < (int)sizeof(*wh) + 4)
+        return;
+
+    wh = mtod(m, struct ieee80211_frame *);
+    if (!IEEE80211_ADDR_EQ(wh->i_addr1, ic->ic_myaddr) ||
+        !IEEE80211_ADDR_EQ(wh->i_addr2, ni->ni_bssid) ||
+        !IEEE80211_ADDR_EQ(wh->i_addr3, ni->ni_bssid))
+        return;
+    frm = (const u_int8_t *)&wh[1];
+    trid = LE_READ_2(&frm[2]);
+    for (i = 0; i < ni->ni_sa_query_count; i++) {
+        if (ni->ni_sa_query_trids[i] == trid)
+            break;
+    }
+    if (i == ni->ni_sa_query_count)
+        return;
+
+    /* MLME-SAQuery.confirm: cancel and erase this association's query state. */
+    timeout_del(&ni->ni_sa_query_to);
+    ni->ni_flags &= ~(IEEE80211_NODE_SA_QUERY |
+                      IEEE80211_NODE_SA_QUERY_FAILED);
+    ni->ni_sa_query_count = 0;
+    ni->ni_sa_query_trid = 0;
+    memset(ni->ni_sa_query_trids, 0, sizeof(ni->ni_sa_query_trids));
+    memset(ni->ni_sa_query_bssid, 0, sizeof(ni->ni_sa_query_bssid));
+    memset(ni->ni_sa_query_local, 0, sizeof(ni->ni_sa_query_local));
 }
 #endif
 
@@ -3513,11 +3743,9 @@ ieee80211_recv_action(struct ieee80211com *ic, mbuf_t m,
                 case IEEE80211_ACTION_SA_QUERY_REQ:
                     ieee80211_recv_sa_query_req(ic, m, ni);
                     break;
-#ifndef IEEE80211_STA_ONLY
                 case IEEE80211_ACTION_SA_QUERY_RESP:
                     ieee80211_recv_sa_query_resp(ic, m, ni);
                     break;
-#endif
             }
             break;
         default:

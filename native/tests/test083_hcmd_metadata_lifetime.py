@@ -94,8 +94,20 @@ HARNESS_TEMPLATE = r'''#include <cassert>
 #include "native/iwx_fw_diagnostics.hpp"
 
 using IwxFirmwareDiagnostics::Entry;
-struct iwx_softc {};
-struct iwx_host_cmd { uint32_t flags = 0; };
+struct ieee80211_node {};
+struct ieee80211_key {};
+struct iwx_rx_packet;
+#define IWX_MAX_CMD_TBS_PER_TFD 2
+@@REAL_COMMAND_TYPES@@
+struct task {};
+struct iwx_softc {
+    iwx_pmf_key_cmd sc_pmf_key_cmd[IWX_PMF_KEY_SLOT_COUNT]{};
+    uint32_t sc_generation = 17, sc_pmf_force_closed = 0;
+    uint8_t sc_pmf_igtk_status1_abi = 1;
+    uint8_t sc_pmf_timeout_fired = 0, sc_pmf_key_failed = 0;
+    void *sc_nswq = nullptr;
+    task sc_pmf_key_task;
+};
 struct iwx_wide_header {
     uint32_t cmd, group_id, qid, idx, length, reserved, version;
 };
@@ -109,6 +121,16 @@ static iwx_softc *sc = nullptr;
 static command_ring *ring = nullptr;
 static bool async = true;
 static uint32_t hdrlen = 32, paylen = 200, group_id = 13;
+static uint8_t idx = 7;
+static bool command_submitted = false;
+static bool fail_timeout = false;
+static unsigned timeout_calls = 0, scheduled_tasks = 0;
+static uint64_t iwx_pmf_monotonic_ns() { return 12345; }
+static uint32_t iwx_cmd_opcode(uint32_t id) { return id & 0xff; }
+static int iwx_pmf_arm_key_timeout(iwx_softc *) {
+    ++timeout_calls; return fail_timeout ? 1 : 0;
+}
+static void iwx_add_task(iwx_softc *, void *, task *) { ++scheduled_tasks; }
 static uint32_t captured_count = 0;
 static Entry captured{};
 static bool doorbell_seen = false;
@@ -139,7 +161,10 @@ static uint64_t tahoeRecordFirmwareMetadata(iwx_softc *, Entry value) {
     return captured_count;
 }
 
-int main() {
+static void runCase(uint8_t kind, bool timeoutFails) {
+    captured_count = timeout_calls = scheduled_tasks = 0;
+    command_submitted = doorbell_seen = command_invalidated = false;
+    fail_timeout = timeoutFails;
     iwx_softc softc{};
     iwx_host_cmd hostCommand{};
     command_ring txRing{};
@@ -150,6 +175,12 @@ int main() {
     commandBuffer.hdr_wide.idx = 7;
     commandBuffer.hdr_wide.version = 3;
     hostCommand.flags = IWX_CMD_WANT_RESP;
+    ieee80211_node node{}; ieee80211_key key{};
+    hostCommand.id = 0x1f;
+    hostCommand.pmf_command_kind = kind;
+    hostCommand.pmf_key_slot = 4;
+    hostCommand.pmf_node = &node; hostCommand.pmf_key = &key;
+    hostCommand.pmf_node_epoch = 19; hostCommand.pmf_key_incarnation = 23;
     sc = &softc;
     hcmd = &hostCommand;
     ring = &txRing;
@@ -173,6 +204,27 @@ int main() {
     assert((captured.flags & IwxFirmwareDiagnostics::kWantResponse) != 0U);
     assert(command_invalidated && cmd == nullptr);
     assert(ring->queued == 1U && ring->cur == 3U);
+    assert(command_submitted);
+    const auto &pending = softc.sc_pmf_key_cmd[4];
+    if (kind == IWX_PMF_KEY_CMD_NONE) {
+        assert(!pending.active && timeout_calls == 0 && scheduled_tasks == 0);
+    } else {
+        assert(pending.active && pending.node == &node && pending.key == &key);
+        assert(pending.generation == 17 && pending.node_epoch == 19);
+        assert(pending.incarnation == 23 && pending.command_id == 0x1f);
+        assert(pending.command_qid == 4 && pending.command_index == 7);
+        assert(pending.igtk_status1_abi == (kind == IWX_PMF_KEY_CMD_IGTK));
+        assert(pending.timeout_deadline_ns == 5000012345ULL);
+        assert(timeout_calls == 1 && scheduled_tasks == unsigned(timeoutFails));
+        assert(softc.sc_pmf_force_closed == unsigned(timeoutFails));
+        assert(softc.sc_pmf_key_failed == unsigned(timeoutFails));
+    }
+}
+int main() {
+    runCase(IWX_PMF_KEY_CMD_NONE, false);
+    runCase(IWX_PMF_KEY_CMD_ADD_STA, false);
+    runCase(IWX_PMF_KEY_CMD_IGTK, false);
+    runCase(IWX_PMF_KEY_CMD_IGTK, true);
     return 0;
 }
 '''
@@ -187,12 +239,17 @@ class HcmdMetadataLifetimeTests(unittest.TestCase):
             doorbell_in_slice,
             production_slice.find("tahoeRecordFirmwareMetadata(sc, diagnosticEntry);"),
         )
-        self.assertNotIn("cmd->", doorbell_to_record)
+        self.assertNotRegex(doorbell_to_record, r"(?<![A-Za-z0-9_])cmd->")
 
         compile_slice = re.sub(
             r"(?m)^\s*#(?:ifdef|endif)\b[^\n]*\n", "", production_slice
         )
-        source = HARNESS_TEMPLATE.replace("@@PRODUCTION_SLICE@@", compile_slice)
+        header = (ROOT / "itlwm/hal_iwx/if_iwxvar.h").read_text()
+        types_start = header.index("struct iwx_host_cmd {")
+        types_end = header.index("enum iwx_pmf_gate_operation", types_start)
+        source = HARNESS_TEMPLATE.replace("@@REAL_COMMAND_TYPES@@",
+                                         header[types_start:types_end])
+        source = source.replace("@@PRODUCTION_SLICE@@", compile_slice)
         compiler = shutil.which("clang++") or shutil.which("g++")
         if not compiler:
             self.skipTest("C++ compiler unavailable")

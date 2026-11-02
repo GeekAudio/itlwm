@@ -219,6 +219,9 @@ public:
     IOInterruptEventSource* fInterrupt;
     IOTimerEventSource *watchdogTimer;
     bool watchdogSourceAttached {false};
+#ifdef AIRPORT_TAHOE
+    bool stopRetainedForBusy_ {false};
+#endif
     IOPCIDevice *pciNub;
     IONetworkStats *fpNetStats;
     AirportItlwmEthernetInterface *bsdInterface;

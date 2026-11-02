@@ -519,6 +519,7 @@ void Backend::driverState(bool isReady) {
     if (stopped_ || controlRevision_ != publishRevision || ready_ != isReady)
         return; // Do not finish a different Join from this old state callback.
     if (!isReady) {
+        const bool hadJoin = joinPending_;
         if (scanPending_) {
             if (scanQueued_) {
                 // Retire the WCL request. Busy alone cannot prove whether HAL
@@ -536,6 +537,9 @@ void Backend::driverState(bool isReady) {
         if (stopped_ || controlRevision_ != publishRevision || ready_ != isReady)
             return;
         finishJoin(1, NativeOffline);
+        if (!hadJoin && operations_.clearCredentials)
+            operations_.clearCredentials(operations_.context);
+        authorized_ = false;
     }
 }
 void Backend::retryDeferredJoin() {
@@ -624,7 +628,11 @@ void Backend::observeScanReset(uint32_t generation) {
 void Backend::addressHardwareStopped() {
     // Called synchronously on the owned gate only after a real address-change
     // quiesce. This also retires a native scan queued before HAL admission.
-    if (!stopped_ && addressChanging_) observeScanReset(scanGeneration_);
+    if (!stopped_ && addressChanging_) {
+        if (operations_.clearCredentials)
+            operations_.clearCredentials(operations_.context);
+        observeScanReset(scanGeneration_);
+    }
 }
 bool Backend::observeAssociation(uint16_t status, const uint8_t *bssid) {
     if (stopped_ || !joinPending_ || deferred_ || !equalAddress(target_, bssid))
@@ -763,6 +771,8 @@ void Backend::finishJoin(uint16_t status, uint32_t driverStatus) {
     copyBytes(resultTarget, deferred_ ? deferredJoin_.bssid : target_, sizeof(resultTarget));
     joinPending_ = false; joinRemaining_ = 0;
     clearDeferredJoin();
+    if ((status || driverStatus) && operations_.clearCredentials)
+        operations_.clearCredentials(operations_.context);
     uint8_t payload[ConnectionEventSize] {};
     write16(payload, status); copyBytes(payload + 4, resultTarget, sizeof(resultTarget));
     write32(payload + 12, driverStatus);
@@ -817,7 +827,10 @@ void Backend::tick(uint32_t elapsed) {
     }
 }
 void Backend::stop() {
+    if (stopped_) return;
     advanceControlRevision();
+    if (operations_.clearCredentials)
+        operations_.clearCredentials(operations_.context);
     stopped_ = true; ready_ = false;
     addressChanging_ = false;
     addressPreviousReady_ = addressPreviousAuthorized_ = false;

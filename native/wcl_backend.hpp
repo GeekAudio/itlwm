@@ -40,6 +40,8 @@ struct Operations {
     // scan callback and must describe that exact invocation, not stale state.
     uint64_t (*monotonicNanoseconds)(void *);
     ScanBusyDetail (*busyScanDetail)(void *);
+    // Erase connection secrets/config without starting new radio work.
+    void (*clearCredentials)(void *) = nullptr;
 };
 
 // Fixed-capacity, payload-free scan audit. No SSID, BSSID, frame, or IE bytes
@@ -134,6 +136,7 @@ public:
     void observeBeacon(const Beacon &);
     void tick(uint32_t elapsedMilliseconds);
     void stop();
+    bool stopped() const { return stopped_; }
     bool ready() const { return ready_ && !stopped_; }
     bool changingAddress() const { return addressChanging_; }
     Status copyBss(void *, size_t) const;

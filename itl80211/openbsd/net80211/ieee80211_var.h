@@ -59,6 +59,7 @@
 #define IEEE80211_STA_ONLY	1
 #endif
 
+#include "../../../native/scan_ssid_targets.h"
 #include <sys/param.h>
 #include <sys/timeout.h>
 #include <sys/_if_ether.h>
@@ -437,6 +438,11 @@ struct ieee80211com {
 				    uint32_t, struct IwxStaAuthSubmitReceipt *);
 	struct IwxStaAuthTrace ic_tahoe_auth_trace;
 #endif
+		/* Schedule an async key completion check outside the RX interrupt. */
+		void			(*ic_pmf_keys_ready)(struct ieee80211com *,
+				    struct ieee80211_node *);
+		void			(*ic_pmf_cancel_keys)(struct ieee80211com *,
+				    struct ieee80211_node *);
 	int			(*ic_ampdu_tx_start)(struct ieee80211com *,
 				    struct ieee80211_node *, u_int8_t);
 	void			(*ic_ampdu_tx_stop)(struct ieee80211com *,
@@ -462,6 +468,7 @@ struct ieee80211com {
     uint8_t         ic_tahoe_scan_channels[32];
     uint8_t         ic_tahoe_scan_ssid[32];
     uint8_t         ic_tahoe_scan_ssid_len;
+    struct itl_scan_ssid_targets ic_tahoe_scan_targets;
     uint32_t        ic_tahoe_scan_generation;
     uint32_t        ic_tahoe_init_stage;
     int32_t         ic_tahoe_init_error;
@@ -548,6 +555,10 @@ struct ieee80211com {
 	u_int8_t		ic_globalcnt[EAPOL_KEY_NONCE_LEN];
 	u_int8_t		ic_nonce[EAPOL_KEY_NONCE_LEN];
 	u_int8_t		ic_psk[IEEE80211_PMK_LEN];
+	/* SAE password is retained only while the selected join requires it. */
+	u_int8_t		ic_sae_password[64];
+	u_int8_t		ic_sae_password_len;
+	void			*ic_sae_exchange;
 	CTimeout*		ic_rsn_timeout;
 	int			ic_tkip_micfail;
 	u_int64_t		ic_tkip_micfail_last_tsc;
@@ -754,6 +765,10 @@ enum ieee80211_phymode ieee80211_chan2mode(struct ieee80211com *,
 		const struct ieee80211_channel *);
 void	ieee80211_disable_wep(struct ieee80211com *); 
 void	ieee80211_disable_rsn(struct ieee80211com *); 
+void	ieee80211_pmf_keys_cancel(struct ieee80211com *,
+	    struct ieee80211_node *);
+void	ieee80211_sta_security_cleanup(struct ieee80211com *,
+	    struct ieee80211_node *);
 int	ieee80211_add_ess(struct ieee80211com *, struct ieee80211_join *);
 void	ieee80211_del_ess(struct ieee80211com *, char *, int, int);
 void	ieee80211_set_ess(struct ieee80211com *, struct ieee80211_ess *,
