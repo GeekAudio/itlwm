@@ -10,6 +10,10 @@ def function_from(text,marker):
         depth += (text[end]=='{')-(text[end]=='}'); end+=1
     return text[start:end]
 def function(marker): return function_from(source,marker)
+def preprocess(text,definitions):
+    result=subprocess.run(['xcrun','clang++','-E','-P','-x','c++',*definitions,'-'],
+        input=text,text=True,capture_output=True,check=True)
+    return result.stdout
 methods=[function(s) for s in [
     'bool AirportItlwm::initializeNativePowerLocks(',
     'void AirportItlwm::releaseNativePowerLocks(',
@@ -27,6 +31,7 @@ methods=[function(s) for s in [
     'uint32_t AirportItlwm::observeNativePowerEvent(',
     'uint32_t AirportItlwm::beginNativeControlTrace(',
     'void AirportItlwm::recordNativeControlTrace(',
+    'bool AirportItlwm::recordNativeWifiStateObservation(',
     'void AirportItlwm::publishNativePowerTrace(',
     'bool AirportItlwm::postNativePowerChangedIfNeeded(',
     'void AirportItlwm::publishNativePowerState(',
@@ -70,7 +75,14 @@ assert stop_latch < stop_barrier < stop_gate < stop_disable
 assert stop_source.index('retireNativePMPowerCallouts())') < stop_disable
 assert stop_source.index('retireNativePMPowerCallouts())') < stop_source.index('super::stop(provider);')
 assert 'advanceNativePowerEpoch(false);' not in stop_source
-assert stop_source.count('disableAdapter(bsdInterface);') == 1
+# The production stop body has separate Tahoe and legacy compile-time paths.
+# Count the selected body in each configuration instead of counting both raw
+# source branches as if they were emitted into one binary.
+tahoe_stop=preprocess(stop_source,['-DAIRPORT_TAHOE=1',
+    '-DITL_NATIVE_AWDL_RESIDENT_25G332=1'])
+legacy_stop=preprocess(stop_source,['-UAIRPORT_TAHOE'])
+assert tahoe_stop.count('disableAdapter(bsdInterface);') == 1
+assert legacy_stop.count('disableAdapter(bsdInterface);') == 1
 start_source=function('bool AirportItlwm::start(IOService *provider)')
 assert '__atomic_store_n(&nativePowerStopping, false, __ATOMIC_RELEASE);' in start_source
 set_pm_source=function('IOReturn AirportItlwm::setPowerState(')
@@ -107,6 +119,7 @@ shim=r'''
 #include <utility>
 #include <vector>
 #include "native/native_power_trace.hpp"
+#include "native/native_wifi_state_trace.hpp"
 #define AIRPORT_TAHOE 1
 #define XYLog(...) do {} while (0)
 #define IOLog(...) do {} while (0)
@@ -281,6 +294,7 @@ struct AirportItlwm:IO80211Controller {
  uint64_t nativePowerTransitionRevision=0;
  NativePowerTrace::NotificationState nativePowerNotificationState;
  NativePowerTrace::AddressRestartNotification nativeAddressRestartNotification;
+ NativeWifiStateTrace::Ledger nativeWifiStateTrace;
  uint64_t nativeAddressRestartPublishedId=0,nativeAddressRestartStartRevision=0;
  uint32_t nativeAddressRestartPublishedEpoch=0,nativeAddressRestartStartedCount=0,
   nativeAddressRestartSuppressedCount=0,nativeAddressRestartCompletedCount=0,
@@ -317,6 +331,7 @@ struct AirportItlwm:IO80211Controller {
  void publishNativeAddressRestartMetrics();
  void releaseNativePowerHAL();
  void publishNativePowerTrace();bool postNativePowerChangedIfNeeded();void publishNativePowerState();
+ bool recordNativeWifiStateObservation(const NativeWifiStateTrace::Observation&,bool=false);
  void setNativePowerStopping(bool);void unregistPM();bool retireNativePMPowerCallouts();
  IOReturn setPowerState(unsigned long,IOService*);
  IOReturn waitForNativePower(uint32_t,uint32_t);void wakeNativePowerWaiters();
@@ -551,7 +566,24 @@ int main(){unsigned scenarios=0;
  lockAllocationFailAt=lockAllocationAttempts;
  assert(!failed.initializeNativePowerLocks()&&!failed.nativePowerStateLock&&
   !failed.nativePowerTraceLock);lockAllocationFailAt=-1;++scenarios;}
- {Fixture f;assert(f.state()==0&&f.a.nativePowerGetCount==1);++scenarios;}
+ {Fixture f;assert(f.state()==0&&f.a.nativePowerGetCount==1);
+  NativeWifiStateTrace::Snapshot trace{};f.a.nativeWifiStateTrace.snapshot(&trace);
+  assert(trace.schemaVersion==NativeWifiStateTrace::kSchemaVersion&&
+   trace.count==1&&trace.newestSequence==1&&
+   trace.callCounts[uint32_t(NativeWifiStateTrace::Kind::kPowerGet)]==1&&
+   trace.entries[0].kind==uint32_t(NativeWifiStateTrace::Kind::kPowerGet)&&
+   trace.entries[0].result==kIOReturnSuccess&&trace.entries[0].value==0&&
+   (trace.entries[0].flags&NativeWifiStateTrace::kValueValid));
+  assert(f.state()==0&&f.a.nativePowerGetCount==2);
+  f.a.nativeWifiStateTrace.snapshot(&trace);
+  assert(trace.count==1&&trace.newestSequence==1&&
+   trace.callCounts[uint32_t(NativeWifiStateTrace::Kind::kPowerGet)]==2);
+  f.a.updateNativePowerFlags(0,1U);assert(f.state()==0&&f.a.nativePowerGetCount==3);
+  f.a.nativeWifiStateTrace.snapshot(&trace);
+  assert(trace.count==2&&trace.newestSequence==2&&
+   trace.callCounts[uint32_t(NativeWifiStateTrace::Kind::kPowerGet)]==3&&
+   (trace.entries[1].flags&NativeWifiStateTrace::kPMRequestedOn)&&
+   !(trace.entries[1].flags&NativeWifiStateTrace::kHALReady));++scenarios;}
  {Fixture f;f.a.updateNativePowerFlags(0,1U);
   assert(f.a.nativePowerFlags==1U&&f.state()==0);++scenarios;}
  {Fixture f;f.a.nativePowerFlags=3;f.a.nativePowerEpoch=5;f.hal.faultSerial=11;

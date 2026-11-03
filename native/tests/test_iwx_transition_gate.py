@@ -157,7 +157,9 @@ struct TahoeNet80211Transition {
 class IOWorkLoop {
 public:
     bool onThread() const { return onThreadValue; }
+    bool inGate() const { return gateHeld; }
     bool onThreadValue = false;
+    bool gateHeld = false;
 };
 
 class IOCommandGate {
@@ -166,14 +168,20 @@ public:
     IOWorkLoop *loop = nullptr;
     unsigned calls = 0;
     IOReturn forcedResult = kIOReturnSuccess;
+    bool lastActionOnThread = false;
+    bool lastActionInGate = false;
     IOReturn runAction(Action action, void *arg0, void *arg1) {
         ++calls;
         if (forcedResult != kIOReturnSuccess)
             return forcedResult;
-        const bool previous = loop->onThreadValue;
-        loop->onThreadValue = true;
+        // runAction serializes against event sources by holding the gate. It
+        // does not move a caller-thread invocation onto the workloop thread.
+        const bool previousGate = loop->gateHeld;
+        loop->gateHeld = true;
+        lastActionOnThread = loop->onThread();
+        lastActionInGate = loop->inGate();
         const IOReturn result = action(target, arg0, arg1, nullptr, nullptr);
-        loop->onThreadValue = previous;
+        loop->gateHeld = previousGate;
         return result;
     }
 };
@@ -259,6 +267,7 @@ static TahoeNet80211Transition snapshot(
     assert(request.identityCaptured && request.node == owner.com.sc_ic.ic_bss);
     assert(request.nodeEpoch == 17 && request.akm == 0x80);
     assert(owner.gate.calls == 1 && stateCalls == 0);
+    assert(owner.gate.lastActionInGate && !owner.gate.lastActionOnThread);
     return request;
 }
 
@@ -273,6 +282,7 @@ static void test_gate_capture_and_commit() {
     assert(stateCalls == 1 && eventCalls == 0);
     assert(owner.com.sc_ic.ic_state == IEEE80211_S_AUTH);
     assert(owner.gate.calls == 2);
+    assert(owner.gate.lastActionInGate && !owner.gate.lastActionOnThread);
     delete owner.controller;
 }
 
@@ -287,6 +297,73 @@ static void test_assoc_done_runs_inside_gate() {
     assert(owner.iwx_run_net80211_transition_gate(&owner.com, &request) == 0);
     assert(stateCalls == 1 && eventCalls == 1);
     assert(owner.com.sc_ic.ic_state == IEEE80211_S_RUN);
+    assert(owner.gate.lastActionInGate && !owner.gate.lastActionOnThread);
+    delete owner.controller;
+}
+
+static void test_stop_init_transition_from_off_worker() {
+    ItlIwx owner;
+    ieee80211_node node{};
+    seed(owner, node);
+    owner.com.sc_ic.ic_state = IEEE80211_S_RUN;
+    owner.com.sc_flags |= IWX_FLAG_SHUTDOWN;
+
+    // Mirrors iwx_stop(): INIT is allowed during shutdown. The caller is not
+    // the workloop thread; runAction must grant gate ownership, not fake it.
+    TahoeNet80211Transition request{};
+    request.newState = IEEE80211_S_INIT;
+    request.arg = -1;
+    request.generation = 44;
+    request.allowShutdown = true;
+    assert(!owner.loop.onThread() && !owner.loop.inGate());
+    const int result = owner.iwx_run_net80211_transition_gate(
+        &owner.com, &request);
+    assert(result == 0);
+    assert(owner.gate.calls == 1);
+    assert(owner.gate.lastActionInGate && !owner.gate.lastActionOnThread);
+    assert(stateCalls == 1 && owner.com.sc_ic.ic_state == IEEE80211_S_INIT);
+    delete owner.controller;
+}
+
+static void test_transition_action_rejects_ungated_callback() {
+    ItlIwx owner;
+    ieee80211_node node{};
+    seed(owner, node);
+    owner.loop.onThreadValue = true;
+    owner.com.sc_flags |= IWX_FLAG_SHUTDOWN;
+    TahoeNet80211Transition request{};
+    request.newState = IEEE80211_S_INIT;
+    request.arg = -1;
+    request.generation = 44;
+    request.gateOwner = owner.controller;
+    request.sc = &owner.com;
+    request.allowShutdown = true;
+
+    // Worker-thread identity alone is not proof of serialized gate ownership.
+    assert(owner.loop.onThread() && !owner.loop.inGate());
+    assert(owner.iwx_net80211_transition_gate_action(
+        owner.controller, owner.controller, &request, nullptr, nullptr) ==
+        kIOReturnNotReady);
+    assert(stateCalls == 0 && owner.com.sc_ic.ic_state != IEEE80211_S_INIT);
+    delete owner.controller;
+}
+
+static void test_existing_gate_is_reused_off_worker() {
+    ItlIwx owner;
+    ieee80211_node node{};
+    seed(owner, node);
+    owner.loop.gateHeld = true;
+    owner.com.sc_flags |= IWX_FLAG_SHUTDOWN;
+    TahoeNet80211Transition request{};
+    request.newState = IEEE80211_S_INIT;
+    request.arg = -1;
+    request.generation = 44;
+    request.allowShutdown = true;
+
+    assert(!owner.loop.onThread() && owner.loop.inGate());
+    assert(owner.iwx_run_net80211_transition_gate(&owner.com, &request) == 0);
+    assert(owner.gate.calls == 0);
+    assert(stateCalls == 1 && owner.com.sc_ic.ic_state == IEEE80211_S_INIT);
     delete owner.controller;
 }
 
@@ -392,6 +469,7 @@ static void test_request_sequence_and_shutdown_reset() {
         ieee80211_node node{};
         seed(owner, node);
         owner.loop.onThreadValue = true;
+        owner.loop.gateHeld = true;
         owner.com.sc_flags |= IWX_FLAG_SHUTDOWN;
         TahoeNet80211Transition request{};
         request.newState = IEEE80211_S_INIT;
@@ -403,9 +481,31 @@ static void test_request_sequence_and_shutdown_reset() {
         assert(stateCalls == 1 && owner.com.sc_ic.ic_state == IEEE80211_S_INIT);
         delete owner.controller;
     }
+    {
+        ItlIwx owner;
+        ieee80211_node node{};
+        seed(owner, node);
+        const unsigned priorStateCalls = stateCalls;
+        owner.com.sc_flags |= IWX_FLAG_SHUTDOWN;
+        TahoeNet80211Transition request{};
+        request.newState = IEEE80211_S_INIT;
+        request.arg = -1;
+        request.generation = 44;
+        assert(owner.iwx_run_net80211_transition_gate(&owner.com, &request) ==
+               ECANCELED);
+        assert(stateCalls == priorStateCalls &&
+               owner.com.sc_ic.ic_state == IEEE80211_S_SCAN);
+        delete owner.controller;
+    }
 }
 
 int main() {
+    test_stop_init_transition_from_off_worker();
+    stateCalls = eventCalls = 0;
+    test_transition_action_rejects_ungated_callback();
+    stateCalls = eventCalls = 0;
+    test_existing_gate_is_reused_off_worker();
+    stateCalls = eventCalls = 0;
     test_gate_capture_and_commit();
     stateCalls = eventCalls = 0;
     test_assoc_done_runs_inside_gate();
