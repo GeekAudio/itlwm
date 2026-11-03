@@ -1,28 +1,27 @@
 window.TEST_RECORDS = [
   {
-    "id": "record-test121-runtime",
-    "version": "25G332-Test121",
-    "label": "Test121：系统接口可见，但 Wi-Fi 初始化未保持 READY；Test122 修复候选待重启验收。",
+    "id": "record-test122-runtime-boot1793681053",
+    "version": "25G332-Test122",
+    "label": "Test122：Wi-Fi已恢复；受控RX工具离线核验通过，真实AWDL数据未验证。",
     "tone": "warning",
     "date": "2026-11-03",
-    "state": "Test121本轮：1项通过 · 0项部分通过 · 1项未通过 · 38项未覆盖",
-    "short_summary": "Wi-Fi 初始化失败；Test122 已部署待重启",
-    "summary": "Test121 已加载，系统仍列出 en1，但接口处于 Off/inactive。日志显示 READY 曾出现，之后地址重启 quiesce 被拒绝，接口仅保留 UP、READY 清零，上层等待超时。当前源码复核发现 stop/INIT 转换把 gate 持有误当作 workloop 线程身份；Test122 改为验证 gate ownership。本轮未测试 AWDL、即时热点或 AirDrop；Test122 尚无启动实测。",
+    "state": "Test122本轮：3项通过 · 5项部分通过 · 0项未通过 · 32项未覆盖",
+    "short_summary": "Wi-Fi已恢复；RX工具离线通过，实机数据待测",
+    "summary": "Test122已启动，Wi-Fi保持On/Ready并在手动切网后恢复；联网冒烟按用户要求跳过。受控AWDL RX工具11项离线核验通过，Test122/awdl0及149频道目标身份已核对；本轮尚未启动RF，真实AWDL数据接收、ifnet回包和AirDrop未验证。",
     "evidence": [
-      "Test121 加载身份已核对，系统列出 en1；当前接口为 Off/inactive。",
-      "Wi-Fi 初始化链路曾达到 READY；随后地址重启 quiesce 返回 Busy，状态退回 UP-only，READY 为 0，最终电源等待超时。",
-      "没有 watchdog、固件错误或硬件错误触发；本轮不能据此判断路由器问题。",
-      "源代码复核找到 stop/INIT gate 的线程身份检查与 runAction 持 gate 语义不符；Test122 候选修正为 gate ownership 检查。",
-      "本轮没有进行 AWDL、149 频道、即时热点或 AirDrop 诊断。"
+      "Test122加载身份、Wi-Fi On/Ready及手动切网后恢复已核对。",
+      "联网冒烟按用户要求跳过；长时稳定观察和睡眠恢复本轮未覆盖。",
+      "受控RX工具11项离线核验通过，其中10项初轮通过，修正测试路径断言后定向项目通过。",
+      "Test122 metadata/UUID、awdl0与149频道目标身份已核对；本轮没有启动RF。",
+      "离线工具和身份核对不证明真实RX、原生ifnet回包或AirDrop成功。"
     ],
     "blockers": [
-      "Test121 的 Wi-Fi 初始化/地址重启恢复失败，需先在 Test122 验证 gate 修复。",
-      "AWDL 真实数据输入和原生 awdl0 回包本轮未测试。",
-      "即时热点与双向 AirDrop 尚未完成端到端验收。"
+      "真实AWDL数据接收、原生ifnet回包和AirDrop尚未实测。",
+      "本轮没有RF诊断；离线工具核验不计入40项功能验收。"
     ],
     "next": [
-      "重启进入 Test122，确认 Wi-Fi READY、扫描和连接稳定；先完成短时稳定性观察。",
-      "Wi-Fi 基线通过后，再单独验证 AWDL 接收入口与原生 awdl0 数据回包；本轮未做 AirDrop 发送。"
+      "执行绑定Test122的149频道有界接收诊断，确认真实RX是否到达驱动和原生ifnet。",
+      "依据真实接收证据再推进数据回包和双向AirDrop验收。"
     ]
   }
 ];
