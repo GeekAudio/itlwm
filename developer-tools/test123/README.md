@@ -18,6 +18,7 @@
 - 主机发送状态与本轮帧匹配，不等于确认了空口发送或硬件 ACK。
 - awdl0 监听器实际收到匹配标记，并通过接口、地址、端口、hop limit 和截断检查，才算本轮载荷输入的正证据。
 - 四帧共用本轮标记。收到四份相同标记可能包含重复包，不能直接算四个不同帧全部到达。
+- 报告中的 `wire_nonce_hex_ascii_sha256` 哈希的是 16 个小写十六进制字符的 ASCII 字节，不是原始 8 字节 nonce。
 - 当前内核输入收据缺少完整 SC、AWDL 序号和标记。它与 socket 结果分开保存，不直接声称是同一个 MPDU。
 - START 是同 owner 的一次性快照。重复读取它不等于获得当前 HAL、BSD lease 和 ifnet 的原子快照。
 - 路由器与 Mac 的时钟分开记录；用户态读取时间不等于内核到达或空口时间。没有转换依据的时间差保持未知。
@@ -56,5 +57,16 @@ Test123 继续使用 Test122 的 disarmed metadata、内核构建/部署收据�
       --metadata <Test122 disarmed metadata> --ap wlan7
 
 每个启动实例仍只有原 Test122 的一次性接收 claim。身份刷新只读设备和 OpenWrt 接口配置，不改 Wi-Fi、WAN 或 LAN。不要重复使用同一启动实例或 wire nonce。
+
+### 唯一一次的预 ARM 中断续测
+
+只有上一条记录明确为 `MONITOR_READY_MALFORMED`，并且同一启动实例的原始报告、native capture、清理观察和主机进程观察全部通过私有证据核对时，才可以显式加 `--resume-prearm`。该选项只允许与 `--run` 一起使用：
+
+    python3 developer-tools/test123/coordinate_test123_rx149.py \
+      --run --resume-prearm --host <OpenWrt主机> \
+      --control-path <已认证SSH控制套接字> \
+      --metadata <Test122 disarmed metadata> --ap wlan7
+
+续测会使用本启动内一个全新输出目录并留下持久的一次性标记；它不会清除或重置 Test122 内核 claim。原有 Test104/T087 身份、加载版本、START、100 ms 接收窗口和 claim 检查仍照常执行。证据过期、启动实例不同、已有续测标记或新输出目录已存在时会停止。其他失败不能用此选项重跑。
 
 工具构建收据与 packet set 保存在私有 RuntimeTest123 目录；主采集报告仍写在 Test122 metadata 所在的私有运行目录，以兼容原生 worker 的输出目录校验。含接口地址、包样本和运行日志的私有数据不进入公开里程碑。

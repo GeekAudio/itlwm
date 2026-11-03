@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import importlib.util
+import hashlib
+import io
 import json
+import os
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr
 from unittest import mock
 
 
@@ -53,6 +57,7 @@ class _Output:
 
 class _Process:
     def __init__(self, exit_code=0):
+        self.pid = 12345
         self.stdin = _Input()
         self.stdout = _Output()
         self.exit_code = exit_code
@@ -63,6 +68,9 @@ class _Process:
 
 
 class _Selector:
+    def register(self, *_args, **_kwargs):
+        return None
+
     def close(self):
         return None
 
@@ -94,6 +102,44 @@ def _started_line(token: str, nonce: str) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
+def _packetset_valid_line(nonce: str, **overrides) -> str:
+    value = {
+        "event": "PACKET_SET_VALID",
+        "schema": COORD.SENDER_PROTOCOL.PACKETSET_SCHEMA,
+        "frames": 4,
+        "interval_ms": 10,
+        "budget_ms": 40,
+        "noack_requested": False,
+        "transmission_capability": False,
+        "rf_transmission_proven": False,
+        "wire_nonce_hex": nonce,
+    }
+    value.update(overrides)
+    return "PACKET_SET_VALID " + json.dumps(
+        value, sort_keys=True, separators=(",", ":"))
+
+
+def _monitor_ready_line() -> str:
+    values = {
+        "mode": "monitor_direct_channel",
+        "monitor_direct_channel_known": "true",
+        "monitor_wiphy": "0", "monitor_channel": "149",
+        "monitor_frequency_mhz": "5745", "ap_wiphy": "0",
+        "ap_channel": "149", "ap_frequency_mhz": "5745",
+        "ap_width_mhz": "80", "phy_single_channel_constraints_count": "1",
+        "active_same_phy_channel_count": "1",
+        "active_same_phy_channels": "149",
+        "active_same_phy_frequencies_mhz": "5745",
+    }
+    return "MONITOR_READY " + " ".join(f"{key}={value}" for key, value in values.items())
+
+
+def _sender_ready_line(nonce: str) -> str:
+    values = dict(COORD.SENDER_PROTOCOL.READY_VALUES)
+    values["wire_nonce_hex"] = nonce
+    return "READY " + " ".join(f"{key}={value}" for key, value in values.items())
+
+
 class Test123CoordinatorIntegration(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -105,12 +151,136 @@ class Test123CoordinatorIntegration(unittest.TestCase):
         COORD.SENDER_PROTOCOL.clear_packet_set_binding()
         COORD.BINDING.clear_active_run()
 
+    def _invoke_real_t087_start(self, lines):
+        """Run the installed T123 wrapper around the real T087 start method."""
+        restore = COORD._configure_test123_profile()
+        raw, manifest = SENDER_FIXTURES.packet_set()
+        nonce = manifest["wire_nonce_hex"]
+        COORD.SENDER_PROTOCOL.bind_packet_set(raw)
+        old_manifest = getattr(COORD.RUNNER, "ACTIVE_PACKET_MANIFEST", None)
+        COORD.RUNNER.ACTIVE_PACKET_MANIFEST = manifest
+        process = _Process(exit_code=0)
+        selector = _Selector()
+        reader = mock.Mock(side_effect=list(lines))
+        router = COORD.RUNNER.ROUTER
+        # T087 only needs a real file and a matching digest before it opens the
+        # mocked subprocess; the file is never executed by this test.
+        with tempfile.TemporaryDirectory(prefix="test123-ready-") as tmp:
+            binary = Path(tmp) / "sender"
+            binary.write_bytes(b"offline fake sender binary")
+            binary.chmod(0o600)
+            digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+            try:
+                with (
+                    mock.patch.object(router, "_read_protocol_line", reader),
+                    mock.patch.object(router, "build_bootstrap_argv",
+                                      return_value=["ssh", "mock"]),
+                    mock.patch.object(router.subprocess, "Popen", return_value=process),
+                    mock.patch.object(router.selectors, "DefaultSelector",
+                                      return_value=selector),
+                    mock.patch.object(router.protocol,
+                                      "build_remote_monitor_sender_script",
+                                      return_value="#!/bin/sh\n"),
+                    mock.patch.object(router, "_terminate_process") as terminate,
+                ):
+                    result = COORD.RUNNER.ROUTER.RouterSenderSession.start(
+                        host="root@192.0.2.1", control_path="/private/tmp/mock.sock",
+                        sender_binary=binary, sender_sha256=digest,
+                        run_token=SENDER_FIXTURES.TOKEN, ap="wlan7")
+                    capture = COORD.RUNNER.TEST088._RunCapture(
+                        COORD.RUNNER.CANDIDATE)
+                    attached_report = COORD.RUNNER.TEST088._RunCapture.attach(
+                        capture, {})
+                return result, reader, process, terminate, nonce, attached_report
+            finally:
+                restore()
+                COORD.RUNNER.ACTIVE_PACKET_MANIFEST = old_manifest
+                COORD.SENDER_PROTOCOL.clear_packet_set_binding()
+
     def test_default_plan_is_inert_and_separates_tool_from_kernel(self):
         self.assertEqual(COORD.plan()["tool_test"], "Test123")
         self.assertEqual(COORD.plan()["running_kernel_test"], "Test122")
         self.assertFalse(COORD.plan()["rf_triggered"])
         self.assertFalse(COORD.plan()["armed"])
         self.assertEqual(COORD.main(["--plan"]), 0)
+
+    def test_t087_start_validates_packetset_preface_then_parses_real_readiness(self):
+        raw, manifest = SENDER_FIXTURES.packet_set()
+        nonce = manifest["wire_nonce_hex"]
+        result, reader, process, terminate, _, attached_report = self._invoke_real_t087_start([
+            _packetset_valid_line(nonce), _monitor_ready_line(),
+            _sender_ready_line(nonce),
+        ])
+        session, monitor_ready, sender_ready = result
+        self.assertEqual(monitor_ready["ap_channel"], 149)
+        self.assertEqual(sender_ready["wire_nonce_hex"], nonce)
+        evidence = session.protocol_evidence["test123_packetset_verification"]
+        self.assertEqual(evidence["status"], "validated")
+        self.assertEqual(evidence["frames"], 4)
+        self.assertEqual(evidence["interval_ms"], 10)
+        self.assertEqual(evidence["budget_ms"], 40)
+        self.assertFalse(evidence["rf_transmission_proven"])
+        self.assertEqual(evidence["packet_set_sha256"], manifest["packet_set_sha256"])
+        self.assertNotIn("wire_nonce_hex", evidence)
+        self.assertEqual(
+            attached_report["test123_packetset_verification"]["status"],
+            "validated")
+        self.assertEqual(reader.call_count, 3)
+        self.assertFalse(process.terminated)
+        terminate.assert_not_called()
+
+    def test_t087_start_rejects_missing_wrong_nonce_and_duplicate_preface(self):
+        raw, manifest = SENDER_FIXTURES.packet_set()
+        nonce = manifest["wire_nonce_hex"]
+        cases = (
+            ("missing", [_monitor_ready_line(), _sender_ready_line(nonce)],
+             "packetset_verification_missing", None),
+            ("wrong nonce", [_packetset_valid_line("ffffffffffffffff"),
+                              _monitor_ready_line(), _sender_ready_line(nonce)],
+             "packetset_verification_contract_invalid",
+             "packetset_verification_nonce_mismatch"),
+            ("float frames", [_packetset_valid_line(nonce, frames=4.0),
+                               _monitor_ready_line(), _sender_ready_line(nonce)],
+             "packetset_verification_numeric_type_invalid", "frames"),
+            ("boolean frames", [_packetset_valid_line(nonce, frames=True),
+                                 _monitor_ready_line(), _sender_ready_line(nonce)],
+             "packetset_verification_contract_invalid",
+             "packetset_verification_contract_mismatch"),
+            ("duplicate", [_packetset_valid_line(nonce),
+                            _packetset_valid_line(nonce), _monitor_ready_line(),
+                            _sender_ready_line(nonce)],
+             "packetset_verification_duplicate", None),
+        )
+        for name, lines, error_code, reason in cases:
+            with self.subTest(name=name):
+                with self.assertRaises(COORD.RUNNER.PROTOCOL.ControlledProbeError) as caught:
+                    self._invoke_real_t087_start(lines)
+                self.assertEqual(
+                    caught.exception.code,
+                    "TEST123_PACKETSET_VERIFICATION_INVALID")
+                self.assertEqual(
+                    caught.exception.evidence["test123_packetset_verification"]["error_code"],
+                    error_code)
+                if reason is not None:
+                    self.assertEqual(
+                        caught.exception.evidence["test123_packetset_verification"]["reason"],
+                        reason)
+
+    def test_t087_remote_error_still_reads_cleanup_without_packetset_preface(self):
+        cleanup = "CLEANUP " + json.dumps({
+            "event": "MONITOR_CLEANUP",
+            "run_token": SENDER_FIXTURES.TOKEN,
+            "monitor_removed": True,
+            "ap_unchanged": True,
+            "temporary_files_removed": True,
+        }, sort_keys=True, separators=(",", ":"))
+        with self.assertRaises(COORD.RUNNER.PROTOCOL.ControlledProbeError) as caught:
+            self._invoke_real_t087_start([
+                "REMOTE_ERROR code=monitor_create_failed", cleanup,
+            ])
+        self.assertEqual(caught.exception.code, "ROUTER_READINESS_SETUP_FAILED")
+        self.assertTrue(caught.exception.evidence["cleanup"]["monitor_removed"])
+        self.assertTrue(caught.exception.evidence["cleanup"]["temporary_files_removed"])
 
     def test_t088_go_once_uses_legacy_projection_but_preserves_raw_nonce_failure(self):
         restore = COORD._configure_test123_profile()
@@ -395,6 +565,145 @@ class Test123CoordinatorIntegration(unittest.TestCase):
                 self.assertFalse(finalized["complete"])
                 self.assertTrue(finalized["partial"])
                 self.assertTrue(finalized["tool_workflow_incomplete_reasons"])
+
+    def test_resume_prearm_requires_explicit_run(self):
+        stderr = io.StringIO()
+        with redirect_stderr(stderr):
+            self.assertEqual(COORD.main(["--resume-prearm"]), 2)
+        self.assertIn("resume_prearm_requires_explicit_run", stderr.getvalue())
+
+    def test_resume_prearm_claims_once_after_barrier_install_and_restores_paths(self):
+        from types import SimpleNamespace
+
+        runner = COORD.RUNNER
+        boot_epoch = 1793697291
+        uuid = "17DB1FD2-214C-30A1-825C-C841B5F9E80B"
+        fresh_output = (COORD.BINDING.KERNEL_METADATA.parent /
+                        f"test123-tools-boot{boot_epoch}-prearm-resume")
+        verification = {
+            "eligible": True, "same_boot": True,
+            "expected_boot_epoch": boot_epoch, "expected_uuid": uuid,
+            "kernel_claim_recheck_required_by_normal_preflight": True,
+            "fresh_output_directory": str(fresh_output),
+            "prior_status": "MONITOR_READY_MALFORMED",
+            "prior_native_claim_consumed": False, "prior_go_attempted": False,
+            "report_sha256": "a" * 64, "capture_sha256": "b" * 64,
+            "cleanup_observation_sha256": "c" * 64,
+            "host_processes_sha256": "d" * 64,
+        }
+        claim = {
+            "resume_marker_created": True,
+            "fresh_output_directory": str(fresh_output),
+            "resume_marker_sha256": "e" * 64,
+        }
+        events = []
+        helper = SimpleNamespace(
+            PrearmResumeError=type("PrearmResumeError", (ValueError,), {}),
+            verify_prearm_resume=mock.Mock(return_value=verification),
+            claim_prearm_resume=mock.Mock(
+                side_effect=lambda value: (events.append("claim") or claim)),
+        )
+        old_run_directory = runner.test104_run_dir
+        old_test104_configure = COORD._ORIGINAL_TEST104_CONFIGURE
+        old_context = COORD._ACTIVE_PREARM_RESUME_CONTEXT
+        old_installer = runner.START_BARRIER.install_native_armed_go_barrier
+        old_run_once = runner.run_once
+
+        def original_test104_configure():
+            return lambda: None
+
+        def original_installer(*_args, **_kwargs):
+            events.append("barrier_installed")
+            return lambda: events.append("barrier_restored")
+
+        def fake_run_once(**kwargs):
+            self.assertEqual(kwargs["metadata_path"], COORD.BINDING.KERNEL_METADATA)
+            self.assertEqual(runner.test104_run_dir(boot_epoch, runner.CANDIDATE),
+                             fresh_output)
+            restore_profile = runner.configure_test104_profile()
+            try:
+                restore_barrier = runner.START_BARRIER.install_native_armed_go_barrier()
+                try:
+                    self.assertEqual(events[:2], ["barrier_installed", "claim"])
+                    self.assertEqual(helper.claim_prearm_resume.call_count, 1)
+                    self.assertTrue(COORD._ACTIVE_PREARM_RESUME_CONTEXT[
+                        "resume_marker_created"])
+                finally:
+                    restore_barrier()
+            finally:
+                restore_profile()
+            return {"status": "offline_mock"}, fresh_output, None
+
+        try:
+            COORD._ORIGINAL_TEST104_CONFIGURE = original_test104_configure
+            runner.START_BARRIER.install_native_armed_go_barrier = original_installer
+            runner.run_once = fake_run_once
+            with (
+                mock.patch.object(COORD, "_configure_test123_run"),
+                mock.patch.object(COORD.T120, "_load_current_identity",
+                                  return_value=(boot_epoch, uuid)),
+                mock.patch.object(COORD.BINDING, "validate_kernel_bundle",
+                                  return_value=({"minimum_boot_epoch_exclusive":
+                                                 boot_epoch - 1},
+                                                {"mach_o_uuid": uuid}, b"", Path("meta"))),
+                mock.patch.object(COORD, "_load", return_value=helper),
+                mock.patch.dict(os.environ, {}, clear=False),
+            ):
+                report, output_dir = COORD._run_once(
+                    host="root@192.0.2.1", control_path="/private/tmp/mock.sock",
+                    metadata=COORD.BINDING.KERNEL_METADATA, ap="wlan7",
+                    resume_prearm=True)
+            self.assertEqual(report["status"], "offline_mock")
+            self.assertEqual(output_dir, fresh_output)
+            self.assertEqual(runner.test104_run_dir, old_run_directory)
+            self.assertIsNone(COORD._ACTIVE_PREARM_RESUME_CONTEXT)
+            helper.verify_prearm_resume.assert_called_once_with(
+                expected_boot_epoch=boot_epoch, expected_uuid=uuid)
+            helper.claim_prearm_resume.assert_called_once_with(verification)
+            self.assertEqual(events, ["barrier_installed", "claim", "barrier_restored"])
+        finally:
+            runner.test104_run_dir = old_run_directory
+            COORD._ORIGINAL_TEST104_CONFIGURE = old_test104_configure
+            runner.START_BARRIER.install_native_armed_go_barrier = old_installer
+            runner.run_once = old_run_once
+            COORD._ACTIVE_PREARM_RESUME_CONTEXT = old_context
+
+    def test_resume_prearm_rejects_bad_recheck_semantics_before_run(self):
+        from types import SimpleNamespace
+
+        boot_epoch = 1793697291
+        uuid = "17DB1FD2-214C-30A1-825C-C841B5F9E80B"
+        bad_verification = {
+            "eligible": True, "same_boot": True,
+            "expected_boot_epoch": boot_epoch, "expected_uuid": uuid,
+            "kernel_claim_recheck_required_by_normal_preflight": False,
+            "fresh_output_directory": str(COORD.BINDING.KERNEL_METADATA.parent /
+                                           f"test123-tools-boot{boot_epoch}-prearm-resume"),
+        }
+        helper = SimpleNamespace(
+            PrearmResumeError=type("PrearmResumeError", (ValueError,), {}),
+            verify_prearm_resume=mock.Mock(return_value=bad_verification),
+            claim_prearm_resume=mock.Mock(),
+        )
+        with (
+            mock.patch.object(COORD, "_configure_test123_run"),
+            mock.patch.object(COORD.T120, "_load_current_identity",
+                              return_value=(boot_epoch, uuid)),
+            mock.patch.object(COORD.BINDING, "validate_kernel_bundle",
+                              return_value=({"minimum_boot_epoch_exclusive": boot_epoch - 1},
+                                            {"mach_o_uuid": uuid}, b"", Path("meta"))),
+            mock.patch.object(COORD, "_load", return_value=helper),
+            mock.patch.object(COORD.RUNNER, "run_once") as run_once,
+        ):
+            with self.assertRaises(COORD.BINDING.Tool123BindingError) as caught:
+                COORD._run_once(
+                    host="root@192.0.2.1", control_path="/private/tmp/mock.sock",
+                    metadata=COORD.BINDING.KERNEL_METADATA, ap="wlan7",
+                    resume_prearm=True)
+        self.assertEqual(caught.exception.args[0],
+                         "test123_prearm_resume_binding_mismatch")
+        run_once.assert_not_called()
+        helper.claim_prearm_resume.assert_not_called()
 
 
 if __name__ == "__main__":

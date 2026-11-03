@@ -28,6 +28,7 @@ SENDER_SOURCE = TOOL_DIR / "router-status/awdl_router_rx_lease_sender_test123.c"
 SENDER_PROTOCOL_SOURCE = TOOL_DIR / "router-status/dual_sender_protocol_test123.py"
 LISTENER_SOURCE = TOOL_DIR / "awdl0_unicast_listener_test123.c"
 LISTENER_PROTOCOL_SOURCE = TOOL_DIR / "listener_protocol_test123.py"
+PREARM_RESUME_SOURCE = TOOL_DIR / "prearm_resume_test123.py"
 SENDER_RECEIPT = (Path.home() / "Library/Application Support/IntelWirelessNative/"
                   "RuntimeTest123/research/preparation-private/sender-build-private.json")
 LISTENER_RECEIPT = (Path.home() / "Library/Application Support/IntelWirelessNative/"
@@ -72,6 +73,7 @@ REMOTE_SENDER = _load(
     "tool123_remote_sender", TOOL_DIR / "remote_sender_test123.py")
 ARTIFACTS_PATH = TOOL_DIR / "tool_artifacts_test123.py"
 _ARTIFACTS = None
+_ACTIVE_PREARM_RESUME_CONTEXT: dict | None = None
 
 _ORIGINAL_TEST104_CONFIGURE = RUNNER.configure_test104_profile
 
@@ -190,6 +192,7 @@ def _configure_test123_profile():
         "sender_start": RUNNER.ROUTER.RouterSenderSession.start,
         "sender_go_once": RUNNER.TEST088.Test088SenderSession.go_once,
         "capture_attach": RUNNER.TEST088._RunCapture.attach,
+        "start_barrier_installer": RUNNER.START_BARRIER.install_native_armed_go_barrier,
         "provenance_classifier": SENDER_PROTOCOL.classify_sender_result,
         "atomic_private_write": RUNNER.atomic_private_write,
     }
@@ -224,6 +227,30 @@ def _configure_test123_profile():
     # treating a token copied from STARTED/RESULT as its own expectation.
     sender_session_class = RUNNER.ROUTER.RouterSenderSession
     original_sender_start = sender_session_class.start
+    router_module = RUNNER.ROUTER
+
+    def packetset_verification_summary(parsed: dict, *, status: str) -> dict:
+        nonce = parsed.get("wire_nonce_hex")
+        manifest = _active_manifest()
+        return {
+            "schema": "test123-packetset-verification/v1",
+            "status": status,
+            "event": "PACKET_SET_VALID",
+            "tool_test": "Test123",
+            "running_kernel_test": "Test122",
+            "packet_set_schema": parsed.get("schema"),
+            "frames": parsed.get("frames"),
+            "interval_ms": parsed.get("interval_ms"),
+            "budget_ms": parsed.get("budget_ms"),
+            "noack_requested": parsed.get("noack_requested"),
+            "transmission_capability": parsed.get("transmission_capability"),
+            "rf_transmission_proven": parsed.get("rf_transmission_proven"),
+            "wire_nonce_hex_ascii_sha256": (
+                hashlib.sha256(nonce.encode("ascii")).hexdigest()
+                if isinstance(nonce, str) else None),
+            "packet_set_sha256": manifest.get("packet_set_sha256"),
+        }
+
     def capture_sender_start(cls, **kwargs):
         token = kwargs.get("run_token")
         if token is None:
@@ -235,7 +262,102 @@ def _configure_test123_profile():
         if token_state["run_token"] is not None:
             raise protocol.ControlledProbeError("TEST123_DUPLICATE_SENDER_START")
         token_state["run_token"] = token
-        return original_sender_start(**kwargs)
+        original_read_protocol_line = router_module._read_protocol_line
+
+        read_state = {"phase": "packetset_pending", "verification": None}
+
+        def controlled_failure(code: str, *, reason: str | None = None):
+            evidence = {
+                "schema": "test123-packetset-verification/v1",
+                "status": "rejected",
+                "error_code": code,
+                "expected_wire_nonce_hex_ascii_sha256": hashlib.sha256(
+                    _active_nonce().encode("ascii")).hexdigest(),
+                "packet_set_sha256": _active_manifest().get("packet_set_sha256"),
+            }
+            if isinstance(reason, str):
+                evidence["reason"] = reason
+            if read_state["verification"] is not None:
+                evidence["previous_validation"] = dict(read_state["verification"])
+            token_state["packetset_verification"] = evidence
+            raise protocol.ControlledProbeError(
+                "TEST123_PACKETSET_VERIFICATION_INVALID",
+                evidence={"test123_packetset_verification": evidence})
+
+        def read_with_packetset_verification(selector, process, state, deadline):
+            if read_state["phase"] == "remote_error":
+                line = original_read_protocol_line(selector, process, state, deadline)
+                if line is not None and line.startswith("PACKET_SET_VALID "):
+                    controlled_failure("packetset_verification_duplicate")
+                return line
+
+            if read_state["phase"] == "packetset_pending":
+                line = original_read_protocol_line(selector, process, state, deadline)
+                if line is None:
+                    controlled_failure("packetset_verification_missing")
+                if line.startswith("REMOTE_ERROR "):
+                    # Preserve Test087's existing error and cleanup parser.
+                    read_state["phase"] = "remote_error"
+                    return line
+                if not line.startswith("PACKET_SET_VALID "):
+                    controlled_failure("packetset_verification_missing")
+                try:
+                    parsed = SENDER_PROTOCOL.parse_packetset_valid(
+                        line, expected_wire_nonce_hex=_active_nonce())
+                except SENDER_PROTOCOL.SenderProtocolError as error:
+                    reason = str(error)
+                    if (not reason.isascii() or not reason.replace("_", "").isalnum()
+                            or not 1 <= len(reason) <= 96):
+                        reason = "packetset_verification_contract_invalid"
+                    controlled_failure("packetset_verification_contract_invalid",
+                                      reason=reason)
+                for field in ("frames", "interval_ms", "budget_ms"):
+                    if type(parsed.get(field)) is not int:
+                        controlled_failure(
+                            "packetset_verification_numeric_type_invalid",
+                            reason=field)
+                summary = packetset_verification_summary(parsed, status="validated")
+                read_state["verification"] = summary
+                token_state["packetset_verification"] = summary
+                read_state["phase"] = "monitor_ready_pending"
+
+                # PACKET_SET_VALID is a T123 preface. Consume it here, then
+                # return the real MONITOR_READY line to frozen Test087.
+                line = original_read_protocol_line(selector, process, state, deadline)
+                if line is None:
+                    return None
+                if line.startswith("PACKET_SET_VALID "):
+                    controlled_failure("packetset_verification_duplicate")
+                read_state["phase"] = "monitor_ready_returned"
+                return line
+
+            line = original_read_protocol_line(selector, process, state, deadline)
+            if line is not None and line.startswith("PACKET_SET_VALID "):
+                controlled_failure("packetset_verification_duplicate")
+            return line
+
+        try:
+            # T087 owns all readiness/START/GO semantics. This temporary
+            # reader shim consumes and validates only the Test123 preface.
+            router_module._read_protocol_line = read_with_packetset_verification
+            result = original_sender_start(**kwargs)
+        except protocol.ControlledProbeError as error:
+            summary = token_state.get("packetset_verification")
+            if isinstance(summary, dict):
+                evidence = dict(getattr(error, "evidence", {}) or {})
+                evidence.setdefault("test123_packetset_verification", summary)
+                error.evidence = evidence
+            raise
+        finally:
+            router_module._read_protocol_line = original_read_protocol_line
+
+        session = result[0] if isinstance(result, tuple) and result else None
+        summary = read_state["verification"]
+        if (summary is not None and session is not None and
+                isinstance(getattr(session, "protocol_evidence", None), dict)):
+            session.protocol_evidence["test123_packetset_verification"] = dict(summary)
+        return result
+
     sender_session_class.start = classmethod(capture_sender_start)
 
     def go_once_preserving_after_go(self, *, on_control_write=None):
@@ -333,8 +455,53 @@ def _configure_test123_profile():
 
     RUNNER.TEST088.Test088SenderSession.go_once = go_once_preserving_after_go
 
+    # Consume the optional pre-ARM continuation marker only after the frozen
+    # Test104 preflight calls this installer, but before the native worker can
+    # ARM or consume its own one-use kernel claim. The marker never resets the
+    # kernel claim; normal Test104/T087 checks still decide whether ARM can run.
+    barrier_module = RUNNER.START_BARRIER
+    original_barrier_installer = saved["start_barrier_installer"]
+
+    def install_test123_barrier(*args, **kwargs):
+        restore_barrier = original_barrier_installer(*args, **kwargs)
+        context = _ACTIVE_PREARM_RESUME_CONTEXT
+        if context is None:
+            return restore_barrier
+        if context.get("resume_marker_created") is True:
+            restore_barrier()
+            raise RUNNER.ControlledRunError("TEST123_PREARM_RESUME_ALREADY_CLAIMED")
+        try:
+            resume_module = _load(
+                "tool123_prearm_resume_runtime", PREARM_RESUME_SOURCE)
+            verification = context.get("verification")
+            if not isinstance(verification, dict):
+                raise resume_module.PrearmResumeError(
+                    "prearm_resume_verification_missing")
+            claimed = resume_module.claim_prearm_resume(verification)
+            if (claimed.get("resume_marker_created") is not True or
+                    claimed.get("fresh_output_directory") !=
+                    context.get("fresh_output_directory")):
+                raise resume_module.PrearmResumeError(
+                    "prearm_resume_claim_result_mismatch")
+            context["claim"] = claimed
+            context["resume_marker_created"] = True
+        except Exception as error:
+            restore_barrier()
+            code = getattr(error, "code", None)
+            safe_code = (code if isinstance(code, str) and code.isascii() and
+                         code.replace("_", "").isalnum() and 1 <= len(code) <= 96
+                         else "prearm_resume_claim_rejected")
+            raise RUNNER.ControlledRunError(
+                "TEST123_PREARM_RESUME_CLAIM_REJECTED:" + safe_code) from error
+        return restore_barrier
+
+    barrier_module.install_native_armed_go_barrier = install_test123_barrier
+
     def attach_sender_terminal_error(self, report):
         result = saved["capture_attach"](self, report)
+        verification = token_state.get("packetset_verification")
+        if isinstance(verification, dict):
+            result["test123_packetset_verification"] = dict(verification)
         terminal = getattr(self, "test123_sender_terminal_error", None)
         if isinstance(terminal, dict):
             result["sender_terminal_error"] = dict(terminal)
@@ -508,7 +675,7 @@ def _configure_test123_profile():
                 listener.get("status") == "marker_received" and
                 listener.get("marker_match") is True and
                 listener.get("payload_match") is True),
-            "listener_input_nonce_sha256": (
+            "listener_input_nonce_hex_ascii_sha256": (
                 hashlib.sha256(wire_nonce.encode("ascii")).hexdigest()
                 if isinstance(wire_nonce, str) else None),
             "native_result_status": native.get("status", "unknown"),
@@ -521,6 +688,31 @@ def _configure_test123_profile():
             "native_awdl_reply_proven": False,
             "airdrop_proven": False,
         })
+        resume_context = _ACTIVE_PREARM_RESUME_CONTEXT
+        if resume_context is not None:
+            claim = resume_context.get("claim")
+            if (resume_context.get("resume_marker_created") is not True or
+                    not isinstance(claim, dict) or
+                    claim.get("resume_marker_created") is not True):
+                raise RUNNER.ControlledRunError(
+                    "TEST123_PREARM_RESUME_REPORT_WITHOUT_CLAIM")
+            verification = resume_context["verification"]
+            value["prearm_resume"] = {
+                "schema": "test123-prearm-resume-report/v1",
+                "attempt_id": resume_context["attempt_id"],
+                "same_boot": True,
+                "prior_status": verification["prior_status"],
+                "prior_native_claim_consumed": False,
+                "prior_go_attempted": False,
+                "source_report_sha256": verification["report_sha256"],
+                "source_capture_sha256": verification["capture_sha256"],
+                "cleanup_observation_sha256":
+                    verification["cleanup_observation_sha256"],
+                "host_processes_sha256": verification["host_processes_sha256"],
+                "resume_marker_sha256": claim["resume_marker_sha256"],
+                "kernel_claim_reset": False,
+                "kernel_claim_recheck_required_by_normal_preflight": True,
+            }
         return saved["atomic_private_write"](path, value, account)
 
     RUNNER.atomic_private_write = save_test123_report
@@ -535,6 +727,8 @@ def _configure_test123_profile():
         timing.parse_sender_started = saved["timing_started"]
         RUNNER.TEST088.Test088SenderSession.go_once = saved["sender_go_once"]
         RUNNER.TEST088._RunCapture.attach = saved["capture_attach"]
+        barrier_module.install_native_armed_go_barrier = saved[
+            "start_barrier_installer"]
         sender_session_class.start = saved["sender_start_descriptor"]
         SENDER_PROTOCOL.classify_sender_result = saved["provenance_classifier"]
         RUNNER.atomic_private_write = saved["atomic_private_write"]
@@ -747,7 +941,8 @@ def _configure_test123_run() -> None:
         TOOL_DIR / "tool_artifacts_test123.py", NATIVE_WORKER,
         SENDER_SOURCE, SENDER_PROTOCOL_SOURCE,
         TOOL_DIR / "remote_sender_test123.py", LISTENER_SOURCE,
-        LISTENER_PROTOCOL_SOURCE, KERNEL_COORDINATOR.NATIVE_WORKER,
+        LISTENER_PROTOCOL_SOURCE, PREARM_RESUME_SOURCE,
+        KERNEL_COORDINATOR.NATIVE_WORKER,
         sender_binary, listener_binary,
     )
     def runtime_tool_hashes() -> dict[str, str]:
@@ -787,7 +982,9 @@ def _configure_test123_run() -> None:
     RUNNER.configure_test104_profile = _configure_test123_profile
 
 
-def _run_once(*, host: str, control_path: str, metadata: Path, ap: str) -> tuple[dict, Path]:
+def _run_once(*, host: str, control_path: str, metadata: Path, ap: str,
+              resume_prearm: bool = False) -> tuple[dict, Path]:
+    global _ACTIVE_PREARM_RESUME_CONTEXT
     import re
     if (not isinstance(host, str) or not re.fullmatch(r"[A-Za-z0-9_.@:-]{1,255}", host)
             or host.startswith("-") or not Path(control_path).is_absolute()):
@@ -802,11 +999,56 @@ def _run_once(*, host: str, control_path: str, metadata: Path, ap: str) -> tuple
     if (loaded_uuid != build.get("mach_o_uuid") or
             boot_epoch <= kernel_metadata.get("minimum_boot_epoch_exclusive", boot_epoch)):
         raise BINDING.Tool123BindingError("test122_current_runtime_identity_mismatch")
+
+    old_run_directory = None
+    resume_context = None
+    if resume_prearm:
+        try:
+            resume_module = _load(
+                "tool123_prearm_resume_runtime", PREARM_RESUME_SOURCE)
+            verification = resume_module.verify_prearm_resume(
+                expected_boot_epoch=boot_epoch, expected_uuid=loaded_uuid)
+        except Exception as error:
+            code = getattr(error, "code", None) or "prearm_resume_evidence_rejected"
+            raise BINDING.Tool123BindingError(
+                "test123_prearm_resume_rejected:" + str(code)[:96]) from error
+        expected_output = (BINDING.KERNEL_METADATA.parent /
+                           f"test123-tools-boot{boot_epoch}-prearm-resume")
+        output_directory = Path(verification.get("fresh_output_directory", ""))
+        if (verification.get("eligible") is not True or
+                verification.get("same_boot") is not True or
+                verification.get("expected_boot_epoch") != boot_epoch or
+                verification.get("expected_uuid") != loaded_uuid or
+                verification.get("kernel_claim_recheck_required_by_normal_preflight") is not True or
+                output_directory != expected_output or
+                output_directory.exists() or output_directory.is_symlink()):
+            raise BINDING.Tool123BindingError(
+                "test123_prearm_resume_binding_mismatch")
+        resume_context = {
+            "verification": verification,
+            "fresh_output_directory": str(output_directory),
+            "attempt_id": secrets.token_hex(16),
+            "resume_marker_created": False,
+        }
+        old_run_directory = RUNNER.test104_run_dir
+
+        def resumed_run_directory(requested_boot: int, candidate: str) -> Path:
+            if (requested_boot != boot_epoch or
+                    candidate != BINDING.KERNEL_CANDIDATE):
+                raise RUNNER.ControlledRunError(
+                    "TEST123_PREARM_RESUME_OUTPUT_IDENTITY_MISMATCH")
+            return output_directory
+
+        RUNNER.test104_run_dir = resumed_run_directory
+        _ACTIVE_PREARM_RESUME_CONTEXT = resume_context
     os.environ["INTEL_WIRELESS_NATIVE_ROOT"] = str(BINDING.IWN_ROOT)
     try:
         report, output_dir, _prearm = RUNNER.run_once(
             host=host, control_path=control_path, metadata_path=metadata, ap=ap)
     finally:
+        if resume_context is not None:
+            RUNNER.test104_run_dir = old_run_directory
+            _ACTIVE_PREARM_RESUME_CONTEXT = None
         BINDING.clear_active_run()
         SENDER_PROTOCOL.clear_packet_set_binding()
     return report, output_dir
@@ -818,12 +1060,17 @@ def main(argv: list[str] | None = None) -> int:
     mode.add_argument("--plan", action="store_true")
     mode.add_argument("--run", action="store_true",
                       help="Perform one explicitly authorized Test123 capture on Test122")
+    parser.add_argument("--resume-prearm", action="store_true",
+                        help="Use the one-use same-boot path for the exact verified pre-ARM abort")
     parser.add_argument("--host")
     parser.add_argument("--control-path")
     parser.add_argument("--iwn-root", type=Path, default=BINDING.IWN_ROOT)
     parser.add_argument("--metadata", type=Path, default=BINDING.KERNEL_METADATA)
     parser.add_argument("--ap", default="wlan7")
     args = parser.parse_args(argv)
+    if args.resume_prearm and not args.run:
+        print("ERROR: resume_prearm_requires_explicit_run", file=sys.stderr)
+        return 2
     if not args.run:
         print(json.dumps(plan(), sort_keys=True))
         return 0
@@ -834,7 +1081,8 @@ def main(argv: list[str] | None = None) -> int:
             raise BINDING.Tool123BindingError("router_transport_required")
         report, output_dir = _run_once(
             host=args.host, control_path=args.control_path,
-            metadata=args.metadata, ap=args.ap)
+            metadata=args.metadata, ap=args.ap,
+            resume_prearm=args.resume_prearm)
         sender_event = (report.get("test088_sender", {})
                         .get("sender_result_event"))
         sender_status = sender_event.get("status") if isinstance(sender_event, dict) else "unknown"
@@ -848,6 +1096,7 @@ def main(argv: list[str] | None = None) -> int:
             "listener_status": rx_status,
             "complete": report.get("complete") is True,
             "output_directory": str(output_dir),
+            "prearm_resume_used": args.resume_prearm,
             "retry_allowed": False,
             "rf_transmission_proven": False,
             "peer_receipt_proven": False,
