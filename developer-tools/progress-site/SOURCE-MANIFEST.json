@@ -20,27 +20,27 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "8d41a44f5b781699236f5bd4d1166fe9b375c6d01fd3749103c3be50655b1824"
+      "sha256": "d217b1b8eb39b4360fe55c3fdcdc4eff3a1ad5c9e19a54bd97fd0c930c2876a5"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "73e640ca156539ed045c42ceff0d9ac949fe87c04fb14d0da6b1639365359ffa"
+      "sha256": "9c7eb504c4e27d8e216774a9d8f640dc787d121dd0efaa9a3235e00a84db88b3"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "380653c199dd31bdc657ba9ef6ad601ed317a8e314ca9e212c0a295a36f6c73a"
+      "sha256": "6206df2e6578653729e76eb54e82b7cee99c9c83825bd5e444c3caf9eb8da723"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "380653c199dd31bdc657ba9ef6ad601ed317a8e314ca9e212c0a295a36f6c73a"
+      "sha256": "6206df2e6578653729e76eb54e82b7cee99c9c83825bd5e444c3caf9eb8da723"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "e07fcf9befdc8ae9879f64c3719cf8d602d6806fb0913d62e1553afcf871bd9b"
+      "sha256": "2be03a33e526dc8fb5aa3178015338748ee7207837567e3c7b4a1ad5b8ad4938"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
@@ -85,11 +85,11 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-03T16:50:00+08:00",
-  "runtime_scope": "Test123仅升级观测工具，运行内核仍为25G332-Test122，EFI未改。59项主离线测试通过；T104 sender预检用例及6个独立边界分支通过（不并入主套件数字），发送器/监听器独立重建后产物一致；固件会话最终复核通过、无剩余阻断。新工具尚未实机运行；40项验收保持通过5、部分5、未通过0、未覆盖30；联网冒烟与睡眠恢复跳过。",
+  "updated_at": "2026-11-03T18:10:15+08:00",
+  "runtime_scope": "Test123启动握手已修复，运行内核仍为25G332-Test122且EFI未改；77项离线验证通过。本轮有效149频道接收窗口有24条入口，Data/QoS/AWDL-BSSID候选为0，filter-match结果不可用；awdl0载荷为0。同一原始发送记录与对应帧集合离线重放校验通过，但现场汇总仍标记未验证；parser绑定错位仅为待查可能，根因未确认。三次State10失败生命周期均已清理；不证明RF发送、Intel归因或AirDrop。联网冒烟与睡眠按要求跳过。",
   "running_candidate": "25G332-Test122",
   "next_candidate": null,
-  "website_delivery": "Test123最终固件复核已完成，页面已准备记录下一次新启动的有界同窗采集；运行内核Test122及40项验收不变。仅本地生成并更新源码哈希清单；未提交、未推送、未发布。",
+  "website_delivery": "本地刷新Test123同窗采集结果、开发总时间线与公开来源哈希；40项验收保持5通过、5部分、0未通过、30未覆盖。尚未提交、推送或发布；未改驱动/EFI。",
   "deployment_state": "test122_running",
-  "site_preparation": "Public-safe current runtime projection; Test123 final firmware review passed; next bounded correlated capture awaits fresh boot; kernel Test122 unchanged; local refresh only; no EFI write or publish"
+  "site_preparation": "Local public-safe update: Test123 current run; offline sender replay passes while onsite summary remains unvalidated; receive data candidates are zero; cleanup verified; no RF/AirDrop claim; 40-item counts unchanged; local render only."
 }
