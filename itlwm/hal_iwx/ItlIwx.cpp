@@ -18176,7 +18176,7 @@ iwx_net80211_transition_gate_action(OSObject *target, void *arg0,
     ItlIwx *that = container_of(request->sc, ItlIwx, com);
     IOWorkLoop *loop = that->getMainWorkLoop();
     if (that->getController() != gateOwner ||
-        request->sc != &that->com || loop == nullptr || !loop->onThread())
+        request->sc != &that->com || loop == nullptr || !loop->inGate())
         return kIOReturnNotReady;
 
     struct iwx_softc *sc = request->sc;
@@ -18289,9 +18289,11 @@ iwx_run_net80211_transition_gate(struct iwx_softc *sc,
     request->sc = sc;
     request->stateResult = 0;
     IOReturn gateResult;
-    if (loop->onThread()) {
-        // The workloop serializes its event sources and gate actions. Calling
-        // directly here avoids recursively queueing work from an RX callback.
+    if (loop->inGate()) {
+        // runAction holds the workloop gate on the caller's thread; it does
+        // not move that caller to the workloop thread. Gate ownership is the
+        // serialization proof for both state-task and stop/INIT transitions.
+        // Reuse an already-held gate, including an RX event-source callback.
         gateResult = iwx_net80211_transition_gate_action(
             owner, owner, request, nullptr, nullptr);
     } else {
