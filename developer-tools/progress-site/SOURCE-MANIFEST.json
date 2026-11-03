@@ -20,27 +20,27 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "4419f3c6371ef5d257997a430708166b5606d521dcdfcc5e3f23e666ba32bc89"
+      "sha256": "12fcec4e9982e11461e39e4abab025cfa86f73bf00307ca3ace71cf70102bb3a"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "2e53b627ce05917960f738f57538639a4ea4d9b1b6014235e596f1e6a3055244"
+      "sha256": "08e0879f0c0ba1673e443fdaea65439eec62320785ad43527d5e392a4877be2f"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "cbcaab118530f841adcfe280a9f61eef018578c37d864eb6eb241492506b27f0"
+      "sha256": "2448e1db6ff7561d6df894b26c62d36b5c996310c7178b1bc08808a9cf182fa6"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "cbcaab118530f841adcfe280a9f61eef018578c37d864eb6eb241492506b27f0"
+      "sha256": "2448e1db6ff7561d6df894b26c62d36b5c996310c7178b1bc08808a9cf182fa6"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "a89524f49a817c790ec0f5432b8c73f2deb929bb13e6b61b0b7f09b143f963e8"
+      "sha256": "92cacbb0b294868533c29783a4cdc6bd9464ecd0b7b48ad55ce976642592a9ef"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
@@ -85,11 +85,11 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-03T13:16:28+08:00",
-  "runtime_scope": "Test122 Wi-Fi on/ready and recovered after manual switching; network smoke skipped per user; 11 offline RX-tool checks passed and Test122/AWDL/router149 target identity matched; no RF or real AWDL data receive tested",
+  "updated_at": "2026-11-03T13:32:31+08:00",
+  "runtime_scope": "Test122 controlled 149-channel receive window completed: START/END accepted and State 7/released; Intel-side observation saw 2 Beacons and no AWDL candidate or complete Data frame; native listener/capture/decode/ifnet correlated data 0. OpenWrt tap saw 4 outgoing packets without RF TXS/ACK proof. Wi-Fi On/Ready and recovered after manual switching; network smoke and sleep recovery skipped per user.",
   "running_candidate": "25G332-Test122",
   "next_candidate": null,
-  "website_delivery": "Test122 runtime and offline RX-tool readiness reflected; controlled RF receive and native data path pending; no AirDrop success claim",
+  "website_delivery": "Test122 controlled RX result and development timeline updated; current missing layer is before a complete Data frame enters receive observation. 12 offline tool checks passed; no driver or EFI change and no AirDrop success claim.",
   "deployment_state": "test122_loaded_runtime_reviewed",
   "site_preparation": "Public-safe current runtime projection; private evidence excluded"
 }

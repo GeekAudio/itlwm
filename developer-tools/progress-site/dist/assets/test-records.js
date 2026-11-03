@@ -1,27 +1,28 @@
 window.TEST_RECORDS = [
-  {
-    "id": "record-test122-runtime-boot1793681053",
-    "version": "25G332-Test122",
-    "label": "Test122：Wi-Fi已恢复；受控RX工具离线核验通过，真实AWDL数据未验证。",
-    "tone": "warning",
-    "date": "2026-11-03",
-    "state": "Test122本轮：3项通过 · 5项部分通过 · 0项未通过 · 32项未覆盖",
-    "short_summary": "Wi-Fi已恢复；RX工具离线通过，实机数据待测",
-    "summary": "Test122已启动，Wi-Fi保持On/Ready并在手动切网后恢复；联网冒烟按用户要求跳过。受控AWDL RX工具11项离线核验通过，Test122/awdl0及149频道目标身份已核对；本轮尚未启动RF，真实AWDL数据接收、ifnet回包和AirDrop未验证。",
-    "evidence": [
-      "Test122加载身份、Wi-Fi On/Ready及手动切网后恢复已核对。",
-      "联网冒烟按用户要求跳过；长时稳定观察和睡眠恢复本轮未覆盖。",
-      "受控RX工具11项离线核验通过，其中10项初轮通过，修正测试路径断言后定向项目通过。",
-      "Test122 metadata/UUID、awdl0与149频道目标身份已核对；本轮没有启动RF。",
-      "离线工具和身份核对不证明真实RX、原生ifnet回包或AirDrop成功。"
-    ],
-    "blockers": [
-      "真实AWDL数据接收、原生ifnet回包和AirDrop尚未实测。",
-      "本轮没有RF诊断；离线工具核验不计入40项功能验收。"
-    ],
-    "next": [
-      "执行绑定Test122的149频道有界接收诊断，确认真实RX是否到达驱动和原生ifnet。",
-      "依据真实接收证据再推进数据回包和双向AirDrop验收。"
-    ]
-  }
+{
+  "id": "record-test122-runtime-boot1793681053",
+  "version": "25G332-Test122",
+  "label": "Test122：149频道接收窗口正常收尾；尚无完整 AWDL Data 帧进入接收观测。",
+  "tone": "warning",
+  "date": "2026-11-03",
+  "state": "Test122本轮：5项通过 · 5项部分通过 · 0项未通过 · 30项未覆盖",
+  "short_summary": "窗口正常收尾；首个缺失层在完整数据帧进入接收观测之前",
+  "summary": "Test122受控149频道接收窗口已完成：START/END均观测并被接受，最终State 7/released。Intel侧见2条Beacon，没有AWDL candidate或完整Data帧；native listener/capture/decode/ifnet均无可关联数据。OpenWrt tap记录4条outgoing，但没有RF TXS/ACK证明。当前断点在完整Data帧到达接收观测之前，filter-match不可用，不能归因于Intel过滤或BSD拒绝。Wi-Fi保持On/Ready，用户手动切网后恢复；联网冒烟按要求跳过。",
+  "evidence": [
+    "受控149频道窗口的START/END均观测并被接受，最终State 7/released；清理正常。",
+    "Intel侧观察到2条Beacon；没有AWDL candidate或完整Data帧，filter-match不可用。",
+    "4次本地发送调用显示完成；OpenWrt tap记录4条outgoing，无RF TXS/ACK证明。",
+    "native listener、capture、decode、ifnet均无可关联数据；不能据此归因驱动过滤或BSD输入拒绝。",
+    "Wi-Fi仍为On/Ready，手动切网后恢复；联网冒烟按用户要求跳过。",
+    "本轮12项离线工具验证通过；这是工具检查，不计入40项实机功能验收。"
+  ],
+  "blockers": [
+    "完整AWDL Data帧尚未进入接收观测；具体缺失原因未定位。",
+    "没有RF TXS/ACK或对端接收证明；原生回包和AirDrop未验证。"
+  ],
+  "next": [
+    "核对同一帧从本地发送到Intel接收观测入口的证据，先确认完整Data帧到达。",
+    "帧到达后再分别检查过滤、解码、原生ifnet交付和对端应答。"
+  ]
+}
 ];
