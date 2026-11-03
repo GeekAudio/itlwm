@@ -53,6 +53,18 @@ T121.REUSED_COORDINATOR.DUAL_PROTOCOL = T121.DUAL_PROTOCOL
 T121.REUSED_COORDINATOR.RUNNER.CANDIDATE = BINDING.CANDIDATE
 
 
+def _bind_test121_profile_router_alias() -> None:
+    """Expose Test104's actual router namespace to the Test121 profile shim."""
+    actual_router = RUNNER.TEST088.ROUTER
+    current = getattr(RUNNER, "ROUTER", actual_router)
+    if current is not actual_router:
+        raise RuntimeError("TEST122_PROFILE_ROUTER_ALIAS_CONFLICT")
+    # Test121's wrapper reads RUNNER.ROUTER; the Test104 runner exposes the
+    # same component as RUNNER.TEST088.ROUTER. Keep this compatibility alias
+    # local to the Test122 process instead of altering a frozen candidate.
+    RUNNER.ROUTER = actual_router
+
+
 def plan() -> dict[str, Any]:
     return {
         "candidate": BINDING.CANDIDATE,
@@ -95,6 +107,7 @@ def plan() -> dict[str, Any]:
 
 def _configure_test122_run() -> None:
     """Reuse the frozen T121 setup, then bind every result path to Test122."""
+    _bind_test121_profile_router_alias()
     T121._configure_test121_run()
     RUNNER.IWN_ROOT = BINDING.IWN_ROOT.resolve(strict=True)
     RUNNER.DEFAULT_METADATA = BINDING.METADATA

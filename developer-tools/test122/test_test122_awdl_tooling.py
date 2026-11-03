@@ -229,6 +229,26 @@ print(json.dumps(result, sort_keys=True))
         self.assertEqual(values["protocol_schema"], BINDING.METADATA_SCHEMA)
         self.assertIs(values["run_dir_is_t122"], True)
 
+    def test_profile_configurator_uses_actual_router_and_restores_three_caps(self):
+        self.require_private_receipts()
+        COORDINATOR._configure_test122_run()
+        runner = COORDINATOR.RUNNER
+        self.assertIs(runner.ROUTER, runner.TEST088.ROUTER)
+        readers = (runner.BASE, runner.TEST088.ROUTER, runner.TEST088)
+        original_limits = tuple(reader.MAX_LINE_BYTES for reader in readers)
+        self.assertEqual(len(original_limits), 3)
+
+        restore = runner.configure_test104_profile()
+        try:
+            expected = COORDINATOR.T121.DUAL_PROTOCOL.MAX_LINE_BYTES
+            self.assertEqual(tuple(reader.MAX_LINE_BYTES for reader in readers),
+                             (expected, expected, expected))
+            self.assertEqual(expected, 128 * 1024)
+        finally:
+            restore()
+        self.assertEqual(tuple(reader.MAX_LINE_BYTES for reader in readers),
+                         original_limits)
+
     def test_sender_reuse_is_bound_to_t121_sources_and_binary(self):
         self.require_private_receipts()
         receipt, raw, sender = BINDING._sender_binding()
