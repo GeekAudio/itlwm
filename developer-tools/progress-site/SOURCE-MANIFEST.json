@@ -20,27 +20,27 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "12fcec4e9982e11461e39e4abab025cfa86f73bf00307ca3ace71cf70102bb3a"
+      "sha256": "0926b1b3af043188c0723930a77784cd55fcf21d321aa1dfb5d67bf445010974"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "08e0879f0c0ba1673e443fdaea65439eec62320785ad43527d5e392a4877be2f"
+      "sha256": "9cd987ffea0610c04f55a9127f50ef29d9f993cb2f38785b285c8374ab2cb28f"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "2448e1db6ff7561d6df894b26c62d36b5c996310c7178b1bc08808a9cf182fa6"
+      "sha256": "1e4538f3295c1f38a19c3ccb3e70dd20966cb06e46a02f427aae45033c297645"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "2448e1db6ff7561d6df894b26c62d36b5c996310c7178b1bc08808a9cf182fa6"
+      "sha256": "1e4538f3295c1f38a19c3ccb3e70dd20966cb06e46a02f427aae45033c297645"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "92cacbb0b294868533c29783a4cdc6bd9464ecd0b7b48ad55ce976642592a9ef"
+      "sha256": "33007460426568f97bb93a7fc3840502ba59a63a54202a766c0448630e471ead"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
@@ -85,11 +85,11 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-03T13:32:31+08:00",
-  "runtime_scope": "Test122 controlled 149-channel receive window completed: START/END accepted and State 7/released; Intel-side observation saw 2 Beacons and no AWDL candidate or complete Data frame; native listener/capture/decode/ifnet correlated data 0. OpenWrt tap saw 4 outgoing packets without RF TXS/ACK proof. Wi-Fi On/Ready and recovered after manual switching; network smoke and sleep recovery skipped per user.",
+  "updated_at": "2026-11-03T14:06:46+08:00",
+  "runtime_scope": "Test122 Intel controlled 149-channel RX still saw 2 Beacons and no complete AWDL Data; native awdl0 RX remains 0. A router-side observation of about 2.042 s total (40 ms send budget plus a separate 2 s status tail) observed 4 outgoing exact packets, 3 OTHERHOST status candidates and 1 radiotap-invalid frame; classification was incomplete. Candidates lack per-packet timestamps and a run token, so attribution to this run is unconfirmed and RF transmission, TXS, ACK or peer receipt are unproven. A short read-only follow-up found en1 On/active with IPv4 and no counter increase; it is not a long stability pass. Network smoke and sleep were skipped per user request.",
   "running_candidate": "25G332-Test122",
   "next_candidate": null,
-  "website_delivery": "Test122 controlled RX result and development timeline updated; current missing layer is before a complete Data frame enters receive observation. 12 offline tool checks passed; no driver or EFI change and no AirDrop success claim.",
+  "website_delivery": "Test122 acceptance display and development timeline refreshed locally. Current matrix remains 5 passed, 5 partial, 0 failed and 30 uncovered; the router-only status candidates are shown with attribution limits. No driver or EFI changes. Ready for coordinator review; not published by this update.",
   "deployment_state": "test122_loaded_runtime_reviewed",
   "site_preparation": "Public-safe current runtime projection; private evidence excluded"
 }
