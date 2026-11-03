@@ -54,13 +54,14 @@ Input::Lease lease() {
 }
 
 bool frame(uint8_t out[256],size_t *length,
-           const uint8_t *wifiSource=peerMac) {
+           const uint8_t *wifiSource=peerMac,uint16_t wifiSequence=0) {
     uint8_t ipv6[40]{};
     ipv6[0]=0x60;ipv6[6]=17;ipv6[7]=1;
     linkLocal(ipv6+8,peerMac);linkLocal(ipv6+24,ownMac);
     NativeAwdlData::EncodeInput input{};
     memcpy(input.sourceAddress,wifiSource,6);
     memcpy(input.destinationAddress,ownMac,6);
+    input.wifiSequenceNumber=wifiSequence;
     input.ipv6Packet=ipv6;input.ipv6Length=sizeof(ipv6);
     return NativeAwdlData::encodeIpv6DataMpdu(
         &input,out,256,length)==NativeAwdlData::Status::Ok;
@@ -131,13 +132,12 @@ void caseWrongInnerPeer(FakeIf &dev) {
     assert(frame(bytes,&length));
     Input::Permit permit{};assert(permitFor(current,bytes,length,&permit));
     // Simulate descriptor-to-buffer source identity mismatch after permit
-    // creation. The queued packet parser must reject it before DLIL.
+    // creation. The bridge must reject it before the bounded queue.
     memcpy(bytes+10,otherMac,6);
     assert(captureDirectedDataRx(bytes,length,false,current,permit,52)==
-           CaptureResult::Captured);
+           CaptureResult::Rejected);
+    assert(snapshot().value[DirectedRxPending]==0);
     poll(true,52,&current);
-    const auto receipt=snapshot().directedDataRxInput;
-    assert(receipt.disposition==DirectedDataRxReceiptAddressRejected);
     assert(snapshot().value[DirectedRxDelivered]==0&&delivered==0);
     assert(close());assertBalanced(dev);
 }
@@ -245,6 +245,106 @@ void caseLegacyPollRevokesStaleDirectedWindow(FakeIf &dev) {
     assert(delivered==0&&snapshot().value[DirectedRxDelivered]==0);
     assert(close());assertBalanced(dev);
 }
+
+void caseRetryDomain(FakeIf &dev) {
+    prepare(dev);
+    auto current=lease();assert(publishDirectedDataRxInputLease(current));
+    uint8_t bytes[256]{};size_t length=0;assert(frame(bytes,&length,peerMac,0x5a3));
+    Input::Permit permit{};assert(permitFor(current,bytes,length,&permit));
+    assert(captureDirectedDataRx(bytes,length,false,current,permit,52)==
+           CaptureResult::Captured);
+    assert(snapshot().value[DirectedRxPending]==1);
+
+    // Only an exact same-owner copy may suppress a same-flow Retry. The full
+    // sequence-control field, rather than just its high 12-bit number, keys
+    // the separate directed-data Retry domain.
+    uint8_t retry[256]{};memcpy(retry,bytes,length);retry[1]|=0x08;
+    Input::Permit retryPermit{};
+    assert(permitFor(current,retry,length,&retryPermit));
+    assert(captureDirectedDataRx(retry,length,false,current,retryPermit,52)==
+           CaptureResult::Duplicate);
+    assert(snapshot().value[DirectedRxPending]==1);
+
+    // A different fragment component is not the same full Sequence Control
+    // identity. Decoder policy currently rejects non-zero fragments before
+    // the Retry ledger, preserving the ordinary STA fallback.
+    retry[22]|=0x01;
+    Input::Permit fragmentPermit{};
+    assert(permitFor(current,retry,length,&fragmentPermit));
+    assert(captureDirectedDataRx(retry,length,false,current,fragmentPermit,52)==
+           CaptureResult::Rejected);
+    assert(snapshot().value[DirectedRxPending]==1);
+    assert(close());assertBalanced(dev);
+}
+
+void caseQueueFullDoesNotCommitRetry(FakeIf &dev) {
+    prepare(dev);
+    auto current=lease();assert(publishDirectedDataRxInputLease(current));
+    uint8_t bytes[256]{};size_t length=0;
+    unsigned accepted=0;
+    for(uint16_t sequence=0;sequence<128;++sequence) {
+        assert(frame(bytes,&length,peerMac,sequence));
+        Input::Permit permit{};assert(permitFor(current,bytes,length,&permit));
+        const auto result=captureDirectedDataRx(bytes,length,false,current,permit,52);
+        if(result==CaptureResult::QueueFull)break;
+        assert(result==CaptureResult::Captured);
+        ++accepted;
+    }
+    assert(accepted>0&&snapshot().value[DirectedRxPending]==accepted);
+
+    const uint16_t targetSequence=0x6d2;
+    assert(frame(bytes,&length,peerMac,targetSequence));
+    bytes[1]|=0x08; // Retry is not committed until this packet is copied.
+    Input::Permit targetPermit{};
+    assert(permitFor(current,bytes,length,&targetPermit));
+    assert(captureDirectedDataRx(bytes,length,false,current,targetPermit,52)==
+           CaptureResult::QueueFull);
+    assert(snapshot().value[DirectedRxPending]==accepted);
+
+    poll(true,52,&current);
+    assert(snapshot().value[DirectedRxPending]==0);
+    assert(frame(bytes,&length,peerMac,targetSequence));
+    bytes[1]|=0x08;
+    Input::Permit retryPermit{};assert(permitFor(current,bytes,length,&retryPermit));
+    assert(captureDirectedDataRx(bytes,length,false,current,retryPermit,52)==
+           CaptureResult::Captured);
+    assert(snapshot().value[DirectedRxPending]==1);
+    assert(close());assertBalanced(dev);
+}
+
+void caseRetryDomainOwnerAndIfnetIncarnation(FakeIf &dev) {
+    prepare(dev);
+    auto current=lease();assert(publishDirectedDataRxInputLease(current));
+    uint8_t bytes[256]{};size_t length=0;
+    assert(frame(bytes,&length,peerMac,0x2ab));bytes[1]|=0x08;
+    Input::Permit permit{};assert(permitFor(current,bytes,length,&permit));
+    assert(captureDirectedDataRx(bytes,length,false,current,permit,52)==
+           CaptureResult::Captured);
+
+#if defined(ITL_NATIVE_AWDL_RX149_TEST_HOOKS)
+    // A fresh interface incarnation is a new Retry namespace even if all
+    // visible 802.11 identities are reused.
+    advanceRx149InterfaceIncarnationForTests();
+    Input::Permit incarnationPermit{};
+    assert(permitFor(current,bytes,length,&incarnationPermit));
+    assert(captureDirectedDataRx(bytes,length,false,current,
+        incarnationPermit,52)==CaptureResult::Captured);
+#endif
+
+    Input::Lease next=current;
+    next.ownerSerial=current.ownerSerial+1;
+    next.epochs.context+=1;
+    next.epochs.roc+=1;
+    next.startUs=fakeTime;
+    next.deadlineUs=next.startUs+Input::kSessionWindowUs;
+    next.nowUs=fakeTime;
+    assert(publishDirectedDataRxInputLease(next));
+    Input::Permit nextPermit{};assert(permitFor(next,bytes,length,&nextPermit));
+    assert(captureDirectedDataRx(bytes,length,false,next,nextPermit,52)==
+           CaptureResult::Captured);
+    assert(snapshot().value[DirectedRxPending]==1);
+    assert(close());assertBalanced(dev);
+}
 }
 
 int main(int argc,char **argv) {
@@ -258,6 +358,9 @@ int main(int argc,char **argv) {
         case 6:caseCloseWaitsForInputTicket(dev);break;
         case 7:caseLegacyPollPreservesDirectedWindow(dev);break;
         case 8:caseLegacyPollRevokesStaleDirectedWindow(dev);break;
+        case 9:caseRetryDomain(dev);break;
+        case 10:caseQueueFullDoesNotCommitRetry(dev);break;
+        case 11:caseRetryDomainOwnerAndIfnetIncarnation(dev);break;
         default:assert(false);break;
     }
     return 0;

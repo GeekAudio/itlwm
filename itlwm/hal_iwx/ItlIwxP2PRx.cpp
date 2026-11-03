@@ -1090,12 +1090,14 @@ bool ItlIwx::tahoeP2pRx149DataLease(
     return false;
 }
 
-// Split a strictly authorized RX149 AWDL data MPDU before the shared STA
-// duplicate/reorder state can discard or delay it. The bridge copies the
-// complete MPDU into its bounded permit-carrying queue; only a successful
-// queue copy or an owner-scoped duplicate Retry transfers this packet out of
-// the ordinary STA path. Every other result falls through, while the permit
-// remains fail-closed for stale/unknown owners, protected frames, and A-MSDU.
+// Split a strictly authorized AWDL data MPDU before the shared STA
+// duplicate/reorder state can discard or delay it. Mode 2 uses the channel-149
+// observation lease; mode 4 uses its independent channel-6 directed lease.
+// The bridge copies the complete MPDU into its bounded permit-carrying queue;
+// only a successful queue copy or an owner-scoped duplicate Retry transfers
+// the packet out of the ordinary STA path. Every other result falls through,
+// while the existing permit checks remain fail-closed for stale/unknown
+// owners, protected frames, and A-MSDU.
 NativeP2PRx149DataInput::EarlyRoute
 ItlIwx::tahoeP2pCaptureAwdlDataBeforeStaDedup(
     struct iwx_softc *sc, const uint8_t *frame, size_t length,
@@ -1116,6 +1118,53 @@ ItlIwx::tahoeP2pCaptureAwdlDataBeforeStaDedup(
             NativeAwdlData::Status::Ok || decoded.amsdu ||
         decoded.packetCount != 1)
         return NativeP2PRx149DataInput::EarlyRoute::PassToSta;
+
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    const uint32_t armMode = __atomic_load_n(
+        &nativeP2pManualArmRequested_, __ATOMIC_ACQUIRE);
+    if (armMode == NativeP2PDirectedDataRxInput::kOwnerArmMode) {
+        NativeP2PDirectedDataRxInput::Lease inputLease{};
+        if (!tahoeP2pDirectedDataRxLease(&inputLease))
+            return NativeP2PRx149DataInput::EarlyRoute::PassToSta;
+
+        NativeP2PDirectedDataRxInput::Descriptor descriptor{};
+        descriptor.channelPresent = true;
+        descriptor.ieeeChannel = ieee80211_chan2ieee(
+            &sc->sc_ic, &sc->sc_ic.ic_channels[channelIndex]);
+        descriptor.macPhyIndexPresent = true;
+        descriptor.macPhyIndex = static_cast<uint8_t>(macPhyIndex);
+        descriptor.decodeModePresent = true;
+        descriptor.decodeMode = isset(sc->sc_ucode_api,
+            IWX_UCODE_TLV_API_BAND_IN_RX_DATA) ?
+            NativeP2PDirectedDataRxInput::kMacPhyDecodeBandInRx :
+            NativeP2PDirectedDataRxInput::kMacPhyDecodeLegacy;
+        descriptor.protectedFrame = originalData->protectedFrame ||
+            (frame[1] & IEEE80211_FC1_PROTECTED) != 0;
+        descriptor.awdlDataCandidate = true;
+        descriptor.originalDescriptorPresent = originalData->present;
+        descriptor.hardwareDeaggregated =
+            originalData->hardwareDeaggregated;
+        descriptor.originalRawStatus = originalData->rawStatus;
+        descriptor.sourceMacPresent = length >= 16;
+        if (descriptor.sourceMacPresent)
+            memcpy(descriptor.sourceMac, frame + 10,
+                   sizeof(descriptor.sourceMac));
+
+        NativeP2PDirectedDataRxInput::Permit permit{};
+        if (!NativeP2PDirectedDataRxInput::makePermit(
+                inputLease, descriptor, &permit))
+            return NativeP2PRx149DataInput::EarlyRoute::PassToSta;
+
+        const auto result = NativeAwdlBSD::captureDirectedDataRx(
+            frame, length, descriptor.protectedFrame, inputLease, permit,
+            uint32_t(sc->sc_generation));
+        if (result == NativeAwdlBSD::CaptureResult::Captured)
+            return NativeP2PRx149DataInput::EarlyRoute::QueuedForNative;
+        if (result == NativeAwdlBSD::CaptureResult::Duplicate)
+            return NativeP2PRx149DataInput::EarlyRoute::DuplicateRetry;
+        return NativeP2PRx149DataInput::EarlyRoute::PassToSta;
+    }
+#endif
 
     NativeP2PRx149DataInput::Lease inputLease{};
     if (!tahoeP2pRx149DataLease(&inputLease))

@@ -93,6 +93,22 @@ struct Rx149RetryEntry {
 Rx149RetryEntry rx149RetryWindow[Rx149RetryWindowCapacity]{};
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
 Ring<DirectedRx,QueueDepth> directedRx;
+// Mode 4 has a separate Retry domain from both STA and RX149 mode 2. These
+// slots are protected by `lock` and become live only after a DirectedRx item
+// was copied into the queue for the same owner and ifnet incarnation.
+constexpr size_t DirectedRxRetryWindowCapacity = 32;
+struct DirectedRxRetryEntry {
+    bool valid=false;
+    uint8_t source[6]{};
+    uint8_t destination[6]{};
+    uint8_t tid=0;
+    uint16_t sequenceControl=0;
+    uint64_t ownerSerial=0;
+    uint64_t startUs=0;
+    uint64_t interfaceIncarnation=0;
+    NativeP2PDirectedDataRxInput::Epochs epochs{};
+};
+DirectedRxRetryEntry directedRxRetryWindow[DirectedRxRetryWindowCapacity]{};
 #endif
 ifnet_t interface;
 interface_filter_t filter;
@@ -367,6 +383,59 @@ bool sameDirectedRxPermitIdentity(
         memcmp(lease.peerMac,permit.peerMac,sizeof(permit.peerMac))==0&&
         memcmp(lease.localMac,permit.localMac,sizeof(permit.localMac))==0;
 }
+void clearDirectedRxRetryWindowLocked() {
+    memset(directedRxRetryWindow,0,sizeof(directedRxRetryWindow));
+}
+bool sameDirectedRxRetryOwner(const DirectedRxRetryEntry &entry,
+    const NativeP2PDirectedDataRxInput::Permit &permit,
+    uint64_t incarnation) {
+    return entry.valid&&entry.ownerSerial==permit.ownerSerial&&
+        entry.startUs==permit.startUs&&
+        entry.interfaceIncarnation==incarnation&&
+        NativeP2PDirectedDataRxInput::sameEpochs(entry.epochs,permit.epochs);
+}
+int findDirectedRxRetrySlotLocked(
+    const NativeP2PDirectedDataRxInput::Permit &permit,uint64_t incarnation,
+    const uint8_t source[6],const uint8_t destination[6],uint8_t tid,
+    uint16_t sequenceControl,bool retry,bool *duplicate) {
+    if(duplicate)*duplicate=false;
+    int freeOrStale=-1;
+    for(size_t index=0;index<DirectedRxRetryWindowCapacity;++index) {
+        const auto &entry=directedRxRetryWindow[index];
+        if(!entry.valid) {
+            if(freeOrStale<0)freeOrStale=int(index);
+            continue;
+        }
+        if(!sameDirectedRxRetryOwner(entry,permit,incarnation)) {
+            if(freeOrStale<0)freeOrStale=int(index);
+            continue;
+        }
+        if(entry.tid==tid&&memcmp(entry.source,source,6)==0&&
+           memcmp(entry.destination,destination,6)==0) {
+            if(retry&&entry.sequenceControl==sequenceControl&&duplicate)
+                *duplicate=true;
+            return int(index);
+        }
+    }
+    return freeOrStale;
+}
+void commitDirectedRxRetrySlotLocked(size_t slot,
+    const NativeP2PDirectedDataRxInput::Permit &permit,uint64_t incarnation,
+    const uint8_t source[6],const uint8_t destination[6],uint8_t tid,
+    uint16_t sequenceControl) {
+    if(slot>=DirectedRxRetryWindowCapacity)return;
+    auto &entry=directedRxRetryWindow[slot];
+    entry=DirectedRxRetryEntry{};
+    entry.valid=true;
+    memcpy(entry.source,source,sizeof(entry.source));
+    memcpy(entry.destination,destination,sizeof(entry.destination));
+    entry.tid=tid;
+    entry.sequenceControl=sequenceControl;
+    entry.ownerSerial=permit.ownerSerial;
+    entry.startUs=permit.startUs;
+    entry.interfaceIncarnation=incarnation;
+    entry.epochs=permit.epochs;
+}
 size_t removeDirectedRxItemsLocked(bool all,uint64_t version,
     uint64_t ownerSerial,const NativeP2PDirectedDataRxInput::Epochs *epochs,
     uint64_t nowUsValue) {
@@ -423,6 +492,7 @@ bool activateDirectedRxLeaseLocked(
                                                          nowUsValue);
         else
             (void)removeDirectedRxItemsLocked(true,0,0,nullptr,nowUsValue);
+        clearDirectedRxRetryWindowLocked();
         activeDirectedRxLease=lease;
         activeDirectedRxLeaseValid=true;
         directedRxOwnerSerialHighWater=lease.ownerSerial;
@@ -445,6 +515,7 @@ size_t revokeDirectedRxLeaseLocked(
         if(activeDirectedRxLease.ownerSerial==ownerSerial) {
             activeDirectedRxLeaseValid=false;
             activeDirectedRxLease=NativeP2PDirectedDataRxInput::Lease{};
+            clearDirectedRxRetryWindowLocked();
             if(ownerSerial>directedRxOwnerSerialHighWater)
                 directedRxOwnerSerialHighWater=ownerSerial;
             if(activeDirectedRxVersion==UINT64_MAX)
@@ -456,6 +527,7 @@ size_t revokeDirectedRxLeaseLocked(
         (void)removeDirectedRxItemsLocked(true,0,0,nullptr,nowUsValue);
         activeDirectedRxLeaseValid=false;
         activeDirectedRxLease=NativeP2PDirectedDataRxInput::Lease{};
+        clearDirectedRxRetryWindowLocked();
     }
     if(ownerSerial<=directedRxOwnerSerialHighWater)return 0;
     directedRxOwnerSerialHighWater=ownerSerial;
@@ -1038,6 +1110,7 @@ void detachedCallback(void *,ifnet_t) {
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
     activeDirectedRxLeaseValid=false;
     activeDirectedRxLease=NativeP2PDirectedDataRxInput::Lease{};
+    clearDirectedRxRetryWindowLocked();
     if(activeDirectedRxVersion!=UINT64_MAX)++activeDirectedRxVersion;
     (void)removeDirectedRxItemsLocked(true,0,0,nullptr,nowUs());
 #endif
@@ -1111,6 +1184,9 @@ bool attach(ifnet_t dev,const uint8_t mac[6]) {
         interface=dev;
         ++interfaceIncarnation;
         clearRx149RetryWindowLocked();
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+        clearDirectedRxRetryWindowLocked();
+#endif
     }
     IOSimpleLockUnlockEnableInterrupt(lock,irq);
     attachTrace.recordCanAttach(canAttach);
@@ -1938,6 +2014,22 @@ CaptureResult captureDirectedDataRx(
         add(DirectedRxRejected);
         return CaptureResult::Rejected;
     }
+    NativeAwdlData::DecodedFrame retryDecoded{};
+    if(length<24||
+       NativeAwdlData::decodeIpv6DataMpdu(
+           bytes,length,&retryDecoded)!=NativeAwdlData::Status::Ok||
+       retryDecoded.amsdu||retryDecoded.packetCount!=1||
+       (retryDecoded.destinationAddress[0]&1u)!=0||
+       memcmp(retryDecoded.sourceAddress,permit.peerMac,6)!=0||
+       memcmp(retryDecoded.destinationAddress,permit.localMac,6)!=0) {
+        add(DirectedRxRejected);
+        return CaptureResult::Rejected;
+    }
+    const uint8_t retryTid=retryDecoded.qosData?
+        uint8_t(retryDecoded.qosControl&0x0fu):uint8_t(16);
+    const uint16_t retrySequenceControl=uint16_t(bytes[22])|
+        (uint16_t(bytes[23])<<8);
+    const bool retryBit=(bytes[1]&0x08u)!=0;
     if(!bridgeLock()) {
         add(DirectedRxRejected);
         return CaptureResult::Rejected;
@@ -1992,48 +2084,73 @@ CaptureResult captureDirectedDataRx(
     const bool queueSpace=directedRx.count<QueueDepth;
     const bool queueDeadlineAvailable=captureNow<=UINT64_MAX-
         NativeP2PDirectedDataRxInput::kMaximumQueuedAgeUs;
-    accepted=authorityCurrent&&interfaceCurrent&&sequenceAvailable&&
-        revisionAvailable&&queueSpace&&queueDeadlineAvailable;
+    const bool captureAuthority=authorityCurrent&&interfaceCurrent&&
+        sequenceAvailable&&revisionAvailable&&queueDeadlineAvailable;
+    int retrySlot=-1;
+    bool retryDuplicate=false;
+    bool retryWindowFull=false;
+    if(captureAuthority) {
+        retrySlot=findDirectedRxRetrySlotLocked(
+            permit,interfaceIncarnation,retryDecoded.sourceAddress,
+            retryDecoded.destinationAddress,retryTid,retrySequenceControl,
+            retryBit,&retryDuplicate);
+        retryWindowFull=retrySlot<0;
+    }
+    accepted=captureAuthority&&!retryDuplicate&&!retryWindowFull&&queueSpace;
     if(accepted) {
         item.interfaceIncarnation=interfaceIncarnation;
         item.guardVersion=activeDirectedRxVersion;
-        item.receiptSequence=++directedRxReceiptSequence;
+        item.receiptSequence=directedRxReceiptSequence+1;
         item.permit.capturedUs=captureNow;
         item.permit.deadlineUs=captureNow+
             NativeP2PDirectedDataRxInput::kMaximumQueuedAgeUs;
         if(item.permit.deadlineUs>lease.deadlineUs)
             item.permit.deadlineUs=lease.deadlineUs;
-        directedRxReceipt=DirectedDataRxInputReceipt{};
-        directedRxReceipt.disposition=DirectedDataRxReceiptCaptured;
-        directedRxReceipt.sequence=item.receiptSequence;
-        directedRxReceipt.contentRevision=++directedRxReceiptContentRevision;
-        directedRxReceipt.ownerSerial=lease.ownerSerial;
-        directedRxReceipt.interfaceIncarnation=interfaceIncarnation;
-        directedRxReceipt.contextGeneration=lease.epochs.context;
-        directedRxReceipt.powerGeneration=lease.epochs.power;
-        directedRxReceipt.stationGeneration=lease.epochs.station;
-        directedRxReceipt.rocGeneration=lease.epochs.roc;
-        directedRxReceipt.captureUs=captureNow;
-        directedRxReceipt.startUs=lease.startUs;
-        directedRxReceipt.deadlineUs=item.permit.deadlineUs;
-        directedRxReceipt.ieeeChannel=NativeP2PDirectedDataRxInput::kIeeeChannel;
-        directedRxReceipt.macIndexPresent=1;
-        directedRxReceipt.macIndex=permit.macIndex;
-        directedRxReceipt.macPhyDecodeMode=permit.decodeMode;
-        directedRxReceipt.originalRxStatus=permit.originalRawStatus;
-        directedRxReceipt.mpduLength=uint32_t(length);
-        directedRxReceipt.ifnetInputResultPresent=0;
-        queueFull=false;
-        (void)directedRx.push(item);
+        accepted=directedRx.push(item);
+        if(accepted) {
+            directedRxReceiptSequence=item.receiptSequence;
+            directedRxReceipt=DirectedDataRxInputReceipt{};
+            directedRxReceipt.disposition=DirectedDataRxReceiptCaptured;
+            directedRxReceipt.sequence=item.receiptSequence;
+            directedRxReceipt.contentRevision=++directedRxReceiptContentRevision;
+            directedRxReceipt.ownerSerial=lease.ownerSerial;
+            directedRxReceipt.interfaceIncarnation=interfaceIncarnation;
+            directedRxReceipt.contextGeneration=lease.epochs.context;
+            directedRxReceipt.powerGeneration=lease.epochs.power;
+            directedRxReceipt.stationGeneration=lease.epochs.station;
+            directedRxReceipt.rocGeneration=lease.epochs.roc;
+            directedRxReceipt.captureUs=captureNow;
+            directedRxReceipt.startUs=lease.startUs;
+            directedRxReceipt.deadlineUs=item.permit.deadlineUs;
+            directedRxReceipt.ieeeChannel=NativeP2PDirectedDataRxInput::kIeeeChannel;
+            directedRxReceipt.macIndexPresent=1;
+            directedRxReceipt.macIndex=permit.macIndex;
+            directedRxReceipt.macPhyDecodeMode=permit.decodeMode;
+            directedRxReceipt.originalRxStatus=permit.originalRawStatus;
+            directedRxReceipt.mpduLength=uint32_t(length);
+            directedRxReceipt.ifnetInputResultPresent=0;
+            commitDirectedRxRetrySlotLocked(
+                size_t(retrySlot),permit,interfaceIncarnation,
+                retryDecoded.sourceAddress,retryDecoded.destinationAddress,
+                retryTid,retrySequenceControl);
+        } else {
+            // A ring push failure must never leave a retry key for a packet
+            // that was not copied into the bounded queue.
+            queueFull=true;
+        }
     } else {
-        queueFull=authorityCurrent&&interfaceCurrent&&sequenceAvailable&&
-            revisionAvailable&&queueDeadlineAvailable&&!queueSpace;
+        queueFull=captureAuthority&&!retryDuplicate&&!retryWindowFull&&
+            !queueSpace;
         if(!sequenceAvailable||!revisionAvailable)
             directedRxReceipt.schemaVersion=0;
     }
     set(DirectedRxPending,directedRx.count);
     IOSimpleLockUnlockEnableInterrupt(lock,irq);
     for(size_t index=0;index<expired;++index)add(DirectedRxRejected);
+    if(retryDuplicate) {
+        add(DirectedRxRejected);
+        return CaptureResult::Duplicate;
+    }
     if(accepted) {
         add(DirectedRxCaptured);
         return CaptureResult::Captured;
@@ -2729,6 +2846,7 @@ bool close() {
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
             directedRx.head=directedRx.tail=directedRx.count=0;
             memset(directedRx.values,0,sizeof(directedRx.values));
+            clearDirectedRxRetryWindowLocked();
             set(DirectedRxPending,0);
 #endif
         }
@@ -2754,6 +2872,7 @@ void publishClosing() {
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
     activeDirectedRxLeaseValid=false;
     activeDirectedRxLease=NativeP2PDirectedDataRxInput::Lease{};
+    clearDirectedRxRetryWindowLocked();
     if(activeDirectedRxVersion!=UINT64_MAX)++activeDirectedRxVersion;
     (void)removeDirectedRxItemsLocked(true,0,0,nullptr,nowUs());
 #endif
