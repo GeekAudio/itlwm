@@ -25,22 +25,22 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "937566093463815ca4c39f381c34d6581fff7b859f1fe874cb54f844fb9f2a53"
+      "sha256": "dc90915e071b6bb258b417c69e10160d1895ae8b08ace36d71bfd20d48d500a8"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "0257b933d8460e97fa8565d33e40337a4b04c079783d6251a81235e6ceba2450"
+      "sha256": "564075c706810680c9c7ce997ad64f9e76d8e03198ab46b01ca5d88c738f24e3"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "0257b933d8460e97fa8565d33e40337a4b04c079783d6251a81235e6ceba2450"
+      "sha256": "564075c706810680c9c7ce997ad64f9e76d8e03198ab46b01ca5d88c738f24e3"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "eb0502389d549344012f4dd5941fc4b1956b69993f805879c0df08a33c4b5f29"
+      "sha256": "508494280deec174538ce81ba4d8663769dc6481c95fc4937bbd69a460c5b17a"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
@@ -85,11 +85,11 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-03T14:54:52+08:00",
-  "runtime_scope": "Test122 router-only v2: four host-side status samples match the frame nonce marker, full Sequence Control and AWDL sequence. TX_FLAGS=1 is interpreted by Linux 6.1.111 mac80211 as unicast with host info lacking TX_STAT_ACK; this is not per-frame hardware TXS. DataRetries=0 does not prove zero RF retries. Per-packet times are userspace recvmsg returns; actual mt76 vendor path is unmatched to that source. No RF or same-window Intel RX proof. The prior Intel one-shot RX window remains separate. Offline suite 39/39 passed; firmware review bundle hashes passed, C1-to-host-RX/DMA/IRQ unresolved. Network smoke and sleep skipped; no driver/EFI write or new feature acceptance.",
+  "updated_at": "2026-11-03T15:53:39+08:00",
+  "runtime_scope": "Test123工具升级，运行内核仍为25G332-Test122。发送器与监听器已离线编译，协调器整合复核中；协议使用4帧/40ms发送预算、独立2秒被动尾窗和固定100ms Intel接收lease，按同nonce、完整Sequence Control与AWDL序号关联。工具尚未实机运行；原生AWDL RX与AirDrop未证明。Test122的40项验收保持通过5、部分5、未通过0、未覆盖30。",
   "running_candidate": "25G332-Test122",
   "next_candidate": null,
-  "website_delivery": "Test122 current-runtime record and project timeline updated with the correlated router-only v2 evidence and independent status-semantics review. Next gate prioritizes a new legal Intel owner/lease RX opportunity with the same v2 frame identity; status-source investigation runs in parallel. Acceptance remains 5 passed, 5 partial, 0 failed, 30 uncovered. Local generation, privacy and hash checks only; no commit or publication.",
+  "website_delivery": "Test123工具整合状态已更新到本地静态站；Test122内核身份和40项验收结果保持不变。仅本地生成并更新源码哈希清单；未提交、未推送、未发布。",
   "deployment_state": "test122_running",
-  "site_preparation": "Public-safe current runtime projection; private evidence excluded; local refresh only"
+  "site_preparation": "Public-safe current runtime projection; Test123 tooling status only; private evidence excluded; local refresh only"
 }
