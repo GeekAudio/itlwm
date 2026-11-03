@@ -25,22 +25,22 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "dc90915e071b6bb258b417c69e10160d1895ae8b08ace36d71bfd20d48d500a8"
+      "sha256": "73e640ca156539ed045c42ceff0d9ac949fe87c04fb14d0da6b1639365359ffa"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "564075c706810680c9c7ce997ad64f9e76d8e03198ab46b01ca5d88c738f24e3"
+      "sha256": "380653c199dd31bdc657ba9ef6ad601ed317a8e314ca9e212c0a295a36f6c73a"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "564075c706810680c9c7ce997ad64f9e76d8e03198ab46b01ca5d88c738f24e3"
+      "sha256": "380653c199dd31bdc657ba9ef6ad601ed317a8e314ca9e212c0a295a36f6c73a"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "508494280deec174538ce81ba4d8663769dc6481c95fc4937bbd69a460c5b17a"
+      "sha256": "e07fcf9befdc8ae9879f64c3719cf8d602d6806fb0913d62e1553afcf871bd9b"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
@@ -85,11 +85,11 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-03T15:53:39+08:00",
-  "runtime_scope": "Test123工具升级，运行内核仍为25G332-Test122。发送器与监听器已离线编译，协调器整合复核中；协议使用4帧/40ms发送预算、独立2秒被动尾窗和固定100ms Intel接收lease，按同nonce、完整Sequence Control与AWDL序号关联。工具尚未实机运行；原生AWDL RX与AirDrop未证明。Test122的40项验收保持通过5、部分5、未通过0、未覆盖30。",
+  "updated_at": "2026-11-03T16:50:00+08:00",
+  "runtime_scope": "Test123仅升级观测工具，运行内核仍为25G332-Test122，EFI未改。59项主离线测试通过；T104 sender预检用例及6个独立边界分支通过（不并入主套件数字），发送器/监听器独立重建后产物一致；固件会话最终复核通过、无剩余阻断。新工具尚未实机运行；40项验收保持通过5、部分5、未通过0、未覆盖30；联网冒烟与睡眠恢复跳过。",
   "running_candidate": "25G332-Test122",
   "next_candidate": null,
-  "website_delivery": "Test123工具整合状态已更新到本地静态站；Test122内核身份和40项验收结果保持不变。仅本地生成并更新源码哈希清单；未提交、未推送、未发布。",
+  "website_delivery": "Test123最终固件复核已完成，页面已准备记录下一次新启动的有界同窗采集；运行内核Test122及40项验收不变。仅本地生成并更新源码哈希清单；未提交、未推送、未发布。",
   "deployment_state": "test122_running",
-  "site_preparation": "Public-safe current runtime projection; Test123 tooling status only; private evidence excluded; local refresh only"
+  "site_preparation": "Public-safe current runtime projection; Test123 final firmware review passed; next bounded correlated capture awaits fresh boot; kernel Test122 unchanged; local refresh only; no EFI write or publish"
 }
