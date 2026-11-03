@@ -20,27 +20,27 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "d96e1090703fe1b6870b3bf97bf5bdf8b5e52f75140fe612dde46680b8fe7c4a"
+      "sha256": "4419f3c6371ef5d257997a430708166b5606d521dcdfcc5e3f23e666ba32bc89"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "69fe4261821024c0a3c65fa541964f98d77a0b4bb0c341681379148ce8b8c17b"
+      "sha256": "2e53b627ce05917960f738f57538639a4ea4d9b1b6014235e596f1e6a3055244"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "22125a3c1db2fda74c976a806873a25386f320f928e47323502c2b3aa04cf4ea"
+      "sha256": "cbcaab118530f841adcfe280a9f61eef018578c37d864eb6eb241492506b27f0"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "22125a3c1db2fda74c976a806873a25386f320f928e47323502c2b3aa04cf4ea"
+      "sha256": "cbcaab118530f841adcfe280a9f61eef018578c37d864eb6eb241492506b27f0"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "ede6154e14bc8769b5a7e9e8308a083cc254bed809ae4e5bbdcd06158a035006"
+      "sha256": "a89524f49a817c790ec0f5432b8c73f2deb929bb13e6b61b0b7f09b143f963e8"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
@@ -85,11 +85,11 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-03T12:28:59.864738+08:00",
-  "runtime_scope": "Test121 loaded, Wi-Fi startup/address restart failed; Test122 deployed awaiting reboot; AWDL not tested this boot",
-  "running_candidate": "25G332-Test120",
-  "next_candidate": "25G332-Test121",
-  "website_delivery": "Current-development redesign; runtime evidence unchanged",
-  "deployment_state": "test121_deployed_waiting_manual_reboot",
+  "updated_at": "2026-11-03T13:16:28+08:00",
+  "runtime_scope": "Test122 Wi-Fi on/ready and recovered after manual switching; network smoke skipped per user; 11 offline RX-tool checks passed and Test122/AWDL/router149 target identity matched; no RF or real AWDL data receive tested",
+  "running_candidate": "25G332-Test122",
+  "next_candidate": null,
+  "website_delivery": "Test122 runtime and offline RX-tool readiness reflected; controlled RF receive and native data path pending; no AirDrop success claim",
+  "deployment_state": "test122_loaded_runtime_reviewed",
   "site_preparation": "Public-safe current runtime projection; private evidence excluded"
 }
