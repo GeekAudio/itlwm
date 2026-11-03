@@ -34,17 +34,21 @@
 #define STATUS_TAIL_MS 2000U
 #define GO_TIMEOUT_MS 30000U
 #define IFNAME_MAX 15U
-#define NONCE_HEX_LEN 32U
+#define RUN_TOKEN_HEX_LEN 32U
+#define WIRE_NONCE_LEN 8U
+#define WIRE_NONCE_HEX_LEN 16U
 #define RTAP_LEN 10U
 #define MPDU_LEN 96U
 #define PACKET_LEN (RTAP_LEN + MPDU_LEN)
-#define HEADER_LEN 104U
+#define HEADER_LEN 112U
 #define PACKET_SET_LEN (HEADER_LEN + FRAME_COUNT * PACKET_LEN)
 #define RAW_CAPTURE_BYTES 4096U
 #define RAW_CAPTURE_READ_LIMIT 4096U
 #define EXACT_SAMPLE_LIMIT 16U
 #define STATUS_SAMPLE_LIMIT 8U
+#define NONMATCH_SAMPLE_LIMIT 8U
 #define STATUS_RAW_BYTES 256U
+#define NONMATCH_RAW_BYTES 256U
 #define STALE_QUEUE_READ_LIMIT 256U
 #define GO_TO_START_MAX_NS UINT64_C(5000000)
 #define EXIT_ARGUMENT 2
@@ -52,7 +56,7 @@
 #define EXIT_INTERFACE 4
 #define EXIT_SEND 5
 
-static const uint8_t magic[8] = {'T','1','0','4','P','K','T','1'};
+static const uint8_t magic[8] = {'T','1','2','2','P','K','T','2'};
 static const uint8_t rtap_noack_clear[RTAP_LEN] = {
     0x00,0x00,0x0a,0x00,0x00,0x80,0x00,0x00,0x10,0x00
 };
@@ -77,16 +81,20 @@ struct packet_set {
     uint8_t bytes[PACKET_SET_LEN];
     uint8_t source_mac[6], target_mac[6];
     struct in6_addr source_ip, target_ip;
+    uint16_t wifi_sequence_base, awdl_sequence_base;
+    uint8_t wire_nonce[WIRE_NONCE_LEN];
 };
 struct send_sample {
     unsigned ordinal;
     unsigned ieee80211_sequence;
+    unsigned ieee80211_sequence_control;
     unsigned awdl_sequence;
     uint64_t before_ns, after_ns;
     long long return_bytes;
     int error;
 };
 struct rx_sample {
+    uint64_t observed_ns;
     bool packet_type_present;
     bool ifindex_present;
     unsigned packet_type;
@@ -104,9 +112,11 @@ struct rx_sample {
     bool has_data_retries;
     uint8_t data_retries;
     unsigned ieee80211_sequence;
+    unsigned ieee80211_sequence_control;
     unsigned awdl_sequence;
 };
 struct status_sample {
+    uint64_t observed_ns;
     unsigned ordinal;
     unsigned packet_type;
     unsigned ifindex;
@@ -120,8 +130,23 @@ struct status_sample {
     bool has_data_retries;
     uint8_t data_retries;
     unsigned ieee80211_sequence;
+    unsigned ieee80211_sequence_control;
     unsigned awdl_sequence;
     uint8_t raw[STATUS_RAW_BYTES];
+};
+struct nonmatch_sample {
+    uint64_t observed_ns;
+    const char *parse_status;
+    bool packet_type_present;
+    bool ifindex_present;
+    unsigned packet_type;
+    unsigned ifindex;
+    unsigned msg_flags;
+    size_t received_len;
+    size_t copied_len;
+    size_t raw_len;
+    bool raw_prefix_truncated;
+    uint8_t raw[NONMATCH_RAW_BYTES];
 };
 struct rx_observation {
     uint64_t started_ns;
@@ -152,6 +177,9 @@ struct rx_observation {
     unsigned status_samples_overflow;
     unsigned status_identity_unavailable;
     struct status_sample status_samples[STATUS_SAMPLE_LIMIT];
+    unsigned nonmatch_samples_recorded;
+    unsigned nonmatch_samples_overflow;
+    struct nonmatch_sample nonmatch_samples[NONMATCH_SAMPLE_LIMIT];
 };
 struct stale_queue_observation {
     unsigned read_attempts;
@@ -163,10 +191,8 @@ struct stale_queue_observation {
     unsigned kernel_dropped;
 };
 
-static bool is_status_candidate(const uint8_t *packet, size_t packet_length,
-                               unsigned packet_type,
-                               const struct t089_observation *parsed);
 static int probe_ordinal_from_sequences(const uint8_t *packet,
+                                        size_t packet_length,
                                         const struct t089_observation *parsed,
                                         const struct packet_set *set);
 
@@ -182,41 +208,69 @@ static int capture_loss_free_state(bool finished, bool receive_error,
 
 static uint16_t be16(const uint8_t *p) { return (uint16_t)((p[0] << 8) | p[1]); }
 static uint16_t le16(const uint8_t *p) { return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8)); }
-static bool is_probe_marker(const uint8_t *packet, size_t packet_length,
-                            const struct t089_observation *parsed) {
-    static const uint8_t marker[8] = {'T','0','8','6','R','X','0','1'};
+static bool has_wire_nonce(const uint8_t *packet, size_t packet_length,
+                           const struct t089_observation *parsed,
+                           const struct packet_set *set) {
     return parsed->mpdu_length == MPDU_LEN &&
         parsed->mpdu_offset <= packet_length &&
         MPDU_LEN <= packet_length - parsed->mpdu_offset &&
-        memcmp(packet + parsed->mpdu_offset + 88U, marker, sizeof(marker)) == 0;
+        memcmp(packet + parsed->mpdu_offset + 88U,
+               set->wire_nonce, WIRE_NONCE_LEN) == 0;
 }
-static bool is_status_candidate(const uint8_t *packet, size_t packet_length,
-                                unsigned packet_type,
-                                const struct t089_observation *parsed) {
-    return packet_type==T089_PACKET_OTHERHOST && parsed->has_tx_flags &&
-        parsed->has_data_retries && is_probe_marker(packet,packet_length,parsed);
-}
-static int probe_ordinal_from_sequences(const uint8_t *packet,
-                                        const struct t089_observation *parsed,
-                                        const struct packet_set *set) {
-    if (parsed->mpdu_length != MPDU_LEN) return -1;
+static int exact_frame_ordinal(const uint8_t *packet, size_t packet_length,
+                               const struct t089_observation *parsed,
+                               const struct packet_set *set) {
+    if (parsed->mpdu_length != MPDU_LEN ||
+        parsed->mpdu_offset > packet_length ||
+        MPDU_LEN > packet_length - parsed->mpdu_offset) return -1;
     const uint8_t *mpdu = packet + parsed->mpdu_offset;
-    unsigned wifi = (unsigned)(le16(mpdu + 22U) >> 4) & 0x0fffU;
-    unsigned awdl = le16(mpdu + 34U);
     for (unsigned ordinal = 0; ordinal < FRAME_COUNT; ++ordinal) {
         const uint8_t *expected = set->bytes + HEADER_LEN +
             ordinal * PACKET_LEN + RTAP_LEN;
-        unsigned expected_wifi = (unsigned)(le16(expected + 22U) >> 4) & 0x0fffU;
-        unsigned expected_awdl = le16(expected + 34U);
-        if (wifi == expected_wifi && awdl == expected_awdl) return (int)ordinal;
+        if (memcmp(mpdu, expected, MPDU_LEN) == 0) return (int)ordinal;
     }
     return -1;
+}
+static int probe_ordinal_from_sequences(const uint8_t *packet,
+                                        size_t packet_length,
+                                        const struct t089_observation *parsed,
+                                        const struct packet_set *set) {
+    if (!has_wire_nonce(packet, packet_length, parsed, set)) return -1;
+    const uint8_t *mpdu = packet + parsed->mpdu_offset;
+    uint16_t sequence_control = le16(mpdu + 22U);
+    uint16_t awdl_sequence = le16(mpdu + 34U);
+    for (unsigned ordinal = 0; ordinal < FRAME_COUNT; ++ordinal) {
+        uint16_t expected_wifi = (uint16_t)((set->wifi_sequence_base + ordinal) & 0x0fffU);
+        uint16_t expected_sequence_control = (uint16_t)(expected_wifi << 4);
+        uint16_t expected_awdl = (uint16_t)(set->awdl_sequence_base + ordinal);
+        if (sequence_control == expected_sequence_control &&
+            awdl_sequence == expected_awdl) return (int)ordinal;
+    }
+    return -1;
+}
+static bool is_status_candidate(const uint8_t *packet, size_t packet_length,
+                                unsigned packet_type,
+                                const struct t089_observation *parsed,
+                                const struct packet_set *set,
+                                int *ordinal) {
+    if (ordinal) *ordinal = -1;
+    if (packet_type != T089_PACKET_OTHERHOST || !parsed->has_tx_flags ||
+        !parsed->has_data_retries) return false;
+    int matched = probe_ordinal_from_sequences(packet, packet_length, parsed, set);
+    if (matched < 0) return false;
+    if (ordinal) *ordinal = matched;
+    return true;
 }
 #ifdef __linux__
 static void print_bytes_hex(const uint8_t *bytes, size_t length) {
     for(size_t i=0;i<length;i++) printf("%02x",bytes[i]);
 }
 #endif
+static void format_bytes_hex(const uint8_t *bytes,size_t length,char *out) {
+    static const char digits[]="0123456789abcdef";
+    for(size_t i=0;i<length;i++){out[i*2U]=digits[bytes[i]>>4];out[i*2U+1U]=digits[bytes[i]&0x0fU];}
+    out[length*2U]='\0';
+}
 static bool valid_name(const char *s) {
     size_t n = s ? strlen(s) : 0;
     if (!n || n > IFNAME_MAX) return false;
@@ -228,8 +282,8 @@ static bool valid_name(const char *s) {
     return true;
 }
 static bool valid_nonce(const char *s) {
-    if (!s || strlen(s)!=NONCE_HEX_LEN) return false;
-    for (size_t i=0;i<NONCE_HEX_LEN;i++) if (!((s[i]>='0'&&s[i]<='9')||(s[i]>='a'&&s[i]<='f'))) return false;
+    if (!s || strlen(s)!=RUN_TOKEN_HEX_LEN) return false;
+    for (size_t i=0;i<RUN_TOKEN_HEX_LEN;i++) if (!((s[i]>='0'&&s[i]<='9')||(s[i]>='a'&&s[i]<='f'))) return false;
     return true;
 }
 static void usage(FILE *f,const char *p) {
@@ -266,21 +320,37 @@ static uint16_t udp_checksum(const struct in6_addr *s,const struct in6_addr *d,c
     uint16_t v=(uint16_t)~sum;return v?v:0xffffU;
 }
 static bool valid_mac(const uint8_t *m) { uint8_t any=0;for(unsigned i=0;i<6;i++)any|=m[i];return any&&(m[0]&1U)==0; }
+static void write_le16(uint8_t *p,uint16_t value) { p[0]=(uint8_t)value;p[1]=(uint8_t)(value>>8); }
+static bool build_expected_mpdu(const struct packet_set *s,unsigned ord,uint8_t out[MPDU_LEN]) {
+    if(ord>=FRAME_COUNT)return false;
+    memcpy(out,base[ord],MPDU_LEN);
+    memcpy(out+4,s->target_mac,6);memcpy(out+10,s->source_mac,6);
+    memcpy(out+48,s->source_ip.s6_addr,16);memcpy(out+64,s->target_ip.s6_addr,16);
+    uint16_t wifi=(uint16_t)((s->wifi_sequence_base+ord)&0x0fffU);
+    write_le16(out+22,(uint16_t)(wifi<<4));
+    write_le16(out+34,(uint16_t)(s->awdl_sequence_base+ord));
+    memcpy(out+88,s->wire_nonce,WIRE_NONCE_LEN);
+    out[86]=out[87]=0;
+    uint16_t checksum=udp_checksum(&s->source_ip,&s->target_ip,out+80);
+    out[86]=(uint8_t)(checksum>>8);out[87]=(uint8_t)checksum;
+    return true;
+}
 static bool validate_frame(const uint8_t *packet,unsigned ord,const struct packet_set *s) {
     if(ord>=FRAME_COUNT||memcmp(packet,rtap_noack_clear,RTAP_LEN))return false;
-    uint8_t expected[MPDU_LEN];memcpy(expected,base[ord],MPDU_LEN);
-    memcpy(expected+4,s->target_mac,6);memcpy(expected+10,s->source_mac,6);
-    memcpy(expected+48,s->source_ip.s6_addr,16);memcpy(expected+64,s->target_ip.s6_addr,16);
-    expected[86]=expected[87]=0;uint16_t c=udp_checksum(&s->source_ip,&s->target_ip,expected+80);
-    expected[86]=(uint8_t)(c>>8);expected[87]=(uint8_t)c;
+    uint8_t expected[MPDU_LEN];if(!build_expected_mpdu(s,ord,expected))return false;
     return memcmp(packet+RTAP_LEN,expected,MPDU_LEN)==0;
 }
 static bool validate_set(struct packet_set *s) {
     const uint8_t *h=s->bytes;
-    if(memcmp(h,magic,8)||h[8]!=1||h[9]!=4||be16(h+10)!=10||be16(h+12)!=40||be16(h+14)!=10||be16(h+16)!=96||be16(h+18)!=106)return false;
-    for(unsigned i=20;i<24;i++)if(h[i])return false;
+    if(memcmp(h,magic,8)||h[8]!=2||h[9]!=4||be16(h+10)!=10||be16(h+12)!=40||be16(h+14)!=10||be16(h+16)!=96||be16(h+18)!=106)return false;
+    s->wifi_sequence_base=be16(h+20);
+    s->awdl_sequence_base=be16(h+22);
+    if(s->wifi_sequence_base>0x0fffU)return false;
     if(memcmp(h+68,template_sha256,32))return false;
     for(unsigned i=100;i<104;i++)if(h[i])return false;
+    memcpy(s->wire_nonce,h+104,WIRE_NONCE_LEN);
+    uint8_t nonce_any=0;for(unsigned i=0;i<WIRE_NONCE_LEN;i++)nonce_any|=s->wire_nonce[i];
+    if(!nonce_any)return false;
     memcpy(s->source_mac,h+24,6);memcpy(s->target_mac,h+30,6);
     memcpy(s->source_ip.s6_addr,h+36,16);memcpy(s->target_ip.s6_addr,h+52,16);
     if(!valid_mac(s->source_mac)||!valid_mac(s->target_mac)||!memcmp(s->source_mac,s->target_mac,6)||
@@ -294,8 +364,9 @@ static bool validate_set(struct packet_set *s) {
         struct t089_observation status_shape;memset(&status_shape,0,sizeof(status_shape));
         status_shape.mpdu_offset=RTAP_LEN;status_shape.mpdu_length=MPDU_LEN;
         status_shape.has_tx_flags=true;status_shape.has_data_retries=true;
-        if(!is_status_candidate(packet,PACKET_LEN,T089_PACKET_OTHERHOST,&status_shape) ||
-           probe_ordinal_from_sequences(packet,&status_shape,s)!=(int)i)return false;
+        int ordinal=-1;
+        if(!is_status_candidate(packet,PACKET_LEN,T089_PACKET_OTHERHOST,&status_shape,s,&ordinal)||
+           ordinal!=(int)i||exact_frame_ordinal(packet,PACKET_LEN,&status_shape,s)!=(int)i)return false;
     }
     return true;
 }
@@ -321,12 +392,13 @@ static int read_control_line(uint64_t deadline,char *out,size_t cap) {
         char c;ssize_t got;do{got=read(STDIN_FILENO,&c,1);}while(got<0&&errno==EINTR);
         if(got!=1||n+1>=cap)return -1;out[n++]=c;if(c=='\n'){out[n]='\0';return 1;}}
 }
-static int wait_go(const char *token,uint64_t *observed) {
+static int wait_go(const char *token,const struct packet_set *set,uint64_t *observed) {
     uint64_t start=now_ns();if(!start||start>UINT64_MAX-(uint64_t)GO_TIMEOUT_MS*1000000U)return -1;
     uint64_t deadline=start+(uint64_t)GO_TIMEOUT_MS*1000000U;
-    if(printf("READY schema=test122-router-status-sender/v1 frames=4 interval_ms=10 mpdu_bytes=96 radiotap_bytes=10 packet_bytes=106 send_budget_ms=40 status_tail_ms=2000 tx_flags=NOSEQNO hardware_honoring=unknown noack_requested=false intel_arm_invoked=false boot_claim_used=false\n")<0||fflush(stdout))return -1;
-    char expected[NONCE_HEX_LEN+5];snprintf(expected,sizeof(expected),"GO %s\n",token);
-    for(;;){char line[NONCE_HEX_LEN+8];int r=read_control_line(deadline,line,sizeof(line));if(r!=1)return -1;
+    char wire_nonce_hex[WIRE_NONCE_HEX_LEN+1U];format_bytes_hex(set->wire_nonce,WIRE_NONCE_LEN,wire_nonce_hex);
+    if(printf("READY schema=test122-router-status-sender/v2 frames=4 interval_ms=10 mpdu_bytes=96 radiotap_bytes=10 packet_bytes=106 send_budget_ms=40 status_tail_ms=2000 tx_flags=NOSEQNO hardware_honoring=unknown noack_requested=false intel_arm_invoked=false boot_claim_used=false wire_nonce_hex=%s\n",wire_nonce_hex)<0||fflush(stdout))return -1;
+    char expected[RUN_TOKEN_HEX_LEN+5U];snprintf(expected,sizeof(expected),"GO %s\n",token);
+    for(;;){char line[RUN_TOKEN_HEX_LEN+8U];int r=read_control_line(deadline,line,sizeof(line));if(r!=1)return -1;
         if(!strcmp(line,"WAIT\n"))continue;if(!strcmp(line,"ABORT\n"))return 0;if(strcmp(line,expected))return -1;
         *observed=now_ns();return *observed!=0?1:-1;}
 }
@@ -364,6 +436,33 @@ static bool sleep_abs(uint64_t deadline) {
     struct timespec t={(time_t)(deadline/UINT64_C(1000000000)),(long)(deadline%UINT64_C(1000000000))};
     int e;do{e=clock_nanosleep(CLOCK_MONOTONIC,TIMER_ABSTIME,&t,NULL);}while(e==EINTR);return e==0;
 }
+static void retain_nonmatch_sample(struct rx_observation *out,uint64_t observed_ns,
+                                   const char *parse_status,const struct msghdr *message,
+                                   const struct sockaddr_ll *address,ssize_t received,
+                                   const uint8_t *buffer,size_t copied) {
+    if(out->nonmatch_samples_recorded>=NONMATCH_SAMPLE_LIMIT) {
+        out->nonmatch_samples_overflow++;
+        return;
+    }
+    struct nonmatch_sample *sample=&out->nonmatch_samples[out->nonmatch_samples_recorded++];
+    memset(sample,0,sizeof(*sample));
+    sample->observed_ns=observed_ns;
+    sample->parse_status=parse_status;
+    sample->packet_type_present=message->msg_namelen>=
+        offsetof(struct sockaddr_ll,sll_pkttype)+sizeof(address->sll_pkttype);
+    sample->ifindex_present=message->msg_namelen>=
+        offsetof(struct sockaddr_ll,sll_ifindex)+sizeof(address->sll_ifindex);
+    sample->packet_type=(unsigned)address->sll_pkttype;
+    sample->ifindex=address->sll_ifindex>0?(unsigned)address->sll_ifindex:0U;
+    sample->msg_flags=(unsigned)message->msg_flags;
+    sample->received_len=(size_t)received;
+    sample->raw_len=copied<NONMATCH_RAW_BYTES?copied:NONMATCH_RAW_BYTES;
+    /* copied_len is the bounded retained prefix length, not the full iovec
+     * length. The latter is represented by received_len. */
+    sample->copied_len=sample->raw_len;
+    sample->raw_prefix_truncated=(size_t)received>sample->raw_len;
+    memcpy(sample->raw,buffer,sample->raw_len);
+}
 static void observe_monitor_until(int fd, int expected_index, uint64_t deadline,
                                   const struct packet_set *set,
                                   uint64_t capture_started,
@@ -392,12 +491,15 @@ static void observe_monitor_until(int fd, int expected_index, uint64_t deadline,
         message.msg_name=&address;message.msg_namelen=sizeof(address);
         message.msg_iov=&iov;message.msg_iovlen=1;
         ssize_t received=recvmsg(fd,&message,MSG_DONTWAIT|MSG_TRUNC);
+        int receive_errno=received<0?errno:0;
+        uint64_t observed_ns=now_ns();
         out->read_attempts++;
         if (received<0) {
-            if (errno==EAGAIN || errno==EWOULDBLOCK || errno==EINTR) continue;
-            out->receive_error=errno?errno:EIO;
+            if (receive_errno==EAGAIN || receive_errno==EWOULDBLOCK || receive_errno==EINTR) continue;
+            out->receive_error=receive_errno?receive_errno:EIO;
             break;
         }
+        if(!observed_ns) { out->receive_error=EIO; break; }
         out->packets_received++;
         /* Count complete exact MPDUs independently of the bounded raw bank.
          * Even a matching PACKET_OUTGOING is a local pre-driver tap only. */
@@ -406,23 +508,30 @@ static void observe_monitor_until(int fd, int expected_index, uint64_t deadline,
         struct t089_observation parsed_observation;
         enum t089_parse_result parse_result=T089_PARSE_INVALID;
         if ((size_t)received<=sizeof(buffer) && !(message.msg_flags&MSG_TRUNC)) {
-            for (unsigned ordinal=0; ordinal<FRAME_COUNT; ++ordinal) {
-                const uint8_t *expected=set->bytes+HEADER_LEN+
-                    ordinal*PACKET_LEN+RTAP_LEN;
-                parse_result=t089_parse_observation(buffer,copied,
-                    (unsigned)address.sll_pkttype,expected,&parsed_observation);
-                if (parse_result==T089_PARSE_UNSUPPORTED) break;
-                if (parse_result==T089_PARSE_VALID &&
-                    parsed_observation.exact_probe_match) { exact=(int)ordinal; break; }
-            }
+            const uint8_t *comparison_mpdu=set->bytes+HEADER_LEN+RTAP_LEN;
+            parse_result=t089_parse_observation(buffer,copied,
+                (unsigned)address.sll_pkttype,comparison_mpdu,&parsed_observation);
         } else {
             ++out->truncated_packets;
         }
         if (parse_result==T089_PARSE_INVALID) ++out->radiotap_invalid;
         else if (parse_result==T089_PARSE_UNSUPPORTED) ++out->radiotap_unsupported;
-        if (exact<0 && parse_result==T089_PARSE_VALID) ++out->unmatched_valid_packets;
         bool type_present=message.msg_namelen>=offsetof(struct sockaddr_ll,sll_pkttype)+sizeof(address.sll_pkttype);
         bool index_present=message.msg_namelen>=offsetof(struct sockaddr_ll,sll_ifindex)+sizeof(address.sll_ifindex);
+        if(parse_result==T089_PARSE_VALID)
+            exact=exact_frame_ordinal(buffer,copied,&parsed_observation,set);
+        int status_ordinal=-1;
+        bool status_candidate=parse_result==T089_PARSE_VALID && type_present &&
+            is_status_candidate(buffer,copied,(unsigned)address.sll_pkttype,
+                                &parsed_observation,set,&status_ordinal);
+        if (exact<0 && !status_candidate && parse_result==T089_PARSE_VALID)
+            ++out->unmatched_valid_packets;
+        if(parse_result!=T089_PARSE_VALID || (exact<0&&!status_candidate)) {
+            const char *kind=parse_result==T089_PARSE_UNSUPPORTED?"unsupported":
+                parse_result==T089_PARSE_VALID?"valid_unmatched":"invalid";
+            retain_nonmatch_sample(out,observed_ns,kind,&message,&address,received,buffer,copied);
+        }
+        if(status_candidate) ++out->status_candidate_match[(unsigned)status_ordinal];
         if(exact>=0) {
             ++out->exact_match[(unsigned)exact];
             if(!type_present || !index_present || address.sll_ifindex!=expected_index)
@@ -431,39 +540,37 @@ static void observe_monitor_until(int fd, int expected_index, uint64_t deadline,
                 ++out->outgoing_exact[(unsigned)exact];
             } else {
                 ++out->non_outgoing_exact[(unsigned)exact];
-                if (parsed_observation.is_host_driver_completion_candidate)
+                if (status_candidate)
                     ++out->completion_candidate[(unsigned)exact];
                 else
                     ++out->other_exact[(unsigned)exact];
             }
         }
-        bool status_candidate = parse_result==T089_PARSE_VALID && type_present &&
-            is_status_candidate(buffer,copied,(unsigned)address.sll_pkttype,
-                                &parsed_observation);
         if(status_candidate) {
             if(!index_present || address.sll_ifindex!=expected_index) {
                 ++out->status_identity_unavailable;
             } else {
-                int ordinal=probe_ordinal_from_sequences(buffer,&parsed_observation,set);
-                if(ordinal>=0) ++out->status_candidate_match[(unsigned)ordinal];
                 if(out->status_samples_recorded>=STATUS_SAMPLE_LIMIT) {
                     ++out->status_samples_overflow;
                 } else {
                     struct status_sample *sample=&out->status_samples[out->status_samples_recorded++];
-                    sample->ordinal=ordinal>=0?(unsigned)ordinal:UINT_MAX;
+                    sample->ordinal=(unsigned)status_ordinal;
+                    sample->observed_ns=observed_ns;
                     sample->packet_type=(unsigned)address.sll_pkttype;
                     sample->ifindex=(unsigned)address.sll_ifindex;
                     sample->msg_flags=(unsigned)message.msg_flags;
                     sample->received_len=(size_t)received;
                     sample->copied_len=copied<STATUS_RAW_BYTES?copied:STATUS_RAW_BYTES;
-                    sample->raw_truncated=copied>STATUS_RAW_BYTES;
-                    sample->exact_match=parsed_observation.exact_probe_match;
+                    sample->raw_truncated=sample->received_len>sample->copied_len;
+                    sample->exact_match=exact_frame_ordinal(buffer,copied,
+                        &parsed_observation,set)==status_ordinal;
                     sample->has_tx_flags=parsed_observation.has_tx_flags;
                     sample->tx_flags=parsed_observation.tx_flags;
                     sample->has_data_retries=parsed_observation.has_data_retries;
                     sample->data_retries=parsed_observation.data_retries;
                     const uint8_t *mpdu=buffer+parsed_observation.mpdu_offset;
                     sample->ieee80211_sequence=(unsigned)(le16(mpdu+22U)>>4)&0x0fffU;
+                    sample->ieee80211_sequence_control=le16(mpdu+22U);
                     sample->awdl_sequence=le16(mpdu+34U);
                     memcpy(sample->raw,buffer,sample->copied_len);
                 }
@@ -475,6 +582,7 @@ static void observe_monitor_until(int fd, int expected_index, uint64_t deadline,
             continue;
         }
         struct rx_sample *sample=&out->samples[out->exact_samples_recorded++];
+        sample->observed_ns=observed_ns;
         sample->packet_type_present=message.msg_namelen>=offsetof(struct sockaddr_ll,sll_pkttype)+sizeof(address.sll_pkttype);
         sample->ifindex_present=message.msg_namelen>=offsetof(struct sockaddr_ll,sll_ifindex)+sizeof(address.sll_ifindex);
         sample->packet_type=(unsigned)address.sll_pkttype;
@@ -484,15 +592,17 @@ static void observe_monitor_until(int fd, int expected_index, uint64_t deadline,
         sample->copied_len=copied;
         sample->exact_ordinal=exact;
         sample->parse_supported=parse_result==T089_PARSE_VALID;
-        sample->exact_match=parsed_observation.exact_probe_match;
-        sample->completion_candidate=parsed_observation.is_host_driver_completion_candidate;
-        sample->outgoing_echo=parsed_observation.is_outgoing_echo;
+        sample->exact_match=true;
+        sample->completion_candidate=status_candidate;
+        sample->outgoing_echo=type_present && address.sll_pkttype==PACKET_OUTGOING;
         sample->has_tx_flags=parsed_observation.has_tx_flags;
         sample->tx_flags=parsed_observation.tx_flags;
         sample->has_data_retries=parsed_observation.has_data_retries;
         sample->data_retries=parsed_observation.data_retries;
-        sample->ieee80211_sequence=parsed_observation.wifi_sequence;
-        sample->awdl_sequence=parsed_observation.awdl_sequence;
+        const uint8_t *mpdu=buffer+parsed_observation.mpdu_offset;
+        sample->ieee80211_sequence=(unsigned)(le16(mpdu+22U)>>4)&0x0fffU;
+        sample->ieee80211_sequence_control=le16(mpdu+22U);
+        sample->awdl_sequence=le16(mpdu+34U);
     }
     if (out->read_attempts>=RAW_CAPTURE_READ_LIMIT) out->capture_limit_reached=true;
     out->ended_ns=now_ns();
@@ -516,14 +626,16 @@ static void drain_observer_queue_after_go(int fd, struct stale_queue_observation
         message.msg_name=&address;message.msg_namelen=sizeof(address);
         message.msg_iov=&iov;message.msg_iovlen=1;
         ssize_t received=recvmsg(fd,&message,MSG_DONTWAIT|MSG_TRUNC);
+        int receive_errno=received<0?errno:0;
+        (void)now_ns();
         out->read_attempts++;
         if(received<0) {
-            if(errno==EAGAIN || errno==EWOULDBLOCK) {
+            if(receive_errno==EAGAIN || receive_errno==EWOULDBLOCK) {
                 out->drain_complete=true;
                 break;
             }
-            if(errno==EINTR) continue;
-            out->receive_error=errno?errno:EIO;
+            if(receive_errno==EINTR) continue;
+            out->receive_error=receive_errno?receive_errno:EIO;
             break;
         }
         out->packets_drained++;
@@ -538,7 +650,8 @@ static void drain_observer_queue_after_go(int fd, struct stale_queue_observation
         out->kernel_dropped=stats.tp_drops;
     }
 }
-static void emit_aborted_before_go(const struct options *o);
+static void emit_aborted_before_go(const struct options *o,
+                                   const struct packet_set *set);
 static int send_frames(const struct options *o,const struct packet_set *s,int tx_fd,int observer_fd,int observer_index,uint64_t go,const struct stale_queue_observation *stale) {
     const uint64_t capture_window_ns=SEND_BUDGET_NS+STATUS_TAIL_NS;
     uint64_t start=now_ns();if(!start||start>UINT64_MAX-capture_window_ns)return EXIT_SEND;
@@ -548,10 +661,11 @@ static int send_frames(const struct options *o,const struct packet_set *s,int tx
     uint64_t go_to_start_ns=start>=go?start-go:UINT64_MAX;
     uint64_t first_send_ns=0;
     uint64_t previous_send_before_ns=0;
+    char wire_nonce_hex[WIRE_NONCE_HEX_LEN+1U];format_bytes_hex(s->wire_nonce,WIRE_NONCE_LEN,wire_nonce_hex);
     unsigned attempted=0,completed=0;int last_errno=0;const char *reason="complete";
     /* READY was emitted before GO. This marks actual post-GO send-loop start. */
-    printf("{\"event\":\"SENDER_STARTED\",\"schema\":\"test122-router-status-sender/v1\",\"clock_domain\":\"CLOCK_MONOTONIC\",\"run_token\":\"%s\",\"go_received_ns\":%" PRIu64 ",\"started_ns\":%" PRIu64 ",\"send_deadline_ns\":%" PRIu64 ",\"observer_deadline_ns\":%" PRIu64 ",\"go_to_start_ns\":%" PRIu64 ",\"go_to_start_max_ns\":%" PRIu64 ",\"send_budget_ns\":%" PRIu64 ",\"status_tail_ns\":%" PRIu64 ",\"frames_requested\":4,\"interval_ms\":10,\"tx_flags_requested\":\"NOSEQNO\",\"noack_requested\":false,\"intel_arm_invoked\":false,\"boot_claim_used\":false}\n",
-        o->nonce,go,start,deadline,observer_deadline,go_to_start_ns,
+    printf("{\"event\":\"SENDER_STARTED\",\"schema\":\"test122-router-status-sender/v2\",\"clock_domain\":\"CLOCK_MONOTONIC\",\"run_token\":\"%s\",\"wire_nonce_hex\":\"%s\",\"go_received_ns\":%" PRIu64 ",\"started_ns\":%" PRIu64 ",\"send_deadline_ns\":%" PRIu64 ",\"observer_deadline_ns\":%" PRIu64 ",\"go_to_start_ns\":%" PRIu64 ",\"go_to_start_max_ns\":%" PRIu64 ",\"send_budget_ns\":%" PRIu64 ",\"status_tail_ns\":%" PRIu64 ",\"frames_requested\":4,\"interval_ms\":10,\"tx_flags_requested\":\"NOSEQNO\",\"noack_requested\":false,\"intel_arm_invoked\":false,\"boot_claim_used\":false}\n",
+        o->nonce,wire_nonce_hex,go,start,deadline,observer_deadline,go_to_start_ns,
         (uint64_t)GO_TO_START_MAX_NS,(uint64_t)SEND_BUDGET_NS,
         (uint64_t)STATUS_TAIL_NS);fflush(stdout);
     uint64_t loop_start_ns=now_ns();
@@ -582,6 +696,7 @@ static int send_frames(const struct options *o,const struct packet_set *s,int tx
         const uint8_t *mpdu=packet+RTAP_LEN;
         uint16_t sequence_control=(uint16_t)(mpdu[22]|((uint16_t)mpdu[23]<<8));
         row[i].ordinal=i;row[i].ieee80211_sequence=(sequence_control>>4)&0x0fffU;
+        row[i].ieee80211_sequence_control=sequence_control;
         row[i].awdl_sequence=(unsigned)mpdu[34]|((unsigned)mpdu[35]<<8);
         row[i].before_ns=before;previous_send_before_ns=before;
         if(first_send_ns==0)first_send_ns=before;attempted++;
@@ -604,14 +719,15 @@ static int send_frames(const struct options *o,const struct packet_set *s,int tx
     bool exact_classification_complete=identity_complete &&
         rx.radiotap_invalid==0 && rx.radiotap_unsupported==0 &&
         rx.truncated_packets==0 && rx.exact_samples_overflow==0 &&
-        rx.status_samples_overflow==0 && rx.status_identity_unavailable==0;
+        rx.status_samples_overflow==0 && rx.status_identity_unavailable==0 &&
+        rx.nonmatch_samples_overflow==0;
     int capture_loss_state=capture_loss_free_state(
         rx.capture_finished,rx.receive_error!=0,rx.capture_limit_reached,
         rx.truncated_packets!=0,rx.kernel_stats_available,rx.kernel_packets,
         rx.kernel_dropped,rx.packets_received);
     bool classification_complete=exact_classification_complete;
-    printf("{\"event\":\"SENDER_RESULT\",\"schema\":\"test122-router-status-sender/v1\",\"clock_domain\":\"CLOCK_MONOTONIC\",\"status\":\"%s\",\"run_token\":\"%s\",\"run_token_in_frame\":false,\"go_received_ns\":%" PRIu64 ",\"frames_requested\":4,\"frames_attempted\":%u,\"frames_completed\":%u,\"send_complete\":%s,\"packet_bytes\":106,\"radiotap_bytes\":10,\"mpdu_bytes\":96,\"elapsed_ms\":%" PRIu64 ",\"deadline_hit\":%s,\"error_count\":%u,\"last_errno\":%d,\"stop_reason\":\"%s\",\"tx_flags_requested\":\"NOSEQNO\",\"noack_requested\":false,\"ack_policy\":\"normal_unicast_requested\",\"hardware_honoring\":\"unknown\",\"raw_txs\":\"unknown\",\"mac_ack\":\"unknown\",\"interval_ms\":10,\"send_budget_ns\":%" PRIu64 ",\"status_tail_ns\":%" PRIu64 ",\"capture_window_ns\":%" PRIu64 ",\"started_ns\":%" PRIu64 ",\"send_deadline_ns\":%" PRIu64 ",\"observer_deadline_ns\":%" PRIu64 ",\"finished_ns\":%" PRIu64 ",\"go_to_start_ns\":%" PRIu64 ",\"go_to_start_max_ns\":%" PRIu64 ",\"first_send_ns\":",
-        send_complete?"send_complete":"send_incomplete",o->nonce,go,attempted,completed,
+    printf("{\"event\":\"SENDER_RESULT\",\"schema\":\"test122-router-status-sender/v2\",\"clock_domain\":\"CLOCK_MONOTONIC\",\"status\":\"%s\",\"run_token\":\"%s\",\"wire_nonce_hex\":\"%s\",\"run_token_in_frame\":false,\"go_received_ns\":%" PRIu64 ",\"frames_requested\":4,\"frames_attempted\":%u,\"frames_completed\":%u,\"send_complete\":%s,\"packet_bytes\":106,\"radiotap_bytes\":10,\"mpdu_bytes\":96,\"elapsed_ms\":%" PRIu64 ",\"deadline_hit\":%s,\"error_count\":%u,\"last_errno\":%d,\"stop_reason\":\"%s\",\"tx_flags_requested\":\"NOSEQNO\",\"noack_requested\":false,\"ack_policy\":\"normal_unicast_requested\",\"hardware_honoring\":\"unknown\",\"raw_txs\":\"unknown\",\"mac_ack\":\"unknown\",\"interval_ms\":10,\"send_budget_ns\":%" PRIu64 ",\"status_tail_ns\":%" PRIu64 ",\"capture_window_ns\":%" PRIu64 ",\"started_ns\":%" PRIu64 ",\"send_deadline_ns\":%" PRIu64 ",\"observer_deadline_ns\":%" PRIu64 ",\"finished_ns\":%" PRIu64 ",\"go_to_start_ns\":%" PRIu64 ",\"go_to_start_max_ns\":%" PRIu64 ",\"first_send_ns\":",
+        send_complete?"send_complete":"send_incomplete",o->nonce,wire_nonce_hex,go,attempted,completed,
         send_complete?"true":"false",elapsed_ms,deadline_hit?"true":"false",
         last_errno?1U:0U,last_errno,reason,(uint64_t)SEND_BUDGET_NS,
         (uint64_t)STATUS_TAIL_NS,capture_window_ns,start,deadline,
@@ -624,8 +740,8 @@ static int send_frames(const struct options *o,const struct packet_set *s,int tx
     if(stale->kernel_stats_available)printf("%u,\"kernel_dropped_packets\":%u},",stale->kernel_packets,stale->kernel_dropped);
     else printf("null,\"kernel_dropped_packets\":null},");
     printf("\"send_timing\":[");
-    for(unsigned i=0;i<attempted;i++)printf("%s{\"ordinal\":%u,\"ieee80211_sequence\":%u,\"awdl_sequence\":%u,\"before_ns\":%" PRIu64 ",\"after_ns\":%" PRIu64 ",\"return_bytes\":%lld,\"errno\":%d}",i?",":"",row[i].ordinal,row[i].ieee80211_sequence,row[i].awdl_sequence,row[i].before_ns,row[i].after_ns,row[i].return_bytes,row[i].error);
-    printf("],\"monitor_observation\":{\"schema\":\"test122-router-status-monitor/v1\",\"started_ns\":%" PRIu64 ",\"ended_ns\":%" PRIu64 ",\"actual_horizon_ns\":%" PRIu64 ",\"capture_window_ns\":%" PRIu64 ",\"status_tail_began_ns\":%" PRIu64 ",\"capture_finished\":%s,\"capture_limit_reached\":%s,\"read_attempts\":%u,\"packets_received\":%u,\"exact_samples_recorded\":%u,\"exact_samples_overflow\":%u,\"receive_error\":%d,\"kernel_stats_available\":%s,\"kernel_packets\":",
+    for(unsigned i=0;i<attempted;i++)printf("%s{\"ordinal\":%u,\"ieee80211_sequence\":%u,\"ieee80211_sequence_control\":%u,\"awdl_sequence\":%u,\"before_ns\":%" PRIu64 ",\"after_ns\":%" PRIu64 ",\"return_bytes\":%lld,\"errno\":%d}",i?",":"",row[i].ordinal,row[i].ieee80211_sequence,row[i].ieee80211_sequence_control,row[i].awdl_sequence,row[i].before_ns,row[i].after_ns,row[i].return_bytes,row[i].error);
+    printf("],\"monitor_observation\":{\"schema\":\"test122-router-status-monitor/v2\",\"clock_domain\":\"CLOCK_MONOTONIC\",\"observation_time_semantics\":\"userspace_recvmsg_return\",\"started_ns\":%" PRIu64 ",\"ended_ns\":%" PRIu64 ",\"actual_horizon_ns\":%" PRIu64 ",\"capture_window_ns\":%" PRIu64 ",\"status_tail_began_ns\":%" PRIu64 ",\"capture_finished\":%s,\"capture_limit_reached\":%s,\"read_attempts\":%u,\"packets_received\":%u,\"exact_samples_recorded\":%u,\"exact_samples_overflow\":%u,\"receive_error\":%d,\"kernel_stats_available\":%s,\"kernel_packets\":",
         rx.started_ns,rx.ended_ns,finished>=start?finished-start:0,
         capture_window_ns,deadline,rx.capture_finished?"true":"false",
         rx.capture_limit_reached?"true":"false",rx.read_attempts,
@@ -649,8 +765,8 @@ static int send_frames(const struct options *o,const struct packet_set *s,int tx
     printf("],\"samples\":[");
     for(unsigned i=0;i<stored;i++) {
         const struct rx_sample *sample=&rx.samples[i];
-        printf("%s{\"exact_ordinal\":%d,\"packet_type_present\":%s,\"packet_type\":",
-               i?",":"",sample->exact_ordinal,
+        printf("%s{\"observed_ns\":%" PRIu64 ",\"exact_ordinal\":%d,\"packet_type_present\":%s,\"packet_type\":",
+               i?",":"",sample->observed_ns,sample->exact_ordinal,
                sample->packet_type_present?"true":"false");
         if(sample->packet_type_present)printf("%u,",sample->packet_type);else printf("null,");
         printf("\"ifindex_present\":%s,\"ifindex\":",sample->ifindex_present?"true":"false");
@@ -663,8 +779,25 @@ static int send_frames(const struct options *o,const struct packet_set *s,int tx
         if(sample->has_tx_flags)printf("%u,",sample->tx_flags);else printf("null,");
         printf("\"has_data_retries\":%s,\"data_retries\":",sample->has_data_retries?"true":"false");
         if(sample->has_data_retries)printf("%u,",sample->data_retries);else printf("null,");
-        printf("\"ieee80211_sequence\":%u,\"awdl_sequence\":%u}",
-               sample->ieee80211_sequence,sample->awdl_sequence);
+        printf("\"ieee80211_sequence\":%u,\"ieee80211_sequence_control\":%u,\"awdl_sequence\":%u}",
+               sample->ieee80211_sequence,sample->ieee80211_sequence_control,
+               sample->awdl_sequence);
+    }
+    printf("],\"nonmatch_samples_recorded\":%u,\"nonmatch_samples_overflow\":%u,\"nonmatch_samples\":[",
+        rx.nonmatch_samples_recorded,rx.nonmatch_samples_overflow);
+    for(unsigned i=0;i<rx.nonmatch_samples_recorded;i++) {
+        const struct nonmatch_sample *sample=&rx.nonmatch_samples[i];
+        printf("%s{\"observed_ns\":%" PRIu64 ",\"parse_status\":\"%s\",\"packet_type_present\":%s,\"packet_type\":",
+               i?",":"",sample->observed_ns,sample->parse_status,
+               sample->packet_type_present?"true":"false");
+        if(sample->packet_type_present)printf("%u,",sample->packet_type);else printf("null,");
+        printf("\"ifindex_present\":%s,\"ifindex\":",sample->ifindex_present?"true":"false");
+        if(sample->ifindex_present)printf("%u,",sample->ifindex);else printf("null,");
+        printf("\"msg_flags\":%u,\"received_len\":%zu,\"copied_len\":%zu,\"raw_prefix_truncated\":%s,\"raw_prefix_hex\":\"",
+               sample->msg_flags,sample->received_len,sample->copied_len,
+               sample->raw_prefix_truncated?"true":"false");
+        print_bytes_hex(sample->raw,sample->raw_len);
+        printf("\"}");
     }
     printf("],\"status_candidate_matches_by_ordinal\":[");
     for(unsigned i=0;i<FRAME_COUNT;i++)printf("%s%u",i?",":"",rx.status_candidate_match[i]);
@@ -673,24 +806,28 @@ static int send_frames(const struct options *o,const struct packet_set *s,int tx
         rx.status_identity_unavailable);
     for(unsigned i=0;i<rx.status_samples_recorded;i++) {
         const struct status_sample *sample=&rx.status_samples[i];
-        printf("%s{\"ordinal\":",i?",":"");
+        printf("%s{\"observed_ns\":%" PRIu64 ",\"ordinal\":",i?",":"",sample->observed_ns);
         if(sample->ordinal<FRAME_COUNT)printf("%u,",sample->ordinal);else printf("null,");
-        printf("\"packet_type\":%u,\"ifindex\":%u,\"msg_flags\":%u,\"received_len\":%zu,\"bytes_retained\":%zu,\"raw_prefix_truncated\":%s,\"exact_match\":%s,\"has_tx_flags\":%s,\"tx_flags\":%u,\"has_data_retries\":%s,\"data_retries\":%u,\"ieee80211_sequence\":%u,\"awdl_sequence\":%u,\"raw_prefix_hex\":\"",
+        printf("\"packet_type\":%u,\"ifindex\":%u,\"msg_flags\":%u,\"received_len\":%zu,\"bytes_retained\":%zu,\"raw_prefix_truncated\":%s,\"exact_match\":%s,\"has_tx_flags\":%s,\"tx_flags\":%u,\"has_data_retries\":%s,\"data_retries\":%u,\"ieee80211_sequence\":%u,\"ieee80211_sequence_control\":%u,\"awdl_sequence\":%u,\"raw_prefix_hex\":\"",
             sample->packet_type,sample->ifindex,sample->msg_flags,
             sample->received_len,sample->copied_len,
             sample->raw_truncated?"true":"false",sample->exact_match?"true":"false",
             sample->has_tx_flags?"true":"false",sample->tx_flags,
             sample->has_data_retries?"true":"false",sample->data_retries,
-            sample->ieee80211_sequence,sample->awdl_sequence);
+            sample->ieee80211_sequence,sample->ieee80211_sequence_control,
+            sample->awdl_sequence);
         print_bytes_hex(sample->raw,sample->copied_len);
         printf("\"}");
     }
-    printf("]},\"radio_transmission_proven\":false,\"rf_transmission_proven\":false,\"firmware_tx_status_proven\":false,\"mac_ack\":\"unknown\",\"peer_receipt_proven\":false,\"airdrop_proven\":false,\"intel_arm_invoked\":false,\"boot_claim_used\":false}\n");
+    printf("]},\"radio_transmission_proven\":false,\"rf_transmission_proven\":false,\"firmware_tx_status_proven\":false,\"peer_receipt_proven\":false,\"airdrop_proven\":false,\"intel_arm_invoked\":false,\"boot_claim_used\":false}\n");
     if(fflush(stdout)) return EXIT_SEND;
     return send_complete && rx.capture_finished ? 0 : EXIT_SEND;
 }
-static void emit_aborted_before_go(const struct options *o) {
-    printf("{\"event\":\"SENDER_RESULT\",\"schema\":\"test122-router-status-sender/v1\",\"status\":\"aborted\",\"run_token\":\"%s\",\"run_token_in_frame\":false,\"frames_requested\":4,\"frames_attempted\":0,\"frames_completed\":0,\"send_complete\":false,\"send_budget_ms\":40,\"status_tail_ms\":2000,\"tx_flags_requested\":\"NOSEQNO\",\"noack_requested\":false,\"radio_transmission_proven\":false,\"rf_transmission_proven\":false,\"firmware_tx_status_proven\":false,\"mac_ack\":\"unknown\",\"peer_receipt_proven\":false,\"airdrop_proven\":false,\"intel_arm_invoked\":false,\"boot_claim_used\":false}\n",o->nonce);
+static void emit_aborted_before_go(const struct options *o,
+                                   const struct packet_set *set) {
+    char wire_nonce_hex[WIRE_NONCE_HEX_LEN+1U];
+    format_bytes_hex(set->wire_nonce,WIRE_NONCE_LEN,wire_nonce_hex);
+    printf("{\"event\":\"SENDER_RESULT\",\"schema\":\"test122-router-status-sender/v2\",\"status\":\"aborted\",\"run_token\":\"%s\",\"wire_nonce_hex\":\"%s\",\"run_token_in_frame\":false,\"frames_requested\":4,\"frames_attempted\":0,\"frames_completed\":0,\"send_complete\":false,\"send_budget_ms\":40,\"status_tail_ms\":2000,\"tx_flags_requested\":\"NOSEQNO\",\"noack_requested\":false,\"radio_transmission_proven\":false,\"rf_transmission_proven\":false,\"firmware_tx_status_proven\":false,\"mac_ack\":\"unknown\",\"peer_receipt_proven\":false,\"airdrop_proven\":false,\"intel_arm_invoked\":false,\"boot_claim_used\":false}\n",o->nonce,wire_nonce_hex);
     fflush(stdout);
 }
 #endif
@@ -707,7 +844,12 @@ int main(int argc,char **argv) {
     }
     struct packet_set set;memset(&set,0,sizeof(set));
     if(!read_packet_set(o.file,&set)){fprintf(stderr,"error=packet_set_invalid_or_unsafe\n");return EXIT_ARGUMENT;}
-    if(o.verify_only){printf("{\"event\":\"PACKET_SET_VALID\",\"schema\":\"test104-unicast-packet-set/v1\",\"frames\":4,\"interval_ms\":10,\"budget_ms\":40,\"noack_requested\":false,\"transmission_capability\":false,\"rf_transmission_proven\":false}\n");return fflush(stdout)?EXIT_ARGUMENT:0;}
+    if(o.verify_only){
+        char wire_nonce_hex[WIRE_NONCE_HEX_LEN+1U];
+        format_bytes_hex(set.wire_nonce,WIRE_NONCE_LEN,wire_nonce_hex);
+        printf("{\"event\":\"PACKET_SET_VALID\",\"schema\":\"test122-correlated-packet-set/v2\",\"frames\":4,\"interval_ms\":10,\"budget_ms\":40,\"noack_requested\":false,\"transmission_capability\":false,\"rf_transmission_proven\":false,\"wire_nonce_hex\":\"%s\"}\n",wire_nonce_hex);
+        return fflush(stdout)?EXIT_ARGUMENT:0;
+    }
 #ifndef __linux__
     fprintf(stderr,"error=send_requires_linux_openwrt\n");return EXIT_INTERFACE;
 #else
@@ -720,8 +862,8 @@ int main(int argc,char **argv) {
     if(setsockopt(observer_fd,SOL_PACKET,PACKET_IGNORE_OUTGOING,&ignore_outgoing,sizeof(ignore_outgoing))) {
         int e=errno;close(observer_fd);close(tx_fd);fprintf(stderr,"error=observer_outgoing_tap_enable_failed errno=%d\n",e);return EXIT_INTERFACE;
     }
-    uint64_t go=0;int gate=wait_go(o.nonce,&go);
-    if(gate==0){emit_aborted_before_go(&o);close(observer_fd);close(tx_fd);return 0;}
+    uint64_t go=0;int gate=wait_go(o.nonce,&set,&go);
+    if(gate==0){emit_aborted_before_go(&o,&set);close(observer_fd);close(tx_fd);return 0;}
     if(gate<0){close(observer_fd);close(tx_fd);fprintf(stderr,"error=go_gate_failed\n");return EXIT_GATE;}
     struct stale_queue_observation stale;
     drain_observer_queue_after_go(observer_fd,&stale);

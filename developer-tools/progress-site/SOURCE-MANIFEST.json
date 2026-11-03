@@ -25,22 +25,22 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "6b151bd9fc1e102fd2965c2de30fdb42077f325000fed43260dc94f105cd4946"
+      "sha256": "937566093463815ca4c39f381c34d6581fff7b859f1fe874cb54f844fb9f2a53"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "c8064c40bf5ead8f9540f538e08a4e7cd079257dd7938c51029b1caf9971a6e6"
+      "sha256": "0257b933d8460e97fa8565d33e40337a4b04c079783d6251a81235e6ceba2450"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "c8064c40bf5ead8f9540f538e08a4e7cd079257dd7938c51029b1caf9971a6e6"
+      "sha256": "0257b933d8460e97fa8565d33e40337a4b04c079783d6251a81235e6ceba2450"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "b8f0edf7173f2ef4dc908e8a727e8974ebe960636ffe00b045fbc9c3caab4b9e"
+      "sha256": "eb0502389d549344012f4dd5941fc4b1956b69993f805879c0df08a33c4b5f29"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
@@ -85,11 +85,11 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-03T14:16:38+08:00",
-  "runtime_scope": "Test122 Intel controlled 149-channel owner counters record Management=2 and Data=0; only the last descriptor is confirmed as a Beacon, with no complete AWDL Data. Router-side status candidates remain unassigned to a run and do not establish RF or raw firmware TXS. A separate offline firmware review verified all 123 manifest entries; status write-path analysis advanced, but C1 payload to host RX buffer, corresponding DMA writeback and interrupt are not closed. No driver/production-index edits or deployment basis; no new functional acceptance. Short Wi-Fi read-only observation only; network smoke and sleep skipped per request.",
+  "updated_at": "2026-11-03T14:54:52+08:00",
+  "runtime_scope": "Test122 router-only v2: four host-side status samples match the frame nonce marker, full Sequence Control and AWDL sequence. TX_FLAGS=1 is interpreted by Linux 6.1.111 mac80211 as unicast with host info lacking TX_STAT_ACK; this is not per-frame hardware TXS. DataRetries=0 does not prove zero RF retries. Per-packet times are userspace recvmsg returns; actual mt76 vendor path is unmatched to that source. No RF or same-window Intel RX proof. The prior Intel one-shot RX window remains separate. Offline suite 39/39 passed; firmware review bundle hashes passed, C1-to-host-RX/DMA/IRQ unresolved. Network smoke and sleep skipped; no driver/EFI write or new feature acceptance.",
   "running_candidate": "25G332-Test122",
   "next_candidate": null,
-  "website_delivery": "Test122 current acceptance display and project timeline corrected using the independently hash-verified firmware review. Current matrix remains 5 passed, 5 partial, 0 failed and 30 uncovered. Local refresh and safety validation only; no driver/EFI change and no publication.",
-  "deployment_state": "test122_loaded_runtime_reviewed",
-  "site_preparation": "Public-safe current runtime projection; private evidence excluded"
+  "website_delivery": "Test122 current-runtime record and project timeline updated with the correlated router-only v2 evidence and independent status-semantics review. Next gate prioritizes a new legal Intel owner/lease RX opportunity with the same v2 frame identity; status-source investigation runs in parallel. Acceptance remains 5 passed, 5 partial, 0 failed, 30 uncovered. Local generation, privacy and hash checks only; no commit or publication.",
+  "deployment_state": "test122_running",
+  "site_preparation": "Public-safe current runtime projection; private evidence excluded; local refresh only"
 }

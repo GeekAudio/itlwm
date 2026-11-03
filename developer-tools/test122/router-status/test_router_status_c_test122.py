@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Host-only checks for the Test122 sender and radiotap/TX-status parser."""
+"""Host-only checks for the Test122 sender and run-correlated packet set."""
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 import subprocess
 import sys
@@ -14,11 +13,14 @@ import unittest
 TOOL_DIR = Path(__file__).resolve().parent
 REPO_ROOT = TOOL_DIR.parents[2]
 PARSER_DIR = REPO_ROOT / "developer-tools/test089/txstatus-observer"
-PACKETSET_DIR = REPO_ROOT / "developer-tools/test104"
 SENDER_SOURCE = TOOL_DIR / "awdl_router_status_sender_test122.c"
 PARSER_TEST_SOURCE = TOOL_DIR / "radiotap_status_parser_test122.c"
-sys.path.insert(0, str(PACKETSET_DIR))
-import packetset_test104 as packetset  # noqa: E402
+sys.path.insert(0, str(TOOL_DIR))
+import packetset_correlated_test122 as packetset  # noqa: E402
+import router_status_tail_test122 as router_wrapper  # noqa: E402
+
+
+WIRE_NONCE = "0123456789abcdef"
 
 
 class Test122SenderHostTests(unittest.TestCase):
@@ -50,7 +52,12 @@ class Test122SenderHostTests(unittest.TestCase):
     def make_packet_set(self) -> bytes:
         source = {"mac": "02:11:22:33:44:55", "ipv6_link_local": "fe80::1122"}
         target = {"mac": "02:aa:bb:cc:dd:ee", "ipv6_link_local": "fe80::aabb"}
-        data, manifest = packetset.encode_packet_set(source, target, "test122-host-only")
+        data, manifest = packetset.encode_packet_set(
+            source, target, "test122-host-only", wire_nonce_hex=WIRE_NONCE,
+            wifi_sequence_base=0x0FFE, awdl_sequence_base=0xFFFE)
+        self.assertEqual(len(data), 536)
+        self.assertEqual(manifest["schema"], "test122-correlated-packet-set/v2")
+        self.assertEqual(manifest["wire_nonce_hex"], WIRE_NONCE)
         self.assertFalse(manifest["transmission_capability"])
         return data
 
@@ -60,30 +67,64 @@ class Test122SenderHostTests(unittest.TestCase):
         path.chmod(0o600)
         return path
 
-    def test_c_packetset_verifier_accepts_existing_test104_contract(self):
-        packet_path = self.write_private(self.make_packet_set())
-        result = subprocess.run(
+    def verify(self, data: bytes, name: str = "packet-set.bin"):
+        packet_path = self.write_private(data, name)
+        return subprocess.run(
             [str(self.sender), "--verify-only", "--packet-set", str(packet_path)],
             check=False, capture_output=True, text=True, timeout=10)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(json.loads(result.stdout), {
-            "event": "PACKET_SET_VALID",
-            "schema": "test104-unicast-packet-set/v1",
-            "frames": 4,
-            "interval_ms": 10,
-            "budget_ms": 40,
-            "noack_requested": False,
-            "transmission_capability": False,
-            "rf_transmission_proven": False,
-        })
 
-    def test_c_packetset_verifier_rejects_frame_mutation(self):
+    def test_c_verifier_accepts_v2_and_preserves_json_wire_order(self):
+        result = self.verify(self.make_packet_set())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        expected = (
+            '{"event":"PACKET_SET_VALID",'
+            '"schema":"test122-correlated-packet-set/v2",'
+            '"frames":4,"interval_ms":10,"budget_ms":40,'
+            '"noack_requested":false,"transmission_capability":false,'
+            '"rf_transmission_proven":false,'
+            f'"wire_nonce_hex":"{WIRE_NONCE}"' + '}\n'
+        )
+        self.assertEqual(result.stdout, expected)
+        decoded = json.loads(result.stdout)
+        self.assertEqual(decoded["wire_nonce_hex"], WIRE_NONCE)
+        parsed = router_wrapper.parse_packetset_valid(
+            "PACKET_SET_VALID " + result.stdout.rstrip("\n"))
+        self.assertEqual(parsed["schema"], "test122-correlated-packet-set/v2")
+        self.assertEqual(parsed["wire_nonce_hex"], WIRE_NONCE)
+        self.assertFalse(parsed["transmission_capability"])
+
+    def test_c_packetset_verifier_rejects_sequence_mutation(self):
         data = bytearray(self.make_packet_set())
-        data[104 + 10 + 22] ^= 1
-        packet_path = self.write_private(bytes(data), "mutated.bin")
-        result = subprocess.run(
-            [str(self.sender), "--verify-only", "--packet-set", str(packet_path)],
-            check=False, capture_output=True, text=True, timeout=10)
+        data[112 + 10 + 22] ^= 0x10
+        result = self.verify(bytes(data), "bad-sequence.bin")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+
+    def test_c_packetset_verifier_rejects_wire_nonce_mutation(self):
+        data = bytearray(self.make_packet_set())
+        data[112 + 10 + 88] ^= 0x01
+        result = self.verify(bytes(data), "bad-frame-nonce.bin")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+
+    def test_c_packetset_verifier_rejects_zero_header_nonce(self):
+        data = bytearray(self.make_packet_set())
+        data[104:112] = bytes(8)
+        result = self.verify(bytes(data), "zero-header-nonce.bin")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+
+    def test_c_packetset_verifier_rejects_checksum_mutation(self):
+        data = bytearray(self.make_packet_set())
+        data[112 + 10 + 86] ^= 0x01
+        result = self.verify(bytes(data), "bad-checksum.bin")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, "")
+
+    def test_c_packetset_verifier_rejects_sequence_base_mismatch(self):
+        data = bytearray(self.make_packet_set())
+        data[20:22] = b"\x00\x10"  # exceeds the 12-bit Wi-Fi sequence range
+        result = self.verify(bytes(data), "bad-base.bin")
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
 
@@ -94,7 +135,7 @@ class Test122SenderHostTests(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertIn("--verify-only", result.stderr)
 
-    def test_parser_handles_exact_echo_header_change_and_fcs(self):
+    def test_parser_handles_dynamic_nonce_and_full_sequences(self):
         result = subprocess.run([str(self.parser_test)], check=False,
                                 capture_output=True, text=True, timeout=10)
         self.assertEqual(result.returncode, 0, result.stderr)

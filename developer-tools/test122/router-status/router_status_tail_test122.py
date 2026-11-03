@@ -32,10 +32,10 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[3]
 TOOL_DIR = Path(__file__).resolve().parent
-SCHEMA = "test122-router-status-tail/v1"
-SENDER_SCHEMA = "test122-router-status-sender/v1"
-MONITOR_SCHEMA = "test122-router-status-monitor/v1"
-PACKETSET_SCHEMA = "test104-unicast-packet-set/v1"
+SCHEMA = "test122-router-status-tail/v2"
+SENDER_SCHEMA = "test122-router-status-sender/v2"
+MONITOR_SCHEMA = "test122-router-status-monitor/v2"
+PACKETSET_SCHEMA = "test122-correlated-packet-set/v2"
 AP_INTERFACE = "wlan7"
 MONITOR_INTERFACE = "iwtail122"
 GO_TO_START_MAX_NS = 5_000_000
@@ -47,6 +47,7 @@ MAX_REMOTE_SCRIPT_BYTES = 3 * 1024 * 1024
 MAX_REMOTE_LINE_BYTES = 64 * 1024
 MAX_REMOTE_OUTPUT_BYTES = 2 * 1024 * 1024
 TOKEN_RE = re.compile(r"^[0-9a-f]{32}$")
+WIRE_RE = re.compile(r"^(?!0{16}$)[0-9a-f]{16}$")
 SHA_RE = re.compile(r"^[0-9a-f]{64}$")
 
 READY_VALUES = {
@@ -88,6 +89,16 @@ def _load_module(name: str, path: Path):
     return module
 
 
+def _load_packetset():
+    return _load_module("test122_correlated_packetset", TOOL_DIR / "packetset_correlated_test122.py")
+
+
+def _wire_nonce(value: Any) -> str:
+    if not isinstance(value, str) or not WIRE_RE.fullmatch(value):
+        raise RouterStatusTailError("wire_nonce_invalid")
+    return value
+
+
 def _load_router_runner():
     path = ROOT / "developer-tools/test087/run_controlled_probe_once.py"
     return _load_module("test122_router_status_tail_transport", path)
@@ -102,7 +113,14 @@ def _json_record(value: str, label: str) -> dict:
     if not isinstance(value, str) or len(value.encode("utf-8")) > MAX_REMOTE_LINE_BYTES:
         raise RouterStatusTailError(label + "_line_invalid")
     try:
-        parsed = json.loads(value)
+        def unique_fields(pairs):
+            result = {}
+            for key, item in pairs:
+                if key in result:
+                    raise RouterStatusTailError(label + "_duplicate_json_field")
+                result[key] = item
+            return result
+        parsed = json.loads(value, object_pairs_hook=unique_fields)
     except (TypeError, ValueError) as exc:
         raise RouterStatusTailError(label + "_json_invalid") from exc
     if not isinstance(parsed, dict):
@@ -121,10 +139,11 @@ def parse_ready(line: str) -> dict:
         if not key or not value or key in values:
             raise RouterStatusTailError("sender_ready_malformed")
         values[key] = value
+    wire_nonce = _wire_nonce(values.pop("wire_nonce_hex", None))
     if values != READY_VALUES:
         raise RouterStatusTailError("sender_ready_contract_mismatch")
     return {
-        "schema": SENDER_SCHEMA, "frames": 4, "interval_ms": 10,
+        "schema": SENDER_SCHEMA, "wire_nonce_hex": wire_nonce, "frames": 4, "interval_ms": 10,
         "mpdu_bytes": 96, "radiotap_bytes": 10, "packet_bytes": 106,
         "send_budget_ms": 40, "status_tail_ms": 2000,
         "tx_flags_requested": "NOSEQNO", "noack_requested": False,
@@ -138,7 +157,7 @@ def parse_packetset_valid(line: str) -> dict:
     if not isinstance(line, str) or not line.startswith(prefix):
         raise RouterStatusTailError("packetset_verification_malformed")
     value = _json_record(line[len(prefix):], "packetset_verification")
-    required = {"event", "schema", "frames", "interval_ms", "budget_ms",
+    required = {"event", "schema", "wire_nonce_hex", "frames", "interval_ms", "budget_ms",
                 "noack_requested", "transmission_capability",
                 "rf_transmission_proven"}
     if (set(value) != required or value.get("event") != "PACKET_SET_VALID" or
@@ -148,11 +167,12 @@ def parse_packetset_valid(line: str) -> dict:
             value.get("transmission_capability") is not False or
             value.get("rf_transmission_proven") is not False):
         raise RouterStatusTailError("packetset_verification_contract_mismatch")
+    _wire_nonce(value["wire_nonce_hex"])
     return value
 
 
 STARTED_FIELDS = {
-    "event", "schema", "clock_domain", "run_token", "go_received_ns",
+    "event", "schema", "clock_domain", "run_token", "wire_nonce_hex", "go_received_ns",
     "started_ns", "send_deadline_ns", "observer_deadline_ns", "go_to_start_ns",
     "go_to_start_max_ns", "send_budget_ns", "status_tail_ns", "frames_requested",
     "interval_ms", "tx_flags_requested", "noack_requested", "intel_arm_invoked",
@@ -184,11 +204,12 @@ def validate_started(value: Any, token: str) -> dict:
             value["intel_arm_invoked"] is not False or
             value["boot_claim_used"] is not False):
         raise RouterStatusTailError("sender_started_contract_mismatch")
+    _wire_nonce(value["wire_nonce_hex"])
     return dict(value)
 
 
 RESULT_FIELDS = {
-    "event", "schema", "clock_domain", "status", "run_token", "run_token_in_frame",
+    "event", "schema", "clock_domain", "status", "run_token", "wire_nonce_hex", "run_token_in_frame",
     "go_received_ns", "frames_requested", "frames_attempted", "frames_completed",
     "send_complete", "packet_bytes", "radiotap_bytes", "mpdu_bytes", "elapsed_ms",
     "deadline_hit", "error_count", "last_errno", "stop_reason", "tx_flags_requested",
@@ -201,18 +222,18 @@ RESULT_FIELDS = {
     "intel_arm_invoked", "boot_claim_used",
 }
 ABORTED_FIELDS = {
-    "event", "schema", "status", "run_token", "run_token_in_frame", "frames_requested",
+    "event", "schema", "status", "run_token", "wire_nonce_hex", "run_token_in_frame", "frames_requested",
     "frames_attempted", "frames_completed", "send_complete", "send_budget_ms",
     "status_tail_ms", "tx_flags_requested", "noack_requested", "radio_transmission_proven",
     "rf_transmission_proven", "firmware_tx_status_proven", "mac_ack", "peer_receipt_proven",
     "airdrop_proven", "intel_arm_invoked", "boot_claim_used",
 }
-SEND_ROW_FIELDS = {"ordinal", "ieee80211_sequence", "awdl_sequence", "before_ns", "after_ns",
+SEND_ROW_FIELDS = {"ordinal", "ieee80211_sequence", "ieee80211_sequence_control", "awdl_sequence", "before_ns", "after_ns",
                    "return_bytes", "errno"}
 QUEUE_FIELDS = {"read_attempts", "packets_drained", "receive_error", "drain_complete",
                 "kernel_stats_available", "kernel_packets", "kernel_dropped_packets"}
 MONITOR_FIELDS = {
-    "schema", "started_ns", "ended_ns", "actual_horizon_ns", "capture_window_ns",
+    "schema", "clock_domain", "observation_time_semantics", "started_ns", "ended_ns", "actual_horizon_ns", "capture_window_ns",
     "status_tail_began_ns", "capture_finished", "capture_limit_reached", "read_attempts",
     "packets_received", "exact_samples_recorded", "exact_samples_overflow", "receive_error",
     "kernel_stats_available", "kernel_packets", "kernel_dropped_packets", "capture_loss_free",
@@ -223,12 +244,12 @@ MONITOR_FIELDS = {
     "tx_status_candidate_by_ordinal", "other_exact_by_ordinal", "samples",
     "status_candidate_matches_by_ordinal", "status_candidate_samples_recorded",
     "status_candidate_samples_overflow", "status_candidate_identity_unavailable",
-    "status_candidate_samples",
+    "status_candidate_samples", "nonmatch_samples_recorded", "nonmatch_samples_overflow", "nonmatch_samples",
 }
 STATUS_SAMPLE_FIELDS = {
     "ordinal", "packet_type", "ifindex", "msg_flags", "received_len", "bytes_retained",
     "raw_prefix_truncated", "exact_match", "has_tx_flags", "tx_flags", "has_data_retries",
-    "data_retries", "ieee80211_sequence", "awdl_sequence", "raw_prefix_hex",
+    "data_retries", "ieee80211_sequence", "ieee80211_sequence_control", "awdl_sequence", "observed_ns", "raw_prefix_hex",
 }
 
 
@@ -236,6 +257,21 @@ def _ints(value: dict, keys: tuple[str, ...], label: str) -> None:
     for key in keys:
         if type(value.get(key)) is not int or value[key] < 0:
             raise RouterStatusTailError(label + "_integer_invalid:" + key)
+
+
+def _validate_sample_times(samples: list, *, started: int, ended: int) -> None:
+    previous = started
+    for sample in samples:
+        observed = sample.get("observed_ns")
+        if type(observed) is not int or not previous <= observed <= ended:
+            raise RouterStatusTailError("sample_observation_time_invalid")
+        previous = observed
+        if "ieee80211_sequence_control" in sample:
+            sc, seq = sample["ieee80211_sequence_control"], sample["ieee80211_sequence"]
+            if (type(sc) is not int or type(seq) is not int or not 0 <= seq <= 4095 or
+                    sc != seq << 4 or type(sample["awdl_sequence"]) is not int or
+                    not 0 <= sample["awdl_sequence"] <= 65535):
+                raise RouterStatusTailError("sample_full_sequence_invalid")
 
 
 def _validate_monitor(value: Any, *, started: int, deadline: int,
@@ -248,13 +284,14 @@ def _validate_monitor(value: Any, *, started: int, deadline: int,
             "radiotap_invalid", "radiotap_unsupported", "unmatched_valid_packets",
             "truncated_packets", "exact_identity_unavailable", "observer_bound_ifindex",
             "status_candidate_samples_recorded", "status_candidate_samples_overflow",
-            "status_candidate_identity_unavailable")
+            "status_candidate_identity_unavailable", "nonmatch_samples_recorded", "nonmatch_samples_overflow")
     _ints(value, ints, "monitor")
     bools = ("capture_finished", "capture_limit_reached", "kernel_stats_available",
              "classification_complete", "identity_complete", "outgoing_tap_is_rf_proof")
     if any(type(value.get(k)) is not bool for k in bools):
         raise RouterStatusTailError("monitor_boolean_invalid")
-    if (value.get("schema") != MONITOR_SCHEMA or value["started_ns"] != started or
+    if (value.get("schema") != MONITOR_SCHEMA or value.get("clock_domain") != "CLOCK_MONOTONIC" or
+            value.get("observation_time_semantics") != "userspace_recvmsg_return" or value["started_ns"] != started or
             value["status_tail_began_ns"] != deadline or
             value["capture_window_ns"] != CAPTURE_WINDOW_NS or
             value["ended_ns"] < value["started_ns"] or
@@ -299,7 +336,7 @@ def _validate_monitor(value: Any, *, started: int, deadline: int,
                     "ifindex", "msg_flags", "received_len", "copied_len", "parse_supported",
                     "exact_match", "outgoing_echo", "host_driver_completion_candidate",
                     "has_tx_flags", "tx_flags", "has_data_retries", "data_retries",
-                    "ieee80211_sequence", "awdl_sequence"}
+                    "ieee80211_sequence", "ieee80211_sequence_control", "awdl_sequence", "observed_ns"}
         if not isinstance(sample, dict) or set(sample) != required:
             raise RouterStatusTailError("monitor_sample_field_set_invalid")
     status_samples = value.get("status_candidate_samples")
@@ -312,10 +349,10 @@ def _validate_monitor(value: Any, *, started: int, deadline: int,
         if not isinstance(sample, dict) or set(sample) != STATUS_SAMPLE_FIELDS:
             raise RouterStatusTailError("status_candidate_sample_fields_invalid")
         _ints(sample, ("packet_type", "ifindex", "msg_flags", "received_len", "bytes_retained",
-                       "tx_flags", "data_retries", "ieee80211_sequence", "awdl_sequence"),
+                       "tx_flags", "data_retries", "ieee80211_sequence", "ieee80211_sequence_control", "awdl_sequence", "observed_ns"),
               "status_candidate_sample")
         ordinal = sample["ordinal"]
-        ordinal_valid = ordinal is None or (type(ordinal) is int and 0 <= ordinal < 4)
+        ordinal_valid = type(ordinal) is int and 0 <= ordinal < 4
         if (sample["packet_type"] != 3 or sample["ifindex"] != value["observer_bound_ifindex"] or
                 sample["bytes_retained"] > 256 or sample["bytes_retained"] > sample["received_len"] or
                 not ordinal_valid or
@@ -328,12 +365,43 @@ def _validate_monitor(value: Any, *, started: int, deadline: int,
             raise RouterStatusTailError("status_candidate_sample_invalid")
         if sample["raw_prefix_truncated"] != (sample["received_len"] > 256):
             raise RouterStatusTailError("status_candidate_prefix_truncation_invalid")
+    nonmatches = value["nonmatch_samples"]
+    if (not isinstance(nonmatches, list) or len(nonmatches) > 8 or
+            len(nonmatches) != value["nonmatch_samples_recorded"] or
+            len(nonmatches) + value["nonmatch_samples_overflow"] > value["packets_received"]):
+        raise RouterStatusTailError("nonmatch_samples_count_invalid")
+    for sample in nonmatches:
+        fields = {"observed_ns", "parse_status", "packet_type_present", "packet_type",
+                  "ifindex_present", "ifindex", "msg_flags", "received_len", "copied_len",
+                  "raw_prefix_truncated", "raw_prefix_hex"}
+        if not isinstance(sample, dict) or set(sample) != fields:
+            raise RouterStatusTailError("nonmatch_sample_fields_invalid")
+        _ints(sample, ("msg_flags", "received_len", "copied_len",
+                       "observed_ns"), "nonmatch_sample")
+        for field in ("packet_type", "ifindex"):
+            present = sample[field + "_present"]
+            if (type(present) is not bool or
+                    (present and (type(sample[field]) is not int or sample[field] < 0)) or
+                    (not present and sample[field] is not None)):
+                raise RouterStatusTailError("nonmatch_sample_identity_invalid")
+        if (sample["parse_status"] not in {"invalid", "unsupported", "valid_unmatched"} or
+                any(type(sample[k]) is not bool for k in (
+                    "packet_type_present", "ifindex_present", "raw_prefix_truncated")) or
+                sample["copied_len"] > min(256, sample["received_len"]) or
+                not isinstance(sample["raw_prefix_hex"], str) or
+                len(sample["raw_prefix_hex"]) != sample["copied_len"] * 2 or
+                not re.fullmatch(r"(?:[0-9a-f]{2})*", sample["raw_prefix_hex"]) or
+                sample["raw_prefix_truncated"] != (sample["received_len"] > sample["copied_len"])):
+            raise RouterStatusTailError("nonmatch_sample_invalid")
+    for rows in (samples, status_samples, nonmatches):
+        _validate_sample_times(rows, started=started, ended=value["ended_ns"])
     return dict(value)
 
 
 def validate_result(value: Any, token: str) -> dict:
     if not isinstance(value, dict):
         raise RouterStatusTailError("sender_result_not_object")
+    _wire_nonce(value.get("wire_nonce_hex"))
     if value.get("status") == "aborted":
         if set(value) != ABORTED_FIELDS:
             raise RouterStatusTailError("sender_abort_field_set_invalid")
@@ -413,9 +481,11 @@ def validate_result(value: Any, token: str) -> dict:
     for index, row in enumerate(rows):
         if not isinstance(row, dict) or set(row) != SEND_ROW_FIELDS:
             raise RouterStatusTailError("send_timing_field_set_invalid")
-        _ints(row, ("ordinal", "ieee80211_sequence", "awdl_sequence", "before_ns", "after_ns",
+        _ints(row, ("ordinal", "ieee80211_sequence", "ieee80211_sequence_control", "awdl_sequence", "before_ns", "after_ns",
                     "errno"), "send_timing")
-        if (row["ordinal"] != index or row["after_ns"] < row["before_ns"] or
+        if (row["ordinal"] != index or row["ieee80211_sequence"] > 4095 or
+                row["ieee80211_sequence_control"] != row["ieee80211_sequence"] << 4 or
+                row["awdl_sequence"] > 65535 or row["after_ns"] < row["before_ns"] or
                 row["return_bytes"] != 106 or row["errno"] != 0 or
                 row["before_ns"] < value["started_ns"] or
                 row["after_ns"] > value["send_deadline_ns"]):
@@ -462,11 +532,85 @@ def _validate_input_file(path: Path, expected_sha: str, *, private: bool) -> byt
     return raw
 
 
-def validate_packetset_shape(raw: bytes) -> None:
-    if len(raw) != 528 or raw[:8] != b"T104PKT1" or raw[8] != 1 or raw[9] != 4:
-        raise RouterStatusTailError("packet_set_shape_invalid")
-    if struct.unpack_from(">HHHHH", raw, 10) != (10, 40, 10, 96, 106):
-        raise RouterStatusTailError("packet_set_contract_invalid")
+def validate_packetset_shape(raw: bytes) -> dict:
+    try:
+        return _load_packetset().decode_packet_set(raw)
+    except (ValueError, KeyError, TypeError) as exc:
+        raise RouterStatusTailError("packet_set_invalid") from exc
+
+
+def claim_wire_nonce(directory: Path, nonce: str, packet_set_sha256: str, token: str) -> Path:
+    """Reserve a frame identity before device I/O; never reuse it after an abort."""
+    _wire_nonce(nonce)
+    if not SHA_RE.fullmatch(packet_set_sha256) or not TOKEN_RE.fullmatch(token):
+        raise RouterStatusTailError("nonce_claim_binding_invalid")
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    info = directory.lstat()
+    if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or
+            info.st_uid != os.getuid() or stat.S_IMODE(info.st_mode) != 0o700):
+        raise RouterStatusTailError("nonce_ledger_must_be_private_0700")
+    path = directory / (nonce + ".json")
+    try:
+        _write_private_new(path, {"schema": "test122-wire-nonce-claim/v1",
+                                 "wire_nonce_hex": nonce, "run_token": token,
+                                 "packet_set_sha256": packet_set_sha256,
+                                 "state": "reserved_before_device_io"})
+    except FileExistsError as exc:
+        raise RouterStatusTailError("wire_nonce_already_claimed") from exc
+    directory_fd = os.open(directory, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) |
+                           getattr(os, "O_NOFOLLOW", 0))
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+    return path
+
+
+def correlate_status_samples(report: dict, packet_set: bytes) -> dict:
+    """Bind raw host status copies to this packet set, without claiming RF RX."""
+    decoded = validate_packetset_shape(packet_set)
+    result = report["sender_result"]
+    if result["wire_nonce_hex"] != decoded["wire_nonce_hex"]:
+        raise RouterStatusTailError("result_wire_nonce_mismatch")
+    _validate_sample_times(result["monitor_observation"]["status_candidate_samples"],
+                           started=result["started_ns"],
+                           ended=result["monitor_observation"]["ended_ns"])
+    for row, expected in zip(result["send_timing"], decoded["frames"]):
+        if (row["ordinal"] != expected["ordinal"] or
+                row["ieee80211_sequence_control"] != expected["sequence_control"] or
+                row["awdl_sequence"] != expected["awdl_sequence"]):
+            raise RouterStatusTailError("send_packetset_sequence_mismatch")
+    correlated = []
+    for sample in result["monitor_observation"]["status_candidate_samples"]:
+        raw = bytes.fromhex(sample["raw_prefix_hex"])
+        if len(raw) < 8 or raw[0] != 0:
+            raise RouterStatusTailError("status_raw_radiotap_invalid")
+        offset = int.from_bytes(raw[2:4], "little")
+        if offset < 8 or offset + 96 > len(raw):
+            raise RouterStatusTailError("status_raw_mpdu_incomplete")
+        match = _load_packetset().match_frame(raw[offset:offset + 96], packet_set)
+        if (match is None or match["ordinal"] != sample["ordinal"] or
+                match["sequence_control"] != sample["ieee80211_sequence_control"] or
+                match["awdl_sequence"] != sample["awdl_sequence"]):
+            raise RouterStatusTailError("status_raw_packetset_identity_mismatch")
+        row = result["send_timing"][match["ordinal"]]
+        if sample["observed_ns"] < row["before_ns"]:
+            raise RouterStatusTailError("status_observed_before_bound_send")
+        correlated.append({
+            "ordinal": match["ordinal"], "observed_ns": sample["observed_ns"],
+            "send_before_ns": row["before_ns"], "send_after_ns": row["after_ns"],
+            "observed_after_send_return_ns": sample["observed_ns"] - row["after_ns"],
+            "observed_after_send_budget": sample["observed_ns"] > result["send_deadline_ns"],
+            "tx_flags_raw": sample["tx_flags"], "data_retries_raw": sample["data_retries"],
+            "host_tx_fail_bit": bool(sample["tx_flags"] & 1),
+            "frame_identity_matched": True, "exact_mpdu_match": match["exact_mpdu_match"],
+        })
+    return {"schema": "test122-frame-correlation/v2", "wire_nonce_hex": decoded["wire_nonce_hex"],
+            "clock_domain": "CLOCK_MONOTONIC", "time_semantics": "userspace_recvmsg_return",
+            "samples": correlated, "matched_status_samples": len(correlated),
+            "missing_ordinals": [i for i in range(4) if i not in {s["ordinal"] for s in correlated}],
+            "kernel_receive_timestamp_present": False, "rf_transmission_proven": False,
+            "hardware_ack_proven": False, "intel_rx_correlated": False}
 
 
 def _b64(raw: bytes) -> str:
@@ -481,7 +625,8 @@ def build_remote_script(*, binary: bytes, binary_sha256: str, packet_set: bytes,
         raise RouterStatusTailError("sender_binary_sha_mismatch")
     if hashlib.sha256(packet_set).hexdigest() != packet_set_sha256:
         raise RouterStatusTailError("packet_set_sha_mismatch")
-    validate_packetset_shape(packet_set)
+    packetset_info = validate_packetset_shape(packet_set)
+    wire_nonce = packetset_info["wire_nonce_hex"]
     if not binary or len(binary) > MAX_BINARY_BYTES:
         raise RouterStatusTailError("sender_binary_size_invalid")
     router = _load_router_protocol()
@@ -504,6 +649,11 @@ def build_remote_script(*, binary: bytes, binary_sha256: str, packet_set: bytes,
         '  exit 2\n'
         'fi\n'
     )
+    verify_json = json.dumps({"event": "PACKET_SET_VALID", "schema": PACKETSET_SCHEMA,
+                              "frames": 4, "interval_ms": 10, "budget_ms": 40,
+                              "noack_requested": False, "transmission_capability": False,
+                              "rf_transmission_proven": False, "wire_nonce_hex": wire_nonce},
+                             separators=(",", ":"))
     pset_block = (
         stage_anchor +
         f"printf '%s' '{_b64(packet_set)}' | base64 -d > \"$PSET\" || "
@@ -515,7 +665,7 @@ def build_remote_script(*, binary: bytes, binary_sha256: str, packet_set: bytes,
         '  exit 2\n'
         'fi\n'
         'VERIFY_OUT="$("$BIN" --verify-only --packet-set "$PSET" 2>&1)" || { printf \'REMOTE_ERROR code=packet_set_verify_failed\\n\'; exit 2; }\n'
-        'case "$VERIFY_OUT" in \'{"event":"PACKET_SET_VALID","schema":"test104-unicast-packet-set/v1","frames":4,"interval_ms":10,"budget_ms":40,"noack_requested":false,"transmission_capability":false,"rf_transmission_proven":false}\') ;; *) printf \'REMOTE_ERROR code=packet_set_verify_contract_mismatch\\n\'; exit 2 ;; esac\n'
+        f'case "$VERIFY_OUT" in \'{verify_json}\') ;; *) printf \'REMOTE_ERROR code=packet_set_verify_contract_mismatch\\n\'; exit 2 ;; esac\n'
         'printf \'PACKET_SET_VALID %s\\n\' "$VERIFY_OUT"\n'
     )
     if script.count(stage_anchor) != 1:
@@ -604,6 +754,8 @@ def _record_line(report: dict, line: str, token: str) -> None:
         if report.get("packetset_verified") is not None or report.get("monitor_ready") is not None:
             raise RouterStatusTailError("packetset_verification_order_invalid")
         report["packetset_verified"] = parse_packetset_valid(line)
+        if report["packetset_verified"]["wire_nonce_hex"] != report["wire_nonce_hex"]:
+            raise RouterStatusTailError("packetset_verification_wire_nonce_mismatch")
         report["event_order"].append("PACKET_SET_VALID")
         return
     if line.startswith("MONITOR_READY "):
@@ -617,6 +769,8 @@ def _record_line(report: dict, line: str, token: str) -> None:
                 report.get("ready") is not None):
             raise RouterStatusTailError("sender_ready_order_invalid")
         report["ready"] = parse_ready(line)
+        if report["ready"]["wire_nonce_hex"] != report["wire_nonce_hex"]:
+            raise RouterStatusTailError("ready_wire_nonce_mismatch")
         report["event_order"].append("READY")
         return
     if line.startswith("CLEANUP "):
@@ -644,11 +798,17 @@ def _record_line(report: dict, line: str, token: str) -> None:
         elif event == "SENDER_RESULT":
             if report.get("sender_result") is not None:
                 raise RouterStatusTailError("duplicate_sender_result")
-            report["sender_result"] = validate_result(value, token)
+            try:
+                report["sender_result"] = validate_result(value, token)
+            except (ValueError, KeyError, TypeError):
+                report["sender_result_unvalidated"] = value
+                raise
             if (value.get("status") != "aborted" and report.get("sender_started") is None):
                 raise RouterStatusTailError("sender_result_before_started")
         else:
             raise RouterStatusTailError("sender_event_unknown")
+        if value["wire_nonce_hex"] != report["wire_nonce_hex"]:
+            raise RouterStatusTailError("sender_wire_nonce_mismatch")
         report["event_order"].append(event)
         return
     raise RouterStatusTailError("remote_protocol_line_unknown")
@@ -661,7 +821,8 @@ def run(args) -> dict:
     if len(binary) > MAX_BINARY_BYTES:
         raise RouterStatusTailError("sender_binary_size_invalid")
     packet_set = _validate_input_file(args.packet_set, args.packet_set_sha256, private=True)
-    validate_packetset_shape(packet_set)
+    packetset_info = validate_packetset_shape(packet_set)
+    wire_nonce = packetset_info["wire_nonce_hex"]
     if args.output.parent.is_symlink():
         raise RouterStatusTailError("output_parent_symlink")
     args.output.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -678,9 +839,11 @@ def run(args) -> dict:
     if not args.host or not args.control_path:
         raise RouterStatusTailError("host_and_control_path_required")
     argv = runner.build_bootstrap_argv(args.host, str(args.control_path))
+    claim_path = claim_wire_nonce(args.nonce_ledger_dir, wire_nonce, args.packet_set_sha256, token)
     report = {
         "schema": SCHEMA, "status": "starting", "complete": False,
-        "run_token": token, "sender_sha256": args.binary_sha256,
+        "run_token": token, "wire_nonce_hex": wire_nonce, "wire_nonce_claim": str(claim_path),
+        "frame_nonce_in_payload": True, "sender_sha256": args.binary_sha256,
         "packet_set_sha256": args.packet_set_sha256,
         "script_sha256": hashlib.sha256(script.encode("utf-8")).hexdigest(),
         "execution_host": args.host, "control_path": str(args.control_path),
@@ -748,8 +911,11 @@ def run(args) -> dict:
         report["outgoing_exact_total"] = sum(monitor.get("outgoing_exact_by_ordinal", []))
         report["non_outgoing_exact_total"] = sum(monitor.get("non_outgoing_exact_by_ordinal", []))
         report["capture_loss_free"] = monitor.get("capture_loss_free")
+        if report["complete"]:
+            report["frame_correlation"] = correlate_status_samples(report, packet_set)
     except Exception as exc:
         report["status"] = "router_only_incomplete"
+        report["complete"] = False
         report["error"] = (str(exc)[:240] if isinstance(exc, RouterStatusTailError)
                             else type(exc).__name__)
         if process is not None and process.poll() is None and not report.get("go_write_attempted"):
@@ -792,6 +958,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--packet-set", type=Path)
     parser.add_argument("--packet-set-sha256")
     parser.add_argument("--output", type=Path)
+    parser.add_argument("--nonce-ledger-dir", type=Path, help="persistent private ledger; a frame nonce is never reused")
     args = parser.parse_args(argv)
     if not args.run:
         print(json.dumps({
@@ -805,11 +972,11 @@ def main(argv: list[str] | None = None) -> int:
         }, ensure_ascii=False))
         return 0
     missing = [name for name in ("host", "control_path", "binary", "binary_sha256", "packet_set",
-                                  "packet_set_sha256", "output")
+                                  "packet_set_sha256", "output", "nonce_ledger_dir")
                if getattr(args, name) is None]
     if missing:
         parser.error("--run requires --host, --control-path, --binary, --binary-sha256, --packet-set, "
-                     "--packet-set-sha256 and --output")
+                     "--packet-set-sha256, --output and --nonce-ledger-dir")
     try:
         report = run(args)
     except Exception as exc:
