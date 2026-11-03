@@ -52,6 +52,8 @@ python3 developer-tools/test122/router-status/router_status_tail_test122.py \
 
 当前内核可通过 listener 实际收到 nonce 验证原生输入成功。若未收到，现有 RX 记录只有部分帧身份，不能据此判断该 nonce 在哪一层丢失。特别是 `Rx149InputReceipt.sequence` 是本地收据序号，不是 Wi-Fi Sequence Control；严格的入口归因仍需补充有界内核记录。
 
+四个测试帧的 UDP 载荷共用同一个 nonce。listener 收到它，只能证明本轮至少一次载荷输入；收到四份相同 nonce 也可能包含重复包，不能据此认定四个不同 ordinal 全部到达。逐帧接收计数必须在同一 MPDU/收据中关联完整 Wi-Fi SC、AWDL 序号和 nonce，再按 ordinal 去重；只有 payload 的 socket 记录不满足这一条件。
+
 ## 离线验证
 
 ```sh
