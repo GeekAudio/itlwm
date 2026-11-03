@@ -48,6 +48,9 @@ SENDER_PROTOCOL = load(
 SENDER_FIXTURES = load(
     "test123_terminal_sender_fixture_helpers",
     ROOT / "developer-tools/test123/router-status/test_dual_sender_protocol_test123.py")
+IDENTITY_FIXTURES = load(
+    "test123_terminal_identity_fixture_helpers",
+    ROOT / "developer-tools/test123/test_binding_independent_test123.py")
 TEST123_COORDINATOR = load(
     "test123_terminal_coordinator_under_test",
     ROOT / "developer-tools/test123/coordinate_test123_rx149.py")
@@ -322,17 +325,25 @@ class TerminalFlowTests(unittest.TestCase):
             "mach_o_uuid": self.uuid,
             "binary_sha256": self.archive_sha,
         }
-        self.packet_set_raw, self.packet_manifest = SENDER_FIXTURES.packet_set()
-        self.test123_manifest = dict(self.packet_manifest)
-        self.test123_manifest["packet_set_length"] = len(self.packet_set_raw)
-        self.test123_manifest["identities"] = {
-            "source": self.packet_manifest["source"],
-            "destination_awdl0": self.packet_manifest["destination_awdl0"],
-        }
+        binding = TEST123_COORDINATOR.BINDING
+        binding.clear_active_run()
+        router_receipt = IDENTITY_FIXTURES._router_receipt()
+        target_receipt = IDENTITY_FIXTURES._target_receipt(uuid=self.uuid)
+        self.packet_set_raw, self.test123_manifest = binding.bind_runtime_identities(
+            IDENTITY_FIXTURES._metadata(self.uuid), router_receipt, target_receipt,
+            expected_boot_epoch=target_receipt["boot_epoch"],
+            expected_uuid=self.uuid,
+            router_receipt_sha256=IDENTITY_FIXTURES._canonical_sha(router_receipt),
+            now=IDENTITY_FIXTURES.NOW,
+            wire_nonce_hex=NONCE,
+            wifi_sequence_base=0x321, awdl_sequence_base=0x4567)
+        self.packet_manifest = binding.PACKETSET.validate_packet_set(
+            self.packet_set_raw)
         SENDER_PROTOCOL.bind_packet_set(self.packet_set_raw)
         self.sender_processes = []
         self.sender_selectors = []
         self.addCleanup(SENDER_PROTOCOL.clear_packet_set_binding)
+        self.addCleanup(binding.clear_active_run)
         self.addCleanup(self.temp.cleanup)
 
     def _sender_start(self, *, scenario: str, run_token: str, **_kwargs):

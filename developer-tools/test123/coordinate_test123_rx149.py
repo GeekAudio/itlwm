@@ -16,6 +16,7 @@ import os
 from pathlib import Path
 import secrets
 import sys
+from types import SimpleNamespace
 from typing import Any
 
 
@@ -29,6 +30,7 @@ SENDER_PROTOCOL_SOURCE = TOOL_DIR / "router-status/dual_sender_protocol_test123.
 LISTENER_SOURCE = TOOL_DIR / "awdl0_unicast_listener_test123.c"
 LISTENER_PROTOCOL_SOURCE = TOOL_DIR / "listener_protocol_test123.py"
 PREARM_RESUME_SOURCE = TOOL_DIR / "prearm_resume_test123.py"
+RUNTIME_SOURCE = TOOL_DIR.parent / "rx149_runtime.py"
 SENDER_RECEIPT = (Path.home() / "Library/Application Support/IntelWirelessNative/"
                   "RuntimeTest123/research/preparation-private/sender-build-private.json")
 LISTENER_RECEIPT = (Path.home() / "Library/Application Support/IntelWirelessNative/"
@@ -74,6 +76,7 @@ REMOTE_SENDER = _load(
 ARTIFACTS_PATH = TOOL_DIR / "tool_artifacts_test123.py"
 _ARTIFACTS = None
 _ACTIVE_PREARM_RESUME_CONTEXT: dict | None = None
+RUNTIME = _load("rx149_shared_runtime", RUNTIME_SOURCE)
 
 _ORIGINAL_TEST104_CONFIGURE = RUNNER.configure_test104_profile
 
@@ -198,6 +201,34 @@ def _configure_test123_profile():
     }
 
     token_state = {"run_token": None}
+    # Hold original pure parser handles before installing compatibility shims.
+    parsers = SimpleNamespace(
+        SCHEMA=SENDER_PROTOCOL.SCHEMA,
+        validate_result=SENDER_PROTOCOL.validate_result,
+        classify_sender_result=saved["provenance_classifier"],
+        parse_started=SENDER_PROTOCOL.parse_started,
+        parse_ready=SENDER_PROTOCOL.parse_ready)
+
+    def bound_run():
+        context = token_state.get("bound_run")
+        if not isinstance(context, RUNTIME.BoundRun):
+            raise protocol.ControlledProbeError("RUNTIME_CONTEXT_NOT_BOUND")
+        return context
+
+    def run_parser(method, value):
+        try:
+            return getattr(bound_run(), method)(value)
+        except Exception as error:
+            # Preserve the actual contract failure without logging wire identity.
+            cause = error
+            while cause.__cause__ is not None:
+                cause = cause.__cause__
+            code = str(cause)
+            if not (code.isascii() and 0 < len(code) <= 128 and
+                    all(c.isalnum() or c in "_:" for c in code)):
+                code = "runtime_contract_validation_failed"
+            token_state["validation_failure"] = {"phase": method, "code": code}
+            raise
 
     RUNNER.LISTENER_PROTOCOL = LISTENER_PROTOCOL
     RUNNER.LISTENER_SOURCE = LISTENER_SOURCE
@@ -214,8 +245,7 @@ def _configure_test123_profile():
 
     def parse_sender_ready(line: str):
         try:
-            return SENDER_PROTOCOL.parse_ready(
-                line, expected_wire_nonce_hex=_active_nonce())
+            return run_parser("parse_ready", line)
         except SENDER_PROTOCOL.SenderProtocolError as error:
             raise protocol.ControlledProbeError(
                 "TEST123_SENDER_READY_INVALID") from error
@@ -231,7 +261,7 @@ def _configure_test123_profile():
 
     def packetset_verification_summary(parsed: dict, *, status: str) -> dict:
         nonce = parsed.get("wire_nonce_hex")
-        manifest = _active_manifest()
+        manifest = bound_run().packet_set.manifest()
         return {
             "schema": "test123-packetset-verification/v1",
             "status": status,
@@ -261,6 +291,10 @@ def _configure_test123_profile():
             raise protocol.ControlledProbeError("TEST123_RUN_TOKEN_INVALID")
         if token_state["run_token"] is not None:
             raise protocol.ControlledProbeError("TEST123_DUPLICATE_SENDER_START")
+        packet_set, construction = BINDING.validate_active_packetset()
+        validated = RUNTIME.ValidatedPacketSet.from_bytes(
+            packet_set, construction, BINDING.PACKETSET.validate_packet_set)
+        token_state["bound_run"] = RUNTIME.BoundRun(token, validated, parsers)
         token_state["run_token"] = token
         original_read_protocol_line = router_module._read_protocol_line
 
@@ -272,8 +306,8 @@ def _configure_test123_profile():
                 "status": "rejected",
                 "error_code": code,
                 "expected_wire_nonce_hex_ascii_sha256": hashlib.sha256(
-                    _active_nonce().encode("ascii")).hexdigest(),
-                "packet_set_sha256": _active_manifest().get("packet_set_sha256"),
+                    bound_run().packet_set.wire_nonce_hex.encode("ascii")).hexdigest(),
+                "packet_set_sha256": bound_run().packet_set.sha256,
             }
             if isinstance(reason, str):
                 evidence["reason"] = reason
@@ -303,7 +337,7 @@ def _configure_test123_profile():
                     controlled_failure("packetset_verification_missing")
                 try:
                     parsed = SENDER_PROTOCOL.parse_packetset_valid(
-                        line, expected_wire_nonce_hex=_active_nonce())
+                        line, expected_wire_nonce_hex=bound_run().packet_set.wire_nonce_hex)
                 except SENDER_PROTOCOL.SenderProtocolError as error:
                     reason = str(error)
                     if (not reason.isascii() or not reason.replace("_", "").isalnum()
@@ -516,9 +550,13 @@ def _configure_test123_profile():
                 sender_result.get("run_token") != expected_token):
             raise SENDER_PROTOCOL.SenderAdapterError(
                 "sender_result_run_token_not_bound_to_session")
-        return saved["provenance_classifier"](
-            sender_result, expected_wire_nonce_hex=_active_nonce(),
-            packet_set_manifest=_active_manifest())
+        try:
+            return run_parser("classify_result", sender_result)
+        except SENDER_PROTOCOL.SenderProtocolError as error:
+            # T104's provenance seam consumes SenderAdapterError. Preserve the
+            # precise failure in runtime_validation_failure and in __cause__.
+            raise SENDER_PROTOCOL.SenderAdapterError(
+                "sender_result_validation_failed") from error
     SENDER_PROTOCOL.classify_sender_result = classify_sender_result
 
     def parse_listener_ready(line: str, *, run_token: str):
@@ -573,10 +611,7 @@ def _configure_test123_profile():
         if (not isinstance(expected_token, str) or
                 sender_result.get("run_token") != expected_token):
             raise timing.TimingError("Test123 SENDER_RESULT token mismatch")
-        checked = SENDER_PROTOCOL.validate_result(
-            sender_result, expected_token,
-            expected_wire_nonce_hex=_active_nonce(),
-            packet_set_manifest=_active_manifest())
+        checked = run_parser("validate_result", sender_result)
         rows = checked["send_timing"]
         return {
             "clock_domain": "CLOCK_MONOTONIC",
@@ -603,12 +638,10 @@ def _configure_test123_profile():
                 sender_started.get("schema") != SENDER_PROTOCOL.SCHEMA or
                 sender_started.get("tool_test") != "Test123" or
                 sender_started.get("running_kernel_test") != "Test122" or
-                sender_started.get("wire_nonce_hex") != _active_nonce() or
+                sender_started.get("wire_nonce_hex") != bound_run().packet_set.wire_nonce_hex or
                 sender_started.get("run_token") != expected_token):
             raise timing.TimingError("Test123 SENDER_STARTED identity mismatch")
-        checked = SENDER_PROTOCOL.parse_started(
-            sender_started, expected_token,
-            expected_wire_nonce_hex=_active_nonce())
+        checked = run_parser("parse_started", sender_started)
         return {"go_received_ns": checked["go_received_ns"],
                 "started_ns": checked["started_ns"]}
 
@@ -617,6 +650,8 @@ def _configure_test123_profile():
 
     def build_test123_remote_script(**kwargs):
         packet_set, manifest = BINDING.validate_active_packetset()
+        if hashlib.sha256(packet_set).hexdigest() != bound_run().packet_set.sha256:
+            raise protocol.ControlledProbeError("RUNTIME_PACKETSET_CHANGED")
         token = kwargs.get("run_token")
         if not isinstance(token, str) or token != token_state.get("run_token"):
             raise protocol.ControlledProbeError("TEST123_REMOTE_TOKEN_MISMATCH")
@@ -644,6 +679,29 @@ def _configure_test123_profile():
     def save_test123_report(path, value, account):
         if not isinstance(value, dict):
             raise RUNNER.ControlledRunError("TEST123_REPORT_NOT_OBJECT")
+        context = token_state.get("bound_run")
+        if isinstance(context, RUNTIME.BoundRun):
+            value["runtime_contract"] = context.audit()
+        if token_state.get("validation_failure") is not None:
+            value["runtime_validation_failure"] = dict(token_state["validation_failure"])
+        # Derive a second, explicitly separate terminal view. Never alter the
+        # frozen native report or promote a failed exercise to delivery success.
+        if isinstance(context, RUNTIME.BoundRun):
+            native_path = Path(path).parent / RUNNER.CAPTURE_NAME
+            try:
+                if native_path.stat().st_size > 16 * 1024 * 1024:
+                    raise ValueError("native_capture_too_large")
+                capture, capture_raw = RUNNER.read_private_json(native_path, account.pw_uid)
+                terminal = RUNTIME.native_terminal(
+                    capture, run_token=context.run_token,
+                    boot_epoch=value.get("boot_epoch"),
+                    expected_loaded_uuid=value.get("expected_loaded_uuid"))
+                terminal["source_sha256"] = hashlib.sha256(capture_raw).hexdigest()
+            except (OSError, ValueError, RUNNER.ControlledRunError):
+                terminal = {"state": "unknown", "cleanup": "unknown",
+                            "exercise": "unknown", "retry_allowed": False,
+                            "functional_delivery_proven": False}
+            value["native_terminal_observation"] = terminal
         finalize_capture_report(value)
         sender = value.get("test088_sender")
         sender = sender if isinstance(sender, dict) else {}
@@ -828,6 +886,27 @@ def finalize_capture_report(report: dict[str, Any]) -> dict[str, Any]:
     if report.get("listener_worker_cleanup") != "exited_after_result_window":
         reasons.append("listener_worker_cleanup_unverified")
 
+    # Independent axes prevent 'all collectors finished' from being confused
+    # with successful native delivery, or exercise failure with a resource leak.
+    terminal = report.get("native_terminal_observation", {})
+    collection_reasons = [reason for reason in reasons
+                          if reason != "coordinator_flow_incomplete" and not (
+                              reason == "native_terminal_incomplete" and
+                              terminal.get("state") == "known")]
+    report["evidence_axes"] = {
+        "collection": "complete" if not collection_reasons else "partial",
+        "collection_incomplete_reasons": collection_reasons,
+        "sender_validation": provenance.get("status", "unknown"),
+        "monitor_observation": provenance.get("monitor_observation_state", "unknown"),
+        "native_exercise": terminal.get("exercise", "unknown"),
+        "native_resource_cleanup": terminal.get("cleanup", "unknown"),
+        "socket_payload": ("received" if listener.get("status") == "marker_received"
+                           and listener.get("marker_match") is True
+                           and listener.get("payload_match") is True else
+                           "not_received" if listener.get("status") == "timeout_or_unmatched"
+                           else "unknown"),
+        "native_bidirectional_exchange": "unproven", "airdrop": "unproven",
+    }
     complete = not reasons
     original_status = report.get("status")
     report["complete"] = complete
@@ -941,7 +1020,7 @@ def _configure_test123_run() -> None:
         TOOL_DIR / "tool_artifacts_test123.py", NATIVE_WORKER,
         SENDER_SOURCE, SENDER_PROTOCOL_SOURCE,
         TOOL_DIR / "remote_sender_test123.py", LISTENER_SOURCE,
-        LISTENER_PROTOCOL_SOURCE, PREARM_RESUME_SOURCE,
+        LISTENER_PROTOCOL_SOURCE, PREARM_RESUME_SOURCE, RUNTIME_SOURCE,
         KERNEL_COORDINATOR.NATIVE_WORKER,
         sender_binary, listener_binary,
     )

@@ -34,6 +34,9 @@ COORD = load("test123_coordinate_integration_under_test",
 SENDER_FIXTURES = load(
     "test123_sender_fixtures_for_coordinator",
     HERE / "router-status/test_dual_sender_protocol_test123.py")
+IDENTITY_FIXTURES = load(
+    "test123_identity_fixtures_for_coordinator",
+    HERE / "test_binding_independent_test123.py")
 
 
 class _Input:
@@ -154,7 +157,16 @@ class Test123CoordinatorIntegration(unittest.TestCase):
     def _invoke_real_t087_start(self, lines):
         """Run the installed T123 wrapper around the real T087 start method."""
         restore = COORD._configure_test123_profile()
-        raw, manifest = SENDER_FIXTURES.packet_set()
+        router_receipt = IDENTITY_FIXTURES._router_receipt()
+        target_receipt = IDENTITY_FIXTURES._target_receipt()
+        raw, manifest = COORD.BINDING.bind_runtime_identities(
+            IDENTITY_FIXTURES._metadata(), router_receipt, target_receipt,
+            expected_boot_epoch=target_receipt["boot_epoch"],
+            expected_uuid=IDENTITY_FIXTURES.UUID,
+            router_receipt_sha256=IDENTITY_FIXTURES._canonical_sha(router_receipt),
+            now=IDENTITY_FIXTURES.NOW,
+            wire_nonce_hex=SENDER_FIXTURES.NONCE,
+            wifi_sequence_base=0x321, awdl_sequence_base=0x4567)
         nonce = manifest["wire_nonce_hex"]
         COORD.SENDER_PROTOCOL.bind_packet_set(raw)
         old_manifest = getattr(COORD.RUNNER, "ACTIVE_PACKET_MANIFEST", None)
@@ -191,11 +203,13 @@ class Test123CoordinatorIntegration(unittest.TestCase):
                         COORD.RUNNER.CANDIDATE)
                     attached_report = COORD.RUNNER.TEST088._RunCapture.attach(
                         capture, {})
-                return result, reader, process, terminate, nonce, attached_report
+                return (result, reader, process, terminate, nonce,
+                        hashlib.sha256(raw).hexdigest(), attached_report)
             finally:
                 restore()
                 COORD.RUNNER.ACTIVE_PACKET_MANIFEST = old_manifest
                 COORD.SENDER_PROTOCOL.clear_packet_set_binding()
+                COORD.BINDING.clear_active_run()
 
     def test_default_plan_is_inert_and_separates_tool_from_kernel(self):
         self.assertEqual(COORD.plan()["tool_test"], "Test123")
@@ -205,9 +219,9 @@ class Test123CoordinatorIntegration(unittest.TestCase):
         self.assertEqual(COORD.main(["--plan"]), 0)
 
     def test_t087_start_validates_packetset_preface_then_parses_real_readiness(self):
-        raw, manifest = SENDER_FIXTURES.packet_set()
-        nonce = manifest["wire_nonce_hex"]
-        result, reader, process, terminate, _, attached_report = self._invoke_real_t087_start([
+        nonce = SENDER_FIXTURES.NONCE
+        (result, reader, process, terminate, _, actual_packet_sha,
+         attached_report) = self._invoke_real_t087_start([
             _packetset_valid_line(nonce), _monitor_ready_line(),
             _sender_ready_line(nonce),
         ])
@@ -220,7 +234,7 @@ class Test123CoordinatorIntegration(unittest.TestCase):
         self.assertEqual(evidence["interval_ms"], 10)
         self.assertEqual(evidence["budget_ms"], 40)
         self.assertFalse(evidence["rf_transmission_proven"])
-        self.assertEqual(evidence["packet_set_sha256"], manifest["packet_set_sha256"])
+        self.assertEqual(evidence["packet_set_sha256"], actual_packet_sha)
         self.assertNotIn("wire_nonce_hex", evidence)
         self.assertEqual(
             attached_report["test123_packetset_verification"]["status"],
@@ -578,7 +592,10 @@ class Test123CoordinatorIntegration(unittest.TestCase):
         runner = COORD.RUNNER
         boot_epoch = 1793697291
         uuid = "17DB1FD2-214C-30A1-825C-C841B5F9E80B"
-        fresh_output = (COORD.BINDING.KERNEL_METADATA.parent /
+        temp_root = Path(tempfile.mkdtemp(prefix="test123-prearm-output-"))
+        self.addCleanup(lambda: __import__("shutil").rmtree(temp_root, ignore_errors=True))
+        kernel_metadata = temp_root / "native-controlled-probe-private.json"
+        fresh_output = (kernel_metadata.parent /
                         f"test123-tools-boot{boot_epoch}-prearm-resume")
         verification = {
             "eligible": True, "same_boot": True,
@@ -640,6 +657,7 @@ class Test123CoordinatorIntegration(unittest.TestCase):
             runner.run_once = fake_run_once
             with (
                 mock.patch.object(COORD, "_configure_test123_run"),
+                mock.patch.object(COORD.BINDING, "KERNEL_METADATA", kernel_metadata),
                 mock.patch.object(COORD.T120, "_load_current_identity",
                                   return_value=(boot_epoch, uuid)),
                 mock.patch.object(COORD.BINDING, "validate_kernel_bundle",
