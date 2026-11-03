@@ -6,6 +6,7 @@ import importlib.util
 import json
 from pathlib import Path
 import sys
+import tempfile
 import unittest
 from unittest import mock
 
@@ -214,6 +215,130 @@ class Test123CoordinatorIntegration(unittest.TestCase):
 
     def test_empty_listener_argv_is_inert(self):
         self.assertEqual(COORD.adapt_legacy_listener_argv([]), [])
+
+    def test_t104_exact_sender_pin_passes_and_rejects_before_io(self):
+        """Exercise the frozen T104 preflight expression through run_once."""
+        from types import SimpleNamespace
+
+        # Rebind the actual Test123 paths/receipts, then make only the inputs
+        # preceding T104's runtime hash gate deterministic. The T088 sentinel
+        # is the first point after that gate; no barrier, claim, or device I/O
+        # is allowed in this offline test.
+        COORD._configure_test123_run()
+        runner = COORD.RUNNER
+        packet_bytes, manifest = COORD.SENDER_PROTOCOL._PACKETSET.encode_packet_set(
+            SENDER_FIXTURES.SOURCE, SENDER_FIXTURES.TARGET,
+            "preflight-runtime-pin", wire_nonce_hex="a1b2c3d4e5f67890",
+            wifi_sequence_base=19, awdl_sequence_base=411)
+        uuid = "17DB1FD2-214C-30A1-825C-C841B5F9E80B"
+        build = {
+            "candidate": runner.CANDIDATE,
+            "mach_o_uuid": uuid,
+            "binary_sha256": "a" * 64,
+        }
+        deployment = {
+            "candidate": runner.CANDIDATE,
+            "mach_o_uuid": uuid,
+            "binary_sha256": "a" * 64,
+        }
+        metadata = {
+            "candidate": runner.CANDIDATE,
+            "expected_loaded_uuid": uuid,
+            "minimum_boot_epoch_exclusive": 100,
+        }
+        original_read_private = runner.read_private_json
+        def read_private(path, owner_uid):
+            if Path(path) == Path(runner.ROUTER_SOURCE_RECEIPT):
+                return {"identity_receipt_sha256": "b" * 64}, b"router"
+            if Path(path) == Path(runner.TARGET_IDENTITY_RECEIPT):
+                return {"ifindex": 31}, b"target"
+            return original_read_private(path, owner_uid)
+
+        class ReachedT088(Exception):
+            pass
+
+        with tempfile.TemporaryDirectory(prefix="test123-preflight-") as temp:
+            temp_root = Path(temp)
+            output_dir = temp_root / "run-output"
+            def fake_reader(directory):
+                path = Path(directory) / "mock-reader"
+                path.write_bytes(b"offline test reader")
+                return path
+
+            original_hashes = runner.runtime_tool_hashes
+            expected_key = str(runner.SENDER_BINARY.relative_to(runner.REPO))
+            def hashes(*, corrupt=False):
+                value = original_hashes()
+                private_keys = [key for key in value
+                                if key.startswith("private:") and
+                                key.endswith("/" + runner.SENDER_BINARY.name)]
+                self.assertEqual(len(private_keys), 1)
+                self.assertEqual(value.get(expected_key), value[private_keys[0]])
+                if corrupt:
+                    value[expected_key] = "0" * 64
+                return value
+
+            def run_preflight(*, corrupt):
+                reached = []
+                def stop_before_device_io(**_kwargs):
+                    reached.append(True)
+                    raise ReachedT088()
+
+                with mock.patch.object(runner, "workspace_account",
+                                       return_value=SimpleNamespace(pw_uid=runner.REPO.stat().st_uid,
+                                                                    pw_gid=runner.REPO.stat().st_gid)), \
+                     mock.patch.object(runner, "validate_deployment",
+                                       return_value=(build, deployment, b"build", b"deployment")), \
+                     mock.patch.object(runner, "validate_runtime_metadata",
+                                       return_value=(metadata, {"status": "passed"},
+                                                     {"metadata_sha256": "c" * 64})), \
+                     mock.patch.object(runner.RUNTIME_BINDING, "_read_boot_epoch",
+                                       return_value=200), \
+                     mock.patch.object(runner.RUNTIME_BINDING, "_run_text",
+                                       return_value="loaded " + uuid), \
+                     mock.patch.object(runner.RUNTIME_BINDING, "_extract_loaded_uuid",
+                                       return_value=uuid), \
+                     mock.patch.object(runner, "read_private_json",
+                                       side_effect=read_private), \
+                     mock.patch.object(runner.RUNTIME_BINDING, "bind_runtime_identities",
+                                       return_value=(packet_bytes, manifest)), \
+                     mock.patch.object(runner.START_BARRIER, "compile_reader",
+                                       side_effect=fake_reader), \
+                     mock.patch.object(runner, "test104_run_dir",
+                                       return_value=output_dir), \
+                     mock.patch.object(runner.BASE, "_validate_bundle",
+                                       return_value=(metadata, build, "d" * 64,
+                                                     Path("build.json"))), \
+                     mock.patch.object(runner, "runtime_tool_hashes",
+                                       side_effect=lambda: hashes(corrupt=corrupt)), \
+                     mock.patch.object(runner.START_BARRIER,
+                                       "install_native_armed_go_barrier",
+                                       return_value=lambda: None) as barrier, \
+                     mock.patch.object(runner, "install_go_deadline_guard",
+                                       return_value=lambda: None), \
+                     mock.patch.object(runner.TEST088, "run_test088_once",
+                                       side_effect=stop_before_device_io) as t088:
+                    if corrupt:
+                        with self.assertRaises(runner.ControlledRunError) as caught:
+                            runner.run_once(
+                                host="root@192.0.2.1", control_path="/private/tmp/mock.sock",
+                                metadata_path=COORD.BINDING.KERNEL_METADATA, ap="wlan7")
+                        self.assertEqual(caught.exception.code,
+                                         "SENDER_BINARY_RUNTIME_PIN_MISMATCH")
+                        self.assertEqual(reached, [])
+                        barrier.assert_not_called()
+                        t088.assert_not_called()
+                    else:
+                        with self.assertRaises(ReachedT088):
+                            runner.run_once(
+                                host="root@192.0.2.1", control_path="/private/tmp/mock.sock",
+                                metadata_path=COORD.BINDING.KERNEL_METADATA, ap="wlan7")
+                        self.assertEqual(reached, [True])
+                        barrier.assert_called_once()
+                        t088.assert_called_once()
+
+            run_preflight(corrupt=False)
+            run_preflight(corrupt=True)
 
     def test_workflow_completion_requires_all_terminal_observations(self):
         def report():

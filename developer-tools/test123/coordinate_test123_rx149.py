@@ -758,6 +758,26 @@ def _configure_test123_run() -> None:
                 raise RUNNER.ControlledRunError(
                     "TEST123_RUNTIME_TOOL_UNAVAILABLE:" + path.name)
             values[_private_hash_key(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
+        # T104's unchanged pre-run gate indexes SENDER_BINARY relative to its
+        # public research root. Keep the private artifact identity above, and
+        # add that exact compatibility key with the same measured digest.
+        sender_private_key = _private_hash_key(sender_binary)
+        sender_digest = values.get(sender_private_key)
+        if not isinstance(sender_digest, str):
+            raise RUNNER.ControlledRunError(
+                "TEST123_SENDER_BINARY_PRIVATE_HASH_MISSING")
+        try:
+            sender_anchor = Path(RUNNER.REPO).resolve(strict=True)
+            sender_key = sender_binary.resolve(strict=True).relative_to(
+                sender_anchor).as_posix()
+        except (OSError, ValueError) as error:
+            raise RUNNER.ControlledRunError(
+                "TEST123_SENDER_BINARY_OUTSIDE_T104_REPO") from error
+        previous_digest = values.get(sender_key)
+        if previous_digest is not None and previous_digest != sender_digest:
+            raise RUNNER.ControlledRunError(
+                "TEST123_SENDER_BINARY_HASH_KEY_CONFLICT")
+        values[sender_key] = sender_digest
         return values
     RUNNER.runtime_tool_hashes = runtime_tool_hashes
 
