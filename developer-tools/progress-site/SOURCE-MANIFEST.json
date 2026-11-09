@@ -20,27 +20,27 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "59899d3bb82c8455fa85fde33182300d0016687b803aa79aa5849b0e82bd8e9c"
+      "sha256": "53ed9547660a471c77759eb4987af89892ebc45b03e60c9c79791f7b0c535a4c"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "866dea647bd9ac3b4b9d91ffde65dde93bb96a365230988a29192ff2fed5fcb4"
+      "sha256": "bf70d60952540ab3b8e01408340f42ea51a2d20126cd1e8478520430598610a4"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "e8254d2d2eee9acfa3fbd8fb876c840be5ea1b98ea1bcd48de3feb44446dff6c"
+      "sha256": "9c217f7ad167260378c7bbacf3e45c2a15fe303a3aa6ae608f245f448e4a2177"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "e8254d2d2eee9acfa3fbd8fb876c840be5ea1b98ea1bcd48de3feb44446dff6c"
+      "sha256": "9c217f7ad167260378c7bbacf3e45c2a15fe303a3aa6ae608f245f448e4a2177"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "a8bc276fb92eb70dc71a56a1ef58bb18b10df16873d8e5eb8b3fe290d6ef46ba"
+      "sha256": "c464f90c72b4e8985ae0c6ae03a03a324599556cbbe886c106f572d13c14969d"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
@@ -85,11 +85,11 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-09T13:03:32+08:00",
+  "updated_at": "2026-11-09T13:23:31+08:00",
   "runtime_scope": "本轮只确认Test125加载、原生接口及本次诊断前后状态。频道许可发布记录为旧代，内核在驻留前返回EOPNOTSUPP；没有UDP发送、数据回包或AirDrop证据。Test124的单包返回保留在开发时间线，不计入Test125本轮；未覆盖不代表能力回退。",
   "running_candidate": "25G416-Test125",
-  "next_candidate": null,
-  "website_delivery": "Test125驻留前阻断结果与MCC发布接线离线进展；无设备地址、私有收据或凭据。",
-  "deployment_state": "test125_boot_verified_pre_roc_blocked",
-  "site_preparation": "Test125 loaded. Native UDP not attempted. MCC publisher wiring fixed offline, not deployed."
+  "next_candidate": "25G416-Test126",
+  "website_delivery": "Test125运行结果保持不变；Test126同代MCC修复已离线验证、部署并读回，待重启验收。",
+  "deployment_state": "test126_deployed_waiting_reboot",
+  "site_preparation": "Test125 current runtime; Test126 deployed and read back, not boot verified. No private runtime metadata published."
 }
