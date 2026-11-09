@@ -4,6 +4,9 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import hashlib
+from pathlib import Path
+import tempfile
 import unittest
 
 import coordinate_directed_test129 as tool
@@ -172,6 +175,62 @@ class Test129TerminalContract(unittest.TestCase):
                 self.assertFalse(outcome["accepted"])
                 self.assertIn("unproven_ack_peer_receipt_airdrop_remain_false",
                               outcome["failures"])
+
+    def test_shared_test129_validate_config_and_make_plan_integration(self):
+        with tempfile.TemporaryDirectory(prefix="test129-shared-plan-") as temp:
+            runtime = Path(temp) / "tools"
+            runtime.mkdir()
+            artifacts = {}
+            for name, payload in (
+                ("helper", b"offline test129 helper"),
+                ("helper-source", b"offline test129 helper source"),
+                ("monitor-script", b"offline active monitor script"),
+                ("peer-binary", b"offline echo peer"),
+            ):
+                path = runtime / name
+                path.write_bytes(payload)
+                artifacts[name] = path
+
+            def sha(path):
+                return hashlib.sha256(path.read_bytes()).hexdigest()
+
+            config = {
+                "ssh_target": "root@192.168.5.1",
+                "ssh_socket": "/tmp/test129-plan-only-ssh.sock",
+                "remote_dir": f"/tmp/iw111echo-{TOKEN}",
+                "output_dir": str(runtime / f"run-{TOKEN}"),
+                "expected_boot": CONFIG["expected_boot"],
+                "expected_uuid": UUID,
+                "expected_build": tool.BUILD,
+                "expected_reset_count": 0,
+                "helper_path": str(artifacts["helper"]),
+                "helper_sha256": sha(artifacts["helper"]),
+                "helper_source_path": str(artifacts["helper-source"]),
+                "helper_source_sha256": sha(artifacts["helper-source"]),
+                "remote_script_path": str(artifacts["monitor-script"]),
+                "remote_script_sha256": sha(artifacts["monitor-script"]),
+                "peer_binary_path": str(artifacts["peer-binary"]),
+                "peer_sha256": sha(artifacts["peer-binary"]),
+                "prepare_peer_mac_required": True,
+                "identity": {
+                    "run_token": TOKEN,
+                    "nonce": "0102030405060708",
+                    "local_mac": "02:00:00:00:00:01",
+                    "peer_mac": "02:00:00:00:00:02",
+                    "local_ipv6": "fe80::1",
+                    "peer_ipv6": "fe80::2",
+                },
+            }
+            normalized, hashes = tool.shared.validate_config(config, build_id=tool.BUILD)
+            plan = tool.shared.make_plan(config, build_id=tool.BUILD)
+
+        self.assertEqual(normalized["expected_build"], "25G416-Test129")
+        self.assertEqual(hashes["helper"], config["helper_sha256"])
+        self.assertEqual(plan["schema"], "test129-local-coordinator/v1")
+        self.assertEqual(plan["build"], "25G416-Test129")
+        self.assertTrue(plan["automatic_ack_possible_during_prepare"])
+        self.assertFalse(plan["hardware_action"])
+        self.assertFalse(plan["ssh_attempted"])
 
 
 if __name__ == "__main__":
