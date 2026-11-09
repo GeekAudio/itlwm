@@ -25,22 +25,22 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "e970f8cb6069998591e80b46a917c7c7362877ee789f84372d5113621d123bb7"
+      "sha256": "dde675b9ae90659e89d2c9100209842584827451d38e97984fd283ad39fe7aff"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "fe212b3952cde55c540c422d062186ae6d4db2c7baa73cd5ad75696a147f2fb5"
+      "sha256": "fc840e0cec624651c0c91cee5ecf0147192b72800d4c6dd9b84a4a3b37af0474"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "fe212b3952cde55c540c422d062186ae6d4db2c7baa73cd5ad75696a147f2fb5"
+      "sha256": "fc840e0cec624651c0c91cee5ecf0147192b72800d4c6dd9b84a4a3b37af0474"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "7f322544ebc2a7cd596e3f40160871f00926d6df267f1c55e111771d1893cdc8"
+      "sha256": "198af5f0915a697432987307a49beac5d11bcc264e246a0a965c8624ed48a6d6"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
@@ -85,11 +85,11 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-09T23:23:47+08:00",
-  "runtime_scope": "Test132同轮两包原生UDP/TX完成、精确ifnet回包及最终MAC移除/释放已确认；原始helper过早快照仍保留失败。13通过、7部分、20未覆盖。",
-  "running_candidate": "25G416-Test132",
-  "next_candidate": "25G416-Test133",
-  "website_delivery": "Test132实机结果保持；Test133离线候选未部署。",
-  "deployment_state": "test132_runtime_two_packet_confirmed",
-  "site_preparation": "Test133 build and offline reviews complete; startup ALIVE failure unresolved; native DNS-SD and AirDrop unverified."
+  "updated_at": "2026-11-10T01:23:01+08:00",
+  "runtime_scope": "Test134资源准入与撤销实测通过；5通过、5部分、30未覆盖。本轮不发数据帧，不能计作mDNS或AirDrop成功。",
+  "running_candidate": "25G416-Test134",
+  "next_candidate": null,
+  "website_delivery": "Test134本轮实测与开发总时间线同步；Test132双包证据保留为历史。",
+  "deployment_state": "test134_multicast_admission_cleanup_proven",
+  "site_preparation": "Runtime admission and exact cleanup proven; native mDNS and AirDrop unverified. Startup ALIVE timeout remains unresolved."
 }
