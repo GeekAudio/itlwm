@@ -28,9 +28,9 @@ snapshot = extract(ACTION,
 snapshot_action = extract(ACTION, "static IOReturn directedDataSnapshotAction(")
 response = extract(ACTION,
     "bool iwx_tahoe_p2p_directed_data_tx_response(")
-unknown_completion = commit.index(
-    "if (context->doorbellIssued &&")
+unknown_completion = commit.index("if (anyDoorbell && (")
 assert commit.index("directedDataMarkCompletedClosed(context)") > unknown_completion
+assert "!allDoorbellsCompleted ||" in commit
 assert "!context->completionObserved || context->mbufHeldByRing" in commit
 assert "context->state != TahoeP2PDirectedDataState::kQuarantined" in commit
 assert "context->originClosed = true;" in commit

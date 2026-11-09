@@ -128,7 +128,7 @@ constexpr int BUS_DMASYNC_POSTREAD = 1;
     action, 'static uint16_t directedDataReadLe16(',
     'static bool directedDataSubmitHasDeadlineMargin(') + cut(
     action, 'static bool directedDataHasDoorbellHistory(',
-    'struct DirectedDataGateCheck') + cut(
+    'static void directedDataRecordUnsubmittedSlot(') + cut(
     action, 'static bool directedDataMatchesRetiredResponse(',
     'bool iwx_tahoe_p2p_directed_data_tx_response(') + cut(
     action, 'bool iwx_tahoe_p2p_directed_data_tx_response(',

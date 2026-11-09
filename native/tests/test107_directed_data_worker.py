@@ -118,9 +118,36 @@ assert "if (!data.doorbellIssued || data.completionObserved)" in worker
 assert "if (data.state == TahoeP2PDirectedDataState::kQuarantined)" in worker
 assert "if (finalData.state == TahoeP2PDirectedDataState::kQuarantined)" in worker
 
-# Stage 8 requires successful local firmware completion and complete cleanup.
-# Completion is explicitly not presented as a peer ACK.
-assert "!finalData.completionObserved || !finalData.frameAttemptSucceeded" in worker_flat
+# Stage 8 requires a run-level aggregate plus exact evidence for every
+# doorbelled packet. Completion is not presented as a peer ACK.
+assert "bool exchangeComplete = finalData.packetCount != 0 && finalData.completionObserved;" in worker_flat
+assert "for (uint8_t slot = 0; slot < finalData.packetCount; ++slot)" in worker_flat
+for proof in (
+        "packet.doorbellIssued",
+        "packet.completionObserved",
+        "packet.frameAttemptSucceeded",
+        "packet.resourcesAbsent",
+        "packet.originDoorbellRecorded",
+        "packet.originCompletionRecorded",
+        "originPacket.present",
+        "originPacket.packetSpent",
+        "originPacket.doorbellObserved",
+        "originPacket.txResponseObserved",
+        "originPacket.txSucceeded",
+        "originPacket.packetSerial == packet.packetToken",
+        "originPacket.slot == slot"):
+    assert proof in worker_flat, f"missing per-slot terminal proof: {proof}"
+assert "if (finalData.packetCount == 2)" in worker_flat
+for proof in (
+        "packet.exactReplyCaptured",
+        "packet.exactReplyDelivered",
+        "originPacket.exactReplyValid",
+        "originPacket.replyCaptured",
+        "originPacket.replyDelivered"):
+    assert proof in worker_flat, f"missing two-packet peer proof: {proof}"
+assert "exchangeComplete = exchangeComplete && packetComplete;" in worker_flat
+assert "!exchangeComplete" in worker_flat
+assert "finalData.frameAttemptSucceeded" not in worker_flat
 assert "probe->directedDataInnerCleanupProven =" in worker
 assert "if (!probe->directedDataInnerCleanupProven)" in worker
 assert "deferDirectedDataTerminal(owner, probe, failure == 0 ?" in worker

@@ -20,27 +20,27 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "2088dfbde87802ebd955649bca2f0c665f2f950ed585db17e4b4048042f4e496"
+      "sha256": "7b4c81726580433b9b8d59f230b86229090b921ec26a3ff9a3b47be8271569be"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "323dbf50253813511453cb984cf2738d227551e2c86c9e5f861782d1a81ee8b0"
+      "sha256": "a7397717c81c1d7341e2f3c1257c02220d6995e6015664a62632a7cfaca7f64b"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "cf4b3f480e1e8390dc7a41a7ed514d9a45f71e387b45315b664b7de0bcf5e0c8"
+      "sha256": "2f8f56e671eb734bd30cfa822d50925df47a76bc04739ac2128449a67d224b3b"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "cf4b3f480e1e8390dc7a41a7ed514d9a45f71e387b45315b664b7de0bcf5e0c8"
+      "sha256": "2f8f56e671eb734bd30cfa822d50925df47a76bc04739ac2128449a67d224b3b"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "6669b58a35259435d2b6e1793cc7b73c897194ddc75ef712208128ce6d2a08d2"
+      "sha256": "9cdcb11a298e00a1deab855a2eb097359d851bb2bc8c43cda3c990e350dabd0e"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
@@ -85,11 +85,11 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-09T18:20:58+08:00",
+  "updated_at": "2026-11-09T19:52:58+08:00",
   "runtime_scope": "精确TX_RSP、匹配UDP回包、原生ifnet交付及外层MAC移除均取得同轮证据。新增通过完整资源回收，共11项直接通过、4项部分通过、25项未覆盖。持续AWDL和AirDrop仍未验收。",
   "running_candidate": "25G416-Test129",
-  "next_candidate": null,
-  "website_delivery": "Test129单次受控收发和完整清理已实测；保留现有依赖图并绑定本轮源码。",
-  "deployment_state": "test129_runtime_verified",
-  "site_preparation": "Current Test129 runtime evidence and project timeline; no new driver deployment."
+  "next_candidate": "25G416-Test130",
+  "website_delivery": "Test130已部署，等待同一窗口内两包交换验证；Test129当前实测计数保持不变。",
+  "deployment_state": "test130_deployed_waiting_reboot",
+  "site_preparation": "Current Test129 runtime evidence; Test130 candidate deployment and total timeline updated without adding runtime passes."
 }

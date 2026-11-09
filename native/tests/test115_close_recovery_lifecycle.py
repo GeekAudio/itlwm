@@ -29,6 +29,12 @@ def extract_statement(source: str, marker: str) -> str:
     return source[start:end]
 
 
+def extract_assignment(source: str, marker: str) -> str:
+    start = source.index(marker)
+    end = source.index(";", start) + 1
+    return source[start:end]
+
+
 state_enum = extract_block(DATA, "enum class TahoeP2PDirectedDataState") + ";"
 reason_enum = extract_block(DATA, "enum class TahoeP2PDirectedDataReason") + ";"
 identity = extract_block(ACTION, "struct DirectedDataCloseIdentity") + ";"
@@ -42,10 +48,16 @@ can_clear = extract_block(
     ACTION, "static bool directedDataCanClearMayOwnResource(")
 mark_completed = extract_block(
     ACTION, "static void directedDataMarkCompletedClosed(")
+has_doorbell = extract_block(
+    ACTION, "static bool directedDataHasDoorbellHistory(")
+all_doorbells_completed = extract_block(
+    ACTION, "static bool directedDataAllDoorbellsCompleted(")
 quarantine = extract_block(
     ACTION, "void iwx_tahoe_p2p_directed_data_quarantine(")
 
 snapshot_fn = extract_block(ACTION, "static bool directedDataCaptureSnapshot(")
+packet_snapshot = extract_block(
+    DATA, "struct TahoeP2PDirectedDataPacketSnapshot") + ";"
 snapshot_prefix = extract_statement(
     snapshot_fn, "const auto completion = context->completion.snapshot()")
 snapshot_fields = []
@@ -53,9 +65,20 @@ for field in (
     "originTicketBound", "originClosed", "completionArmed",
     "doorbellIssued", "completionObserved", "mbufHeldByRing",
 ):
-    match = re.search(rf"^\s*value\.{field}\s*=.*;$", snapshot_fn, re.M)
-    assert match, f"missing production snapshot mapping for {field}"
-    snapshot_fields.append(match.group(0).strip())
+    statement = extract_assignment(snapshot_fn, f"value.{field} =")
+    assert statement, f"missing production snapshot mapping for {field}"
+    snapshot_fields.append(statement)
+
+# Snapshot completion is an aggregate of actual submitted per-slot completions
+# and resource absence. A stale generic completion flag or empty set cannot
+# satisfy it.
+assert "if (!packet.doorbellIssued)" in all_doorbells_completed
+assert "!packet.completionObserved || !packet.resourcesAbsent" in all_doorbells_completed
+assert "return anyDoorbell;" in all_doorbells_completed
+assert "value.doorbellIssued = directedDataHasDoorbellHistory(context);" in snapshot_fn
+assert re.search(
+    r"value\.completionObserved\s*=\s*value\.doorbellIssued\s*&&\s*"
+    r"directedDataAllDoorbellsCompleted\(context\);", snapshot_fn)
 
 close_fn = extract_block(ACTION, "int iwx_tahoe_p2p_directed_data_close(")
 inactive_assignment = extract_statement(
@@ -64,8 +87,9 @@ inactive_expression = inactive_assignment.split("=", 1)[1].strip()[:-1]
 
 origin_closed_expression = extract_statement(
     PROBE, "const bool originClosed = !run->directedDataTicketBound")
+no_doorbell_marker = "const bool noDoorbell = dataValid && !data.doorbellIssued"
 no_doorbell_expression = extract_statement(
-    PROBE, "const bool noDoorbell = dataValid && !data.doorbellIssued")
+    PROBE[PROBE.rindex(no_doorbell_marker):], no_doorbell_marker)
 
 # These are the safety gates being covered here. The ticket-closed fix must
 # not erase the separate no-doorbell, queue, and resource-retirement proofs.
@@ -100,13 +124,21 @@ struct Completion {
     CompletionSnapshot value{};
     CompletionSnapshot snapshot() const { return value; }
 };
+struct TxWitness {
+    void rememberClose(uint64_t, uint32_t) {}
+};
+static uint64_t directedDataMonotonicUs() { return 1000; }
+static constexpr uint8_t kTahoeP2PDirectedDataMaxPackets = 2;
+""" + packet_snapshot + r"""
 struct TahoeP2PDirectedDataContext {
     struct Binding { uint64_t ownerSerial = 0; uint64_t runSerial = 0; } binding;
     Completion completion;
+    TxWitness txWitness;
     TahoeP2PDirectedDataOriginTicket originTicket{};
     TahoeP2PDirectedDataState state = TahoeP2PDirectedDataState::kIdle;
     TahoeP2PDirectedDataReason reason = TahoeP2PDirectedDataReason::kNone;
     uint64_t armSerialHighWater = 0;
+    uint8_t currentSlot = 0;
     uint32_t mayOwnResource = 0;
     bool ticketBound = false;
     bool originClosed = false;
@@ -114,6 +146,9 @@ struct TahoeP2PDirectedDataContext {
     bool completionObserved = false;
     bool mbufHeldByRing = false;
     bool hardStopDrained = false;
+    uint8_t packetCount = 0;
+    TahoeP2PDirectedDataPacketSnapshot
+        packets[kTahoeP2PDirectedDataMaxPackets]{};
 };
 struct TahoeP2PDirectedDataSnapshot {
     TahoeP2PDirectedDataState state = TahoeP2PDirectedDataState::kIdle;
@@ -134,8 +169,13 @@ static bool directedDataHasNoDoorbell(ItlIwx *owner) {
 }
 
 """ + identity + "\n" + commit_struct + "\n" + capture_identity + "\n" + \
-    mark_completed + "\n" + set_may_own + "\n" + can_clear + "\n" + \
-    quarantine + "\n" + commit_close + r"""
+    mark_completed + "\n" + has_doorbell + "\n" + \
+    all_doorbells_completed + "\n" + set_may_own + "\n" + can_clear + "\n" + \
+    quarantine + r"""
+
+static bool directedDataRetireUnsubmittedNextSlotOnMainGate(
+    ItlIwx *, TahoeP2PDirectedDataContext *, bool) { return false; }
+""" + commit_close + r"""
 
 static TahoeP2PDirectedDataSnapshot captureSnapshot(
     const TahoeP2PDirectedDataContext *context) {
@@ -186,6 +226,13 @@ static TahoeP2PDirectedDataContext makeContext() {
     return context;
 }
 
+static void setPacket(TahoeP2PDirectedDataContext &context, uint8_t slot,
+                     bool doorbell, bool completed, bool resourcesAbsent) {
+    context.packets[slot].doorbellIssued = doorbell;
+    context.packets[slot].completionObserved = completed;
+    context.packets[slot].resourcesAbsent = resourcesAbsent;
+}
+
 static NativeAwdlDirectedOriginTx::Snapshot closedOrigin(
     const TahoeP2PDirectedDataContext &context) {
     NativeAwdlDirectedOriginTx::Snapshot origin{};
@@ -230,6 +277,51 @@ static bool ticketClosedFor(
 
 int main() {
     ItlIwx owner{};
+
+    // Snapshot completion is based on the actual submitted-slot ledger. A
+    // stale generic completion bit cannot make the empty set look complete.
+    {
+        auto empty = makeContext();
+        empty.packetCount = 2;
+        empty.completion.value = {true, true};
+        const auto data = captureSnapshot(&empty);
+        assert(!data.doorbellIssued && !data.completionObserved);
+    }
+    {
+        auto partial = makeContext();
+        partial.packetCount = 2;
+        setPacket(partial, 0, true, true, true);
+        setPacket(partial, 1, true, false, false);
+        partial.completion.value = {true, true};
+        const auto data = captureSnapshot(&partial);
+        assert(data.doorbellIssued && !data.completionObserved);
+    }
+    {
+        auto oneSubmitted = makeContext();
+        oneSubmitted.packetCount = 2;
+        setPacket(oneSubmitted, 0, true, true, true);
+        // Slot one was never submitted; its absent completion does not block
+        // the aggregate, but the one real slot must be fully retired.
+        oneSubmitted.completion.value = {false, false};
+        const auto data = captureSnapshot(&oneSubmitted);
+        assert(data.doorbellIssued && data.completionObserved);
+    }
+    {
+        auto dmaNotRetired = makeContext();
+        dmaNotRetired.packetCount = 1;
+        setPacket(dmaNotRetired, 0, true, true, false);
+        dmaNotRetired.completion.value = {true, true};
+        const auto data = captureSnapshot(&dmaNotRetired);
+        assert(data.doorbellIssued && !data.completionObserved);
+    }
+    {
+        auto both = makeContext();
+        both.packetCount = 2;
+        setPacket(both, 0, true, true, true);
+        setPacket(both, 1, true, true, true);
+        const auto data = captureSnapshot(&both);
+        assert(data.doorbellIssued && data.completionObserved);
+    }
 
     // Positive: an exact successful close changes the snapshot's live ticket
     // bit while preserving the context's historical ticket and exact identity.
@@ -311,7 +403,8 @@ int main() {
     // may-own-resource gates even when BSD exact close itself succeeded.
     {
         auto unknown = makeContext();
-        unknown.doorbellIssued = true;
+        unknown.packetCount = 1;
+        setPacket(unknown, 0, true, false, false);
         unknown.mbufHeldByRing = true;
         auto id = captureIdentity(owner, unknown);
         assert(commitClose(owner, id, true, true) == EBUSY);
