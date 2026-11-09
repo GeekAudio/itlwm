@@ -20,27 +20,27 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "a9e5577445cda41fd97e2d4e03d17a058ada91d547e43408383b072f34860e5c"
+      "sha256": "2686b21c40106f52a1dc27ea78b5da3718b8b2458003e65bbf07d79e30210f07"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "2fd184d0401b445b7f33d0ae08ca989b6686dbb9edac7b896eb45b3392216a3f"
+      "sha256": "43684fb4d35d3b989085e0e9708cf020b1e2c742cd48291ac57f49e89021b8cd"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "57465cabe38c4956c447861b4828521c807a5e680900dad9849ae8b8bd281275"
+      "sha256": "0a1a266067452f6ff69504dac01b3991a21cc2cfbff20bf9544ae9d0ed3bccba"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "57465cabe38c4956c447861b4828521c807a5e680900dad9849ae8b8bd281275"
+      "sha256": "0a1a266067452f6ff69504dac01b3991a21cc2cfbff20bf9544ae9d0ed3bccba"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "4fd24859b4e9a68f8b0a9b9177f5420b94016b7709146bfcaedab31a50997627"
+      "sha256": "5d4983dd04028be990e0e3be42ba61d2308f7bfa9700a2bf028b5ffc4cd30d75"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
@@ -85,11 +85,11 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-09T13:55:15+08:00",
-  "runtime_scope": "本轮越过Test125的驻留前许可阻塞。原生UDP提交8字节，驱动触发一次门铃；对端匹配本轮请求，Mac在100 ms租约内捕获、解码并交付1个匹配返回。350 ms完成等待耗尽后进入隔离，未取得精确TX completion和完整资源回收证明。受控单包不等于持续AWDL或AirDrop。",
-  "running_candidate": "25G416-Test126",
+  "updated_at": "2026-11-09T14:13:49+08:00",
+  "runtime_scope": "原生UDP提交8字节，对端匹配请求，Mac约52.4 ms收到同一标记返回，捕获、解码和交付各1帧。固定记录覆盖门铃到收尾约350 ms，7个TX/BA与首次拒绝槽均无事件；随后超时隔离，完成与安全释放仍未通过。这只说明已观测入口在该窗口未记录候选，不能断言固件从未产出或窗口外没有迟到。",
+  "running_candidate": "25G416-Test127",
   "next_candidate": "25G416-Test127",
-  "website_delivery": "Test126实测保持；Test127已部署并读回，等待重启。",
-  "deployment_state": "test127_deployed_waiting_reboot",
-  "site_preparation": "Test126 runtime evidence retained; Test127 deployed and read back, not boot verified. No private runtime metadata published."
+  "website_delivery": "Test127实测回包、完成入口空记录及恢复结果已更新。",
+  "deployment_state": "test127_runtime_return_observed_no_completion_candidate",
+  "site_preparation": "Test127 runtime evidence only; no next candidate deployed. No private runtime metadata published."
 }
