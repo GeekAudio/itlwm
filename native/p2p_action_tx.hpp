@@ -30,6 +30,7 @@ struct Ticket {
     uint16_t sequenceControl;
     uint16_t byteCount;
     uint16_t frameControl;
+    uint16_t responseFrameControl;
     uint16_t status;
     bool armed;
     bool completed;
@@ -73,6 +74,17 @@ public:
                     size_t frameControlOffset, size_t queueOffset,
                     size_t nextSsnOffset);
 
+    // Directed LINK/TID-0 data may be reported with only the 802.11 Retry bit
+    // added by firmware. This explicit path accepts exactly FC 0x0008 or
+    // 0x0808 for an expected 0x0008 ticket; all other FC bits and existing
+    // checks remain unchanged.
+    // Use only after the HAL has verified the active directed LINK/TID-0 lease.
+    Result completeDirectedData(uint32_t generation, const uint8_t *payload,
+                    size_t length, size_t statusOffset,
+                    size_t sequenceOffset, size_t byteCountOffset,
+                    size_t frameControlOffset, size_t queueOffset,
+                    size_t nextSsnOffset);
+
     // Call only after positively proven firmware stop plus RX/TX/DMA drain.
     // Empty or completed tickets retire idempotently; a live ticket requires
     // a nonzero generation different from the ticket's generation.
@@ -85,6 +97,11 @@ public:
     Ticket snapshot() const;
 
 private:
+    Result completeImpl(uint32_t generation, const uint8_t *payload,
+                    size_t length, size_t statusOffset,
+                    size_t sequenceOffset, size_t byteCountOffset,
+                    size_t frameControlOffset, size_t queueOffset,
+                    size_t nextSsnOffset, bool allowDirectedRetryBit);
     Ticket ticket_;
     bool quarantined_;
 };

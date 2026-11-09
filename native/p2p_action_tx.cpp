@@ -99,6 +99,28 @@ Result CompletionTracker::complete(uint32_t generation, const uint8_t *p,
                                    size_t queueOffset,
                                    size_t nextSsnOffset)
 {
+    return completeImpl(generation, p, length, statusOffset, sequenceOffset,
+        byteCountOffset, frameControlOffset, queueOffset, nextSsnOffset, false);
+}
+
+Result CompletionTracker::completeDirectedData(
+    uint32_t generation, const uint8_t *p, size_t length,
+    size_t statusOffset, size_t sequenceOffset, size_t byteCountOffset,
+    size_t frameControlOffset, size_t queueOffset, size_t nextSsnOffset)
+{
+    return completeImpl(generation, p, length, statusOffset, sequenceOffset,
+        byteCountOffset, frameControlOffset, queueOffset, nextSsnOffset, true);
+}
+
+Result CompletionTracker::completeImpl(uint32_t generation, const uint8_t *p,
+                                   size_t length, size_t statusOffset,
+                                   size_t sequenceOffset,
+                                   size_t byteCountOffset,
+                                   size_t frameControlOffset,
+                                   size_t queueOffset,
+                                   size_t nextSsnOffset,
+                                   bool allowDirectedRetryBit)
+{
     if (!ticket_.armed || ticket_.completed || quarantined_)
         return Result::kBusy;
     if (generation != ticket_.generation)
@@ -134,7 +156,10 @@ Result CompletionTracker::complete(uint32_t generation, const uint8_t *p,
         quarantined_ = true;
         return Result::kWrongLength;
     }
-    if (le16(p + frameControlOffset) != ticket_.frameControl) {
+    const uint16_t responseFrameControl = le16(p + frameControlOffset);
+    if (responseFrameControl != ticket_.frameControl &&
+        !(allowDirectedRetryBit && ticket_.frameControl == 0x0008 &&
+          responseFrameControl == 0x0808)) {
         quarantined_ = true;
         return Result::kWrongFrameControl;
     }
@@ -147,6 +172,7 @@ Result CompletionTracker::complete(uint32_t generation, const uint8_t *p,
         return Result::kWrongDescriptor;
     }
 
+    ticket_.responseFrameControl = responseFrameControl;
     ticket_.status = le16(p + statusOffset);
     ticket_.completed = true;
     ticket_.frameAttemptSucceeded = (ticket_.status & 0xff) == 1;

@@ -4139,7 +4139,7 @@ static bool directedDataMatchesRetiredResponse(
             continue;
         if (prior.firmwareStatus == status &&
             prior.sequenceControl == seq && prior.byteCount == byteCount &&
-            prior.frameControl == frameControl &&
+            prior.responseFrameControl == frameControl &&
             (ssn & (context->ringSize - 1)) == prior.expectedNextSsn)
             return true;
     }
@@ -4259,7 +4259,7 @@ bool iwx_tahoe_p2p_directed_data_tx_response(
         return true;
     }
 
-    const auto result = context->completion.complete(
+    const auto result = context->completion.completeDirectedData(
         context->binding.generation, payload, payloadLength,
         offsetof(struct iwx_tx_resp, status),
         offsetof(struct iwx_tx_resp, seq_ctl),
@@ -4295,6 +4295,7 @@ bool iwx_tahoe_p2p_directed_data_tx_response(
     context->mbufHeldByRing = false;
     currentPacket.txResponseUs = directedDataMonotonicUs();
     currentPacket.firmwareStatus = completion.status;
+    currentPacket.responseFrameControl = completion.responseFrameControl;
     currentPacket.completionObserved = completion.completed;
     currentPacket.frameAttemptSucceeded = completion.frameAttemptSucceeded;
     currentPacket.resourcesAbsent = true;
@@ -4720,6 +4721,7 @@ static bool directedDataCaptureSnapshot(
         destination.expectedNextSsn = source.expectedNextSsn;
         destination.sequenceControl = source.sequenceControl;
         destination.frameControl = source.frameControl;
+        destination.responseFrameControl = source.responseFrameControl;
         destination.byteCount = source.byteCount;
         destination.firmwareStatus = source.firmwareStatus;
         destination.slot = source.slot;

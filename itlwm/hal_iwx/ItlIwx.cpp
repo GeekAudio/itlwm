@@ -4025,7 +4025,7 @@ iwx_ctxt_info_gen3_init(struct iwx_softc *sc, const struct iwx_fw_sects *fws)
                                sizeof(struct iwx_prph_scratch), 0);
     if (err) {
         XYLog("%s: could not allocate prph scratch\n", DEVNAME(sc));
-        return false;
+        return ENOMEM;
     }
     
     prph_scratch = (struct iwx_prph_scratch *)sc->prph_scratch_dma.vaddr;

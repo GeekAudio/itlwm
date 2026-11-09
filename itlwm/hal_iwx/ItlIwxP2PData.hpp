@@ -82,6 +82,7 @@ struct TahoeP2PDirectedDataPacketRecord {
     uint16_t expectedNextSsn;
     uint16_t sequenceControl;
     uint16_t frameControl;
+    uint16_t responseFrameControl;
     uint16_t byteCount;
     uint16_t firmwareStatus;
     uint8_t nonce[8];
@@ -111,6 +112,7 @@ struct TahoeP2PDirectedDataPacketSnapshot {
     uint16_t expectedNextSsn;
     uint16_t sequenceControl;
     uint16_t frameControl;
+    uint16_t responseFrameControl;
     uint16_t byteCount;
     uint16_t firmwareStatus;
     uint8_t slot;

@@ -104,6 +104,7 @@ struct TahoeP2PDirectedDataContext {
     struct PacketRecord {
         uint64_t doorbellUs;
         uint16_t firmwareStatus, sequenceControl, byteCount, frameControl;
+        uint16_t responseFrameControl;
         uint16_t expectedNextSsn, descriptorIndex;
         bool doorbellIssued, completionObserved, resourcesAbsent;
     } packets[2]{};
@@ -255,6 +256,7 @@ int main()
         context.packets[0].sequenceControl = 0x310;
         context.packets[0].byteCount = 96;
         context.packets[0].frameControl = 8;
+        context.packets[0].responseFrameControl = 0x0808;
         context.packets[0].expectedNextSsn = 1;
         context.packets[1].doorbellIssued = true;
         context.state = TahoeP2PDirectedDataState::kInFlight;
@@ -262,7 +264,7 @@ int main()
                IntelP2PActionTx::Result::kReady);
         rsp->frame_count = 1;
         rsp->ra_tid = 0x30;
-        rsp->frame_ctrl = 8;
+        rsp->frame_ctrl = 0x0808;
         rsp->seq_ctl = 0x310;
         rsp->byte_cnt = 96;
         rsp->tx_queue = 4;
@@ -274,6 +276,31 @@ int main()
     prepareRetiredSlotOne();
     assert(invoke(&context));
     assert(!context.quarantined && !context.enteredLiveCompletion);
+    assert(context.completion.snapshot().armed &&
+           !context.completion.snapshot().completed);
+
+    // A retired duplicate is exact on the first observed response FC: the
+    // expected FC is 0x0008, but this first successful response carried Retry.
+    rsp->frame_ctrl = 8;
+    context.enteredLiveCompletion = false;
+    assert(invoke(&context));
+    assert(context.enteredLiveCompletion && !context.quarantined);
+
+    // Retry plus Protected cannot match the old response tombstone.
+    rsp->frame_ctrl = 0x4808;
+    context.enteredLiveCompletion = false;
+    assert(invoke(&context));
+    assert(context.enteredLiveCompletion && !context.quarantined);
+
+    // A different scheduler SSN also cannot be treated as a retired duplicate.
+    rsp->frame_ctrl = 0x0808;
+    rawSsn = 0x1002;
+    memcpy(tx.get()->data + sizeof(iwx_tx_resp), &rawSsn, sizeof(rawSsn));
+    context.enteredLiveCompletion = false;
+    assert(invoke(&context));
+    assert(context.enteredLiveCompletion && !context.quarantined);
+    rawSsn = 0x1001;
+    memcpy(tx.get()->data + sizeof(iwx_tx_resp), &rawSsn, sizeof(rawSsn));
 
     // Every truncated payload length from the status-only boundary through
     // the complete 32-bit SSN boundary must avoid the retired-slot matcher.

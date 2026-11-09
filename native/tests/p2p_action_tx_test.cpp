@@ -28,6 +28,13 @@ static Result complete(CompletionTracker *tracker, uint32_t generation,
     return tracker->complete(generation, response, length,
                               40, 28, 30, 34, 36, 44);
 }
+static Result completeDirectedData(CompletionTracker *tracker,
+                                   uint32_t generation,
+                                   const uint8_t *response, size_t length)
+{
+    return tracker->completeDirectedData(generation, response, length,
+                                         40, 28, 30, 34, 36, 44);
+}
 
 int main()
 {
@@ -171,6 +178,51 @@ int main()
     makeResponse(response, 1, 12, 0x40, 9, 100, 0x00c0);
     assert(complete(&wrongFc, 7, response, sizeof(response)) == Result::kWrongFrameControl);
     assert(wrongFc.firmwareDrained(8) == Result::kReady);
+
+    // Generic Action remains strict, while only the explicit directed-data
+    // path accepts Retry on the exact LINK/TID-0 data FC 0x0008.
+    CompletionTracker genericRetryIsStrict;
+    assert(genericRetryIsStrict.arm(7, 12, 8, 0, 0x40, 100, 0x0008) ==
+           Result::kReady);
+    makeResponse(response, 1, 12, 0x40, 9, 100, 0x0808);
+    assert(complete(&genericRetryIsStrict, 7, response, sizeof(response)) ==
+           Result::kWrongFrameControl);
+    assert(!genericRetryIsStrict.snapshot().completed &&
+           genericRetryIsStrict.snapshot().responseFrameControl == 0);
+
+    CompletionTracker directedRetry;
+    assert(directedRetry.arm(7, 12, 8, 0, 0x40, 100, 0x0008) ==
+           Result::kReady);
+    makeResponse(response, 1, 12, 0x40, 9, 100, 0x0808);
+    assert(completeDirectedData(&directedRetry, 7, response,
+                                sizeof(response)) == Result::kCompletion);
+    assert(directedRetry.snapshot().responseFrameControl == 0x0808);
+
+    CompletionTracker directedNormal;
+    assert(directedNormal.arm(7, 12, 8, 0, 0x40, 100, 0x0008) ==
+           Result::kReady);
+    makeResponse(response, 1, 12, 0x40, 9, 100, 0x0008);
+    assert(completeDirectedData(&directedNormal, 7, response,
+                                sizeof(response)) == Result::kCompletion);
+    assert(directedNormal.snapshot().responseFrameControl == 0x0008);
+
+    CompletionTracker directedRetryProtected;
+    assert(directedRetryProtected.arm(7, 12, 8, 0, 0x40, 100, 0x0008) ==
+           Result::kReady);
+    makeResponse(response, 1, 12, 0x40, 9, 100, 0x4808);
+    assert(completeDirectedData(&directedRetryProtected, 7, response,
+                                sizeof(response)) == Result::kWrongFrameControl);
+    assert(!directedRetryProtected.snapshot().completed &&
+           directedRetryProtected.snapshot().responseFrameControl == 0);
+
+    CompletionTracker directedRetryWrongSsn;
+    assert(directedRetryWrongSsn.arm(7, 12, 8, 0, 0x40, 100, 0x0008) ==
+           Result::kReady);
+    makeResponse(response, 1, 12, 0x40, 10, 100, 0x0808);
+    assert(completeDirectedData(&directedRetryWrongSsn, 7, response,
+                                sizeof(response)) == Result::kWrongDescriptor);
+    assert(!directedRetryWrongSsn.snapshot().completed &&
+           directedRetryWrongSsn.snapshot().responseFrameControl == 0);
 
     for (size_t n = 0; n < sizeof(response); ++n) {
         CompletionTracker shortResponse;
