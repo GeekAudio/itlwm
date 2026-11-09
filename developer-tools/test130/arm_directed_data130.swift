@@ -474,7 +474,7 @@ let required: Set<String> = ["--expect-build", "--expect-uuid", "--peer-mac",
     "--peer-ready-file"]
 guard argIndex == optionArguments.count, Set(options.keys) == required,
       let build = options["--expect-build"],
-      matches130(build, "^(?:25G[0-9]+-Test130|25G416-Test131)$"),
+      matches130(build, "^(?:25G[0-9]+-Test130|25G416-Test131|25G416-Test132)$"),
       let expectedUUID = options["--expect-uuid"],
       matches130(expectedUUID, "^[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}$"),
       let peerMACText = options["--peer-mac"], let peerMAC = colonMac130(peerMACText),

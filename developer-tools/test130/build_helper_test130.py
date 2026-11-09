@@ -27,7 +27,7 @@ def sha(path: Path) -> str:
 
 
 def main(*, build_id: str = BUILD_ID, private_dir: Path = PRIVATE_DIR) -> None:
-    if build_id not in (BUILD_ID, "25G416-Test131"):
+    if build_id not in (BUILD_ID, "25G416-Test131", "25G416-Test132"):
         raise ValueError("unsupported helper profile")
     os.umask(0o077)
     output_dir = private_dir / "tools"
