@@ -107,7 +107,7 @@
  */
 
 #include "ItlIwx.hpp"
-#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+#if defined(AIRPORT_TAHOE) && (defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332) || defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332))
 #include "../../native/awdl_native_bsd_data_25G332.hpp"
 #endif
 #include "../../native/iwx_stop_retirement.hpp"
@@ -1744,7 +1744,7 @@ void ItlIwx::tahoeClearStopBlockState()
 IOReturn ItlIwx::tahoeRx149RecoverInputAction(
     OSObject *, void *context, void *flushOut, void *, void *)
 {
-#if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+#if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332) || defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
     auto *owner = static_cast<ItlIwx *>(context);
     auto *flush = static_cast<bool *>(flushOut);
     if (!owner || !flush || !owner->tahoeP2pOnMainGate())
@@ -1824,7 +1824,7 @@ IOReturn ItlIwx::tahoeRx149RecoverInputAction(
 
 void ItlIwx::tahoeRx149RecoverInput()
 {
-#if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+#if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332) || defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
     if (!NativeAwdlBSD::rx149DataInputBlocked())
         return;
     bool flush = false;
@@ -5801,7 +5801,7 @@ iwx_check_rfkill(struct iwx_softc *sc)
     v = IWX_READ(sc, IWX_CSR_GP_CNTRL);
     rv = (v & IWX_CSR_GP_CNTRL_REG_FLAG_HW_RF_KILL_SW) == 0;
     if (rv) {
-#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+#if defined(AIRPORT_TAHOE) && (defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332) || defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332))
         NativeAwdlBSD::invalidateRx149DataInputFast();
 #endif
         sc->sc_flags |= IWX_FLAG_RFKILL;
@@ -6331,12 +6331,15 @@ void ItlIwx::tahoeRetireStoppedQueuesAfterSoftStop(
 int ItlIwx::
 iwx_stop_device(struct iwx_softc *sc)
 {
-#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+#if defined(AIRPORT_TAHOE) && (defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332) || defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332))
     __atomic_store_n(&nativeRx149InitProof_, uint64_t(0), __ATOMIC_RELEASE);
 #endif
 #if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
     NativeRxPreOwner::StopActivity observerStopActivity(&nativeRxPreOwnerStopDepth_);
     tahoeRxPreOwnerStop();
+#endif
+#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+    NativeAwdlBSD::revokeDiscoveryRxInput();
 #endif
 #if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
     NativeAwdlBSD::revokeRx149DataInput();
@@ -8086,9 +8089,10 @@ iwx_load_firmware(struct iwx_softc *sc)
         },
         iwxMonotonicNs, SEC_TO_NSEC(1), kIwxFirmwareInitWaitPollNs,
         EWOULDBLOCK, ENXIO);
+    const int aliveIntr = __atomic_load_n(&sc->sc_uc.uc_intr, __ATOMIC_ACQUIRE);
     const int aliveOk = __atomic_load_n(&sc->sc_uc.uc_ok, __ATOMIC_ACQUIRE);
     const uint32_t aliveObserved =
-        (__atomic_load_n(&sc->sc_uc.uc_intr, __ATOMIC_ACQUIRE) ? 1U : 0U) |
+        (aliveIntr ? 1U : 0U) |
         (aliveOk ? 2U : 0U);
     err = aliveWait.outcome == IwxInitWait::Outcome::Ready
         ? (aliveOk ? 0 : EINVAL) : aliveWait.error;
@@ -8098,18 +8102,92 @@ iwx_load_firmware(struct iwx_softc *sc)
               aliveObserved, aliveWait.sleepCalls,
               static_cast<unsigned long long>(aliveWait.elapsedNs),
               sc->sc_generation);
+        uint32_t secBootCpu1Status = 0;
+        uint32_t secBootCpu2Status = 0;
+        uint32_t umacCurrentPc = 0;
+        uint32_t lmacCurrentPc = 0;
+        uint32_t registerReadMask = 0;
         if (iwx_nic_lock(sc)) {
+            secBootCpu1Status = iwx_read_umac_prph(
+                sc, IWX_UMAG_SB_CPU_1_STATUS);
+            secBootCpu2Status = iwx_read_umac_prph(
+                sc, IWX_UMAG_SB_CPU_2_STATUS);
+            umacCurrentPc = iwx_read_umac_prph(
+                sc, IWX_UREG_UMAC_CURRENT_PC);
+            lmacCurrentPc = iwx_read_umac_prph(
+                sc, IWX_UREG_LMAC1_CURRENT_PC);
+            registerReadMask = 0x0fU;
             XYLog("SecBoot CPU1 Status: 0x%x, CPU2 Status: 0x%x\n",
-                  iwx_read_umac_prph(sc, IWX_UMAG_SB_CPU_1_STATUS),
-                  iwx_read_umac_prph(sc, IWX_UMAG_SB_CPU_2_STATUS));
-            XYLog("UMAC PC: 0x%x\n",
-                  iwx_read_umac_prph(sc,
-                                     IWX_UREG_UMAC_CURRENT_PC));
-            XYLog("LMAC PC: 0x%x\n",
-                  iwx_read_umac_prph(sc,
-                                     IWX_UREG_LMAC1_CURRENT_PC));
+                  secBootCpu1Status, secBootCpu2Status);
+            XYLog("UMAC PC: 0x%x\n", umacCurrentPc);
+            XYLog("LMAC PC: 0x%x\n", lmacCurrentPc);
             iwx_nic_unlock(sc);
         }
+#ifdef AIRPORT_TAHOE
+        // Keep the first complete failed ALIVE-wait snapshot on the controller.
+        // Register values are meaningful only when their RegisterReadMask bits
+        // are set; zero is a valid hardware value, not a read-status sentinel.
+        if (IOEthernetController *controller = getController()) {
+            OSNumber *priorValid = OSDynamicCast(OSNumber,
+                controller->getProperty("NativeFirstAliveWaitFailureValid"));
+            if (!priorValid || priorValid->unsigned32BitValue() != 1U) {
+                const auto set32 = [controller](const char *key,
+                                                uint32_t value) {
+                    return controller->setProperty(
+                        key, static_cast<uint64_t>(value), 32);
+                };
+                const auto set64 = [controller](const char *key,
+                                                uint64_t value) {
+                    return controller->setProperty(key, value, 64);
+                };
+                bool published = set32(
+                    "NativeFirstAliveWaitFailureValid", 0);
+                published = published && set32(
+                    "NativeFirstAliveWaitFailureSchema", 1);
+                published = published && set32(
+                    "NativeFirstAliveWaitFailureDriverGeneration",
+                    static_cast<uint32_t>(initGeneration));
+                published = published && set32(
+                    "NativeFirstAliveWaitFailureObservedGeneration",
+                    static_cast<uint32_t>(sc->sc_generation));
+                published = published && set32(
+                    "NativeFirstAliveWaitFailureOutcome",
+                    static_cast<uint32_t>(aliveWait.outcome));
+                published = published && set32(
+                    "NativeFirstAliveWaitFailureError",
+                    static_cast<uint32_t>(err));
+                published = published && set64(
+                    "NativeFirstAliveWaitFailureElapsedNs",
+                    aliveWait.elapsedNs);
+                published = published && set32(
+                    "NativeFirstAliveWaitFailureSleepCalls",
+                    aliveWait.sleepCalls);
+                published = published && set32(
+                    "NativeFirstAliveWaitFailureUcIntr",
+                    static_cast<uint32_t>(aliveIntr));
+                published = published && set32(
+                    "NativeFirstAliveWaitFailureUcOk",
+                    static_cast<uint32_t>(aliveOk));
+                published = published && set32(
+                    "NativeFirstAliveWaitFailureRegisterReadMask",
+                    registerReadMask);
+                published = published && set32(
+                    "NativeFirstAliveWaitFailureSecBootCpu1Status",
+                    secBootCpu1Status);
+                published = published && set32(
+                    "NativeFirstAliveWaitFailureSecBootCpu2Status",
+                    secBootCpu2Status);
+                published = published && set32(
+                    "NativeFirstAliveWaitFailureUmacCurrentPc",
+                    umacCurrentPc);
+                published = published && set32(
+                    "NativeFirstAliveWaitFailureLmacCurrentPc",
+                    lmacCurrentPc);
+                if (published)
+                    (void)set32("NativeFirstAliveWaitFailureValid", 1);
+            }
+        }
+#endif
         iwx_ctxt_info_free_paging(sc);
         XYLog("%s: could not load firmware\n", DEVNAME(sc));
     }
@@ -15338,6 +15416,9 @@ iwx_mcc_update(struct iwx_softc *sc, struct iwx_mcc_chub_notif *notif)
 #if defined(AIRPORT_TAHOE) && ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
     NativeAwdlBSD::revokeDirectedDataRxInput();
 #endif
+#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+    NativeAwdlBSD::revokeDiscoveryRxInput();
+#endif
 #if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
     // Revoke this ROC even if no data packet has activated its BSD lease yet.
     const auto traceOwner = nativeAwdlRxEventTimeline_.snapshot();
@@ -18945,6 +19026,9 @@ iwx_newstate(struct ieee80211com *ic, enum ieee80211_state nstate, int arg)
     
 #ifdef AIRPORT_TAHOE
     if (nstate != IEEE80211_S_RUN || ic->ic_state != IEEE80211_S_RUN) {
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+        NativeAwdlBSD::revokeDiscoveryRxInput();
+#endif
 #if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
         NativeAwdlBSD::revokeRx149DataInput();
 #endif
@@ -19636,7 +19720,7 @@ iwx_init(struct _ifnet *ifp)
 
     //    rw_assert_wrlock(&sc->ioctl_rwl);
 
-#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+#if defined(AIRPORT_TAHOE) && (defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332) || defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332))
     __atomic_store_n(&nativeRx149InitProof_, uint64_t(0), __ATOMIC_RELEASE);
     // Do not manufacture a recovery identity after signed generation exhaustion.
     if (sc->sc_generation < 0 || sc->sc_generation == INT32_MAX) {
@@ -19741,7 +19825,7 @@ iwx_init(struct _ifnet *ifp)
         return err;
     }
     ic->ic_tahoe_init_stage = 14;
-#if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+#if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332) || defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
     // An IRQ fault during this initialization invalidates the proof. A fault
     // after this check is still rejected by recovery's exact-serial CAS.
     if (generation == sc->sc_generation && generation > 0 &&
@@ -22470,7 +22554,7 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
                 XYLog("%s: device at critical temperature (%u degC), "
                        "stopping device\n",
                        DEVNAME(sc), le16toh(notif->temperature));
-#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+#if defined(AIRPORT_TAHOE) && (defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332) || defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332))
                 NativeAwdlBSD::invalidateRx149DataInputFast();
 #endif
                 sc->sc_flags |= IWX_FLAG_HW_ERR;
@@ -23071,7 +23155,7 @@ iwx_intr(OSObject *object, IOInterruptEventSource* sender, int count)
     }
     
     if (r1 & IWX_CSR_INT_BIT_SW_ERR) {
-#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+#if defined(AIRPORT_TAHOE) && (defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332) || defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332))
         NativeAwdlBSD::invalidateRx149DataInputFast();
 #endif
 #ifdef AIRPORT_TAHOE
@@ -23117,7 +23201,7 @@ iwx_intr(OSObject *object, IOInterruptEventSource* sender, int count)
         handled |= IWX_CSR_INT_BIT_HW_ERR;
         XYLog("%s: hardware error, stopping device \n", DEVNAME(sc));
         if ((sc->sc_flags & IWX_FLAG_SHUTDOWN) == 0) {
-#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+#if defined(AIRPORT_TAHOE) && (defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332) || defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332))
             NativeAwdlBSD::invalidateRx149DataInputFast();
 #endif
             sc->sc_flags |= IWX_FLAG_HW_ERR;
@@ -23214,7 +23298,7 @@ iwx_intr_msix(OSObject *object, IOInterruptEventSource* sender, int count)
     if ((inta_fh & IWX_MSIX_FH_INT_CAUSES_FH_ERR) ||
         (inta_hw & IWX_MSIX_HW_INT_CAUSES_REG_SW_ERR) ||
         (inta_hw & IWX_MSIX_HW_INT_CAUSES_REG_SW_ERR_V2)) {
-#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+#if defined(AIRPORT_TAHOE) && (defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332) || defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332))
         NativeAwdlBSD::invalidateRx149DataInputFast();
 #endif
 #ifdef AIRPORT_TAHOE
@@ -23268,7 +23352,7 @@ iwx_intr_msix(OSObject *object, IOInterruptEventSource* sender, int count)
     if (inta_hw & IWX_MSIX_HW_INT_CAUSES_REG_HW_ERR) {
         XYLog("%s: hardware error, stopping device \n", DEVNAME(sc));
         if ((sc->sc_flags & IWX_FLAG_SHUTDOWN) == 0) {
-#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+#if defined(AIRPORT_TAHOE) && (defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332) || defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332))
             NativeAwdlBSD::invalidateRx149DataInputFast();
 #endif
             sc->sc_flags |= IWX_FLAG_HW_ERR;

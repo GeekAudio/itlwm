@@ -37,6 +37,12 @@ def unresolved_project_symbols(undefined: str) -> list[str]:
 
 def receive149_profile_errors(args):
     data_input = getattr(args, 'native_awdl_rx149_data_input', False)
+    discovery_rx = getattr(args, 'native_awdl_discovery_rx_input', False)
+    if discovery_rx and (args.native_awdl_rx149_observation_only or not (
+            args.native_awdl_discovery_mif_current_slot and
+            args.native_awdl_discovery_experiment and
+            args.native_awdl_resident_data and args.p2p_manual_trigger)):
+        return ['Discovery RX requires the separate manual resident MIF-current profile and excludes RX149']
     directed_prepare = getattr(args, 'native_awdl_directed_prepare', False)
     directed_data = getattr(args, 'native_awdl_directed_data_tx', False)
     if directed_data and getattr(args, 'native_awdl_reply_shadow', False):
@@ -84,6 +90,8 @@ def resident_build_flags(args):
         flags += ' -DITL_NATIVE_AWDL_TX_EVIDENCE_25G332=1'
     if args.native_awdl_discovery_experiment or args.native_awdl_rx149_observation_only:
         flags += ' -DITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332=1'
+    if getattr(args, 'native_awdl_discovery_rx_input', False):
+        flags += ' -DITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332=1'
     if args.native_awdl_rx149_observation_only:
         flags += ' -DITL_NATIVE_AWDL_RX149_OBSERVATION_25G332=1'
     if getattr(args, 'native_awdl_rx149_data_input', False):
@@ -115,6 +123,7 @@ def apply_artifact_profile(personality, args):
         'NativeAwdlDiscoveryExperimentEnabled': bool(args.native_awdl_discovery_experiment),
         'NativeAwdlDiscoveryMifCurrentSlotEnabled': bool(args.native_awdl_discovery_mif_current_slot),
         'NativeAwdlDiscoveryCurrentAwFallbackEnabled': bool(args.native_awdl_discovery_current_aw_fallback),
+        'NativeAwdlDiscoveryRxInputEnabled': bool(getattr(args, 'native_awdl_discovery_rx_input', False)),
         'NativeP2PRx149ObservationOnly': bool(args.native_awdl_rx149_observation_only),
         'NativeP2PRx149DataInputExperiment': bool(getattr(args, 'native_awdl_rx149_data_input', False)),
         'NativeRxPreOwnerObservation': bool(getattr(args, 'native_rx_preowner_observation', False)),
@@ -170,6 +179,8 @@ def main():
                         help='Allow one real native QM discovery packet using an explicitly estimated PSF target; no formal peer admission change')
     parser.add_argument('--native-awdl-discovery-mif-current-slot', action='store_true',
                         help='Test066: use a same-peer MIF current-slot estimate and bounded early MIF preparation')
+    parser.add_argument('--native-awdl-discovery-rx-input', action='store_true',
+                        help='Bound native QM replies to the selected live peer, query doorbell and ROC; separate from RX149/nonce diagnostics')
     parser.add_argument('--native-awdl-discovery-current-aw-fallback', action='store_true',
                         help='Test077: try the current AW only after the original next-AW planner reports an empty conservative window')
     parser.add_argument('--native-awdl-rx149-observation-only', action='store_true',
@@ -299,6 +310,7 @@ def main():
                           'native_awdl_tx_evidence': args.native_awdl_tx_evidence,
                           'native_awdl_discovery_experiment': args.native_awdl_discovery_experiment,
                           'native_awdl_discovery_mif_current_slot': args.native_awdl_discovery_mif_current_slot,
+                          'native_awdl_discovery_rx_input': args.native_awdl_discovery_rx_input,
                           'native_awdl_discovery_current_aw_fallback': args.native_awdl_discovery_current_aw_fallback,
                           'native_awdl_rx149_observation_only': args.native_awdl_rx149_observation_only,
                           'native_awdl_rx149_data_input': args.native_awdl_rx149_data_input,

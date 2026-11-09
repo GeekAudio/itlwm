@@ -275,6 +275,18 @@ public:
                         uint64_t nowMonotonicUs,
                         PsfPeerSnapshot *output);
 
+    // Copy the private source key only for one exact, fresh same-entry PSF/MIF
+    // binding. This is for a serialized kernel caller's transient permit; the
+    // address remains absent from snapshots and public diagnostics.
+    bool copyBoundPeerSource(
+                        uint8_t slot,
+                        const IntelAwdlPeer::RuntimeEpochs &current,
+                        uint64_t nowMonotonicUs,
+                        uint64_t expectedPeerIncarnation,
+                        uint64_t expectedPsfRevision,
+                        uint64_t expectedMifRevision,
+                        uint8_t output[6]);
+
     // Return an address-free current-epoch MIF view, including MIF-only
     // entries. This is peer-presence evidence only, never TX permission.
     bool getMifSnapshot(uint8_t slot,
@@ -295,7 +307,7 @@ public:
 
 private:
     struct Entry {
-        uint8_t sourceAddress[6]; // Private matching key; never returned.
+        uint8_t sourceAddress[6]; // Never published; copied only through exact private binding.
         IntelAwdlElection::Advertisement mifAdvertisement;
         IntelAwdlElection::Advertisement psfAdvertisement;
         TimingSample timing[kTimingSampleCapacity];

@@ -255,6 +255,13 @@ struct P2PProbeRun {
     char directedRunToken[33];
     bool txProbeEnabled;
     uint32_t nativeDataAttempts;
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+    NativeAwdlBSD::DiscoveryRxIfnetIdentity discoveryRxIfnet;
+    bool discoveryRxIfnetValid;
+    bool discoveryRxCleanupSelected;
+    NativeAwdlDiscoveryRxInput::RocCleanupWitness discoveryRocCleanupWitness;
+    TahoeP2PMacContextAckReceipt discoveryMacRemoveAck;
+#endif
 #if defined(ITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332)
     bool discoveryConsumed;
     bool discoveryDoorbelled;
@@ -659,6 +666,11 @@ struct RocEventRun {
     bool rxDrainComplete;
     bool failedEndCleanupEligible;
     bool failedEndReceiptSealed;
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+    NativeAwdlDiscoveryRxInput::Lease discoveryRxLease{};
+    NativeAwdlDiscoveryRxInput::MainGate discoveryRxGate{};
+    bool discoveryRxReady=false;
+#endif
 #if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
     NativeP2PRx149DataInput::Lease rx149DataLease{};
 #endif
@@ -3606,6 +3618,152 @@ static void recordNativeDataTxConsumption(
 }
 #endif
 
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+static bool discoveryRxQueryOwnership(ItlIwx *owner,
+    const NativeAwdlDiscoveryRxInput::Identity &id, bool initial,
+    NativeAwdlDiscoveryRxInput::TxOwnership *out)
+{
+    if (!owner || !out || !owner->tahoeP2pOnMainGate()) return false;
+    *out=initial?NativeAwdlDiscoveryRxInput::TxOwnership{}:owner->nativeDiscoveryRxTx_;
+    auto &context=owner->nativeP2pActionTx_;
+    NativeAwdlDataTxTrace::RecordSnapshot row{};
+    bool found=false;
+    for (size_t index=0;index<NativeAwdlDataTxTrace::kRecordCapacity;++index) {
+        NativeAwdlDataTxTrace::RecordSnapshot candidate{};
+        if (context.dataTxTrace.snapshot(index,&candidate) && candidate.present &&
+            candidate.identity.token==id.queryToken &&
+            candidate.identity.contextGeneration==id.epochs.context &&
+            candidate.identity.powerGeneration==id.epochs.power &&
+            candidate.identity.stationGeneration==id.epochs.station &&
+            candidate.identity.rocGeneration==id.epochs.roc) {
+            if (found) return false;
+            row=candidate;found=true;
+        }
+    }
+    if (!found) return false;
+    auto &queue=owner->nativeP2pTxQueue_;
+    if (!queue.stateLock) return false;
+    const auto irq=IOSimpleLockLockDisableInterrupt(queue.stateLock);
+    out->queueActive=queue.state==TahoeP2PResourceState::kActive &&
+        queue.generation==id.epochs.power && queue.queueId==row.queueId &&
+        queue.everDoorbelled && !queue.unsubmittedAbortInProgress &&
+        !queue.idleAbortAfterEndInProgress;
+    out->submitOutstandingClear=!queue.submissionBusy;
+    IOSimpleLockUnlockEnableInterrupt(queue.stateLock,irq);
+    if (initial) {
+        const uint32_t stage=__atomic_load_n(&context.submitDiagnostics.lastStage,__ATOMIC_ACQUIRE);
+        out->doorbellIssued=(row.stageMask&NativeAwdlDataTxTrace::kDoorbellIssued)!=0;
+        out->finishSucceeded=stage==uint32_t(TahoeP2PActionTxSubmitStage::kDoorbellIssued);
+        out->actionSubmitted=context.state==TahoeP2PActionTxState::kInFlight;
+    }
+    out->queryTraceExact=true;
+    out->traceUnknown=(row.stageMask&NativeAwdlDataTxTrace::kUnknown)!=0 ||
+        row.unknownUs!=0 || context.state==TahoeP2PActionTxState::kQuarantined;
+    out->traceCancelled=(row.stageMask&NativeAwdlDataTxTrace::kCancel)!=0;
+    out->traceStopped=(row.stageMask&NativeAwdlDataTxTrace::kStopObserved)!=0;
+    out->queryToken=row.identity.token;
+    out->queryDoorbellUs=row.doorbellIssuedUs;
+    out->epochs=id.epochs;
+    return NativeAwdlDiscoveryRxInput::queryOwnershipCurrent(id,*out);
+}
+
+static bool discoveryRxMccCurrent(ItlIwx *owner, uint64_t *revision,
+    IwxMccRefreshPolicy::DirectedDataWitness *witness)
+{
+    if (!owner || !revision || !witness || !owner->tahoeP2pOnMainGate())
+        return false;
+    auto *controller=owner->tahoeP2pController();
+    const auto value=[controller](const char *key)->uint64_t {
+        auto *n=controller?OSDynamicCast(OSNumber,controller->getProperty(key)):nullptr;
+        return n?n->unsigned64BitValue():0;
+    };
+    const uint64_t first=value("NativeMCCSnapshotRevision");
+    if (!first || (first&1u) || value("NativeMCCSnapshotValid")!=1 ||
+        value("NativeMCCSnapshotBegin")!=first ||
+        value("NativeMCCSnapshotEnd")!=first ||
+        !owner->tahoeDirectedDataMccWitness(*witness) ||
+        value("NativeMCCSourceGeneration")!=witness->firmwareGeneration ||
+        value("NativeMCCSnapshotRevision")!=first)
+        return false;
+    *revision=first;
+    return true;
+}
+
+static void bindDiscoveryRxAfterDoorbell(P2PProbeRun *run)
+{
+    auto *owner=run?run->owner:nullptr;
+    if (!owner || !owner->tahoeP2pOnMainGate() ||
+        !run->discoveryRxIfnetValid || !run->discoveryDoorbelled ||
+        !run->discoveryRuntimeMifBound ||
+        run->discoveryMode!=NativeAwdlDiscoveryBinding::Mode::kMifCurrentSlot)
+        return;
+    auto *controller=owner->tahoeP2pController();
+    if (!controller || controller->getProperty("NativeAwdlDiscoveryRxInputEnabled")!=kOSBooleanTrue)
+        return;
+    const uint64_t now=p2pProbeMonotonicNanoseconds()/1000ULL;
+    const auto session=owner->nativeP2pRocEvents_.snapshot();
+    const uint64_t duration=uint64_t(__atomic_load_n(
+        &owner->nativeP2pRocDurationMs_,__ATOMIC_ACQUIRE))*1000ULL;
+    if (!duration || !session.startObservedMonotonicUs ||
+        session.startObservedMonotonicUs>UINT64_MAX-duration)
+        return;
+    NativeAwdlDataTxTrace::RecordSnapshot query{};
+    bool found=false;
+    for (size_t index=0;index<NativeAwdlDataTxTrace::kRecordCapacity;++index) {
+        NativeAwdlDataTxTrace::RecordSnapshot candidate{};
+        if (owner->nativeP2pActionTx_.dataTxTrace.snapshot(index,&candidate) &&
+            candidate.present && candidate.identity.token==run->discoveryPacketToken &&
+            candidate.identity.contextGeneration==run->contextGeneration &&
+            candidate.identity.powerGeneration==run->powerGeneration &&
+            candidate.identity.stationGeneration==run->stationGeneration &&
+            candidate.identity.rocGeneration==run->contextGeneration &&
+            (candidate.stageMask&NativeAwdlDataTxTrace::kDoorbellIssued) &&
+            candidate.queueEligible && candidate.doorbellIssuedUs) {
+            if (found) return;
+            query=candidate;found=true;
+        }
+    }
+    if (!found) return;
+    NativeAwdlDiscoveryRxInput::Lease lease{};
+    auto &id=lease.identity;
+    id.ownerSerial=owner->nativeAwdlRxEventOwnerSerial_;
+    id.queryToken=run->discoveryPacketToken;
+    id.queryDoorbellUs=query.doorbellIssuedUs;
+    id.peerIncarnation=run->discoveryPeerIncarnation;
+    id.psfRevision=run->discoveryPsfRevision;
+    id.mifRevision=run->discoveryMifRevision;
+    id.epochs={run->contextGeneration,run->powerGeneration,
+        run->stationGeneration,session.generation};
+    id.ifindex=run->discoveryRxIfnet.ifindex;
+    id.ifnetIncarnation=run->discoveryRxIfnet.ifnetIncarnation;
+    memcpy(id.localMac,run->discoveryRxIfnet.localMac,6);
+    id.rocStartUs=session.startObservedMonotonicUs;
+    id.rocDeadlineUs=id.rocStartUs+duration;
+    id.channel=6;
+    const IntelAwdlPeer::RuntimeEpochs epochs{
+        run->contextGeneration,run->powerGeneration,run->stationGeneration,true};
+    IwxMccRefreshPolicy::DirectedDataWitness mcc{};
+    if (!owner->tahoe_awdl_peer_runtime_.copyBoundPeerSource(
+            run->discoveryPeerSlot,epochs,now,id.peerIncarnation,
+            id.psfRevision,id.mifRevision,id.sourceMac) ||
+        !discoveryRxMccCurrent(owner,&id.mccRevision,&mcc))
+        return;
+    NativeAwdlDiscoveryRxInput::TxOwnership ownership{};
+    if (!discoveryRxQueryOwnership(owner,id,true,&ownership)) {
+        NativeAwdlBSD::revokeDiscoveryRxInput();
+        return;
+    }
+    owner->nativeDiscoveryRxLease_=lease;
+    owner->nativeDiscoveryRxTx_=ownership;
+    owner->nativeDiscoveryRxMcc_=mcc;
+    owner->nativeDiscoveryRxPeerSlot_=run->discoveryPeerSlot;
+    owner->nativeDiscoveryRxBound_=true;
+    NativeAwdlDiscoveryRxInput::Lease accepted{};
+    NativeAwdlDiscoveryRxInput::MainGate gate{};
+    (void)owner->tahoeP2pDiscoveryRxLease(&accepted,&gate);
+}
+#endif
+
 static mbuf_t takeDiscoveryPacketPsfNextSlot(P2PProbeRun *run,
     const IntelAwdlPeer::RuntimeEpochs &epochs, uint16_t sequence,
     uint64_t *token, bool requireRuntimeMifBinding)
@@ -6195,6 +6353,30 @@ static int remove(void *opaque)
     auto run = static_cast<P2PProbeRun *>(opaque);
     if (!run || !run->owner || !run->owner->nativeP2pCommandAllowed())
         return EBUSY;
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+    if (run->discoveryRxCleanupSelected) {
+    NativeAwdlBSD::revokeDiscoveryRxInput();
+    // Revocation prevents new tickets; it does not pretend that an already
+    // admitted DLIL operation has left. Retain firmware resources if not idle.
+    if (!NativeAwdlBSD::discoveryRxQuiescent()) return EBUSY;
+    if (!NativeAwdlDiscoveryRxInput::cleanupWitnessCurrent(
+            run->discoveryRocCleanupWitness,run->contextGeneration,
+            run->scGeneration)) return ESTALE;
+    auto &ack=run->discoveryMacRemoveAck;
+    ack={};
+    ack.schemaVersion=TahoeP2PMacContextAckPolicy::kSchemaVersion;
+    ack.expectedP2PEpoch=run->contextGeneration;
+    ack.expectedRocToken=run->discoveryRocCleanupWitness.expectedToken;
+    ack.expectedDriverGeneration=run->scGeneration;
+    const int removed=run->owner->iwx_p2p_mac_context_remove_with_ack(
+        &run->owner->com,&ack);
+    if (auto *controller=run->owner->tahoeP2pController()) {
+        controller->setProperty("NativeAwdlDiscoveryMacRemoveAckAccepted",ack.accepted,32);
+        controller->setProperty("NativeAwdlDiscoveryMacRemoveAckReject",ack.rejectReason,32);
+    }
+    return removed;
+    }
+#endif
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
     if (run->directedDataOnly) {
         auto &receipt = run->directedDataMacRemoveAck;
@@ -6295,12 +6477,52 @@ static void publishPrepareTraceSnapshot(
                             snapshot.valid ? 1U : 0U, 32);
 }
 
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+static bool runDiscoveryRxAdmission(void *ownerContext,
+    const NativeAwdlDiscoveryRxInput::Identity &expected,
+    NativeAwdlBSD::DiscoveryRxAdmissionAction takeTicket, void *ticketContext)
+{
+    auto *owner=static_cast<ItlIwx *>(ownerContext);
+    if (!owner || !takeTicket || owner->tahoeP2pOnMainGate()) return false;
+    struct Admission {
+        ItlIwx *owner;
+        const NativeAwdlDiscoveryRxInput::Identity *expected;
+        NativeAwdlBSD::DiscoveryRxAdmissionAction takeTicket;
+        void *ticketContext;
+        bool accepted;
+    } request{owner,&expected,takeTicket,ticketContext,false};
+    auto action=[](OSObject *,void *arg,void *,void *,void *)->IOReturn {
+        auto *request=static_cast<Admission *>(arg);
+        NativeAwdlDiscoveryRxInput::Lease fresh{};
+        NativeAwdlDiscoveryRxInput::MainGate gate{};
+        if (request->owner->tahoeP2pDiscoveryRxLease(&fresh,&gate) &&
+            NativeAwdlDiscoveryRxInput::sameLeaseIdentity(
+                fresh.identity,*request->expected))
+            request->accepted=request->takeTicket(request->ticketContext,fresh,gate);
+        return kIOReturnSuccess;
+    };
+    auto *commandGate=owner->tahoeP2pCommandGate();
+    return commandGate && commandGate->runAction(action,&request)==kIOReturnSuccess &&
+        request.accepted;
+}
+#endif
+
 static int readRocState(P2PProbeRun *probe, RocEventRun *event,
                         bool consumeRx = false,
                         bool requestDirectedDataReady = false)
 {
     if (!probe || !probe->owner || !event)
         return EINVAL;
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+    // Pin/read the live ifnet outside the radio gate. Publication later
+    // rechecks its incarnation and cached identity under the BSD lock.
+    probe->discoveryRxIfnetValid =
+        !probe->owner->tahoeP2pOnMainGate() &&
+        NativeAwdlBSD::readDiscoveryRxIfnetIdentity(&probe->discoveryRxIfnet);
+    event->discoveryRxReady=false;
+    event->discoveryRxLease={};
+    event->discoveryRxGate={};
+#endif
     event->probe = probe;
     event->operation = kRocRead;
     event->consumeRxAfterRead = consumeRx;
@@ -6319,6 +6541,16 @@ static int readRocState(P2PProbeRun *probe, RocEventRun *event,
         (!probe->rx149ObservationOnly && !directedDataRunSelected(probe) &&
          !event->txSnapshotValid))
         return EBUSY;
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+    // Independent of TX dequeue/completion: keep receiving after the one QM
+    // was consumed. DLIL input must never run inside the radio command gate.
+    if (!probe->owner->tahoeP2pOnMainGate())
+        NativeAwdlBSD::pollDiscoveryRx(event->discoveryRxReady,
+            probe->powerGeneration,
+            event->discoveryRxReady?&event->discoveryRxLease:nullptr,
+            event->discoveryRxReady?&event->discoveryRxGate:nullptr,
+            runDiscoveryRxAdmission,probe->owner);
+#endif
     return 0;
 }
 
@@ -7429,6 +7661,10 @@ static int runTxProbeSession(P2PProbeRun *probe, mbuf_t *frame,
                     run->discoveryDoorbelled = doorbellIssued;
                     run->discoverySubmitResult = result;
                     run->discoveryStatus = doorbellIssued ? 13 : 14;
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+                    if (doorbellIssued)
+                        bindDiscoveryRxAfterDoorbell(run);
+#endif
                     publishDiscoveryExperiment(run, true);
                 }
 #endif
@@ -10617,9 +10853,24 @@ static int exerciseTxProbe(P2PProbeRun *probe)
     __atomic_store_n(&owner->nativeP2pRocChannel_, 6u, __ATOMIC_RELEASE);
     __atomic_store_n(&owner->nativeP2pRocDurationMs_, 900u, __ATOMIC_RELEASE);
     publishP2PTxStage(owner, kTxProbeRocPrepare, 0);
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+    auto *discoveryController=owner->tahoeP2pController();
+    probe->discoveryRxCleanupSelected=probe->awdlPsfProbeEnabled &&
+        discoveryController && discoveryController->getProperty(
+            "NativeAwdlDiscoveryRxInputEnabled")==kOSBooleanTrue;
+    const uint32_t beforePrepareToken=sc->sc_p2p_roc.token;
+#endif
     int error = owner->tahoeP2pRocPrepare(
         sc, channel, probe->contextGeneration,
         configuration);
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+    if (probe->discoveryRxCleanupSelected)
+        probe->discoveryRocCleanupWitness=
+            NativeAwdlDiscoveryRxInput::observePrepareToken(
+                probe->contextGeneration,probe->scGeneration,
+                beforePrepareToken,sc->sc_p2p_roc.token,
+                sc->sc_p2p_roc.fw_generation);
+#endif
     publishP2PTxSetup(owner, 1, error);
     if (error) {
         const bool safelyAbsent = !sc->sc_p2p.phy_leased &&
@@ -10871,6 +11122,78 @@ static int exerciseTxProbe(P2PProbeRun *probe)
 
 } // namespace
 
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+bool ItlIwx::tahoeP2pDiscoveryRxLease(
+    NativeAwdlDiscoveryRxInput::Lease *out,
+    NativeAwdlDiscoveryRxInput::MainGate *gate)
+{
+    if (!out || !gate) return false;
+    *out={};*gate={};
+    if (!tahoeP2pOnMainGate() || !nativeDiscoveryRxBound_) return false;
+    const auto lease=nativeDiscoveryRxLease_;
+    const auto &id=lease.identity;
+    const auto session=nativeP2pRocEvents_.snapshot();
+    const auto &rx=tahoe_p2p_rx_lease_;
+    const auto &sc=com;
+    const uint64_t now=p2pProbeMonotonicNanoseconds()/1000ULL;
+    auto *controller=tahoeP2pController();
+    gate->identity=id;
+    if (!discoveryRxQueryOwnership(this,id,false,&gate->queryTx)) {
+        NativeAwdlBSD::revokeDiscoveryRxInput(id);
+        nativeDiscoveryRxBound_=false;
+        return false;
+    }
+    gate->currentOwner=controller &&
+        controller->getProperty("NativeAwdlDiscoveryRxInputEnabled")==kOSBooleanTrue &&
+        controller->getProperty("NativeAwdlDiscoveryMifCurrentSlotEnabled")==kOSBooleanTrue &&
+        nativeP2pBusy() &&
+        __atomic_load_n(&nativeP2pProbeOwner_,__ATOMIC_ACQUIRE)!=nullptr &&
+        nativeAwdlRxEventOwnerSerial_==id.ownerSerial &&
+        __atomic_load_n(&nativeP2pCancelRequested_,__ATOMIC_ACQUIRE)==0 &&
+        !NativeAwdlBSD::rx149DataInputBlocked() &&
+        sc.sc_ic.ic_state==IEEE80211_S_RUN &&
+        !(sc.sc_flags&(IWX_FLAG_HW_ERR|IWX_FLAG_SHUTDOWN|IWX_FLAG_RFKILL)) &&
+        sc.sc_p2p.initialized && sc.sc_p2p.mac_state==IWX_P2P_RESOURCE_ACTIVE &&
+        sc.sc_p2p.binding_state==IWX_P2P_RESOURCE_ACTIVE && sc.sc_p2p.phy_leased;
+    gate->currentEpochs=rx.active &&
+        nativeP2pProbeGeneration_==id.epochs.context &&
+        uint32_t(sc.sc_generation)==id.epochs.power &&
+        __atomic_load_n(&sc.sc_tx_rate_generation,__ATOMIC_ACQUIRE)==id.epochs.station &&
+        rx.contextGeneration==id.epochs.context && rx.currentContextGeneration==id.epochs.context &&
+        rx.powerGeneration==id.epochs.power && rx.currentPowerGeneration==id.epochs.power &&
+        rx.stationGeneration==id.epochs.station && rx.currentStationGeneration==id.epochs.station &&
+        session.generation==id.epochs.roc &&
+        sc.sc_p2p_roc.token==id.epochs.roc &&
+        sc.sc_p2p.fw_generation==id.epochs.power;
+    gate->startSeen=session.commandReturned && session.commandResult==0 &&
+        session.configuration==IWX_SESSION_PROTECT_CONF_P2P_GO_NEGOTIATION &&
+        session.startSeen && session.startStatus==1 &&
+        session.startObservedMonotonicUs==id.rocStartUs &&
+        sc.sc_p2p_roc.phase==IWX_P2P_ROC_SESSION_ACKED &&
+        isCurrentIeeeChannel6(&com.sc_ic,sc.sc_p2p_roc.roc_channel);
+    gate->noEnd=!session.endSeen && !session.outcomeUnknown;
+    uint8_t source[6]{};
+    const IntelAwdlPeer::RuntimeEpochs epochs{
+        id.epochs.context,id.epochs.power,id.epochs.station,true};
+    gate->currentPeer=tahoe_awdl_peer_runtime_.copyBoundPeerSource(
+        nativeDiscoveryRxPeerSlot_,epochs,now,id.peerIncarnation,
+        id.psfRevision,id.mifRevision,source) && memcmp(source,id.sourceMac,6)==0;
+    IwxMccRefreshPolicy::DirectedDataWitness mcc{};
+    uint64_t revision=0;
+    gate->currentMcc=discoveryRxMccCurrent(this,&revision,&mcc) &&
+        revision==id.mccRevision &&
+        IwxMccRefreshPolicy::sameDirectedDataWitness(mcc,nativeDiscoveryRxMcc_);
+    if (!NativeAwdlDiscoveryRxInput::leaseCurrent(lease,*gate,now) ||
+        !NativeAwdlBSD::publishDiscoveryRxInputLease(lease,*gate)) {
+        NativeAwdlBSD::revokeDiscoveryRxInput(id);
+        nativeDiscoveryRxBound_=false;
+        return false;
+    }
+    *out=lease;
+    return true;
+}
+#endif
+
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
 bool ItlIwx::tahoeP2pDirectedDataRxLease(
     NativeP2PDirectedDataRxInput::Lease *out,uint32_t *rejectMask)
@@ -11068,6 +11391,10 @@ IOReturn ItlIwx::tahoeP2pRocEventAction(OSObject *, void *opaque,
         __atomic_load_n(&owner->com.sc_tx_rate_generation, __ATOMIC_ACQUIRE) ==
             probe->stationGeneration;
     if (!currentOwner) {
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+        NativeAwdlBSD::revokeDiscoveryRxInput();
+        owner->nativeDiscoveryRxBound_=false;
+#endif
         if (probe->rx149ObservationOnly)
             __atomic_store_n(&probe->rx149FailedEndInvalidated, 1u,
                              __ATOMIC_RELEASE);
@@ -11094,6 +11421,11 @@ IOReturn ItlIwx::tahoeP2pRocEventAction(OSObject *, void *opaque,
     }
     auto &tracker = owner->nativeP2pRocEvents_;
     if (action->operation == kRocArm) {
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+        NativeAwdlBSD::revokeDiscoveryRxInput();
+        owner->nativeDiscoveryRxBound_=false;
+        owner->nativeDiscoveryRxLease_={};
+#endif
         if (action->firmwareGeneration != probe->powerGeneration ||
             action->macIdAndColor != IWX_FW_CMD_ID_AND_COLOR(1, 0) ||
             action->configuration !=
@@ -11597,6 +11929,12 @@ IOReturn ItlIwx::tahoeP2pRocEventAction(OSObject *, void *opaque,
                 owner->tahoeP2pRxConsume();
         }
     }
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+    // Refresh after draining control frames too: a peer revision change must
+    // revoke copied data before the outer worker reaches DLIL.
+    action->discoveryRxReady=owner->tahoeP2pDiscoveryRxLease(
+        &action->discoveryRxLease,&action->discoveryRxGate);
+#endif
     return kIOReturnSuccess;
 }
 
@@ -11764,6 +12102,13 @@ void ItlIwx::tahoeP2pTapSessionEvent(struct iwx_softc *sc,
         if (canonicalStart)
             tahoeP2pSyncRxDiagnosticOwner(false);
         if (canonicalEnd) {
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+            const auto &id=nativeDiscoveryRxLease_.identity;
+            if (nativeDiscoveryRxBound_ && id.ownerSerial==nativeAwdlRxEventOwnerSerial_ &&
+                id.epochs.context==epochs.contextGeneration && id.epochs.power==epochs.powerGeneration &&
+                id.epochs.station==epochs.stationGeneration && id.epochs.roc==epochs.rocGeneration)
+                (void)NativeAwdlBSD::markDiscoveryRxEndFast(id);
+#endif
             (void)nativeAwdlRxEventTimeline_.closeProducer(
                 nativeAwdlRxEventOwnerSerial_, epochs, 1);
             // Fence Test130's origin/capture owner at the IRQ-observed END,
@@ -13177,6 +13522,9 @@ IOReturn ItlIwx::tahoeP2pCancelAction(OSObject *, void *contextArg,
         __atomic_load_n(&owner->nativeP2pNswqPaused_, __ATOMIC_ACQUIRE))
         return kIOReturnBusy;
     removeRx149LiveStartPublication(owner);
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+    NativeAwdlBSD::revokeDiscoveryRxInput();
+#endif
 #if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
     NativeAwdlBSD::revokeRx149DataInput();
 #endif
@@ -13463,6 +13811,9 @@ IOReturn ItlIwx::tahoeP2pResetAction(OSObject *, void *contextArg,
     if (!reset || !reset->owner || !reset->softc)
         return kIOReturnBadArgument;
     ItlIwx *owner = reset->owner;
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+    NativeAwdlBSD::revokeDiscoveryRxInput();
+#endif
 #if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
     NativeAwdlBSD::revokeRx149DataInput();
 #endif
@@ -13855,6 +14206,9 @@ int ItlIwx::tahoeP2pStopBeforeReset(struct iwx_softc *sc)
     int invalidateError = invalidateRx149LiveStartOnMainGate(this);
     if (invalidateError)
         return invalidateError;
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+    NativeAwdlBSD::revokeDiscoveryRxInput();
+#endif
 #if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
     NativeAwdlBSD::revokeRx149DataInput();
 #endif

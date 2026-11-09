@@ -4,6 +4,13 @@
 #ifndef ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
 #define ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332 0
 #endif
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332) && \
+    (!defined(ITL_NATIVE_AWDL_RESIDENT_25G332) || \
+     !ITL_NATIVE_AWDL_RESIDENT_25G332 || \
+     defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332) || \
+     ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332)
+#error "Discovery RX input requires the resident-only non-RX149/non-directed profile"
+#endif
 #if defined(ITL_NATIVE_AWDL_REPLY_SHADOW_25G332) && \
     (!defined(ITL_NATIVE_AWDL_RESIDENT_25G332) || !defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332))
 #error "Reply Shadow requires the unchanged receive-only RX149 profile"
@@ -58,6 +65,26 @@ struct Rx {
     NativeP2PRx149DataInput::Permit rx149Permit{};
     uint8_t bytes[2048]{};
 };
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+struct DiscoveryRx {
+    uint16_t length=0;
+    uint32_t generation=0;
+    uint64_t interfaceIncarnation=0;
+    uint64_t guardVersion=0;
+    NativeAwdlDiscoveryRxInput::Permit permit{};
+    uint8_t bytes[2048]{};
+};
+struct DiscoveryRetryEntry {
+    bool valid=false;
+    uint8_t source[6]{};
+    uint8_t destination[6]{};
+    uint8_t tid=0;
+    uint16_t sequenceControl=0;
+    uint64_t ownerSerial=0;
+    uint64_t queryToken=0;
+    uint64_t ifnetIncarnation=0;
+};
+#endif
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
 struct DirectedRx {
     uint16_t length=0;
@@ -75,9 +102,30 @@ struct DirectedRx {
 IOSimpleLock *lock;
 uint32_t attachClaimed=0;
 uint64_t interfaceIncarnation=0;
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+uint32_t interfaceIndex=0;
+#endif
 AttachTraceLedger attachTrace;
 Ring<Tx,QueueDepth> tx;
 Ring<Rx,QueueDepth> rx;
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+Ring<DiscoveryRx,QueueDepth> discoveryRx;
+constexpr size_t DiscoveryRetryWindowCapacity=32;
+DiscoveryRetryEntry discoveryRetryWindow[DiscoveryRetryWindowCapacity]{};
+NativeAwdlDiscoveryRxInput::Lease activeDiscoveryRxLease{};
+bool activeDiscoveryRxLeaseValid=false;
+uint64_t activeDiscoveryRxVersion=0;
+uint64_t discoveryOwnerSerialHighWater=0;
+uint64_t discoveryQueryDoorbellHighWater=0;
+uint32_t discoveryRxWorkers=0;
+uint32_t discoveryRxTickets=0;
+// The lock-free identity is encoded as sixteen reversible words. The lower
+// 31 bits of admission hold live ticket count, bit 31 is END, and the upper
+// 32 bits bind tickets to one published identity generation.
+uint64_t discoveryFastSeq=0;
+uint64_t discoveryFastIdentity[16]{};
+uint64_t discoveryFastAdmission=0;
+#endif
 // Separate RX149 duplicate state from the AP's shared STA duplicate window.
 // Entries are fixed-size and only touched under `lock`; a full current-owner
 // table rejects/falls back instead of evicting an active peer.
@@ -183,6 +231,227 @@ void releaseRx149InputTicketFast() {
 IOSimpleLock *bridgeLock() {
     return __atomic_load_n(&lock,__ATOMIC_ACQUIRE);
 }
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+constexpr uint64_t kDiscoveryFastEnded=uint64_t(1)<<31;
+constexpr uint64_t kDiscoveryFastTicketMask=kDiscoveryFastEnded-1;
+enum class DiscoveryFastState : uint8_t { Mismatch,Current,Ended };
+uint64_t packDiscoveryMac(const uint8_t mac[6]) {
+    uint64_t value=0;
+    for(unsigned index=0;index<6;++index)
+        value=(value<<8)|uint64_t(mac[index]);
+    return value;
+}
+void discoveryIdentityWords(
+    const NativeAwdlDiscoveryRxInput::Identity &identity,uint64_t out[16]) {
+    out[0]=identity.ownerSerial;
+    out[1]=identity.queryToken;
+    out[2]=identity.queryDoorbellUs;
+    out[3]=identity.peerIncarnation;
+    out[4]=identity.psfRevision;
+    out[5]=identity.mifRevision;
+    out[6]=(uint64_t(identity.epochs.context)<<32)|identity.epochs.power;
+    out[7]=(uint64_t(identity.epochs.station)<<32)|identity.epochs.roc;
+    out[8]=identity.ifindex;
+    out[9]=identity.ifnetIncarnation;
+    out[10]=packDiscoveryMac(identity.sourceMac);
+    out[11]=packDiscoveryMac(identity.localMac);
+    out[12]=identity.rocStartUs;
+    out[13]=identity.rocDeadlineUs;
+    out[14]=identity.mccRevision;
+    out[15]=identity.channel;
+}
+DiscoveryFastState discoveryFastState(
+    const NativeAwdlDiscoveryRxInput::Identity &identity) {
+    const uint64_t before=__atomic_load_n(&discoveryFastSeq,__ATOMIC_ACQUIRE);
+    if(!before||(before&1u))return DiscoveryFastState::Mismatch;
+    uint64_t expected[16]{};
+    discoveryIdentityWords(identity,expected);
+    for(unsigned index=0;index<16;++index) {
+        if(__atomic_load_n(&discoveryFastIdentity[index],__ATOMIC_RELAXED)!=
+           expected[index])
+            return DiscoveryFastState::Mismatch;
+    }
+    const uint64_t after=__atomic_load_n(&discoveryFastSeq,__ATOMIC_ACQUIRE);
+    if(before!=after||(after&1u))return DiscoveryFastState::Mismatch;
+    const uint64_t admission=__atomic_load_n(&discoveryFastAdmission,
+                                              __ATOMIC_ACQUIRE);
+    const uint64_t generation=after>>1;
+    if(!generation||(admission>>32)!=generation)
+        return DiscoveryFastState::Mismatch;
+    return (admission&kDiscoveryFastEnded)?DiscoveryFastState::Ended:
+                                            DiscoveryFastState::Current;
+}
+bool markDiscoveryFastEnd(
+    const NativeAwdlDiscoveryRxInput::Identity &identity) {
+    const uint64_t before=__atomic_load_n(&discoveryFastSeq,__ATOMIC_ACQUIRE);
+    if(!before||(before&1u))return false;
+    uint64_t expectedWords[16]{};
+    discoveryIdentityWords(identity,expectedWords);
+    for(unsigned index=0;index<16;++index) {
+        if(__atomic_load_n(&discoveryFastIdentity[index],__ATOMIC_RELAXED)!=
+           expectedWords[index])
+            return false;
+    }
+    const uint64_t after=__atomic_load_n(&discoveryFastSeq,__ATOMIC_ACQUIRE);
+    if(before!=after||(after&1u))return false;
+    const uint64_t generation=after>>1;
+    uint64_t admission=__atomic_load_n(&discoveryFastAdmission,
+                                        __ATOMIC_ACQUIRE);
+    if(!generation||(admission>>32)!=generation)return false;
+    for(;;) {
+        if((admission&kDiscoveryFastEnded)!=0)return true;
+        if((admission>>32)!=generation)return false;
+        const uint64_t ended=admission|kDiscoveryFastEnded;
+        if(__atomic_compare_exchange_n(&discoveryFastAdmission,&admission,
+                ended,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))
+            return true;
+    }
+}
+bool reserveDiscoveryFastTicket(
+    const NativeAwdlDiscoveryRxInput::Identity &identity,
+    uint32_t *generationOut) {
+    if(generationOut)*generationOut=0;
+    if(discoveryFastState(identity)!=DiscoveryFastState::Current)
+        return false;
+    const uint64_t sequence=__atomic_load_n(&discoveryFastSeq,
+                                             __ATOMIC_ACQUIRE);
+    const uint64_t generation=sequence>>1;
+    if(!generation||generation>UINT32_MAX)return false;
+    uint64_t admission=__atomic_load_n(&discoveryFastAdmission,
+                                        __ATOMIC_ACQUIRE);
+    for(;;) {
+        if((admission>>32)!=generation||
+           (admission&kDiscoveryFastEnded)!=0||
+           (admission&kDiscoveryFastTicketMask)==
+                kDiscoveryFastTicketMask)
+            return false;
+        if(__atomic_compare_exchange_n(&discoveryFastAdmission,&admission,
+                admission+1u,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE)) {
+            if(generationOut)*generationOut=uint32_t(generation);
+            return true;
+        }
+    }
+}
+void releaseDiscoveryFastTicket(uint32_t generation) {
+    if(!generation)return;
+    uint64_t admission=__atomic_load_n(&discoveryFastAdmission,
+                                        __ATOMIC_ACQUIRE);
+    for(;;) {
+        if((admission>>32)!=generation||
+           (admission&kDiscoveryFastTicketMask)==0)
+            return;
+        const uint64_t released=admission-1u;
+        if(__atomic_compare_exchange_n(&discoveryFastAdmission,&admission,
+                released,false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))
+            return;
+    }
+}
+bool publishDiscoveryFastIdentityLocked(
+    const NativeAwdlDiscoveryRxInput::Identity &identity) {
+    const uint64_t prior=__atomic_load_n(&discoveryFastSeq,__ATOMIC_RELAXED);
+    if((prior&1u)!=0||prior>UINT64_MAX-2u) {
+        __atomic_store_n(&discoveryFastSeq,UINT64_MAX&~uint64_t(1),
+                         __ATOMIC_RELEASE);
+        __atomic_store_n(&discoveryFastAdmission,uint64_t(0),
+                         __ATOMIC_RELEASE);
+        return false;
+    }
+    const uint64_t generation=(prior>>1)+1u;
+    if(!generation||generation>UINT32_MAX) {
+        __atomic_store_n(&discoveryFastSeq,UINT64_MAX&~uint64_t(1),
+                         __ATOMIC_RELEASE);
+        __atomic_store_n(&discoveryFastAdmission,uint64_t(0),
+                         __ATOMIC_RELEASE);
+        return false;
+    }
+    const uint64_t odd=(generation<<1)-1u;
+    const uint64_t stable=generation<<1;
+    __atomic_store_n(&discoveryFastSeq,odd,__ATOMIC_RELEASE);
+    uint64_t words[16]{};
+    discoveryIdentityWords(identity,words);
+    for(unsigned index=0;index<16;++index)
+        __atomic_store_n(&discoveryFastIdentity[index],words[index],
+                         __ATOMIC_RELAXED);
+    __atomic_store_n(&discoveryFastAdmission,generation<<32,
+                     __ATOMIC_RELEASE);
+    __atomic_store_n(&discoveryFastSeq,stable,__ATOMIC_RELEASE);
+    return true;
+}
+void clearDiscoveryRetryWindowLocked() {
+    memset(discoveryRetryWindow,0,sizeof(discoveryRetryWindow));
+}
+void clearDiscoveryQueueLocked() {
+    discoveryRx.head=discoveryRx.tail=discoveryRx.count=0;
+    memset(discoveryRx.values,0,sizeof(discoveryRx.values));
+}
+size_t removeDiscoveryRxAt(size_t offset,DiscoveryRx *out) {
+    if(!out||offset>=discoveryRx.count)return 0;
+    const size_t index=(discoveryRx.head+offset)%QueueDepth;
+    *out=discoveryRx.values[index];
+    for(size_t current=offset;current+1<discoveryRx.count;++current) {
+        const size_t destination=(discoveryRx.head+current)%QueueDepth;
+        const size_t source=(discoveryRx.head+current+1)%QueueDepth;
+        discoveryRx.values[destination]=discoveryRx.values[source];
+    }
+    discoveryRx.tail=(discoveryRx.tail+QueueDepth-1)%QueueDepth;
+    discoveryRx.values[discoveryRx.tail]=DiscoveryRx{};
+    --discoveryRx.count;
+    return 1;
+}
+void revokeDiscoveryRxLocked() {
+    if(activeDiscoveryRxLeaseValid)
+        (void)markDiscoveryFastEnd(activeDiscoveryRxLease.identity);
+    activeDiscoveryRxLeaseValid=false;
+    activeDiscoveryRxLease=NativeAwdlDiscoveryRxInput::Lease{};
+    clearDiscoveryRetryWindowLocked();
+    clearDiscoveryQueueLocked();
+    if(activeDiscoveryRxVersion!=UINT64_MAX)++activeDiscoveryRxVersion;
+}
+bool activateDiscoveryRxLocked(
+    const NativeAwdlDiscoveryRxInput::Lease &lease,
+    const NativeAwdlDiscoveryRxInput::MainGate &gate,uint64_t now) {
+    const auto &identity=lease.identity;
+    if(!NativeAwdlDiscoveryRxInput::leaseCurrent(lease,gate,now)||
+       !NativeAwdlDiscoveryRxInput::sameLeaseIdentity(identity,gate.identity)||
+       !NativeAwdlDiscoveryRxInput::validIdentity(identity)||
+       !interface||closing||detached||!radio||interfaceIncarnation==0||
+       interfaceIndex!=identity.ifindex||
+       identity.ifnetIncarnation!=interfaceIncarnation||
+       memcmp(identity.localMac,own,sizeof(own))!=0||
+       __atomic_load_n(&closingRequested,__ATOMIC_ACQUIRE)!=0||
+       __atomic_load_n(&counters[Attached],__ATOMIC_ACQUIRE)==0||
+       radioGeneration!=identity.epochs.power||
+       Rx149InputGateState::blocked(__atomic_load_n(
+           &rx149InputGateState,__ATOMIC_ACQUIRE)))
+        return false;
+    if(activeDiscoveryRxLeaseValid&&
+       NativeAwdlDiscoveryRxInput::sameLeaseIdentity(
+           activeDiscoveryRxLease.identity,identity))
+        return discoveryFastState(identity)==DiscoveryFastState::Current&&
+            activeDiscoveryRxVersion!=0;
+    if(identity.ownerSerial<discoveryOwnerSerialHighWater||
+       (identity.ownerSerial==discoveryOwnerSerialHighWater&&
+        identity.queryDoorbellUs<=discoveryQueryDoorbellHighWater)||
+       activeDiscoveryRxVersion==UINT64_MAX)
+        return false;
+    if(activeDiscoveryRxLeaseValid)
+        (void)markDiscoveryFastEnd(activeDiscoveryRxLease.identity);
+    clearDiscoveryQueueLocked();
+    clearDiscoveryRetryWindowLocked();
+    ++activeDiscoveryRxVersion;
+    if(!publishDiscoveryFastIdentityLocked(identity)) {
+        activeDiscoveryRxLeaseValid=false;
+        activeDiscoveryRxLease=NativeAwdlDiscoveryRxInput::Lease{};
+        clearDiscoveryQueueLocked();
+        return false;
+    }
+    activeDiscoveryRxLease=lease;
+    activeDiscoveryRxLeaseValid=true;
+    discoveryOwnerSerialHighWater=identity.ownerSerial;
+    discoveryQueryDoorbellHighWater=identity.queryDoorbellUs;
+    return true;
+}
+#endif
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
 uint64_t packDirectedEpochs(uint32_t high,uint32_t low) {
     return (uint64_t(high)<<32)|uint64_t(low);
@@ -1389,10 +1658,16 @@ errno_t output(void *,ifnet_t dev,protocol_family_t family,mbuf_t *packet) {
 }
 void detachedCallback(void *,ifnet_t) {
     auto stateLock=bridgeLock();if(!stateLock)return;
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
     DirectedOriginPacketRetirement retiredOrigin{};
+#endif
     auto irq=IOSimpleLockLockDisableInterrupt(stateLock);
     detached=true;filter=nullptr;set(Detached,1);
     clearRx149RetryWindowLocked();
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+    interfaceIndex=0;
+    revokeDiscoveryRxLocked();
+#endif
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
     activeDirectedRxLeaseValid=false;
     activeDirectedRxLease=NativeP2PDirectedDataRxInput::Lease{};
@@ -1406,7 +1681,9 @@ void detachedCallback(void *,ifnet_t) {
     retiredOrigin=takeDirectedOriginPacketLocked();
 #endif
     IOSimpleLockUnlockEnableInterrupt(stateLock,irq);
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
     freeDirectedOriginPacket(retiredOrigin);
+#endif
 }
 }
 bool attach(ifnet_t dev,const uint8_t mac[6]) {
@@ -1442,6 +1719,11 @@ bool attach(ifnet_t dev,const uint8_t mac[6]) {
         attachTrace.finishFailure();
         return false;
     }
+    const uint32_t liveIndex=ifnet_index(dev);
+    if(!liveIndex) {
+        attachTrace.finishFailure();
+        return false;
+    }
     uint32_t unclaimed=0;
     const bool claimed=__atomic_compare_exchange_n(&attachClaimed,&unclaimed,1u,false,
         __ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE);
@@ -1471,6 +1753,10 @@ bool attach(ifnet_t dev,const uint8_t mac[6]) {
     if(canAttach) {
         interface=dev;
         ++interfaceIncarnation;
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+        interfaceIndex=liveIndex;
+        revokeDiscoveryRxLocked();
+#endif
         clearRx149RetryWindowLocked();
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
         clearDirectedRxRetryWindowLocked();
@@ -1485,7 +1771,13 @@ bool attach(ifnet_t dev,const uint8_t mac[6]) {
     attachTrace.recordFilterAttach(result);
     if(result){
         irq=IOSimpleLockLockDisableInterrupt(lock);
-        if(interface==dev)interface=nullptr;
+        if(interface==dev) {
+            interface=nullptr;
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+            interfaceIndex=0;
+            revokeDiscoveryRxLocked();
+#endif
+        }
         IOSimpleLockUnlockEnableInterrupt(lock,irq);
         ifnet_release(dev);attachTrace.finishFailure();return false;
     }
@@ -1546,6 +1838,249 @@ bool address(uint32_t expectedPowerGeneration,uint8_t out[6]) {
     if(!addressMatches||!stillCurrent)return false;
     memcpy(out,actual,sizeof(actual));return true;
 }
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+bool readDiscoveryRxIfnetIdentity(DiscoveryRxIfnetIdentity *out) {
+    if(!out||!bridgeLock())return false;
+    *out=DiscoveryRxIfnetIdentity{};
+    ifnet_t dev=nullptr;
+    uint8_t expectedMac[6]{};
+    uint64_t incarnation=0;
+    uint32_t expectedIndex=0;
+    auto irq=IOSimpleLockLockDisableInterrupt(lock);
+    const bool available=interface&&!closing&&!detached&&
+        __atomic_load_n(&closingRequested,__ATOMIC_ACQUIRE)==0&&
+        __atomic_load_n(&counters[Attached],__ATOMIC_ACQUIRE)!=0&&
+        interfaceIncarnation!=0&&interfaceIndex!=0&&inputCalls!=UINT32_MAX&&
+        discoveryRxWorkers!=UINT32_MAX;
+    if(available) {
+        dev=interface;
+        incarnation=interfaceIncarnation;
+        expectedIndex=interfaceIndex;
+        memcpy(expectedMac,own,sizeof(expectedMac));
+        ++inputCalls;
+        ++discoveryRxWorkers;
+    }
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+    if(!available)return false;
+
+    const uint32_t liveIndex=ifnet_index(dev);
+    uint8_t liveMac[6]{};
+    const bool addressRead=ifnet_lladdr_copy_bytes(
+        dev,liveMac,sizeof(liveMac))==0;
+    irq=IOSimpleLockLockDisableInterrupt(lock);
+    const bool current=interface==dev&&!closing&&!detached&&
+        __atomic_load_n(&closingRequested,__ATOMIC_ACQUIRE)==0&&
+        __atomic_load_n(&counters[Attached],__ATOMIC_ACQUIRE)!=0&&
+        interfaceIncarnation==incarnation&&interfaceIndex==expectedIndex&&
+        liveIndex==expectedIndex&&addressRead&&
+        memcmp(liveMac,expectedMac,sizeof(liveMac))==0&&
+        memcmp(own,expectedMac,sizeof(own))==0;
+    if(inputCalls)--inputCalls;
+    if(discoveryRxWorkers)--discoveryRxWorkers;
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+    if(!current)return false;
+    out->ifindex=liveIndex;
+    out->ifnetIncarnation=incarnation;
+    memcpy(out->localMac,liveMac,sizeof(out->localMac));
+    return true;
+}
+bool publishDiscoveryRxInputLease(
+    const NativeAwdlDiscoveryRxInput::Lease &lease,
+    const NativeAwdlDiscoveryRxInput::MainGate &gate) {
+    if(!bridgeLock())return false;
+    auto irq=IOSimpleLockLockDisableInterrupt(lock);
+    const bool activated=activateDiscoveryRxLocked(lease,gate,nowUs());
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+    return activated;
+}
+bool markDiscoveryRxEndFast(
+    const NativeAwdlDiscoveryRxInput::Identity &identity) {
+    if(!NativeAwdlDiscoveryRxInput::validIdentity(identity))return false;
+    return markDiscoveryFastEnd(identity);
+}
+void revokeDiscoveryRxInput(
+    const NativeAwdlDiscoveryRxInput::Identity &identity) {
+    if(!NativeAwdlDiscoveryRxInput::validIdentity(identity))return;
+    // END is visible before we wait for the queue lock. This closes the final
+    // ticket race even when the ordinary lease cleanup is delayed.
+    (void)markDiscoveryFastEnd(identity);
+    if(!bridgeLock())return;
+    auto irq=IOSimpleLockLockDisableInterrupt(lock);
+    if(activeDiscoveryRxLeaseValid&&
+       NativeAwdlDiscoveryRxInput::sameLeaseIdentity(
+           activeDiscoveryRxLease.identity,identity))
+        revokeDiscoveryRxLocked();
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+}
+void revokeDiscoveryRxInput() {
+    if(!bridgeLock())return;
+    auto irq=IOSimpleLockLockDisableInterrupt(lock);
+    revokeDiscoveryRxLocked();
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+}
+bool discoveryRxQuiescent() {
+    if(!bridgeLock())return false;
+    auto irq=IOSimpleLockLockDisableInterrupt(lock);
+    const uint64_t admission=__atomic_load_n(&discoveryFastAdmission,
+                                              __ATOMIC_ACQUIRE);
+    const bool quiescent=!activeDiscoveryRxLeaseValid&&
+        discoveryRx.count==0&&discoveryRxTickets==0&&discoveryRxWorkers==0&&
+        (admission&kDiscoveryFastTicketMask)==0;
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+    return quiescent;
+}
+CaptureResult captureDiscoveryRxData(
+    const uint8_t *bytes,size_t length,bool protectedFrame,
+    const NativeAwdlDiscoveryRxInput::Lease &lease,
+    const NativeAwdlDiscoveryRxInput::MainGate &gate,
+    const NativeAwdlDiscoveryRxInput::Permit &permit,uint32_t generation) {
+    if(!bytes||!NativeAwdlData::isAwdlDataCandidate(bytes,length))
+        return CaptureResult::NotAwdlDataCandidate;
+    const auto &identity=lease.identity;
+    if(length>2048||length<24||protectedFrame||!permit.valid||
+       generation!=identity.epochs.power||
+       memcmp(bytes+10,identity.sourceMac,6)!=0) {
+        add(RxRejected);
+        return CaptureResult::Rejected;
+    }
+    NativeAwdlData::DecodedFrame parsed{};
+    if(NativeAwdlData::decodeIpv6DataMpdu(bytes,length,&parsed)!=
+            NativeAwdlData::Status::Ok||parsed.amsdu||
+       parsed.packetCount!=1||
+       memcmp(parsed.sourceAddress,identity.sourceMac,6)!=0||
+       memcmp(parsed.packets[0].sourceAddress,identity.sourceMac,6)!=0||
+       !acceptsRx(parsed.packets[0],identity.localMac)) {
+        add(RxRejected);
+        return CaptureResult::Rejected;
+    }
+    const uint8_t retryTid=parsed.qosData?
+        uint8_t(parsed.qosControl&0x0fu):uint8_t(16);
+    const uint16_t retrySequenceControl=uint16_t(bytes[22])|
+        (uint16_t(bytes[23])<<8);
+    const bool retryBit=(bytes[1]&0x08u)!=0;
+    if(!bridgeLock()) {
+        add(RxRejected);
+        return CaptureResult::Rejected;
+    }
+
+    DiscoveryRx item{};
+    item.length=uint16_t(length);
+    item.generation=generation;
+    item.permit=permit;
+    memcpy(item.bytes,bytes,length);
+    size_t expired=0;
+    bool accepted=false,duplicate=false,queueFull=false;
+    auto irq=IOSimpleLockLockDisableInterrupt(lock);
+    const uint64_t captureNow=nowUs();
+    for(size_t offset=0;offset<discoveryRx.count;) {
+        const size_t index=(discoveryRx.head+offset)%QueueDepth;
+        const auto &queued=discoveryRx.values[index];
+        const bool stale=captureNow<queued.permit.capturedUs||
+            captureNow>=queued.permit.receiveDeadlineUs||
+            !activeDiscoveryRxLeaseValid||
+            queued.guardVersion!=activeDiscoveryRxVersion||
+            !NativeAwdlDiscoveryRxInput::sameLeaseIdentity(
+                queued.permit.identity,activeDiscoveryRxLease.identity);
+        if(stale) {
+            DiscoveryRx removed{};
+            if(removeDiscoveryRxAt(offset,&removed))++expired;
+        } else {
+            ++offset;
+        }
+    }
+    const bool authorityCurrent=
+        discoveryFastState(identity)==DiscoveryFastState::Current&&
+        !Rx149InputGateState::blocked(__atomic_load_n(
+            &rx149InputGateState,__ATOMIC_ACQUIRE))&&
+        activeDiscoveryRxLeaseValid&&activeDiscoveryRxVersion!=0&&
+        NativeAwdlDiscoveryRxInput::sameLeaseIdentity(
+            activeDiscoveryRxLease.identity,identity)&&
+        NativeAwdlDiscoveryRxInput::sameLeaseIdentity(
+            permit.identity,identity)&&
+        NativeAwdlDiscoveryRxInput::leaseCurrent(
+            activeDiscoveryRxLease,gate,captureNow)&&
+        NativeAwdlDiscoveryRxInput::stillCurrent(
+            permit,activeDiscoveryRxLease,gate,captureNow);
+    const bool interfaceCurrent=interface&&!closing&&!detached&&radio&&
+        __atomic_load_n(&closingRequested,__ATOMIC_ACQUIRE)==0&&
+        radioGeneration==generation&&generation==identity.epochs.power&&
+        interfaceIncarnation==identity.ifnetIncarnation&&
+        interfaceIndex==identity.ifindex&&
+        __atomic_load_n(&counters[Attached],__ATOMIC_ACQUIRE)!=0&&
+        memcmp(identity.localMac,own,sizeof(own))==0;
+    bool retryWindowFull=false;
+    int retrySlot=-1;
+    if(authorityCurrent&&interfaceCurrent) {
+        int freeSlot=-1;
+        for(size_t index=0;index<DiscoveryRetryWindowCapacity;++index) {
+            const auto &entry=discoveryRetryWindow[index];
+            if(!entry.valid) {
+                if(freeSlot<0)freeSlot=int(index);
+                continue;
+            }
+            const bool sameIdentity=entry.ownerSerial==identity.ownerSerial&&
+                entry.queryToken==identity.queryToken&&
+                entry.ifnetIncarnation==identity.ifnetIncarnation;
+            if(!sameIdentity) {
+                if(freeSlot<0)freeSlot=int(index);
+                continue;
+            }
+            if(entry.tid==retryTid&&
+               memcmp(entry.source,parsed.sourceAddress,6)==0&&
+               memcmp(entry.destination,parsed.destinationAddress,6)==0) {
+                if(retryBit&&entry.sequenceControl==retrySequenceControl)
+                    duplicate=true;
+                retrySlot=int(index);
+                break;
+            }
+        }
+        if(retrySlot<0)retrySlot=freeSlot;
+        retryWindowFull=retrySlot<0;
+    }
+    const bool queueSpace=discoveryRx.count<QueueDepth;
+    accepted=authorityCurrent&&interfaceCurrent&&!duplicate&&
+        !retryWindowFull&&queueSpace;
+    if(accepted) {
+        item.interfaceIncarnation=interfaceIncarnation;
+        item.guardVersion=activeDiscoveryRxVersion;
+        accepted=discoveryRx.push(item);
+        if(accepted) {
+            auto &entry=discoveryRetryWindow[size_t(retrySlot)];
+            entry=DiscoveryRetryEntry{};
+            entry.valid=true;
+            memcpy(entry.source,parsed.sourceAddress,sizeof(entry.source));
+            memcpy(entry.destination,parsed.destinationAddress,
+                   sizeof(entry.destination));
+            entry.tid=retryTid;
+            entry.sequenceControl=retrySequenceControl;
+            entry.ownerSerial=identity.ownerSerial;
+            entry.queryToken=identity.queryToken;
+            entry.ifnetIncarnation=identity.ifnetIncarnation;
+        } else {
+            queueFull=true;
+        }
+    } else {
+        queueFull=authorityCurrent&&interfaceCurrent&&!duplicate&&
+            !retryWindowFull&&!queueSpace;
+    }
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+    for(size_t index=0;index<expired;++index)add(RxRejected);
+    if(duplicate) {
+        add(RxRejected);
+        return CaptureResult::Duplicate;
+    }
+    if(accepted) {
+        add(RxCaptured);
+        return CaptureResult::Captured;
+    }
+    if(queueFull||retryWindowFull) {
+        add(queueFull?RxQueueFull:RxRejected);
+        return queueFull?CaptureResult::QueueFull:CaptureResult::Rejected;
+    }
+    add(RxRejected);
+    return CaptureResult::Rejected;
+}
+#endif
 bool publishRx149DataInputLease(
     const NativeP2PRx149DataInput::Lease &lease) {
     if(!bridgeLock())return false;
@@ -1785,6 +2320,9 @@ Rx149RecoveryResult recoverRx149DataInput(
             // Recovery starts before the next ARM. Drop every old RX slot,
             // including permit-bearing entries, while preserving the latest
             // bounded receipt for permit packets.
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+            revokeDiscoveryRxLocked();
+#endif
             discarded+=drainRxQueueForRecoveryLocked(lockedNow);
             gateState=__atomic_load_n(&rx149InputGateState,__ATOMIC_ACQUIRE);
             if(Rx149InputGateState::faultSerial(gateState)!=
@@ -1795,7 +2333,11 @@ Rx149RecoveryResult recoverRx149DataInput(
                 result=Rx149RecoveryResult::InputTicketActive;
             } else if(inputCalls!=0) {
                 result=Rx149RecoveryResult::WorkerActive;
-            } else if(rx.count!=0) {
+            } else if(rx.count!=0
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+                      ||discoveryRx.count!=0
+#endif
+                      ) {
                 result=Rx149RecoveryResult::PermitQueueNotDrained;
             } else if(!Rx149InputGateState::recover(
                           &rx149InputGateState,authority.faultSerial)) {
@@ -1870,6 +2412,9 @@ void poll(bool ready,uint32_t generation) {
                 true,0,0,nullptr,directedPollNow);
         }
     }
+#endif
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+    if(discardQueued)revokeDiscoveryRxLocked();
 #endif
     radioGeneration=generation;radio=ready&&!closing&&!detached&&
         __atomic_load_n(&closingRequested,__ATOMIC_ACQUIRE)==0&&
@@ -1948,6 +2493,264 @@ void poll(bool ready,uint32_t generation) {
     }
     irq=IOSimpleLockLockDisableInterrupt(lock);--inputCalls;IOSimpleLockUnlockEnableInterrupt(lock,irq);
 }
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+void pollDiscoveryRx(bool ready,uint32_t generation,
+    const NativeAwdlDiscoveryRxInput::Lease *lease,
+    const NativeAwdlDiscoveryRxInput::MainGate *gate,
+    DiscoveryRxGateRunner gateRunner,void *ownerContext) {
+    if(!bridgeLock()||!ready||!lease||!gate||!gateRunner)return;
+    const auto identity=lease->identity;
+    const uint64_t firstNow=nowUs();
+    if(!NativeAwdlDiscoveryRxInput::leaseCurrent(*lease,*gate,firstNow)) {
+        revokeDiscoveryRxInput(identity);
+        return;
+    }
+
+    ifnet_t dev=nullptr;
+    uint8_t expectedMac[6]{};
+    uint64_t incarnation=0;
+    uint32_t expectedIndex=0;
+    auto irq=IOSimpleLockLockDisableInterrupt(lock);
+    const bool authorityCurrent=activeDiscoveryRxLeaseValid&&
+        activeDiscoveryRxVersion!=0&&
+        NativeAwdlDiscoveryRxInput::sameLeaseIdentity(
+            activeDiscoveryRxLease.identity,identity)&&
+        discoveryFastState(identity)==DiscoveryFastState::Current&&
+        !Rx149InputGateState::blocked(__atomic_load_n(
+            &rx149InputGateState,__ATOMIC_ACQUIRE));
+    const bool interfaceReady=authorityCurrent&&interface&&!closing&&
+        !detached&&radio&&
+        __atomic_load_n(&closingRequested,__ATOMIC_ACQUIRE)==0&&
+        __atomic_load_n(&counters[Attached],__ATOMIC_ACQUIRE)!=0&&
+        radioGeneration==generation&&generation==identity.epochs.power&&
+        interfaceIncarnation==identity.ifnetIncarnation&&
+        interfaceIndex==identity.ifindex&&inputCalls!=UINT32_MAX&&
+        discoveryRxWorkers!=UINT32_MAX;
+    if(interfaceReady) {
+        dev=interface;
+        incarnation=interfaceIncarnation;
+        expectedIndex=interfaceIndex;
+        memcpy(expectedMac,own,sizeof(expectedMac));
+        ++inputCalls;
+        ++discoveryRxWorkers;
+    }
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+    if(!interfaceReady) {
+        revokeDiscoveryRxInput(identity);
+        return;
+    }
+
+    const uint32_t liveIndex=ifnet_index(dev);
+    uint8_t liveMac[6]{};
+    const bool addressRead=ifnet_lladdr_copy_bytes(
+        dev,liveMac,sizeof(liveMac))==0;
+    irq=IOSimpleLockLockDisableInterrupt(lock);
+    const bool liveIfnetCurrent=interface==dev&&!closing&&!detached&&radio&&
+        __atomic_load_n(&closingRequested,__ATOMIC_ACQUIRE)==0&&
+        radioGeneration==generation&&interfaceIncarnation==incarnation&&
+        interfaceIndex==expectedIndex&&liveIndex==expectedIndex&&
+        addressRead&&memcmp(liveMac,expectedMac,sizeof(liveMac))==0&&
+        memcmp(expectedMac,identity.localMac,sizeof(expectedMac))==0&&
+        NativeAwdlDiscoveryRxInput::sameLeaseIdentity(
+            activeDiscoveryRxLease.identity,identity)&&
+        discoveryFastState(identity)==DiscoveryFastState::Current;
+    if(!liveIfnetCurrent&&activeDiscoveryRxLeaseValid&&
+       NativeAwdlDiscoveryRxInput::sameLeaseIdentity(
+           activeDiscoveryRxLease.identity,identity))
+        revokeDiscoveryRxLocked();
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+    if(!liveIfnetCurrent) {
+        irq=IOSimpleLockLockDisableInterrupt(lock);
+        if(inputCalls)--inputCalls;
+        if(discoveryRxWorkers)--discoveryRxWorkers;
+        IOSimpleLockUnlockEnableInterrupt(lock,irq);
+        return;
+    }
+
+    for(unsigned index=0;index<QueueDepth;++index) {
+        DiscoveryRx item{};
+        bool have=false,itemCurrent=false;
+        const uint64_t dequeueNow=nowUs();
+        irq=IOSimpleLockLockDisableInterrupt(lock);
+        have=discoveryRx.pop(&item);
+        if(have) {
+            itemCurrent=activeDiscoveryRxLeaseValid&&
+                item.guardVersion==activeDiscoveryRxVersion&&
+                item.interfaceIncarnation==interfaceIncarnation&&
+                item.generation==generation&&
+                NativeAwdlDiscoveryRxInput::sameLeaseIdentity(
+                    item.permit.identity,identity)&&
+                NativeAwdlDiscoveryRxInput::sameLeaseIdentity(
+                    activeDiscoveryRxLease.identity,identity)&&
+                discoveryFastState(identity)==DiscoveryFastState::Current&&
+                !Rx149InputGateState::blocked(__atomic_load_n(
+                    &rx149InputGateState,__ATOMIC_ACQUIRE))&&
+                NativeAwdlDiscoveryRxInput::stillCurrent(
+                    item.permit,*lease,*gate,dequeueNow);
+        }
+        IOSimpleLockUnlockEnableInterrupt(lock,irq);
+        if(!have)break;
+        if(!itemCurrent) {
+            add(RxRejected);
+            continue;
+        }
+
+        NativeAwdlData::DecodedFrame parsed{};
+        if(NativeAwdlData::decodeIpv6DataMpdu(
+                item.bytes,item.length,&parsed)!=NativeAwdlData::Status::Ok||
+           parsed.amsdu||parsed.packetCount!=1||
+           memcmp(item.bytes+10,identity.sourceMac,6)!=0||
+           memcmp(parsed.sourceAddress,identity.sourceMac,6)!=0||
+           memcmp(parsed.packets[0].sourceAddress,identity.sourceMac,6)!=0||
+           !acceptsRx(parsed.packets[0],identity.localMac)) {
+            add(RxRejected);
+            continue;
+        }
+        add(RxDecoded);
+        const auto &packet=parsed.packets[0];
+        mbuf_t packetMbuf=packetWithHeader();
+        if(!packetMbuf) {
+            add(RxInputFailed);
+            continue;
+        }
+        uint8_t *ethernet=static_cast<uint8_t *>(mbuf_data(packetMbuf));
+        memcpy(ethernet,packet.destinationAddress,6);
+        memcpy(ethernet+6,packet.sourceAddress,6);
+        ethernet[12]=0x86;
+        ethernet[13]=0xdd;
+        memcpy(ethernet+14,packet.ipv6Packet,packet.ipv6Length);
+        mbuf_setlen(packetMbuf,packet.ipv6Length+14);
+        mbuf_pkthdr_setlen(packetMbuf,packet.ipv6Length+14);
+        mbuf_pkthdr_setrcvif(packetMbuf,dev);
+        mbuf_pkthdr_setheader(packetMbuf,ethernet);
+        mbuf_adj(packetMbuf,14);
+
+        struct AdmissionTicketContext {
+            const DiscoveryRx *item;
+            ifnet_t dev;
+            uint64_t incarnation;
+            uint32_t generation;
+            bool reserved;
+            uint32_t fastGeneration;
+            NativeAwdlData::PacketView packet;
+            NativeAwdlDiscoveryRxInput::Lease lease;
+            NativeAwdlDiscoveryRxInput::MainGate gate;
+        } ticketContext{&item,dev,incarnation,generation,false,0,
+                        parsed.packets[0],{}, {}};
+        const DiscoveryRxAdmissionAction admissionAction=
+            +[](void *opaque,
+                const NativeAwdlDiscoveryRxInput::Lease &freshLease,
+                const NativeAwdlDiscoveryRxInput::MainGate &freshGate)->bool {
+                auto *context=static_cast<AdmissionTicketContext *>(opaque);
+                if(!context||!context->item||context->reserved||!bridgeLock())
+                    return false;
+                auto irq=IOSimpleLockLockDisableInterrupt(lock);
+                const uint64_t ticketNow=nowUs();
+                const auto &identity=context->item->permit.identity;
+                const bool stillAttached=interface==context->dev&&
+                    !closing&&!detached&&radio&&
+                    __atomic_load_n(&closingRequested,__ATOMIC_ACQUIRE)==0&&
+                    __atomic_load_n(&counters[Attached],__ATOMIC_ACQUIRE)!=0&&
+                    radioGeneration==context->generation&&
+                    interfaceIncarnation==context->incarnation&&
+                    interfaceIndex==identity.ifindex&&
+                    memcmp(own,identity.localMac,sizeof(own))==0;
+                const bool permitStillCurrent=stillAttached&&
+                    activeDiscoveryRxLeaseValid&&
+                    context->item->guardVersion==activeDiscoveryRxVersion&&
+                    NativeAwdlDiscoveryRxInput::sameLeaseIdentity(
+                        activeDiscoveryRxLease.identity,identity)&&
+                    NativeAwdlDiscoveryRxInput::sameLeaseIdentity(
+                        freshLease.identity,identity)&&
+                    NativeAwdlDiscoveryRxInput::sameLeaseIdentity(
+                        freshGate.identity,identity)&&
+                    acceptsRx(context->packet,freshLease.identity.localMac)&&
+                    NativeAwdlDiscoveryRxInput::stillCurrent(
+                        context->item->permit,freshLease,freshGate,ticketNow)&&
+                    NativeAwdlDiscoveryRxInput::stillCurrent(
+                        context->item->permit,activeDiscoveryRxLease,
+                        freshGate,ticketNow)&&
+                    discoveryFastState(identity)==DiscoveryFastState::Current&&
+                    !Rx149InputGateState::blocked(__atomic_load_n(
+                        &rx149InputGateState,__ATOMIC_ACQUIRE))&&
+                    inputCalls!=UINT32_MAX&&
+                    discoveryRxTickets!=UINT32_MAX;
+                bool discoveryTicket=false;
+                if(permitStillCurrent)
+                    discoveryTicket=reserveDiscoveryFastTicket(
+                        identity,&context->fastGeneration);
+                const bool sharedTicket=discoveryTicket&&
+                    reserveRx149InputTicketFast();
+                if(discoveryTicket&&!sharedTicket)
+                    releaseDiscoveryFastTicket(context->fastGeneration);
+                if(sharedTicket) {
+                    ++inputCalls;
+                    ++discoveryRxTickets;
+                    context->reserved=true;
+                    context->lease=freshLease;
+                    context->gate=freshGate;
+                }
+                IOSimpleLockUnlockEnableInterrupt(lock,irq);
+                return context->reserved;
+            };
+        const bool admissionSucceeded=gateRunner(ownerContext,identity,
+            admissionAction,&ticketContext);
+        if(!admissionSucceeded||!ticketContext.reserved) {
+            if(ticketContext.reserved) {
+                irq=IOSimpleLockLockDisableInterrupt(lock);
+                releaseRx149InputTicketFast();
+                releaseDiscoveryFastTicket(ticketContext.fastGeneration);
+                if(inputCalls)--inputCalls;
+                if(discoveryRxTickets)--discoveryRxTickets;
+                IOSimpleLockUnlockEnableInterrupt(lock,irq);
+            }
+            mbuf_freem(packetMbuf);
+            add(RxRejected);
+            continue;
+        }
+
+        add(DiscoveryInputCalls);
+        const int inputResult=ifnet_input(dev,packetMbuf,nullptr);
+        set(DiscoveryInputResult,
+            static_cast<uint64_t>(static_cast<int64_t>(inputResult)));
+        if(inputResult==0)add(DiscoveryInputSuccess);
+        const uint64_t inputCompletedUs=nowUs();
+        irq=IOSimpleLockLockDisableInterrupt(lock);
+        const uint64_t commitNow=nowUs();
+        const bool committed=inputResult==0&&inputCompletedUs>=item.permit.capturedUs&&
+            inputCompletedUs<item.permit.receiveDeadlineUs&&
+            commitNow>=inputCompletedUs&&
+            commitNow<item.permit.receiveDeadlineUs&&
+            interface==dev&&!closing&&!detached&&radio&&
+            __atomic_load_n(&closingRequested,__ATOMIC_ACQUIRE)==0&&
+            radioGeneration==generation&&interfaceIncarnation==incarnation&&
+            activeDiscoveryRxLeaseValid&&
+            item.guardVersion==activeDiscoveryRxVersion&&
+            NativeAwdlDiscoveryRxInput::sameLeaseIdentity(
+                activeDiscoveryRxLease.identity,identity)&&
+            NativeAwdlDiscoveryRxInput::stillCurrent(
+                item.permit,ticketContext.lease,ticketContext.gate,commitNow)&&
+            discoveryFastState(identity)==DiscoveryFastState::Current&&
+            !Rx149InputGateState::blocked(__atomic_load_n(
+                &rx149InputGateState,__ATOMIC_ACQUIRE));
+        releaseRx149InputTicketFast();
+        releaseDiscoveryFastTicket(ticketContext.fastGeneration);
+        if(inputCalls)--inputCalls;
+        if(discoveryRxTickets)--discoveryRxTickets;
+        IOSimpleLockUnlockEnableInterrupt(lock,irq);
+        if(committed) {
+            add(RxDelivered);
+            add(DiscoverySameWindowCommitted);
+        }
+        else if(inputResult!=0)add(RxInputFailed);
+    }
+
+    irq=IOSimpleLockLockDisableInterrupt(lock);
+    if(inputCalls)--inputCalls;
+    if(discoveryRxWorkers)--discoveryRxWorkers;
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+}
+#endif
 void poll(bool ready,uint32_t generation,
           const NativeP2PRx149DataInput::Lease *rx149Lease) {
     if(!bridgeLock())return;
@@ -3254,6 +4057,9 @@ bool close() {
     if(!bridgeLock())return true;
     publishClosing();
     revokeRx149DataInput();
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+    revokeDiscoveryRxInput();
+#endif
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
     revokeDirectedDataRxInput();
 #endif
@@ -3276,6 +4082,10 @@ bool close() {
             ;
         ifnet_t dev=done?interface:nullptr;
         if(done){interface=nullptr;rx.head=rx.tail=rx.count=0;memset(rx.values,0,sizeof(rx.values));set(RxPending,0);
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+            interfaceIndex=0;
+            revokeDiscoveryRxLocked();
+#endif
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
             directedRx.head=directedRx.tail=directedRx.count=0;
             memset(directedRx.values,0,sizeof(directedRx.values));
@@ -3302,6 +4112,9 @@ void publishClosing() {
     auto irq=IOSimpleLockLockDisableInterrupt(lock);
     closing=true;radio=false;set(Closing,1);set(LinkReady,0);
     clearRx149RetryWindowLocked();
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+    revokeDiscoveryRxLocked();
+#endif
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
     activeDirectedRxLeaseValid=false;
     activeDirectedRxLease=NativeP2PDirectedDataRxInput::Lease{};

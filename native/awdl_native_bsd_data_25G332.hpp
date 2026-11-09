@@ -13,6 +13,16 @@
 #ifndef ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
 #define ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332 0
 #endif
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332) && \
+    (!defined(ITL_NATIVE_AWDL_RESIDENT_25G332) || \
+     !ITL_NATIVE_AWDL_RESIDENT_25G332 || \
+     defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332) || \
+     ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332)
+#error "Discovery RX input requires the resident-only non-RX149/non-directed profile"
+#endif
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+#include "awdl_discovery_rx_input.hpp"
+#endif
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
 #include "awdl_directed_origin_tx.hpp"
 #endif
@@ -47,7 +57,9 @@ enum Counter : unsigned {
     TxMdnsLastQuQuestionMask, TxMdnsLastAttemptToken,
     DirectedRxCaptured, DirectedRxRejected, DirectedRxQueueFull,
     DirectedRxDecoded, DirectedRxDelivered, DirectedRxInputFailed,
-    DirectedRxPending, Count
+    DirectedRxPending,
+    DiscoveryInputCalls, DiscoveryInputResult, DiscoveryInputSuccess,
+    DiscoverySameWindowCommitted, Count
 };
 enum Rx149InputDisposition : uint32_t {
     Rx149ReceiptNone=0,
@@ -182,6 +194,44 @@ void advanceRx149InterfaceIncarnationForTests();
 // fresh owner only while the bridge has no active lease and remains ready.
 bool publishRx149DataInputLease(
           const NativeP2PRx149DataInput::Lease &lease);
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+struct DiscoveryRxIfnetIdentity {
+    uint32_t ifindex=0;
+    uint64_t ifnetIncarnation=0;
+    uint8_t localMac[6]{};
+};
+// Call outside the radio main gate; the bridge pins the ifnet, samples its
+// live index/address, and confirms the same attachment generation afterward.
+bool readDiscoveryRxIfnetIdentity(DiscoveryRxIfnetIdentity *out);
+bool publishDiscoveryRxInputLease(
+          const NativeAwdlDiscoveryRxInput::Lease &lease,
+          const NativeAwdlDiscoveryRxInput::MainGate &gate);
+CaptureResult captureDiscoveryRxData(const uint8_t *,size_t,bool protectedFrame,
+          const NativeAwdlDiscoveryRxInput::Lease &,
+          const NativeAwdlDiscoveryRxInput::MainGate &,
+          const NativeAwdlDiscoveryRxInput::Permit &,uint32_t powerGeneration);
+using DiscoveryRxAdmissionAction=bool (*)(void *ticketContext,
+          const NativeAwdlDiscoveryRxInput::Lease &,
+          const NativeAwdlDiscoveryRxInput::MainGate &);
+using DiscoveryRxGateRunner=bool (*)(void *ownerContext,
+          const NativeAwdlDiscoveryRxInput::Identity &,
+          DiscoveryRxAdmissionAction,void *ticketContext);
+void pollDiscoveryRx(bool radioReady,uint32_t powerGeneration,
+          const NativeAwdlDiscoveryRxInput::Lease *lease,
+          const NativeAwdlDiscoveryRxInput::MainGate *gate,
+          DiscoveryRxGateRunner gateRunner=nullptr,
+          void *ownerContext=nullptr);
+// IRQ/main-gate safe exact-identity END fence. It reserves no input ticket and
+// never waits for the BSD bridge lock.
+bool markDiscoveryRxEndFast(
+          const NativeAwdlDiscoveryRxInput::Identity &identity);
+void revokeDiscoveryRxInput(
+          const NativeAwdlDiscoveryRxInput::Identity &identity);
+void revokeDiscoveryRxInput();
+// True after END/revoke only when the dedicated queue, worker, and DLIL ticket
+// have all drained. The resident ifnet may remain attached.
+bool discoveryRxQuiescent();
+#endif
 // Shadow-only configuration from the authoritative main-gate caller. This
 // never activates/refreshes a copied lease and never permits firmware TX.
 // One immutable configuration per bridge lifetime, default disabled.

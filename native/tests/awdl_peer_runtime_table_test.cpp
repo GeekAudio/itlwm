@@ -22,6 +22,18 @@ static void setAddress(uint8_t out[6], uint8_t last)
     memcpy(out, bytes, sizeof(bytes));
 }
 
+static void assertBoundPeerSourceRejectedAndCleared(
+    Table &table, uint8_t slot, const RuntimeEpochs &epochs, uint64_t nowUs,
+    uint64_t peerIncarnation, uint64_t psfRevision, uint64_t mifRevision)
+{
+    uint8_t source[6];
+    memset(source, 0xa5, sizeof(source));
+    assert(!table.copyBoundPeerSource(slot, epochs, nowUs, peerIncarnation,
+                                      psfRevision, mifRevision, source));
+    const uint8_t cleared[6]{};
+    assert(memcmp(source, cleared, sizeof(source)) == 0);
+}
+
 static NativeAwdl::PsfInput validPsf(uint8_t peerId = 5,
                                     uint32_t phy = 1000,
                                     uint32_t target = 1200,
@@ -1137,6 +1149,181 @@ static void testRuntimeSnapshotBindsSameSourceMifAndPsf()
     assert(oneShot.attempted());
 }
 
+static void testBoundPeerSourceCopyRequiresExactFreshCompleteBinding()
+{
+    Table table;
+    const auto epochs = activeEpochs();
+    assert(table.observe(makeRecordAtChannel(5, 1000000, 0), epochs,
+                         1000010) == Result::kCandidate);
+    assert(table.observe(makeRecordAtChannel(5, 1010000, 3), epochs,
+                         1010010) == Result::kAdmitted);
+    assert(table.observe(makeRecordAtChannel(5, 1020000, 0), epochs,
+                         1020010) == Result::kCandidate);
+
+    uint64_t nowUs = 1020100;
+    const auto state = table.snapshot(epochs, nowUs);
+    const uint8_t slot = state.latestFreshMifSlot;
+    assert(slot < IntelAwdlPeerRuntime::kPeerCapacity);
+    IntelAwdlPeerRuntime::PsfPeerSnapshot binding{};
+    assert(table.getPsfSnapshot(slot, epochs, nowUs, &binding));
+    assert(binding.historyCompatible && binding.psfFresh &&
+           binding.mifFresh && binding.mif.complete &&
+           binding.peerIncarnation && binding.psfRevision &&
+           binding.mifRevision);
+
+    uint8_t source[6];
+    memset(source, 0xa5, sizeof(source));
+    assert(table.copyBoundPeerSource(slot, epochs, nowUs,
+        binding.peerIncarnation, binding.psfRevision, binding.mifRevision,
+        source));
+    uint8_t expectedSource[6];
+    setAddress(expectedSource, 5);
+    assert(memcmp(source, expectedSource, sizeof(source)) == 0);
+
+    // Identity and either subtype revision are exact permit inputs.
+    assertBoundPeerSourceRejectedAndCleared(table, slot, epochs, nowUs,
+        binding.peerIncarnation + 1, binding.psfRevision,
+        binding.mifRevision);
+    assertBoundPeerSourceRejectedAndCleared(table, slot, epochs, nowUs,
+        binding.peerIncarnation, binding.psfRevision + 1,
+        binding.mifRevision);
+    assertBoundPeerSourceRejectedAndCleared(table, slot, epochs, nowUs,
+        binding.peerIncarnation, binding.psfRevision,
+        binding.mifRevision + 1);
+
+    // A PSF refresh invalidates a permit carrying the old PSF revision while
+    // leaving the same entry and MIF revision intact.
+    assert(table.observe(makeRecordAtChannel(5, 1030000, 0), epochs,
+                         1030010) == Result::kCandidate);
+    nowUs = 1030100;
+    assertBoundPeerSourceRejectedAndCleared(table, slot, epochs, nowUs,
+        binding.peerIncarnation, binding.psfRevision, binding.mifRevision);
+    IntelAwdlPeerRuntime::PsfPeerSnapshot afterPsfRefresh{};
+    assert(table.getPsfSnapshot(slot, epochs, nowUs, &afterPsfRefresh));
+    assert(afterPsfRefresh.psfRevision > binding.psfRevision &&
+           afterPsfRefresh.mifRevision == binding.mifRevision);
+    assert(table.copyBoundPeerSource(slot, epochs, nowUs,
+        afterPsfRefresh.peerIncarnation, afterPsfRefresh.psfRevision,
+        afterPsfRefresh.mifRevision, source));
+    assert(memcmp(source, expectedSource, sizeof(source)) == 0);
+
+    // The same rule applies when the selected MIF itself is refreshed.
+    assert(table.observe(makeRecordAtChannel(5, 1040000, 3), epochs,
+                         1040010) == Result::kUpdated);
+    nowUs = 1040100;
+    assertBoundPeerSourceRejectedAndCleared(table, slot, epochs, nowUs,
+        afterPsfRefresh.peerIncarnation, afterPsfRefresh.psfRevision,
+        afterPsfRefresh.mifRevision);
+    IntelAwdlPeerRuntime::PsfPeerSnapshot afterMifRefresh{};
+    assert(table.getPsfSnapshot(slot, epochs, nowUs, &afterMifRefresh));
+    assert(afterMifRefresh.mifRevision > afterPsfRefresh.mifRevision &&
+           afterMifRefresh.historyCompatible && afterMifRefresh.mif.complete);
+    assert(table.copyBoundPeerSource(slot, epochs, nowUs,
+        afterMifRefresh.peerIncarnation, afterMifRefresh.psfRevision,
+        afterMifRefresh.mifRevision, source));
+    assert(memcmp(source, expectedSource, sizeof(source)) == 0);
+
+    auto changedEpochs = epochs;
+    ++changedEpochs.powerGeneration;
+    assertBoundPeerSourceRejectedAndCleared(table, slot, changedEpochs, nowUs,
+        afterMifRefresh.peerIncarnation, afterMifRefresh.psfRevision,
+        afterMifRefresh.mifRevision);
+    table.reset();
+    assertBoundPeerSourceRejectedAndCleared(table, slot, epochs, nowUs,
+        afterMifRefresh.peerIncarnation, afterMifRefresh.psfRevision,
+        afterMifRefresh.mifRevision);
+}
+
+static void testBoundPeerSourceCopyRejectsIncompatibleIncompleteAndExpired()
+{
+    const auto epochs = activeEpochs();
+
+    Table invalidSource;
+    auto multicastMif = makeRecordAtChannel(5, 900000, 3);
+    const uint8_t multicastAddress[6] = {0x01, 0x11, 0x22, 0x33, 0x44, 0x55};
+    memcpy(multicastMif.bytes + 10, multicastAddress,
+           sizeof(multicastAddress));
+    assert(invalidSource.observe(multicastMif, epochs, 900010) ==
+           Result::kInvalidSourceAddress);
+    assertBoundPeerSourceRejectedAndCleared(invalidSource, 0, epochs, 900020,
+                                            1, 1, 1);
+
+    // Same Addr2 alone is insufficient when the same-entry PSF history no
+    // longer agrees with the MIF's master/sync/map.
+    Table incompatible;
+    const NativeAwdl::PsfInput mifAdvertisement = validPsf(5);
+    assert(incompatible.observe(
+        makeRecordForPsf(mifAdvertisement, 1000000, 3), epochs,
+        1000010) == Result::kAdmitted);
+    NativeAwdl::PsfInput changedPsf = mifAdvertisement;
+    setAddress(changedPsf.masterAddress, 31);
+    assert(incompatible.observe(makeRecordForPsf(changedPsf, 1000100, 0),
+                                epochs, 1000110) == Result::kCandidate);
+    auto summary = incompatible.snapshot(epochs, 1000200);
+    const uint8_t incompatibleSlot = summary.latestFreshMifSlot;
+    IntelAwdlPeerRuntime::PsfPeerSnapshot incompatibleBinding{};
+    assert(incompatible.getPsfSnapshot(incompatibleSlot, epochs, 1000200,
+                                        &incompatibleBinding));
+    assert(!incompatibleBinding.historyCompatible);
+    assertBoundPeerSourceRejectedAndCleared(incompatible, incompatibleSlot,
+        epochs, 1000200, incompatibleBinding.peerIncarnation,
+        incompatibleBinding.psfRevision, incompatibleBinding.mifRevision);
+
+    // A parsed but incomplete MIF cannot supply a bound source address.
+    Table incomplete;
+    assert(incomplete.observe(makeRecord(5, 2000000, 3, 9, 10, 11,
+                                         false, 0), epochs, 2000010) ==
+           Result::kAdmitted);
+    assert(incomplete.observe(makeRecord(5, 2000100, 0), epochs, 2000110) ==
+           Result::kCandidate);
+    summary = incomplete.snapshot(epochs, 2000200);
+    const uint8_t incompleteSlot = summary.latestFreshMifSlot;
+    IntelAwdlPeerRuntime::PsfPeerSnapshot incompleteBinding{};
+    assert(incomplete.getPsfSnapshot(incompleteSlot, epochs, 2000200,
+                                     &incompleteBinding));
+    assert(incompleteBinding.historyCompatible &&
+           !incompleteBinding.mif.complete);
+    assertBoundPeerSourceRejectedAndCleared(incomplete, incompleteSlot,
+        epochs, 2000200, incompleteBinding.peerIncarnation,
+        incompleteBinding.psfRevision, incompleteBinding.mifRevision);
+
+    // Keep each entry alive with a fresh counterpart while allowing one
+    // subtype lease to expire independently.
+    Table staleMif;
+    assert(staleMif.observe(makeRecord(5, 3000000, 3), epochs, 3000010) ==
+           Result::kAdmitted);
+    assert(staleMif.observe(makeRecord(5, 7000000, 0), epochs, 7000010) ==
+           Result::kCandidate);
+    assert(staleMif.observe(makeRecord(5, 11000000, 0), epochs, 11000010) ==
+           Result::kCandidate);
+    auto staleMifState = staleMif.snapshot(epochs, 11000100);
+    const uint8_t staleMifSlot = staleMifState.latestFreshPsfSlot;
+    IntelAwdlPeerRuntime::PsfPeerSnapshot staleMifBinding{};
+    assert(staleMif.getPsfSnapshot(staleMifSlot, epochs, 11000100,
+                                   &staleMifBinding));
+    assert(staleMifBinding.psfFresh && !staleMifBinding.mifFresh);
+    assertBoundPeerSourceRejectedAndCleared(staleMif, staleMifSlot, epochs,
+        11000100, staleMifBinding.peerIncarnation,
+        staleMifBinding.psfRevision, staleMifBinding.mifRevision);
+
+    Table stalePsf;
+    assert(stalePsf.observe(makeRecord(5, 13000000, 3), epochs, 13000010) ==
+           Result::kAdmitted);
+    assert(stalePsf.observe(makeRecord(5, 17000000, 0), epochs, 17000010) ==
+           Result::kCandidate);
+    assert(stalePsf.observe(makeRecord(5, 21000000, 3), epochs, 21000010) ==
+           Result::kUpdated);
+    auto stalePsfState = stalePsf.snapshot(epochs, 21000100);
+    const uint8_t stalePsfSlot = stalePsfState.latestFreshMifSlot;
+    IntelAwdlPeerRuntime::PsfPeerSnapshot stalePsfBinding{};
+    assert(stalePsf.getPsfSnapshot(stalePsfSlot, epochs, 21000100,
+                                   &stalePsfBinding));
+    assert(stalePsfBinding.mifFresh && stalePsfBinding.psfFresh);
+    assertBoundPeerSourceRejectedAndCleared(stalePsf, stalePsfSlot, epochs,
+        22000001, stalePsfBinding.peerIncarnation,
+        stalePsfBinding.psfRevision, stalePsfBinding.mifRevision);
+}
+
 
 static void testObserverAggregateCannotAuthorizeForeignRuntimePsf()
 {
@@ -1244,6 +1431,7 @@ static void testSlotReuseInvalidatesLockedPeerIncarnation()
     assert(oldSlot < IntelAwdlPeerRuntime::kPeerCapacity);
     IntelAwdlPeerRuntime::PsfPeerSnapshot oldRaw{};
     assert(table.getPsfSnapshot(oldSlot, epochs, timestamp, &oldRaw));
+    assert(oldRaw.hasMif && oldRaw.historyCompatible && oldRaw.mif.complete);
     const auto oldSnapshot = bindingFromRuntimePsf(oldRaw, timestamp);
     auto window = validWindowFor(oldSnapshot, timestamp);
     auto head = validQmHead(window);
@@ -1263,6 +1451,8 @@ static void testSlotReuseInvalidatesLockedPeerIncarnation()
     assert(oneShot.authorizeTake(currentSnapshot, head, window) ==
            Decision::kPeerIncarnationChanged);
     assert(!oneShot.attempted());
+    assertBoundPeerSourceRejectedAndCleared(table, oldSlot, epochs, currentNow,
+        oldRaw.peerIncarnation, oldRaw.psfRevision, oldRaw.mifRevision);
 }
 
 static void testSnapshotRevisionsFreshnessEpochChannelLeaseAndClose()
@@ -1677,6 +1867,8 @@ int main()
     testCapacityExpiryEpochAndClockRegression();
     testMifLeaseBoundaryAndLatestMifSlot();
     testRuntimeSnapshotBindsSameSourceMifAndPsf();
+    testBoundPeerSourceCopyRequiresExactFreshCompleteBinding();
+    testBoundPeerSourceCopyRejectsIncompatibleIncompleteAndExpired();
     testObserverAggregateCannotAuthorizeForeignRuntimePsf();
     testIncarnationNeverReusedAcrossTableReset();
     testRuntimeSnapshotRejectsCrossSourceMifAndPsf();

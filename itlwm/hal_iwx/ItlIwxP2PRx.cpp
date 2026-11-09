@@ -1104,6 +1104,46 @@ ItlIwx::tahoeP2pCaptureAwdlDataBeforeStaDedup(
     uint8_t channelIndex, uint32_t macPhyIndex,
     const NativeP2PRx149DataInput::OriginalDescriptor *originalData)
 {
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+    // Discovery has its own owner-bound queue. Do not let the AP's duplicate
+    // window consume a valid P2P frame before that independent input path.
+    if (!sc || !frame || !originalData || !originalData->present ||
+        length>UINT32_MAX || channelIndex>=nitems(sc->sc_ic.ic_channels) ||
+        !NativeAwdlData::isAwdlDataCandidate(frame,length))
+        return NativeP2PRx149DataInput::EarlyRoute::PassToSta;
+    NativeAwdlDiscoveryRxInput::Lease lease{};
+    NativeAwdlDiscoveryRxInput::MainGate gate{};
+    if (!tahoeP2pDiscoveryRxLease(&lease,&gate))
+        return NativeP2PRx149DataInput::EarlyRoute::PassToSta;
+    NativeAwdlDiscoveryRxInput::Descriptor descriptor{};
+    descriptor.channelPresent=true;
+    descriptor.channel=ieee80211_chan2ieee(&sc->sc_ic,&sc->sc_ic.ic_channels[channelIndex]);
+    descriptor.macPhyIndexPresent=true;
+    descriptor.macPhyIndex=static_cast<uint8_t>(macPhyIndex);
+    descriptor.decodeModePresent=true;
+    descriptor.decodeMode=isset(sc->sc_ucode_api,IWX_UCODE_TLV_API_BAND_IN_RX_DATA)?
+        NativeAwdlDiscoveryRxInput::kMacPhyDecodeBandInRx:
+        NativeAwdlDiscoveryRxInput::kMacPhyDecodeLegacy;
+    descriptor.originalDescriptorPresent=true;
+    descriptor.originalRawStatus=originalData->rawStatus;
+    descriptor.protectedFrame=originalData->protectedFrame ||
+        (frame[1]&IEEE80211_FC1_PROTECTED)!=0;
+    descriptor.amsdu=originalData->hardwareDeaggregated;
+    descriptor.awdlDataCandidate=true;
+    descriptor.sourceMacPresent=length>=16;
+    if (descriptor.sourceMacPresent) memcpy(descriptor.sourceMac,frame+10,6);
+    NativeAwdlDiscoveryRxInput::Permit permit{};
+    if (!NativeAwdlDiscoveryRxInput::makePermit(lease,gate,descriptor,
+            tahoeP2pRxMonotonicUs(),&permit))
+        return NativeP2PRx149DataInput::EarlyRoute::PassToSta;
+    const auto result=NativeAwdlBSD::captureDiscoveryRxData(frame,length,
+        descriptor.protectedFrame,lease,gate,permit,uint32_t(sc->sc_generation));
+    if (result==NativeAwdlBSD::CaptureResult::Captured)
+        return NativeP2PRx149DataInput::EarlyRoute::QueuedForNative;
+    if (result==NativeAwdlBSD::CaptureResult::Duplicate)
+        return NativeP2PRx149DataInput::EarlyRoute::DuplicateRetry;
+    return NativeP2PRx149DataInput::EarlyRoute::PassToSta;
+#endif
 #if defined(ITL_NATIVE_AWDL_RESIDENT_25G332) && \
     defined(ITL_NATIVE_AWDL_RX149_OBSERVATION_25G332) && \
     defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
@@ -1424,6 +1464,9 @@ void ItlIwx::tahoeP2pTapAction(struct iwx_softc *sc, const uint8_t *frame,
             }
         }
     }
+#elif defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+    // Data is admitted only by the pre-STA dedicated discovery path above.
+    // Never fall back to the legacy power-generation-only input queue.
 #else
     const auto session=nativeP2pRocEvents_.snapshot();
     const bool current=NativeP2PRx149Observation::nativeDataPathAllowed(
@@ -1815,7 +1858,11 @@ void ItlIwx::tahoeP2pRxDrain()
         "NativeAwdlDataDirectedRxDecoded",
         "NativeAwdlDataDirectedRxDelivered",
         "NativeAwdlDataDirectedRxInputFailed",
-        "NativeAwdlDataDirectedRxPending"};
+        "NativeAwdlDataDirectedRxPending",
+        "NativeAwdlDataDiscoveryInputCalls",
+        "NativeAwdlDataDiscoveryInputResult",
+        "NativeAwdlDataDiscoveryInputSuccess",
+        "NativeAwdlDataDiscoverySameWindowCommitted"};
     static_assert(sizeof(names)/sizeof(names[0])==NativeAwdlBSD::Count,"data counters");
     for(unsigned i=0;i<NativeAwdlBSD::Count;++i){
         auto prior=OSDynamicCast(OSNumber,controller->getProperty(names[i]));

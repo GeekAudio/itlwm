@@ -156,6 +156,9 @@
 #include "../../native/awdl_rx_entry_publisher.hpp"
 #include "../../native/awdl_peer_observer.hpp"
 #include "../../native/awdl_peer_runtime_table.hpp"
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+#include "../../native/awdl_discovery_rx_input.hpp"
+#endif
 #include "../../native/p2p_hal_probe.hpp"
 #include "../../native/intel_roc_event_state.hpp"
 #include "../../native/iwx_reset_trace.hpp"
@@ -574,6 +577,16 @@ public:
                            const NativeP2PRx149DataInput::OriginalDescriptor * = nullptr,
                            uint32_t diagnosticCandidateGeneration = 0);
     bool tahoeP2pRx149DataLease(NativeP2PRx149DataInput::Lease *);
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+    // Main-gate only; publication never originates from a copied worker lease.
+    bool tahoeP2pDiscoveryRxLease(NativeAwdlDiscoveryRxInput::Lease *,
+        NativeAwdlDiscoveryRxInput::MainGate *);
+    NativeAwdlDiscoveryRxInput::Lease nativeDiscoveryRxLease_ {};
+    NativeAwdlDiscoveryRxInput::TxOwnership nativeDiscoveryRxTx_ {};
+    IwxMccRefreshPolicy::DirectedDataWitness nativeDiscoveryRxMcc_ {};
+    uint8_t nativeDiscoveryRxPeerSlot_ {0xff};
+    bool nativeDiscoveryRxBound_ {false};
+#endif
     NativeP2PRx149DataInput::EarlyRoute
     tahoeP2pCaptureAwdlDataBeforeStaDedup(
         struct iwx_softc *, const uint8_t *, size_t, uint8_t, uint32_t,

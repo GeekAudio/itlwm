@@ -640,6 +640,63 @@ bool Table::getPsfSnapshot(
     return true;
 }
 
+bool Table::copyBoundPeerSource(
+    uint8_t slot, const IntelAwdlPeer::RuntimeEpochs &current,
+    uint64_t nowMonotonicUs, uint64_t expectedPeerIncarnation,
+    uint64_t expectedPsfRevision, uint64_t expectedMifRevision,
+    uint8_t output[6])
+{
+    if (!output)
+        return false;
+    memset(output, 0, 6);
+
+    synchronizeEpochs(current);
+    if (!current.active || nowMonotonicUs == 0)
+        return false;
+    if (lastNowUs_ != 0 && nowMonotonicUs < lastNowUs_) {
+        clearEntries();
+        lastNowUs_ = nowMonotonicUs;
+        return false;
+    }
+    lastNowUs_ = nowMonotonicUs;
+    expire(nowMonotonicUs);
+    if (slot >= kPeerCapacity || !expectedPeerIncarnation ||
+        !expectedPsfRevision || !expectedMifRevision)
+        return false;
+
+    const Entry &entry = entries_[slot];
+    if (!entry.used || !entry.hasPsf || !entry.hasMif ||
+        entry.contextGeneration != current.contextGeneration ||
+        entry.powerGeneration != current.powerGeneration ||
+        entry.stationGeneration != current.stationGeneration ||
+        entry.peerIncarnation != expectedPeerIncarnation ||
+        entry.psfRevision != expectedPsfRevision ||
+        entry.mifRevision != expectedMifRevision ||
+        !entry.historyCompatible)
+        return false;
+
+    const bool psfFresh = nowMonotonicUs >= entry.lastPsfUs &&
+        nowMonotonicUs - entry.lastPsfUs <= kPsfLeaseTtlUs &&
+        entry.psfAdvertisement.syncConsistent;
+    const bool mifFresh = nowMonotonicUs >= entry.lastMifUs &&
+        nowMonotonicUs - entry.lastMifUs <= kMifLeaseTtlUs &&
+        entry.mifAdvertisement.syncConsistent;
+    const auto &mif = entry.mifAdvertisement;
+    const bool mifComplete = mif.syncConsistent &&
+        entry.mifRxGp2TimestampPresent && mif.presenceModePresent &&
+        mif.type18Present && mif.type18Valid;
+    IntelAwdlElection::Address source{};
+    memcpy(source.bytes, entry.sourceAddress, sizeof(source.bytes));
+    if (!psfFresh || !mifFresh || !mifComplete ||
+        !validAddress(source) ||
+        !sameAddress(source, entry.psfAdvertisement.peer) ||
+        !sameAddress(source, entry.mifAdvertisement.peer))
+        return false;
+
+    memcpy(output, entry.sourceAddress, sizeof(source.bytes));
+    return true;
+}
+
 bool Table::getMifSnapshot(
     uint8_t slot, const IntelAwdlPeer::RuntimeEpochs &current,
     uint64_t nowMonotonicUs, MifPeerSnapshot *output)
