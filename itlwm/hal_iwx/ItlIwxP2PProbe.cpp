@@ -55,6 +55,10 @@
 #include <libkern/c++/OSSymbol.h>
 #include <libkern/c++/OSString.h>
 
+#if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
+static bool nativeP2PPublicationBusy(ItlIwx *owner);
+#endif
+
 namespace {
 
 static constexpr uint32_t kDirectedPrepareArmMode = 3u;
@@ -101,7 +105,7 @@ tahoeDiscoveryRxBridgeCounters()
     return result;
 }
 
-static bool nativeP2PPublicationBusy(ItlIwx *owner);
+
 #endif
 
 static_assert(static_cast<uint8_t>(IntelP2PFirmware::DeviceFamily::k22000) ==
@@ -12144,7 +12148,7 @@ IOReturn ItlIwx::tahoeP2pRocEventAction(OSObject *, void *opaque,
 #if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
         owner->tahoeDiscoveryRxWindowInvalidate(
             NativeAwdlDiscoveryRxWindow::CloseReason::OwnerReleasedWithoutEnd,
-            tahoeMonotonicNs() / 1000ULL);
+            p2pProbeMonotonicNanoseconds() / 1000ULL);
 #endif
         if (probe->rx149ObservationOnly) {
             __atomic_store_n(&probe->rx149FailedEndInvalidated, 1u,
@@ -12869,14 +12873,14 @@ bool ItlIwx::tahoeDiscoveryRxWindowEpochs(
         !session.startSeen || session.startStatus != 1) {
         nativeDiscoveryRxWindow_.invalidate(
             NativeAwdlDiscoveryRxWindow::CloseReason::EpochMismatch,
-            tahoeMonotonicNs() / 1000ULL);
+            p2pProbeMonotonicNanoseconds() / 1000ULL);
         return false;
     }
 
     if (session.endSeen || session.outcomeUnknown) {
         nativeDiscoveryRxWindow_.invalidate(
             NativeAwdlDiscoveryRxWindow::CloseReason::OwnerReleasedWithoutEnd,
-            tahoeMonotonicNs() / 1000ULL);
+            p2pProbeMonotonicNanoseconds() / 1000ULL);
         return false;
     }
 
@@ -13062,7 +13066,7 @@ void ItlIwx::tahoeDiscoveryRxWindowPublish(
     OSData *events = nullptr;
     if (ok) {
         events = OSData::withBytes(nativeDiscoveryRxWindowWords_,
-                                   wordCount * sizeof(uint64_t));
+                                   static_cast<unsigned>(wordCount * sizeof(uint64_t)));
         ok = events != nullptr;
     }
     if (ok)
@@ -14792,7 +14796,7 @@ IOReturn ItlIwx::tahoeP2pFinishAction(OSObject *, void *contextArg,
     if (owner->tahoeP2pOnMainGate())
         owner->tahoeDiscoveryRxWindowInvalidate(
             NativeAwdlDiscoveryRxWindow::CloseReason::OwnerReleasedWithoutEnd,
-            tahoeMonotonicNs() / 1000ULL);
+            p2pProbeMonotonicNanoseconds() / 1000ULL);
 #endif
     __atomic_store_n(&owner->nativeP2pProbeOwner_, nullptr, __ATOMIC_RELEASE);
     __atomic_store_n(&owner->nativeP2pProbeBusy_, 0u, __ATOMIC_RELEASE);
@@ -15298,7 +15302,7 @@ int ItlIwx::tahoeP2pStopBeforeReset(struct iwx_softc *sc)
     if (tahoeP2pOnMainGate())
         tahoeDiscoveryRxWindowInvalidate(
             NativeAwdlDiscoveryRxWindow::CloseReason::OwnerReleasedWithoutEnd,
-            tahoeMonotonicNs() / 1000ULL);
+            p2pProbeMonotonicNanoseconds() / 1000ULL);
 #endif
     // A reset/stop attempt invalidates any live GO permit before the other
     // resource gates decide whether firmware cleanup can proceed. Serialize

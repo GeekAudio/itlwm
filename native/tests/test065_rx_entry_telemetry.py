@@ -58,7 +58,8 @@ def source_contracts():
     assert 'size_t maxlen = IWX_RBUF_SIZE - offset - minsz;' in cpp
     assert cpp.count('iwx_rx_packet_payload_len(pkt),') >= 2
     assert cpp.count('maxlen, ml, rxRingSlot,') >= 2
-    assert 'tahoeP2pCurrentRxDiagnosticEpochs(sc, &rxEntryEpochs)' in rx_entry
+    assert 'tahoeP2pCurrentRxDiagnosticEpochs(' in rx_entry
+    assert 'sc, &rxEntryEpochs, preOwnerObserve ? &ownerReason : nullptr)' in rx_entry
     assert 'inspection.frameControlPresent &&' in rx_entry
     assert 'NativeAwdlData::isAwdlDataCandidate(' in rx_entry
     assert 'tahoe_awdl_rx_stage_counters_.record(' in rx_entry
