@@ -54,6 +54,16 @@ def compile_bridge(directory: Path, sanitizer: str) -> Path:
     return binary
 
 
+def run_receipt_publisher(directory: Path) -> None:
+    binary = directory / "receipt-publisher"
+    run([
+        "xcrun", "clang++", "-std=c++14", "-Wall", "-Wextra", "-Werror",
+        "-Inative", "native/tests/test110_directed_rx_receipt_publisher.cpp",
+        "-o", str(binary),
+    ])
+    run([str(binary)])
+
+
 def main() -> None:
     with tempfile.TemporaryDirectory(prefix="test110-directed-rx-") as temp:
         directory = Path(temp)
@@ -63,9 +73,11 @@ def main() -> None:
         tsan = compile_bridge(directory, "thread")
         for scenario in (4, 6, 7, 8):
             run([str(tsan), str(scenario)])
+        run_receipt_publisher(directory)
     print(
         "Test110 directed RX bridge passed: 8 ASan/UBSan cases and "
-        "4 TSAN cases under host KPI shims. Native kernel, RF, firmware, "
+        "4 TSAN cases under host KPI shims plus 1 numeric receipt-publisher "
+        "case. Native kernel, RF, firmware, "
         "peer reply and AirDrop were not tested."
     )
 

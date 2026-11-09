@@ -93,6 +93,61 @@ public:
             receipt.ifnetInputResultPresent);
         DIRECTED_RX_WRITE32("NativeAwdlDataDirectedRxReceiptIfnetInputResult",
                             static_cast<uint32_t>(receipt.ifnetInputResult));
+        static const char *replyNames[2][19]={
+            {"NativeAwdlDataDirectedRxExactReply0Present",
+             "NativeAwdlDataDirectedRxExactReply0Captured",
+             "NativeAwdlDataDirectedRxExactReply0Delivered",
+             "NativeAwdlDataDirectedRxExactReply0Valid",
+             "NativeAwdlDataDirectedRxExactReply0Slot",
+             "NativeAwdlDataDirectedRxExactReply0Ifindex",
+             "NativeAwdlDataDirectedRxExactReply0ContextGeneration",
+             "NativeAwdlDataDirectedRxExactReply0PowerGeneration",
+             "NativeAwdlDataDirectedRxExactReply0StationGeneration",
+             "NativeAwdlDataDirectedRxExactReply0RocGeneration",
+             "NativeAwdlDataDirectedRxExactReply0TicketSerial",
+             "NativeAwdlDataDirectedRxExactReply0PacketSerial",
+             "NativeAwdlDataDirectedRxExactReply0OwnerSerial",
+             "NativeAwdlDataDirectedRxExactReply0RunSerial",
+             "NativeAwdlDataDirectedRxExactReply0InterfaceIncarnation",
+             "NativeAwdlDataDirectedRxExactReply0DoorbellMonotonicUs",
+             "NativeAwdlDataDirectedRxExactReply0CaptureMonotonicUs",
+             "NativeAwdlDataDirectedRxExactReply0InputMonotonicUs",
+             "NativeAwdlDataDirectedRxExactReply0SchemaVersion"},
+            {"NativeAwdlDataDirectedRxExactReply1Present",
+             "NativeAwdlDataDirectedRxExactReply1Captured",
+             "NativeAwdlDataDirectedRxExactReply1Delivered",
+             "NativeAwdlDataDirectedRxExactReply1Valid",
+             "NativeAwdlDataDirectedRxExactReply1Slot",
+             "NativeAwdlDataDirectedRxExactReply1Ifindex",
+             "NativeAwdlDataDirectedRxExactReply1ContextGeneration",
+             "NativeAwdlDataDirectedRxExactReply1PowerGeneration",
+             "NativeAwdlDataDirectedRxExactReply1StationGeneration",
+             "NativeAwdlDataDirectedRxExactReply1RocGeneration",
+             "NativeAwdlDataDirectedRxExactReply1TicketSerial",
+             "NativeAwdlDataDirectedRxExactReply1PacketSerial",
+             "NativeAwdlDataDirectedRxExactReply1OwnerSerial",
+             "NativeAwdlDataDirectedRxExactReply1RunSerial",
+             "NativeAwdlDataDirectedRxExactReply1InterfaceIncarnation",
+             "NativeAwdlDataDirectedRxExactReply1DoorbellMonotonicUs",
+             "NativeAwdlDataDirectedRxExactReply1CaptureMonotonicUs",
+             "NativeAwdlDataDirectedRxExactReply1InputMonotonicUs",
+             "NativeAwdlDataDirectedRxExactReply1SchemaVersion"}
+        };
+        for(size_t i=0;i<kDirectedDataExactReplySlots;++i) {
+            const auto &reply=receipt.exactReplies[i];
+            const uint64_t values[19]={
+                reply.present,reply.captured,reply.delivered,reply.valid,
+                reply.slot,reply.ifindex,reply.contextGeneration,
+                reply.powerGeneration,reply.stationGeneration,
+                reply.rocGeneration,reply.ticketSerial,reply.packetSerial,
+                reply.ownerSerial,reply.runSerial,reply.interfaceIncarnation,
+                reply.doorbellUs,reply.captureUs,reply.inputUs,
+                reply.schemaVersion};
+            for(size_t field=0;field<19;++field)
+                if(!writeNumber(replyNames[i][field],values[field],
+                        field>=10&&field<=17?64:32))
+                    return false;
+        }
 #undef DIRECTED_RX_WRITE32
 #undef DIRECTED_RX_WRITE64
         if(!writeNumber("NativeAwdlDataDirectedRxReceiptSnapshotEnd",end,64)||

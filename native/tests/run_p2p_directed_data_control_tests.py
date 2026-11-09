@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run deterministic Test112 directed-data gate/recovery model tests."""
+"""Run directed-data control, recovery, and two-packet cleanup tests."""
 from pathlib import Path
 import subprocess
 import tempfile
@@ -25,6 +25,7 @@ def main():
             ("control", ["native/tests/p2p_directed_data_control_test.cpp"]),
             ("recovery", ["native/tests/p2p_hal_probe_test.cpp",
                           "native/p2p_hal_probe.cpp"]),
+            ("cleanup-two-packet", ["native/tests/test130_directed_cleanup.cpp"]),
         )
         for name, sources in cases:
             binary = temp_path / f"p2p-directed-{name}"
@@ -35,7 +36,7 @@ def main():
                 "-Inative", *sources, "-o", str(binary),
             ])
             run([str(binary)])
-        print("Test112 directed-data control/recovery tests passed")
+        print("Directed-data control/recovery/two-packet cleanup tests passed")
 
 
 if __name__ == "__main__":

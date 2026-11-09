@@ -59,6 +59,12 @@ inline OriginProof evaluateOriginProof(
     OriginProof proof{};
     proof.noPendingPackets = !snapshot.packetQueued &&
         !snapshot.packetPopping;
+    if (snapshot.packetCount == kMaximumPackets) {
+        for (size_t slot = 0; slot < kMaximumPackets; ++slot)
+            proof.noPendingPackets = proof.noPendingPackets &&
+                !snapshot.packets[slot].packetQueued &&
+                !snapshot.packets[slot].packetPopping;
+    }
     if (!dataOriginClosed || dataOriginTicketBound ||
         !proof.noPendingPackets || !currentOwnerSerial || !currentRunSerial)
         return proof;
@@ -83,6 +89,33 @@ inline OriginProof evaluateOriginProof(
 
     if (!proof.ticketMatches)
         return proof;
+    if (snapshot.packetCount == kMaximumPackets) {
+        // This is a resource-retirement proof, not a successful-exchange
+        // verdict. A consumed BSD packet may never have reached the hardware,
+        // or packet one may be complete while packet two never got admitted.
+        // The caller must provide either no doorbell in this entire run, or
+        // exact completion for EVERY actual doorbell (never the current slot
+        // flag or QueueLease's historical completionObserved alone).
+        const auto &first = snapshot.packets[0];
+        const auto &second = snapshot.packets[1];
+        const bool identitiesBound = first.present && second.present &&
+            first.slot == 0 && second.slot == 1 && first.packetSerial &&
+            second.packetSerial && first.packetSerial != second.packetSerial;
+        if (!identitiesBound || (!noDoorbell && !halCompletionObserved))
+            return proof;
+        switch (snapshot.state) {
+        case State::Spent:
+        case State::Closed:
+        case State::Expired:
+        case State::Revoked:
+        case State::Failed:
+            proof.terminalAccepted = true;
+            break;
+        default:
+            break;
+        }
+        return proof;
+    }
     switch (snapshot.state) {
     case State::Spent:
         proof.terminalAccepted = snapshot.packetSpent &&

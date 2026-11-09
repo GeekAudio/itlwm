@@ -14,6 +14,8 @@
 #include "../../native/iwx_mcc_refresh_policy.hpp"
 #include "ItlIwxP2PDataTxWitness.hpp"
 
+static constexpr uint8_t kTahoeP2PDirectedDataMaxPackets = 2;
+
 class ItlIwx;
 struct iwx_softc;
 struct iwx_rx_packet;
@@ -29,6 +31,12 @@ struct TahoeP2PDirectedDataArm {
     uint8_t localIpv6[16];
     uint8_t nonce[8];
     char runToken[33];
+    // Zero/one preserves the original one-packet arm shape. Two opts into
+    // the bounded Test130 exchange and requires two distinct packetNonces
+    // plus a link-local peer IPv6 address.
+    uint8_t packetCount;
+    uint8_t peerIPv6[16];
+    uint8_t packetNonces[kTahoeP2PDirectedDataMaxPackets][8];
 };
 
 struct TahoeP2PDirectedDataBinding {
@@ -51,6 +59,72 @@ using TahoeP2PDirectedDataOriginTicket =
 struct TahoeP2PDirectedDataOriginPacket {
     TahoeP2PDirectedDataOriginTicket ticket;
     uint64_t packetToken;
+    uint64_t identityTicketSerial;
+    uint8_t slot;
+    uint8_t nonce[8];
+    uint16_t wifiSequence;
+    uint16_t awdlSequence;
+};
+
+// Fixed per-packet evidence. Slot records are immutable once a later packet
+// is admitted; the active CompletionTracker is reused only after the current
+// slot is terminally completed. The nonce is private to the HAL and never
+// copied into diagnostic snapshots.
+struct TahoeP2PDirectedDataPacketRecord {
+    uint64_t packetToken;
+    uint64_t doorbellUs;
+    uint64_t txResponseUs;
+    uint64_t exactReplyCaptureUs;
+    uint64_t exactReplyInputUs;
+    uint16_t wifiSequence;
+    uint16_t awdlSequence;
+    uint16_t descriptorIndex;
+    uint16_t expectedNextSsn;
+    uint16_t sequenceControl;
+    uint16_t frameControl;
+    uint16_t byteCount;
+    uint16_t firmwareStatus;
+    uint8_t nonce[8];
+    uint8_t slot;
+    bool identityBound;
+    bool sequenceReserved;
+    bool permitIssued;
+    bool doorbellIssued;
+    bool completionObserved;
+    bool frameAttemptSucceeded;
+    bool exactReplyCaptured;
+    bool exactReplyDelivered;
+    bool originDoorbellRecorded;
+    bool originCompletionRecorded;
+    bool resourcesAbsent;
+};
+
+struct TahoeP2PDirectedDataPacketSnapshot {
+    uint64_t packetToken;
+    uint64_t doorbellUs;
+    uint64_t txResponseUs;
+    uint64_t exactReplyCaptureUs;
+    uint64_t exactReplyInputUs;
+    uint16_t wifiSequence;
+    uint16_t awdlSequence;
+    uint16_t descriptorIndex;
+    uint16_t expectedNextSsn;
+    uint16_t sequenceControl;
+    uint16_t frameControl;
+    uint16_t byteCount;
+    uint16_t firmwareStatus;
+    uint8_t slot;
+    bool identityBound;
+    bool sequenceReserved;
+    bool permitIssued;
+    bool doorbellIssued;
+    bool completionObserved;
+    bool frameAttemptSucceeded;
+    bool exactReplyCaptured;
+    bool exactReplyDelivered;
+    bool originDoorbellRecorded;
+    bool originCompletionRecorded;
+    bool resourcesAbsent;
 };
 
 enum class TahoeP2PDirectedDataState : uint8_t {
@@ -107,7 +181,11 @@ struct TahoeP2PDirectedDataPermit {
     uint64_t rocToken;
     uint64_t deadlineUs;
     uint16_t queueId;
+    uint16_t wifiSequence;
+    uint16_t awdlSequence;
+    uint16_t descriptorIndex;
     uint8_t stationId;
+    uint8_t packetSlot;
     bool valid;
 };
 
@@ -156,6 +234,10 @@ struct TahoeP2PDirectedDataSnapshot {
     bool frameAttemptSucceeded;
     bool mbufHeldByRing;
     bool hardStopDrained;
+    uint8_t packetCount;
+    uint8_t currentSlot;
+    TahoeP2PDirectedDataPacketSnapshot packets[
+        kTahoeP2PDirectedDataMaxPackets];
 };
 
 enum class TahoeP2PDirectedDataStopProof : uint8_t {
@@ -174,6 +256,10 @@ constexpr uint32_t kTahoeP2PDirectedDataRequiredStopProofs =
 struct TahoeP2PDirectedDataContext {
     IntelP2PActionTx::CompletionTracker completion;
     TahoeP2PDirectedDataTxWitness::Snapshot txWitness{};
+    TahoeP2PDirectedDataTxWitness::Snapshot packetWitness[
+        kTahoeP2PDirectedDataMaxPackets]{};
+    TahoeP2PDirectedDataPacketRecord packets[
+        kTahoeP2PDirectedDataMaxPackets]{};
     TahoeP2PDirectedDataArm arm;
     TahoeP2PDirectedDataBinding binding;
     // The main-gate validator compares this exact worker token with the live
@@ -223,9 +309,11 @@ struct TahoeP2PDirectedDataContext {
     bool frameAttemptSucceeded;
     bool mbufHeldByRing;
     bool hardStopDrained;
+    uint8_t packetCount;
+    uint8_t currentSlot;
 
     TahoeP2PDirectedDataContext()
-        : completion(), arm{}, binding{}, workerThread(nullptr),
+        : completion(), packetWitness{}, packets{}, arm{}, binding{}, workerThread(nullptr),
           originTicket{}, permit{},
           state(TahoeP2PDirectedDataState::kIdle),
           reason(TahoeP2PDirectedDataReason::kNone), mayOwnResource(0),
@@ -243,7 +331,7 @@ struct TahoeP2PDirectedDataContext {
           originWindowBound(false), originClosed(false),
           permitIssued(false), doorbellIssued(false), completionObserved(false),
           frameAttemptSucceeded(false), mbufHeldByRing(false),
-          hardStopDrained(false) {}
+          hardStopDrained(false), packetCount(1), currentSlot(0) {}
 };
 
 // Allocate globally unique per-owner resource identities. Zero is failure;
@@ -273,6 +361,18 @@ bool iwx_tahoe_p2p_directed_data_reserve_sequences(
 int iwx_tahoe_p2p_directed_data_bind_origin_ticket(
     ItlIwx *owner, TahoeP2PDirectedDataContext *context,
     const TahoeP2PDirectedDataOriginTicket *ticket);
+// Records a verified, kernel-delivered exact echo receipt for the current
+// packet slot. Call outside the BSD lock; the main gate validates the full
+// ticket/packet identity and the immutable ROC deadline before latching it.
+bool iwx_tahoe_p2p_directed_data_note_exact_reply(
+    ItlIwx *owner, TahoeP2PDirectedDataContext *context,
+    const TahoeP2PDirectedDataOriginPacket *origin);
+bool iwx_tahoe_p2p_directed_data_record_origin_doorbell(
+    ItlIwx *owner, TahoeP2PDirectedDataContext *context,
+    const TahoeP2PDirectedDataOriginPacket *origin);
+bool iwx_tahoe_p2p_directed_data_record_origin_completion(
+    ItlIwx *owner, TahoeP2PDirectedDataContext *context,
+    const TahoeP2PDirectedDataOriginPacket *origin);
 // The mbuf is borrowed here. This verifies the BSD pop identity and exact 96B
 // MPDU, then returns a one-use permit; submit revalidates all bytes.
 int iwx_tahoe_p2p_directed_data_make_permit(
@@ -311,6 +411,10 @@ bool iwx_tahoe_p2p_directed_data_seal_tx_witness(
     ItlIwx *owner, TahoeP2PDirectedDataContext *context,
     const TahoeP2PDirectedDataBinding &binding,
     TahoeP2PDirectedDataTxWitness::Snapshot *out);
+TahoeP2PDirectedDataTxWitness::Snapshot *
+iwx_tahoe_p2p_directed_data_tx_witness_for_descriptor(
+    TahoeP2PDirectedDataContext *context, uint16_t queueId,
+    uint16_t descriptorIndex);
 
 int iwx_tahoe_p2p_directed_data_close(
     ItlIwx *owner, TahoeP2PDirectedDataContext *context,

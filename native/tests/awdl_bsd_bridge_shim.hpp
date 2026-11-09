@@ -30,13 +30,16 @@ using mbuf_t=FakeMbuf *;
 struct IOSimpleLock {std::mutex mutex;};using IOInterruptState=unsigned;
 inline unsigned &hostSimpleLockDepth(){static thread_local unsigned value=0;return value;}
 extern std::atomic<unsigned> allocated,freed,delivered,finalized,socketsOpen,socketsClosed;extern uint64_t fakeTime;
+inline uint64_t &fakeTimeAdvanceAfterReads(){static uint64_t value=0;return value;}
+inline uint64_t &fakeTimeAdvanceTarget(){static uint64_t value=0;return value;}
+inline void fakeAdvanceTimeAfterReads(uint64_t reads,uint64_t target){fakeTimeAdvanceAfterReads()=reads;fakeTimeAdvanceTarget()=target;}
 extern bool allocateFail,inputFail,detachDelay,offloadFail;
 extern bool ipv6Fail,socketFail,packetHeaderMissing;
 extern bool lladdrFail;
 inline IOSimpleLock *IOSimpleLockAlloc(){return new IOSimpleLock;}
 inline IOInterruptState IOSimpleLockLockDisableInterrupt(IOSimpleLock *l){l->mutex.lock();++hostSimpleLockDepth();return 0;}
 inline void IOSimpleLockUnlockEnableInterrupt(IOSimpleLock *l,IOInterruptState){assert(hostSimpleLockDepth());--hostSimpleLockDepth();l->mutex.unlock();}
-inline void clock_get_uptime(uint64_t *p){*p=fakeTime;}
+inline void clock_get_uptime(uint64_t *p){*p=fakeTime;if(fakeTimeAdvanceAfterReads()&&!--fakeTimeAdvanceAfterReads())fakeTime=fakeTimeAdvanceTarget();}
 inline void absolutetime_to_nanoseconds(uint64_t a,uint64_t *n){*n=a*1000;}
 inline void IOSleep(unsigned){}
 inline size_t mbuf_pkthdr_len(mbuf_t m){return m->total;}

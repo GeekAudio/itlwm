@@ -155,6 +155,10 @@ CaptureResult captureDirectedDataRx(const uint8_t *,size_t,bool protectedFrame,
           const NativeP2PDirectedDataRxInput::Permit &,uint32_t powerGeneration);
 bool publishDirectedDataRxInputLease(
           const NativeP2PDirectedDataRxInput::Lease &lease);
+// IRQ/main-gate safe fence for canonical ROC END. This exact owner/epoch
+// marker is lock-free and never blocks on the BSD bridge lock.
+bool markDirectedDataEndFast(uint64_t ownerSerial,
+          const NativeP2PDirectedDataRxInput::Epochs &epochs);
 void revokeDirectedDataRxInput();
 void revokeDirectedDataRxInput(uint64_t ownerSerial,
           const NativeP2PDirectedDataRxInput::Epochs &epochs);
@@ -232,7 +236,7 @@ void cancelQueued();
 Snapshot snapshot();
 void gateObservation(uint32_t blockers);
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
-// Test107-only one-shot active UDP origin. openDirectedOriginTx binds the
+// Bounded one/two-packet active UDP origin. openDirectedOriginTx binds the
 // caller's START/owner tuple to this live BSD interface; ifindex, interface
 // incarnation, and source MAC are captured here and never accepted from the
 // caller. Call these APIs outside IOSimpleLock/main-gate critical sections.
@@ -244,10 +248,29 @@ bool closeDirectedOriginTx(
 void revokeDirectedOriginTx();
 // The returned mbuf contains exactly one 96-byte 802.11 MPDU (no FCS), and
 // ownership transfers to the caller. The original BSD output mbuf is freed by
-// this call on both encode success and failure; token equals ticketSerial.
+// this call on both encode success and failure. PacketIdentity::packetSerial
+// is independent from ticketSerial and Wi-Fi/AWDL sequence numbers.
 mbuf_t popDirectedOriginTx(
     const NativeAwdlDirectedOriginTx::Ticket &ticket,
-    uint16_t wifiSequence,uint16_t awdlSequence,uint64_t *token);
+    uint16_t wifiSequence,uint16_t awdlSequence,
+    NativeAwdlDirectedOriginTx::PacketIdentity *identity);
+// Legacy single-packet ABI. The token is the independent packetSerial.
+mbuf_t popDirectedOriginTx(
+    const NativeAwdlDirectedOriginTx::Ticket &ticket,
+    uint16_t wifiSequence,uint16_t awdlSequence,uint64_t *packetToken);
+// Called after the actual HBUS write, outside the main-gate/BSD-lock nesting.
+bool recordDirectedTxDoorbell(
+    const NativeAwdlDirectedOriginTx::Ticket &ticket,
+    const NativeAwdlDirectedOriginTx::PacketIdentity &identity,
+    uint64_t submitUs);
+// Records only the HAL's exact, successful per-packet TX_RSP result.
+bool recordDirectedTxCompletion(
+    const NativeAwdlDirectedOriginTx::Ticket &ticket,
+    const NativeAwdlDirectedOriginTx::PacketIdentity &identity,
+    bool frameAttemptSucceeded,uint64_t txResponseUs);
+bool snapshotDirectedExactReply(
+    const NativeAwdlDirectedOriginTx::Ticket &ticket,uint64_t packetSerial,
+    NativeAwdlDirectedOriginTx::ExactReplyReceipt *out);
 void snapshotDirectedOriginTx(
     NativeAwdlDirectedOriginTx::Snapshot *out);
 #endif

@@ -18,6 +18,7 @@ ifnet_t filterIf=nullptr;
 namespace {
 using namespace NativeAwdlBSD;
 namespace Origin=NativeAwdlDirectedOriginTx;
+namespace DirectedRx=NativeP2PDirectedDataRxInput;
 const uint8_t own[6]={0x02,0x11,0x22,0x33,0x44,0x55};
 const uint8_t peer[6]={0x02,0xaa,0xbb,0xcc,0xdd,0xee};
 const uint8_t nonce[8]={0x10,0x21,0x32,0x43,0x54,0x65,0x76,0x87};
@@ -110,6 +111,92 @@ Origin::OpenRequest request(uint64_t runSerial=1001) {
     memcpy(value.peerMac,peer,6);
     memcpy(value.nonce,nonce,sizeof(nonce));
     return value;
+}
+
+Origin::OpenRequest twoPacketRequest(uint64_t runSerial=1301) {
+    auto value=request(runSerial);
+    value.epochs={20,11,21,20}; // Directed RX owner requires context == ROC.
+    value.deadlineUs=value.rocStartUs+DirectedRx::kSessionWindowUs;
+    value.packetCount=2;
+    const uint8_t first[8]={0x81,0x12,0x23,0x34,0x45,0x56,0x67,0x78};
+    const uint8_t second[8]={0x92,0x13,0x24,0x35,0x46,0x57,0x68,0x79};
+    memcpy(value.packetNonces[0],first,sizeof(first));
+    memcpy(value.packetNonces[1],second,sizeof(second));
+    makeLinkLocal(value.peerIPv6,peer);
+    return value;
+}
+
+DirectedRx::Lease directedLease(const Origin::OpenRequest &armed) {
+    DirectedRx::Lease value{};
+    value.compiled=true;value.runtimeEnabled=true;value.profileEnabled=true;
+    value.profileSelected=true;value.ownerCurrent=true;value.epochsMatch=true;
+    value.tokenMatches=true;value.commandReturned=true;
+    value.commandSucceeded=true;value.goNegotiationConfiguration=true;
+    value.channel6Roc=true;value.startSeen=true;value.startSucceeded=true;
+    value.mccCurrent=true;value.epochs={armed.epochs.context,
+        armed.epochs.power,armed.epochs.station,armed.epochs.roc};
+    value.ownerSerial=armed.ownerSerial;value.startUs=armed.rocStartUs;
+    value.deadlineUs=armed.deadlineUs;value.nowUs=fakeTime;
+    value.mccRevision=12;value.mccNoticeGeneration=14;
+    value.mccSourceGeneration=armed.epochs.power;
+    value.mccAppliedNoticeGeneration=value.mccNoticeGeneration;
+    value.mccOrigin=IwxMccRefreshPolicy::kRequestOriginChubNotification;
+    value.mccNoticeEpoch=14;value.mccResponseStatus=1;
+    value.mccResponseChannelCount=51;
+    memcpy(value.peerMac,peer,6);memcpy(value.localMac,own,6);
+    return value;
+}
+
+bool exactEcho(uint8_t out[256],size_t *length,const uint8_t nonceBytes[8],
+               uint16_t sequence) {
+    uint8_t ipv6[Origin::kIpv6Length]{};
+    ipv6[0]=0x60;writeBe16(ipv6+4,Origin::kUdpLength);
+    ipv6[6]=17;ipv6[7]=1;
+    makeLinkLocal(ipv6+8,peer);
+    makeLinkLocal(ipv6+24,own);
+    writeBe16(ipv6+40,Origin::kDestinationPort);
+    writeBe16(ipv6+42,Origin::kSourcePort);
+    writeBe16(ipv6+44,Origin::kUdpLength);
+    memcpy(ipv6+48,nonceBytes,Origin::kNonceLength);
+    writeBe16(ipv6+46,checksum(ipv6));
+    NativeAwdlData::EncodeInput input{};
+    memcpy(input.sourceAddress,peer,6);
+    memcpy(input.destinationAddress,own,6);
+    input.wifiSequenceNumber=sequence;
+    input.ipv6Packet=ipv6;input.ipv6Length=sizeof(ipv6);
+    return NativeAwdlData::encodeIpv6DataMpdu(
+        &input,out,256,length)==NativeAwdlData::Status::Ok;
+}
+
+CaptureResult captureExactEcho(DirectedRx::Lease *lease,
+                               const uint8_t nonceBytes[8],uint16_t sequence) {
+    assert(lease);
+    lease->nowUs=fakeTime;
+    uint8_t bytes[256]{};size_t length=0;
+    assert(exactEcho(bytes,&length,nonceBytes,sequence));
+    DirectedRx::Descriptor descriptor{};
+    descriptor.channelPresent=true;descriptor.ieeeChannel=6;
+    descriptor.macPhyIndexPresent=true;descriptor.macPhyIndex=0x21;
+    descriptor.decodeModePresent=true;
+    descriptor.decodeMode=DirectedRx::kMacPhyDecodeBandInRx;
+    descriptor.awdlDataCandidate=NativeAwdlData::isAwdlDataCandidate(
+        bytes,length);
+    descriptor.originalDescriptorPresent=true;
+    descriptor.sourceMacPresent=true;memcpy(descriptor.sourceMac,peer,6);
+    descriptor.originalRawStatus=0x8100;
+    DirectedRx::Permit permit{};
+    assert(DirectedRx::makePermit(*lease,descriptor,&permit));
+    return captureDirectedDataRx(bytes,length,false,*lease,permit,11);
+}
+
+uint64_t fastEndOwner=0;
+DirectedRx::Epochs fastEndEpochs{};
+void endFastAtInput(ifnet_t,mbuf_t) {
+    assert(markDirectedDataEndFast(fastEndOwner,fastEndEpochs));
+}
+uint64_t deadlineAdvanceTarget=0;
+void advanceToDeadlineAfterInput(ifnet_t,mbuf_t) {
+    fakeAdvanceTimeAfterReads(1,deadlineAdvanceTarget);
 }
 
 void prepare(FakeIf &dev) {
@@ -237,7 +324,8 @@ void caseExpiry(FakeIf &dev) {
     fakeTime=ticket.deadlineUs;
     poll(true,11); // expiry retires and frees only the unsubmitted BSD mbuf.
     Origin::Snapshot state{};snapshotDirectedOriginTx(&state);
-    assert(state.state==Origin::State::Expired&&!state.packetQueued);
+    assert(state.state==Origin::State::Expired&&!state.packetQueued&&
+           !state.packets[0].packetQueued&&!state.packets[0].packetPopping);
     assert(state.expired==1);
     mbuf_t second=packet();assert(output(&second)==EOPNOTSUPP&&second);
     mbuf_freem(second);
@@ -253,7 +341,8 @@ void caseCloseUnsubmitted(FakeIf &dev) {
     mbuf_t original=packet();assert(output(&original)==EJUSTRETURN&&!original);
     assert(closeDirectedOriginTx(ticket));
     Origin::Snapshot state{};snapshotDirectedOriginTx(&state);
-    assert(state.state==Origin::State::Closed&&!state.packetQueued);
+    assert(state.state==Origin::State::Closed&&!state.packetQueued&&
+           !state.packets[0].packetQueued&&!state.packets[0].packetPopping);
     Origin::Ticket retry{};assert(!open(armed,&retry));
     assert(close());assertBalanced(dev);
 }
@@ -265,7 +354,8 @@ void caseStop(FakeIf &dev) {
     mbuf_t original=packet();assert(output(&original)==EJUSTRETURN&&!original);
     poll(false,11);
     Origin::Snapshot state{};snapshotDirectedOriginTx(&state);
-    assert(state.state==Origin::State::Revoked&&!state.packetQueued);
+    assert(state.state==Origin::State::Revoked&&!state.packetQueued&&
+           !state.packets[0].packetQueued&&!state.packets[0].packetPopping);
     uint64_t token=1;assert(!popDirectedOriginTx(ticket,1,2,&token)&&token==0);
     mbuf_t rejected=packet();assert(output(&rejected)==EOPNOTSUPP&&rejected);
     mbuf_freem(rejected);
@@ -415,6 +505,292 @@ void caseLiveAddressScope(FakeIf &dev) {
     assert(!open(finalRequest,&ignored));
     assert(close());assertBalanced(dev);
 }
+
+void caseTwoPacketExchange(FakeIf &dev) {
+    prepare(dev);
+    const auto armed=twoPacketRequest();
+    auto rxLease=directedLease(armed);
+    assert(publishDirectedDataRxInputLease(rxLease));
+    Origin::Ticket ticket{};assert(open(armed,&ticket));
+    assert(ticket.deadlineUs==armed.rocStartUs+DirectedRx::kSessionWindowUs);
+
+    mbuf_t secondTooSoon=packet(Damage::None,armed.packetNonces[1]);
+    assert(output(&secondTooSoon)==EOPNOTSUPP&&secondTooSoon);
+    mbuf_freem(secondTooSoon);
+
+    mbuf_t first=packet(Damage::None,armed.packetNonces[0]);
+    assert(output(&first)==EJUSTRETURN&&!first);
+    Origin::PacketIdentity firstIdentity{};
+    mbuf_t encoded=popDirectedOriginTx(ticket,0x111,0x211,&firstIdentity);
+    assert(encoded&&firstIdentity.slot==0&&
+           firstIdentity.ticketSerial==ticket.ticketSerial&&
+           firstIdentity.packetSerial!=0&&
+           !memcmp(firstIdentity.nonce,armed.packetNonces[0],8));
+    mbuf_freem(encoded);
+
+    // The RX and DLIL success can arrive after the actual submit but before
+    // the HAL's post-gate doorbell note. It stays a candidate until that note.
+    fakeTime=armed.rocStartUs+110;
+    assert(captureExactEcho(&rxLease,armed.packetNonces[0],0x301)==
+           CaptureResult::Captured);
+    poll(true,11,&rxLease);
+    auto rxSnapshot=snapshot().directedDataRxInput;
+    assert(rxSnapshot.exactReplies[0].present==1&&
+           rxSnapshot.exactReplies[0].captured==1&&
+           rxSnapshot.exactReplies[0].delivered==1&&
+           rxSnapshot.exactReplies[0].valid==0);
+    assert(recordDirectedTxDoorbell(ticket,firstIdentity,
+                                    armed.rocStartUs+100));
+    assert(snapshot().directedDataRxInput.exactReplies[0].valid==1);
+    fakeTime=armed.rocStartUs+120;
+    assert(recordDirectedTxCompletion(ticket,firstIdentity,true,
+                                      armed.rocStartUs+115));
+    Origin::Snapshot origin{};snapshotDirectedOriginTx(&origin);
+    assert(origin.state==Origin::State::OpenNext&&
+           origin.packets[0].txSucceeded&&origin.packets[0].exactReplyValid);
+
+    mbuf_t second=packet(Damage::None,armed.packetNonces[1]);
+    assert(output(&second)==EJUSTRETURN&&!second);
+    Origin::PacketIdentity secondIdentity{};
+    encoded=popDirectedOriginTx(ticket,0x112,0x212,&secondIdentity);
+    assert(encoded&&secondIdentity.slot==1&&
+           secondIdentity.ticketSerial==ticket.ticketSerial&&
+           secondIdentity.packetSerial!=firstIdentity.packetSerial&&
+           !memcmp(secondIdentity.nonce,armed.packetNonces[1],8));
+    mbuf_freem(encoded);
+
+    // A matching second nonce observed before packet 2's actual submit is
+    // retained only as audit data. The later doorbell invalidates it.
+    fakeTime=armed.rocStartUs+130;
+    assert(captureExactEcho(&rxLease,armed.packetNonces[1],0x302)==
+           CaptureResult::Captured);
+    poll(true,11,&rxLease);
+    rxSnapshot=snapshot().directedDataRxInput;
+    assert(rxSnapshot.exactReplies[1].captured==1&&
+           rxSnapshot.exactReplies[1].delivered==1&&
+           rxSnapshot.exactReplies[1].valid==0);
+    fakeTime=armed.rocStartUs+150;
+    assert(recordDirectedTxDoorbell(ticket,secondIdentity,
+                                    armed.rocStartUs+140));
+    rxSnapshot=snapshot().directedDataRxInput;
+    assert(rxSnapshot.exactReplies[1].captured==0&&
+           rxSnapshot.exactReplies[1].delivered==0&&
+           rxSnapshot.exactReplies[1].valid==0);
+
+    fakeTime=armed.rocStartUs+160;
+    assert(captureExactEcho(&rxLease,armed.packetNonces[1],0x303)==
+           CaptureResult::Captured);
+    poll(true,11,&rxLease);
+    fakeTime=armed.rocStartUs+180;
+    assert(recordDirectedTxCompletion(ticket,secondIdentity,true,
+                                      armed.rocStartUs+170));
+    origin=Origin::Snapshot{};snapshotDirectedOriginTx(&origin);
+    rxSnapshot=snapshot().directedDataRxInput;
+    assert(origin.state==Origin::State::Spent&&
+           origin.packets[0].exactReplyValid&&
+           origin.packets[1].exactReplyValid&&
+           rxSnapshot.exactReplies[0].valid==1&&
+           rxSnapshot.exactReplies[1].valid==1);
+    assert(closeDirectedOriginTx(ticket));
+    assert(close());assertBalanced(dev);
+}
+
+void caseKnownDoorbellRejectsOldCapture(FakeIf &dev) {
+    prepare(dev);
+    const auto armed=twoPacketRequest(1302);
+    auto rxLease=directedLease(armed);
+    assert(publishDirectedDataRxInputLease(rxLease));
+    Origin::Ticket ticket{};assert(open(armed,&ticket));
+    mbuf_t first=packet(Damage::None,armed.packetNonces[0]);
+    assert(output(&first)==EJUSTRETURN&&!first);
+    Origin::PacketIdentity identity{};
+    mbuf_t encoded=popDirectedOriginTx(ticket,0x121,0x221,&identity);
+    assert(encoded&&identity.slot==0);mbuf_freem(encoded);
+    fakeTime=armed.rocStartUs+110;
+    assert(recordDirectedTxDoorbell(ticket,identity,
+                                    armed.rocStartUs+100));
+
+    // Model a packet that was captured before the known doorbell but whose
+    // RX worker arrives later. It is delivered as ordinary input, never as
+    // the exact origin reply, and cannot occupy the receipt slot.
+    fakeTime=armed.rocStartUs+99;
+    assert(captureExactEcho(&rxLease,armed.packetNonces[0],0x311)==
+           CaptureResult::Captured);
+    poll(true,11,&rxLease);
+    auto exact=snapshot().directedDataRxInput.exactReplies[0];
+    assert(exact.present==1&&exact.captured==0&&exact.delivered==0&&
+           exact.valid==0);
+
+    fakeTime=armed.rocStartUs+120;
+    assert(captureExactEcho(&rxLease,armed.packetNonces[0],0x312)==
+           CaptureResult::Captured);
+    poll(true,11,&rxLease);
+    fakeTime=armed.rocStartUs+130;
+    assert(recordDirectedTxCompletion(ticket,identity,true,
+                                      armed.rocStartUs+125));
+    Origin::Snapshot origin{};snapshotDirectedOriginTx(&origin);
+    exact=snapshot().directedDataRxInput.exactReplies[0];
+    assert(origin.state==Origin::State::OpenNext&&exact.valid==1&&
+           exact.captureUs==armed.rocStartUs+120);
+    assert(closeDirectedOriginTx(ticket));
+    assert(close());assertBalanced(dev);
+}
+
+void caseEndBetweenInputAndReceipt(FakeIf &dev) {
+    prepare(dev);
+    const auto armed=twoPacketRequest(1303);
+    auto rxLease=directedLease(armed);
+    assert(publishDirectedDataRxInputLease(rxLease));
+    Origin::Ticket ticket{};assert(open(armed,&ticket));
+    mbuf_t first=packet(Damage::None,armed.packetNonces[0]);
+    assert(output(&first)==EJUSTRETURN&&!first);
+    Origin::PacketIdentity identity{};
+    mbuf_t encoded=popDirectedOriginTx(ticket,0x131,0x231,&identity);
+    assert(encoded&&identity.slot==0);mbuf_freem(encoded);
+    fakeTime=armed.rocStartUs+100;
+    assert(recordDirectedTxDoorbell(ticket,identity,
+                                    armed.rocStartUs+90));
+    fakeTime=armed.rocStartUs+110;
+    assert(recordDirectedTxCompletion(ticket,identity,true,
+                                      armed.rocStartUs+105));
+
+    fastEndOwner=armed.ownerSerial;
+    fastEndEpochs=rxLease.epochs;
+    fakeInputObserver()=endFastAtInput;
+    assert(captureExactEcho(&rxLease,armed.packetNonces[0],0x321)==
+           CaptureResult::Captured);
+    poll(true,11,&rxLease);
+    fakeInputObserver()=nullptr;
+    auto exact=snapshot().directedDataRxInput.exactReplies[0];
+    Origin::Snapshot origin{};snapshotDirectedOriginTx(&origin);
+    assert(exact.present==1&&exact.captured==1&&exact.delivered==0&&
+           exact.valid==0&&origin.state==Origin::State::AwaitingPacketProof);
+    mbuf_t second=packet(Damage::None,armed.packetNonces[1]);
+    assert(output(&second)==EOPNOTSUPP&&second);mbuf_freem(second);
+    assert(closeDirectedOriginTx(ticket));
+    assert(close());assertBalanced(dev);
+}
+
+void caseEndRetiresQueuedSecondPacket(FakeIf &dev) {
+    prepare(dev);
+    const auto armed=twoPacketRequest(1304);
+    auto rxLease=directedLease(armed);
+    assert(publishDirectedDataRxInputLease(rxLease));
+    Origin::Ticket ticket{};assert(open(armed,&ticket));
+
+    mbuf_t first=packet(Damage::None,armed.packetNonces[0]);
+    assert(output(&first)==EJUSTRETURN&&!first);
+    Origin::PacketIdentity firstIdentity{};
+    mbuf_t encoded=popDirectedOriginTx(ticket,0x141,0x241,&firstIdentity);
+    assert(encoded&&firstIdentity.slot==0);mbuf_freem(encoded);
+    fakeTime=armed.rocStartUs+110;
+    assert(recordDirectedTxDoorbell(ticket,firstIdentity,
+                                    armed.rocStartUs+100));
+    assert(captureExactEcho(&rxLease,armed.packetNonces[0],0x331)==
+           CaptureResult::Captured);
+    poll(true,11,&rxLease);
+    fakeTime=armed.rocStartUs+120;
+    assert(recordDirectedTxCompletion(ticket,firstIdentity,true,
+                                      armed.rocStartUs+115));
+    Origin::Snapshot origin{};snapshotDirectedOriginTx(&origin);
+    assert(origin.state==Origin::State::OpenNext);
+
+    fakeTime=armed.rocStartUs+125;
+    mbuf_t second=packet(Damage::None,armed.packetNonces[1]);
+    assert(output(&second)==EJUSTRETURN&&!second);
+    snapshotDirectedOriginTx(&origin);
+    assert(origin.state==Origin::State::QueuedNext&&
+           origin.packets[1].outputAccepted&&origin.packets[1].packetQueued&&
+           origin.packets[1].packetSerial!=0);
+
+    assert(markDirectedDataEndFast(ticket.ownerSerial,rxLease.epochs));
+    revokeDirectedDataRxInput(ticket.ownerSerial,rxLease.epochs);
+    revokeDirectedOriginTx(); // Retires the actual queued mbuf after END.
+    snapshotDirectedOriginTx(&origin);
+    assert(origin.state==Origin::State::Revoked&&!origin.packetQueued&&
+           !origin.packetPopping&&!origin.packets[1].packetQueued&&
+           !origin.packets[1].packetPopping&&
+           origin.packets[1].outputAccepted&&
+           origin.packets[1].packetSerial!=0);
+    assert(close());assertBalanced(dev);
+}
+
+void caseLockWaitPastDeadlineDoesNotCommit(FakeIf &dev) {
+    prepare(dev);
+    const auto armed=twoPacketRequest(1305);
+    auto rxLease=directedLease(armed);
+    assert(publishDirectedDataRxInputLease(rxLease));
+    Origin::Ticket ticket{};assert(open(armed,&ticket));
+    mbuf_t first=packet(Damage::None,armed.packetNonces[0]);
+    assert(output(&first)==EJUSTRETURN&&!first);
+    Origin::PacketIdentity identity{};
+    mbuf_t encoded=popDirectedOriginTx(ticket,0x151,0x251,&identity);
+    assert(encoded&&identity.slot==0);mbuf_freem(encoded);
+    fakeTime=armed.rocStartUs+105;
+    assert(recordDirectedTxDoorbell(ticket,identity,
+                                    armed.rocStartUs+100));
+    fakeTime=armed.rocStartUs+115;
+    assert(recordDirectedTxCompletion(ticket,identity,true,
+                                      armed.rocStartUs+110));
+
+    // Input completes just before the ROC expires. The host shim advances
+    // monotonic time on the immediately following lock-held receipt read,
+    // modeling a wait for the BSD lock across the hard deadline.
+    fakeTime=armed.deadlineUs-2;
+    deadlineAdvanceTarget=armed.deadlineUs;
+    fakeInputObserver()=advanceToDeadlineAfterInput;
+    assert(captureExactEcho(&rxLease,armed.packetNonces[0],0x341)==
+           CaptureResult::Captured);
+    poll(true,11,&rxLease);
+    fakeInputObserver()=nullptr;
+    assert(fakeTime==armed.deadlineUs);
+    auto exact=snapshot().directedDataRxInput.exactReplies[0];
+    assert(exact.present==1&&exact.captured==1&&exact.delivered==0&&
+           exact.valid==0);
+    Origin::Snapshot origin{};snapshotDirectedOriginTx(&origin);
+    assert(origin.state==Origin::State::Expired&&
+           origin.packets[0].exactReplyValid==false);
+    assert(close());assertBalanced(dev);
+}
+
+void caseEndInvalidatesSpentSecondProof(FakeIf &) {
+    Origin::Ledger ledger;
+    auto armed=twoPacketRequest(1306);
+    Origin::Ticket ticket{};
+    assert(ledger.open(armed,armed.rocStartUs,armed.epochs.power,
+        88,8,own,armed.sourceIPv6,&ticket));
+    Origin::PacketIdentity identities[2]{};
+    for(uint8_t slot=0;slot<2;++slot)
+        assert(ledger.packetIdentity(ticket,slot,&identities[slot]));
+
+    auto finishProof=[&](uint8_t slot,uint64_t base) {
+        assert(ledger.acceptsOutput(ticket,slot,base,true,
+                                    armed.epochs.power,88));
+        assert(ledger.beginPop(ticket,identities[slot],base+1,true,
+                               armed.epochs.power,88));
+        assert(ledger.finishPop(ticket,identities[slot],base+2,true,
+                                armed.epochs.power,88,true));
+        assert(ledger.recordTxDoorbell(ticket,identities[slot],base+3,base+3,
+                                       armed.epochs.power,88));
+        assert(ledger.recordTxCompletion(ticket,identities[slot],true,
+            base+4,base+4,armed.epochs.power,88));
+        assert(ledger.recordExactReplyCaptured(ticket,identities[slot],
+            base+5,base+5,armed.epochs.power,88));
+        assert(ledger.recordExactReplyDelivered(ticket,identities[slot],
+            base+5,base+6,base+6,armed.epochs.power,88));
+    };
+    finishProof(0,armed.rocStartUs+10);
+    assert(ledger.snapshot(armed.rocStartUs+20,true).state==
+           Origin::State::OpenNext);
+    finishProof(1,armed.rocStartUs+30);
+    auto state=ledger.snapshot(armed.rocStartUs+40,true);
+    assert(state.state==Origin::State::Spent&&
+           state.packets[1].exactReplyValid&&state.packets[1].packetSpent);
+    assert(ledger.invalidateExactReplyAfterEnd(ticket,identities[1]));
+    state=ledger.snapshot(armed.rocStartUs+41,true);
+    assert(state.state==Origin::State::AwaitingFinalProof&&
+           !state.packets[1].exactReplyValid&&state.packets[1].packetSpent);
+}
 }
 
 int main(int argc,char **argv) {
@@ -432,6 +808,12 @@ int main(int argc,char **argv) {
         case 9:caseStopDuringFinalize(dev);break;
         case 10:caseOpenBindings(dev);break;
         case 11:caseLiveAddressScope(dev);break;
+        case 12:caseTwoPacketExchange(dev);break;
+        case 13:caseKnownDoorbellRejectsOldCapture(dev);break;
+        case 14:caseEndBetweenInputAndReceipt(dev);break;
+        case 15:caseEndRetiresQueuedSecondPacket(dev);break;
+        case 16:caseLockWaitPastDeadlineDoesNotCommit(dev);break;
+        case 17:caseEndInvalidatesSpentSecondProof(dev);break;
         default:assert(false&&"unknown Test107 case");
     }
     return 0;

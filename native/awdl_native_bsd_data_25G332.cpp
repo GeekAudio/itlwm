@@ -66,6 +66,9 @@ struct DirectedRx {
     uint64_t guardVersion=0;
     uint64_t receiptSequence=0;
     NativeP2PDirectedDataRxInput::Permit permit{};
+    bool exactOriginReplyCaptured=false;
+    NativeAwdlDirectedOriginTx::Ticket originTicket{};
+    NativeAwdlDirectedOriginTx::PacketIdentity originPacket{};
     uint8_t bytes[2048]{};
 };
 #endif
@@ -135,6 +138,14 @@ uint64_t directedRxOwnerSerialHighWater=0;
 uint64_t directedRxReceiptSequence=0;
 uint64_t directedRxReceiptContentRevision=0;
 DirectedDataRxInputReceipt directedRxReceipt{};
+DirectedDataExactReplyReceipt directedExactReplyReceipts[
+    kDirectedDataExactReplySlots]{};
+// Lock-free exact identity/fence used by canonical END.
+uint64_t directedFastSeq=0;
+uint64_t directedFastOwner=0;
+uint64_t directedFastEpochPair0=0;
+uint64_t directedFastEpochPair1=0;
+uint64_t directedFastEndSeq=0;
 #endif
 Rx149InputGateState::Word rx149InputGateState=0;
 Rx149CaptureDiagnostics::Ledger rx149CaptureLedger;
@@ -142,6 +153,7 @@ uint32_t rx149RecoveryPreparedFaultSerial=0;
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
 NativeAwdlDirectedOriginTx::Ledger directedOriginGate;
 mbuf_t directedOriginPacket=nullptr;
+NativeAwdlDirectedOriginTx::PacketIdentity directedOriginPacketIdentity{};
 uint32_t directedOriginOperations=0;
 #endif
 #if defined(ITL_NATIVE_AWDL_REPLY_SHADOW_25G332)
@@ -171,6 +183,120 @@ void releaseRx149InputTicketFast() {
 IOSimpleLock *bridgeLock() {
     return __atomic_load_n(&lock,__ATOMIC_ACQUIRE);
 }
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+uint64_t packDirectedEpochs(uint32_t high,uint32_t low) {
+    return (uint64_t(high)<<32)|uint64_t(low);
+}
+void publishDirectedFastIdentityLocked(
+    const NativeP2PDirectedDataRxInput::Lease &lease) {
+    const uint64_t prior=__atomic_load_n(&directedFastSeq,__ATOMIC_RELAXED);
+    if(prior>UINT64_MAX-2u) {
+        __atomic_store_n(&directedFastOwner,uint64_t(0),__ATOMIC_RELAXED);
+        __atomic_store_n(&directedFastEpochPair0,uint64_t(0),__ATOMIC_RELAXED);
+        __atomic_store_n(&directedFastEpochPair1,uint64_t(0),__ATOMIC_RELAXED);
+        __atomic_store_n(&directedFastEndSeq,uint64_t(0),__ATOMIC_RELAXED);
+        __atomic_store_n(&directedFastSeq,UINT64_MAX&~uint64_t(1),
+                         __ATOMIC_RELEASE);
+        return;
+    }
+    const uint64_t odd=prior+1u;
+    const uint64_t stable=prior+2u;
+    __atomic_store_n(&directedFastSeq,odd,__ATOMIC_RELEASE);
+    __atomic_store_n(&directedFastEndSeq,uint64_t(0),__ATOMIC_RELAXED);
+    __atomic_store_n(&directedFastOwner,lease.ownerSerial,__ATOMIC_RELAXED);
+    __atomic_store_n(&directedFastEpochPair0,
+        packDirectedEpochs(lease.epochs.context,lease.epochs.power),
+        __ATOMIC_RELAXED);
+    __atomic_store_n(&directedFastEpochPair1,
+        packDirectedEpochs(lease.epochs.station,lease.epochs.roc),
+        __ATOMIC_RELAXED);
+    __atomic_store_n(&directedFastSeq,stable,__ATOMIC_RELEASE);
+}
+enum class DirectedFastLeaseState : uint8_t { Mismatch,Current,Ended };
+NativeP2PDirectedDataRxInput::Epochs directedRxEpochs(
+    const NativeAwdlDirectedOriginTx::Epochs &epochs) {
+    return {epochs.context,epochs.power,epochs.station,epochs.roc};
+}
+bool sameDirectedOriginEpochs(
+    const NativeAwdlDirectedOriginTx::Epochs &origin,
+    const NativeP2PDirectedDataRxInput::Epochs &rx) {
+    return origin.context==rx.context&&origin.power==rx.power&&
+        origin.station==rx.station&&origin.roc==rx.roc;
+}
+DirectedFastLeaseState directedFastLeaseState(
+    uint64_t ownerSerial,
+    const NativeP2PDirectedDataRxInput::Epochs &epochs) {
+    const uint64_t before=__atomic_load_n(&directedFastSeq,__ATOMIC_ACQUIRE);
+    if(!before||(before&1u))return DirectedFastLeaseState::Mismatch;
+    const uint64_t owner=__atomic_load_n(&directedFastOwner,__ATOMIC_RELAXED);
+    const uint64_t pair0=__atomic_load_n(&directedFastEpochPair0,
+                                          __ATOMIC_RELAXED);
+    const uint64_t pair1=__atomic_load_n(&directedFastEpochPair1,
+                                          __ATOMIC_RELAXED);
+    const uint64_t after=__atomic_load_n(&directedFastSeq,__ATOMIC_ACQUIRE);
+    if(before!=after||owner!=ownerSerial||
+       pair0!=packDirectedEpochs(epochs.context,epochs.power)||
+       pair1!=packDirectedEpochs(epochs.station,epochs.roc))
+        return DirectedFastLeaseState::Mismatch;
+    const uint64_t ended=__atomic_load_n(&directedFastEndSeq,
+                                          __ATOMIC_ACQUIRE);
+    return ended==after?DirectedFastLeaseState::Ended:
+                        DirectedFastLeaseState::Current;
+}
+bool markDirectedFastEnd(uint64_t ownerSerial,
+    const NativeP2PDirectedDataRxInput::Epochs &epochs) {
+    const uint64_t before=__atomic_load_n(&directedFastSeq,__ATOMIC_ACQUIRE);
+    if(!before||(before&1u))return false;
+    const uint64_t owner=__atomic_load_n(&directedFastOwner,__ATOMIC_RELAXED);
+    const uint64_t pair0=__atomic_load_n(&directedFastEpochPair0,
+                                          __ATOMIC_RELAXED);
+    const uint64_t pair1=__atomic_load_n(&directedFastEpochPair1,
+                                          __ATOMIC_RELAXED);
+    const uint64_t after=__atomic_load_n(&directedFastSeq,__ATOMIC_ACQUIRE);
+    if(before!=after||owner!=ownerSerial||
+       pair0!=packDirectedEpochs(epochs.context,epochs.power)||
+       pair1!=packDirectedEpochs(epochs.station,epochs.roc))
+        return false;
+    __atomic_store_n(&directedFastEndSeq,after,__ATOMIC_RELEASE);
+    return true;
+}
+void updateExactReplyReceiptLocked(
+    const NativeAwdlDirectedOriginTx::Ticket &ticket,
+    const NativeAwdlDirectedOriginTx::PacketIdentity &identity) {
+    using namespace NativeAwdlDirectedOriginTx;
+    if(identity.slot>=kDirectedDataExactReplySlots||
+       directedOriginGate.request().packetCount!=kMaximumPackets)
+        return;
+    ExactReplyReceipt proof{};
+    if(!directedOriginGate.exactReplyReceipt(
+           ticket,identity.packetSerial,&proof))return;
+    auto &receipt=directedExactReplyReceipts[identity.slot];
+    receipt=DirectedDataExactReplyReceipt{};
+    receipt.present=1;
+    receipt.captured=proof.captured?1u:0u;
+    receipt.delivered=proof.delivered?1u:0u;
+    receipt.valid=proof.valid?1u:0u;
+    receipt.slot=proof.slot;
+    receipt.ticketSerial=proof.ticketSerial;
+    receipt.packetSerial=proof.packetSerial;
+    receipt.ownerSerial=proof.ownerSerial;
+    receipt.runSerial=proof.runSerial;
+    receipt.ifindex=proof.ifindex;
+    receipt.interfaceIncarnation=proof.interfaceIncarnation;
+    receipt.contextGeneration=proof.epochs.context;
+    receipt.powerGeneration=proof.epochs.power;
+    receipt.stationGeneration=proof.epochs.station;
+    receipt.rocGeneration=proof.epochs.roc;
+    receipt.doorbellUs=proof.doorbellUs;
+    receipt.captureUs=proof.captureUs;
+    receipt.inputUs=proof.inputUs;
+    if(directedRxReceiptContentRevision==UINT64_MAX) {
+        directedRxReceipt.schemaVersion=0;
+        return;
+    }
+    directedRxReceipt.contentRevision=++directedRxReceiptContentRevision;
+}
+#endif
 void add(Counter c);
 void set(Counter c,uint64_t n);
 Counter mdnsAttemptCounter(NativeAwdlData::MdnsQueryClass value) {
@@ -336,8 +462,71 @@ bool removeDirectedRxAt(size_t offset,DirectedRx *removed) {
     --directedRx.count;
     return true;
 }
+bool sameDirectedRxPermitIdentity(
+    const NativeP2PDirectedDataRxInput::Lease &lease,
+    const NativeP2PDirectedDataRxInput::Permit &permit);
 void recordDirectedRxReceiptLocked(const DirectedRx &item,uint32_t disposition,
-    uint64_t inputUs,uint32_t decodedCount,bool inputPresent,int inputResult) {
+    uint64_t inputUs,uint32_t decodedCount,bool inputPresent,int inputResult,
+    uint64_t inputCompletedUs=0) {
+    if(item.exactOriginReplyCaptured) {
+        // ifnet_input() runs without the BSD lock. Keep its completion time
+        // as the input fact, but resample authority and time after reacquiring
+        // the lock so lock wait cannot carry a proof past END or the ROC.
+        const uint64_t commitNowUs=nowUs();
+        const bool delivered=inputPresent&&inputResult==0&&
+            inputCompletedUs!=0&&inputCompletedUs>=item.permit.capturedUs&&
+            inputCompletedUs<item.originTicket.deadlineUs&&
+            commitNowUs>=inputCompletedUs&&
+            commitNowUs<item.originTicket.deadlineUs&&
+            __atomic_load_n(&closingRequested,__ATOMIC_ACQUIRE)==0&&
+            !closing&&!detached&&radio&&interface&&
+            radioGeneration==item.originTicket.epochs.power&&
+            __atomic_load_n(&counters[Attached],__ATOMIC_ACQUIRE)!=0&&
+            !Rx149InputGateState::blocked(__atomic_load_n(
+                &rx149InputGateState,__ATOMIC_ACQUIRE))&&
+            activeDirectedRxLeaseValid&&
+            item.guardVersion==activeDirectedRxVersion&&
+            item.interfaceIncarnation==interfaceIncarnation&&
+            activeDirectedRxLease.ownerSerial==item.permit.ownerSerial&&
+            activeDirectedRxLease.startUs==item.permit.startUs&&
+            activeDirectedRxLease.deadlineUs==item.permit.leaseDeadlineUs&&
+            NativeP2PDirectedDataRxInput::sameEpochs(
+                activeDirectedRxLease.epochs,item.permit.epochs)&&
+            sameDirectedRxPermitIdentity(activeDirectedRxLease,item.permit)&&
+            NativeP2PDirectedDataRxInput::leaseCurrent(
+                activeDirectedRxLease,commitNowUs)&&
+            directedFastLeaseState(activeDirectedRxLease.ownerSerial,
+                activeDirectedRxLease.epochs)==DirectedFastLeaseState::Current;
+        if(delivered) {
+            // This is the linearization point for an exact reply. Re-read the
+            // no-lock END/close fences immediately before changing the ledger.
+            const bool commitFenceCurrent=
+                directedFastLeaseState(activeDirectedRxLease.ownerSerial,
+                    activeDirectedRxLease.epochs)==
+                        DirectedFastLeaseState::Current&&
+                __atomic_load_n(&closingRequested,__ATOMIC_ACQUIRE)==0&&
+                !Rx149InputGateState::blocked(__atomic_load_n(
+                    &rx149InputGateState,__ATOMIC_ACQUIRE));
+            const bool committed=directedOriginGate.recordExactReplyDelivered(
+                item.originTicket,item.originPacket,item.permit.capturedUs,
+                inputCompletedUs,commitNowUs,
+                activeDirectedRxLease.epochs.power,interfaceIncarnation,
+                commitFenceCurrent);
+            const bool stillCurrent=directedFastLeaseState(
+                activeDirectedRxLease.ownerSerial,
+                activeDirectedRxLease.epochs)==DirectedFastLeaseState::Current&&
+                __atomic_load_n(&closingRequested,__ATOMIC_ACQUIRE)==0&&
+                !Rx149InputGateState::blocked(__atomic_load_n(
+                    &rx149InputGateState,__ATOMIC_ACQUIRE))&&
+                !closing&&!detached&&radio&&interface&&
+                radioGeneration==item.originTicket.epochs.power&&
+                __atomic_load_n(&counters[Attached],__ATOMIC_ACQUIRE)!=0;
+            if(committed&&!stillCurrent)
+                (void)directedOriginGate.invalidateExactReplyAfterEnd(
+                    item.originTicket,item.originPacket);
+        }
+        updateExactReplyReceiptLocked(item.originTicket,item.originPacket);
+    }
     if(!item.receiptSequence||
        directedRxReceipt.sequence!=item.receiptSequence)
         return;
@@ -377,6 +566,49 @@ bool sameDirectedRxPermitIdentity(
     const NativeP2PDirectedDataRxInput::Lease &lease,
     const NativeP2PDirectedDataRxInput::Permit &permit) {
     return NativeP2PDirectedDataRxInput::samePermitIdentity(lease,permit);
+}
+bool matchExactOriginReplyLocked(
+    const NativeP2PDirectedDataRxInput::Lease &lease,
+    const NativeP2PDirectedDataRxInput::Permit &permit,
+    const NativeAwdlData::PacketView &packet,uint64_t captureUs,
+    NativeAwdlDirectedOriginTx::Ticket *outTicket,
+    NativeAwdlDirectedOriginTx::PacketIdentity *outIdentity) {
+    using namespace NativeAwdlDirectedOriginTx;
+    if(outTicket)*outTicket=Ticket{};
+    if(outIdentity)*outIdentity=PacketIdentity{};
+    if(!outTicket||!outIdentity||!interface||!activeDirectedRxLeaseValid||
+       directedFastLeaseState(lease.ownerSerial,lease.epochs)!=
+           DirectedFastLeaseState::Current)
+        return false;
+    const Ticket ticket=directedOriginGate.ticket();
+    const OpenRequest &request=directedOriginGate.request();
+    if(request.packetCount!=kMaximumPackets||
+       ticket.ownerSerial!=lease.ownerSerial||
+       ticket.rocStartUs!=lease.startUs||ticket.deadlineUs!=lease.deadlineUs||
+       !sameDirectedOriginEpochs(ticket.epochs,lease.epochs)||
+       ticket.interfaceIncarnation!=interfaceIncarnation||
+       ticket.ifindex!=ifnet_index(interface)||
+       ticket.epochs.power!=radioGeneration||
+       memcmp(ticket.sourceMac,own,6)||memcmp(lease.localMac,own,6)||
+       memcmp(request.peerMac,lease.peerMac,6)||
+       memcmp(permit.peerMac,request.peerMac,6)||
+       memcmp(permit.localMac,ticket.sourceMac,6)||
+       !sameDirectedRxPermitIdentity(lease,permit)||
+       captureUs<ticket.rocStartUs||captureUs>=ticket.deadlineUs)
+        return false;
+    uint8_t slot=0xff;
+    if(validateExactReply(request,ticket.sourceMac,request.peerMac,
+                          packet,&slot)!=Reason::None)
+        return false;
+    PacketIdentity identity{};
+    if(!directedOriginGate.packetIdentity(ticket,slot,&identity)||
+       !directedOriginGate.recordExactReplyCaptured(ticket,identity,
+           captureUs,captureUs,radioGeneration,interfaceIncarnation))
+        return false;
+    *outTicket=ticket;
+    *outIdentity=identity;
+    updateExactReplyReceiptLocked(ticket,identity);
+    return true;
 }
 void clearDirectedRxRetryWindowLocked() {
     memset(directedRxRetryWindow,0,sizeof(directedRxRetryWindow));
@@ -491,6 +723,7 @@ bool activateDirectedRxLeaseLocked(
         activeDirectedRxLease=lease;
         activeDirectedRxLeaseValid=true;
         directedRxOwnerSerialHighWater=lease.ownerSerial;
+        publishDirectedFastIdentityLocked(lease);
         return true;
     }
     activeDirectedRxLease=lease;
@@ -508,6 +741,7 @@ size_t revokeDirectedRxLeaseLocked(
            !NativeP2PDirectedDataRxInput::sameEpochs(
                activeDirectedRxLease.epochs,*epochs))return 0;
         if(activeDirectedRxLease.ownerSerial==ownerSerial) {
+            (void)markDirectedFastEnd(ownerSerial,*epochs);
             activeDirectedRxLeaseValid=false;
             activeDirectedRxLease=NativeP2PDirectedDataRxInput::Lease{};
             clearDirectedRxRetryWindowLocked();
@@ -530,11 +764,12 @@ size_t revokeDirectedRxLeaseLocked(
                                         ownerSerial,epochs,nowUsValue);
 }
 void recordDirectedRxReceipt(const DirectedRx &item,uint32_t disposition,
-    uint64_t inputUs,uint32_t decodedCount,bool inputPresent,int inputResult) {
+    uint64_t inputUs,uint32_t decodedCount,bool inputPresent,int inputResult,
+    uint64_t inputCompletedUs=0) {
     if(!bridgeLock())return;
     auto irq=IOSimpleLockLockDisableInterrupt(lock);
     recordDirectedRxReceiptLocked(item,disposition,inputUs,decodedCount,
-                                  inputPresent,inputResult);
+                                  inputPresent,inputResult,inputCompletedUs);
     IOSimpleLockUnlockEnableInterrupt(lock,irq);
 }
 #endif
@@ -912,12 +1147,49 @@ bool directedOriginReadyLocked(ifnet_t dev) {
         __atomic_load_n(&counters[Attached],__ATOMIC_ACQUIRE)!=0;
 }
 
-mbuf_t takeDirectedOriginPacketLocked() {
-    mbuf_t packet=directedOriginPacket;
+struct DirectedOriginPacketRetirement {
+    mbuf_t packet=nullptr;
+    NativeAwdlDirectedOriginTx::Ticket ticket{};
+    NativeAwdlDirectedOriginTx::PacketIdentity identity{};
+    bool queuedOwnership=false;
+    bool operationPinned=false;
+};
+
+DirectedOriginPacketRetirement takeDirectedOriginPacketLocked() {
+    DirectedOriginPacketRetirement retired{};
+    retired.packet=directedOriginPacket;
+    if(retired.packet&&directedOriginPacketIdentity.packetSerial) {
+        retired.ticket=directedOriginGate.ticket();
+        retired.identity=directedOriginPacketIdentity;
+        retired.queuedOwnership=directedOriginGate.queuedPacketOwned(
+            retired.ticket,retired.identity);
+        // Keep the bridge resident through the lock-free free below. A pop
+        // has already transitioned this identity to packetPopping and does
+        // not pin a second time here.
+        if(retired.queuedOwnership&&
+           directedOriginOperations!=UINT32_MAX) {
+            ++directedOriginOperations;
+            retired.operationPinned=true;
+        }
+    }
     directedOriginPacket=nullptr;
-    return packet;
+    directedOriginPacketIdentity=
+        NativeAwdlDirectedOriginTx::PacketIdentity{};
+    return retired;
 }
 
+void freeDirectedOriginPacket(const DirectedOriginPacketRetirement &retired) {
+    if(retired.packet)mbuf_freem(retired.packet);
+    if(!retired.queuedOwnership)return;
+    auto stateLock=bridgeLock();
+    if(!stateLock)return;
+    auto irq=IOSimpleLockLockDisableInterrupt(stateLock);
+    (void)directedOriginGate.retireQueuedPacket(
+        retired.ticket,retired.identity);
+    if(retired.operationPinned&&directedOriginOperations)
+        --directedOriginOperations;
+    IOSimpleLockUnlockEnableInterrupt(stateLock,irq);
+}
 void freeDirectedOriginPacket(mbuf_t packet) {
     if(packet)mbuf_freem(packet);
 }
@@ -929,15 +1201,21 @@ errno_t directedOriginOutput(ifnet_t dev,protocol_family_t family,
 
     NativeAwdlDirectedOriginTx::Ticket ticket{};
     NativeAwdlDirectedOriginTx::OpenRequest request{};
+    NativeAwdlDirectedOriginTx::PacketIdentity acceptedIdentity{};
     uint8_t ownAddress[6]{};
+    uint8_t packetSlot=0xff;
     uint64_t incarnation=0;
     uint32_t generation=0;
     auto irq=IOSimpleLockLockDisableInterrupt(lock);
     ticket=directedOriginGate.ticket();
+    request=directedOriginGate.request();
     const uint64_t now=nowUs();
     const bool ready=directedOriginReadyLocked(dev)&&
         directedOriginGate.canAcceptOutput(ticket,now,true,radioGeneration,
-                                           interfaceIncarnation);
+                                           interfaceIncarnation)&&
+        (request.packetCount!=2||directedFastLeaseState(
+            ticket.ownerSerial,directedRxEpochs(ticket.epochs))==
+                DirectedFastLeaseState::Current);
     if(!ready||directedOriginPacket||
        directedOriginOperations==UINT32_MAX) {
         directedOriginGate.noteRejected(
@@ -947,7 +1225,6 @@ errno_t directedOriginOutput(ifnet_t dev,protocol_family_t family,
         add(TxRejected);
         return EOPNOTSUPP;
     }
-    request=directedOriginGate.request();
     memcpy(ownAddress,own,sizeof(ownAddress));
     incarnation=interfaceIncarnation;
     generation=radioGeneration;
@@ -975,7 +1252,7 @@ errno_t directedOriginOutput(ifnet_t dev,protocol_family_t family,
     }
     if(shape) {
         reason=NativeAwdlDirectedOriginTx::validateEthernet(
-            request,ownAddress,bytes,length,false);
+            request,ownAddress,bytes,length,false,&packetSlot);
         shape=reason==NativeAwdlDirectedOriginTx::Reason::None;
     }
     if(shape) {
@@ -986,9 +1263,11 @@ errno_t directedOriginOutput(ifnet_t dev,protocol_family_t family,
         shape=mbuf_pkthdr_len(*packet)==length&&
             mbuf_copydata(*packet,0,length,bytes)==0;
         if(shape) {
+            uint8_t finalPacketSlot=0xff;
             reason=NativeAwdlDirectedOriginTx::validateEthernet(
-                request,ownAddress,bytes,length,true);
-            shape=reason==NativeAwdlDirectedOriginTx::Reason::None;
+                request,ownAddress,bytes,length,true,&finalPacketSlot);
+            shape=reason==NativeAwdlDirectedOriginTx::Reason::None&&
+                finalPacketSlot==packetSlot;
         } else {
             reason=NativeAwdlDirectedOriginTx::Reason::PacketShape;
         }
@@ -1006,18 +1285,29 @@ errno_t directedOriginOutput(ifnet_t dev,protocol_family_t family,
         reason=NativeAwdlDirectedOriginTx::Reason::PacketShape;
     }
 
-    mbuf_t expired=nullptr;
+    DirectedOriginPacketRetirement expired{};
     bool accepted=false;
     irq=IOSimpleLockLockDisableInterrupt(lock);
     const uint64_t finalNow=nowUs();
     const bool current=directedOriginReadyLocked(dev)&&
-        radioGeneration==generation&&interfaceIncarnation==incarnation;
+        radioGeneration==generation&&interfaceIncarnation==incarnation&&
+        (request.packetCount!=2||directedFastLeaseState(
+            ticket.ownerSerial,directedRxEpochs(ticket.epochs))==
+                DirectedFastLeaseState::Current);
     if(shape&&current&&!directedOriginPacket) {
-        accepted=directedOriginGate.acceptsOutput(ticket,finalNow,true,
-            radioGeneration,interfaceIncarnation);
+        accepted=directedOriginGate.acceptsOutput(ticket,packetSlot,
+            finalNow,true,radioGeneration,interfaceIncarnation);
         if(accepted) {
-            directedOriginPacket=*packet;
-            *packet=nullptr; // EJUSTRETURN transfers caller ownership once.
+            if(!directedOriginGate.packetIdentity(
+                   ticket,packetSlot,&acceptedIdentity)) {
+                (void)directedOriginGate.revoke(finalNow,
+                    NativeAwdlDirectedOriginTx::Reason::WrongPacketIdentity);
+                accepted=false;
+            } else {
+                directedOriginPacket=*packet;
+                directedOriginPacketIdentity=acceptedIdentity;
+                *packet=nullptr; // EJUSTRETURN transfers caller ownership once.
+            }
         }
     } else {
         directedOriginGate.noteRejected(
@@ -1099,6 +1389,7 @@ errno_t output(void *,ifnet_t dev,protocol_family_t family,mbuf_t *packet) {
 }
 void detachedCallback(void *,ifnet_t) {
     auto stateLock=bridgeLock();if(!stateLock)return;
+    DirectedOriginPacketRetirement retiredOrigin{};
     auto irq=IOSimpleLockLockDisableInterrupt(stateLock);
     detached=true;filter=nullptr;set(Detached,1);
     clearRx149RetryWindowLocked();
@@ -1112,8 +1403,10 @@ void detachedCallback(void *,ifnet_t) {
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
     (void)directedOriginGate.revoke(
         nowUs(),NativeAwdlDirectedOriginTx::Reason::InterfaceStopped);
+    retiredOrigin=takeDirectedOriginPacketLocked();
 #endif
     IOSimpleLockUnlockEnableInterrupt(stateLock,irq);
+    freeDirectedOriginPacket(retiredOrigin);
 }
 }
 bool attach(ifnet_t dev,const uint8_t mac[6]) {
@@ -1293,6 +1586,12 @@ bool publishRx149DataInputLease(
     return activated;
 }
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+bool markDirectedDataEndFast(uint64_t ownerSerial,
+    const NativeP2PDirectedDataRxInput::Epochs &epochs) {
+    if(!ownerSerial||!NativeP2PDirectedDataRxInput::validEpochs(epochs))
+        return false;
+    return markDirectedFastEnd(ownerSerial,epochs);
+}
 bool publishDirectedDataRxInputLease(
     const NativeP2PDirectedDataRxInput::Lease &lease) {
     if(!bridgeLock())return false;
@@ -1532,7 +1831,7 @@ void poll(bool ready,uint32_t generation) {
     // can enqueue new-generation packets without a post-unlock flush racing it.
     Ring<Tx,QueueDepth> retiredTx{};
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
-    mbuf_t retiredOrigin=nullptr;
+    DirectedOriginPacketRetirement retiredOrigin{};
 #endif
     bool discardQueued=false;
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
@@ -1599,8 +1898,8 @@ void poll(bool ready,uint32_t generation) {
 #endif
     Tx retired{};
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
-    if(retiredOrigin) {
-        mbuf_freem(retiredOrigin);
+    if(retiredOrigin.packet) {
+        freeDirectedOriginPacket(retiredOrigin);
         add(TxExpired);
     }
 #endif
@@ -1872,6 +2171,8 @@ void poll(bool ready,uint32_t generation,
         irq=IOSimpleLockLockDisableInterrupt(lock);
         const bool have=directedRx.pop(&item);
         if(have&&directedLease&&activeDirectedRxLeaseValid&&
+           directedFastLeaseState(activeDirectedRxLease.ownerSerial,
+               activeDirectedRxLease.epochs)==DirectedFastLeaseState::Current&&
            !Rx149InputGateState::blocked(__atomic_load_n(
                &rx149InputGateState,__ATOMIC_ACQUIRE))&&
            item.guardVersion==activeDirectedRxVersion&&
@@ -1887,6 +2188,8 @@ void poll(bool ready,uint32_t generation,
 
         const uint64_t captureNow=nowUs();
         const bool permitCurrent=ready&&dev&&directedLease&&
+            directedFastLeaseState(directedLease->ownerSerial,
+                directedLease->epochs)==DirectedFastLeaseState::Current&&
             item.generation==generation&&
             item.generation==directedLease->epochs.power&&
             item.interfaceIncarnation!=0&&authoritativeMatch&&
@@ -1955,6 +2258,9 @@ void poll(bool ready,uint32_t generation,
                 memcmp(own,expectedAddress,sizeof(expectedAddress))==0;
             const bool permitStillCurrent=stillAttached&&directedLease&&
                 activeDirectedRxLeaseValid&&
+                directedFastLeaseState(activeDirectedRxLease.ownerSerial,
+                    activeDirectedRxLease.epochs)==
+                        DirectedFastLeaseState::Current&&
                 item.guardVersion==activeDirectedRxVersion&&
                 sameDirectedRxLeaseIdentity(activeDirectedRxLease,
                                             *directedLease)&&
@@ -1978,10 +2284,12 @@ void poll(bool ready,uint32_t generation,
             }
 
             const int inputResult=ifnet_input(dev,packetMbuf,nullptr);
+            const uint64_t inputCompletedUs=nowUs();
             recordDirectedRxReceipt(item,
                 inputResult==0?DirectedDataRxReceiptIfnetInputSucceeded:
                               DirectedDataRxReceiptIfnetInputFailed,
-                ticketNow,uint32_t(parsed.packetCount),true,inputResult);
+                ticketNow,uint32_t(parsed.packetCount),true,inputResult,
+                inputCompletedUs);
             irq=IOSimpleLockLockDisableInterrupt(lock);
             releaseRx149InputTicketFast();
             if(inputCalls)--inputCalls;
@@ -2063,6 +2371,8 @@ CaptureResult captureDirectedDataRx(
         }
     }
     const bool authorityCurrent=
+        directedFastLeaseState(lease.ownerSerial,lease.epochs)==
+            DirectedFastLeaseState::Current&&
         !Rx149InputGateState::blocked(__atomic_load_n(
             &rx149InputGateState,__ATOMIC_ACQUIRE))&&
         activeDirectedRxLeaseValid&&activeDirectedRxVersion!=0&&
@@ -2097,6 +2407,9 @@ CaptureResult captureDirectedDataRx(
     }
     accepted=captureAuthority&&!retryDuplicate&&!retryWindowFull&&queueSpace;
     if(accepted) {
+        item.exactOriginReplyCaptured=matchExactOriginReplyLocked(
+            lease,permit,retryDecoded.packets[0],captureNow,
+            &item.originTicket,&item.originPacket);
         item.interfaceIncarnation=interfaceIncarnation;
         item.guardVersion=activeDirectedRxVersion;
         item.receiptSequence=directedRxReceiptSequence+1;
@@ -2653,18 +2966,45 @@ bool openDirectedOriginTx(
     const bool ipRead=macRead&&readLiveLinkLocal(
         dev,request.sourceIPv6,actualIp);
 
-    mbuf_t expired=nullptr;
+    DirectedOriginPacketRetirement expired{};
     bool opened=false;
     irq=IOSimpleLockLockDisableInterrupt(lock);
     const uint64_t now=nowUs();
     const bool current=macRead&&ipRead&&directedOriginReadyLocked(dev)&&
         interfaceIncarnation==incarnation&&radioGeneration==generation&&
-        generation==request.epochs.power&&directedOriginOperations==1;
+        generation==request.epochs.power&&directedOriginOperations==1&&
+        (request.packetCount!=2||
+         (activeDirectedRxLeaseValid&&
+          activeDirectedRxLease.ownerSerial==request.ownerSerial&&
+          activeDirectedRxLease.startUs==request.rocStartUs&&
+          activeDirectedRxLease.deadlineUs==request.deadlineUs&&
+          sameDirectedOriginEpochs(request.epochs,
+              activeDirectedRxLease.epochs)&&
+          !memcmp(activeDirectedRxLease.peerMac,request.peerMac,6)&&
+          !memcmp(request.sourceIPv6,actualIp,16)&&
+          directedFastLeaseState(request.ownerSerial,
+              directedRxEpochs(request.epochs))==
+              DirectedFastLeaseState::Current));
     if(current) {
         if(directedOriginGate.expire(now))
             expired=takeDirectedOriginPacketLocked();
         opened=directedOriginGate.open(request,now,radioGeneration,
             interfaceIncarnation,ifindex,actualMac,actualIp,out);
+        if(opened) {
+            memset(directedExactReplyReceipts,0,
+                   sizeof(directedExactReplyReceipts));
+            if(directedRxReceiptContentRevision==UINT64_MAX)
+                directedRxReceipt.schemaVersion=0;
+            else {
+                directedRxReceipt.contentRevision=
+                    ++directedRxReceiptContentRevision;
+                for(uint8_t slot=0;slot<request.packetCount;++slot) {
+                    PacketIdentity identity{};
+                    if(directedOriginGate.packetIdentity(*out,slot,&identity))
+                        updateExactReplyReceiptLocked(*out,identity);
+                }
+            }
+        }
     } else {
         directedOriginGate.noteRejected(
             macRead&&ipRead?Reason::WrongEpoch:Reason::WrongSource);
@@ -2678,7 +3018,7 @@ bool openDirectedOriginTx(
 bool closeDirectedOriginTx(
     const NativeAwdlDirectedOriginTx::Ticket &ticket) {
     if(!bridgeLock())return false;
-    mbuf_t packet=nullptr;
+    DirectedOriginPacketRetirement packet{};
     auto irq=IOSimpleLockLockDisableInterrupt(lock);
     const bool closed=directedOriginGate.close(ticket,nowUs());
     if(closed)packet=takeDirectedOriginPacketLocked();
@@ -2689,7 +3029,7 @@ bool closeDirectedOriginTx(
 
 void revokeDirectedOriginTx() {
     if(!bridgeLock())return;
-    mbuf_t packet=nullptr;
+    DirectedOriginPacketRetirement packet{};
     auto irq=IOSimpleLockLockDisableInterrupt(lock);
     (void)directedOriginGate.revoke(
         nowUs(),NativeAwdlDirectedOriginTx::Reason::InterfaceStopped);
@@ -2700,26 +3040,34 @@ void revokeDirectedOriginTx() {
 
 mbuf_t popDirectedOriginTx(
     const NativeAwdlDirectedOriginTx::Ticket &ticket,
-    uint16_t wifiSequence,uint16_t awdlSequence,uint64_t *token) {
+    uint16_t wifiSequence,uint16_t awdlSequence,
+    NativeAwdlDirectedOriginTx::PacketIdentity *identity) {
     using namespace NativeAwdlDirectedOriginTx;
-    if(token)*token=0;
-    if(!token||!bridgeLock())return nullptr;
+    if(identity)*identity=PacketIdentity{};
+    if(!identity||!bridgeLock())return nullptr;
 
-    mbuf_t sourcePacket=nullptr,expired=nullptr;
+    mbuf_t sourcePacket=nullptr;
+    DirectedOriginPacketRetirement retiredSource{},expired{};
     ifnet_t dev=nullptr;
     OpenRequest request{};
+    PacketIdentity packetIdentity{};
     uint8_t sourceMac[6]{};
     uint64_t incarnation=0;
     uint32_t generation=0;
     auto irq=IOSimpleLockLockDisableInterrupt(lock);
     const uint64_t now=nowUs();
+    request=directedOriginGate.request();
     if(directedOriginOperations<UINT32_MAX&&directedOriginPacket&&
        directedOriginReadyLocked(interface)&&
-       directedOriginGate.beginPop(ticket,now,true,radioGeneration,
-                                   interfaceIncarnation)) {
+       (request.packetCount!=2||directedFastLeaseState(
+            ticket.ownerSerial,directedRxEpochs(ticket.epochs))==
+                DirectedFastLeaseState::Current)&&
+       directedOriginGate.beginPop(ticket,directedOriginPacketIdentity,now,
+           true,radioGeneration,interfaceIncarnation)) {
         dev=interface;
-        sourcePacket=takeDirectedOriginPacketLocked();
-        request=directedOriginGate.request();
+        packetIdentity=directedOriginPacketIdentity;
+        retiredSource=takeDirectedOriginPacketLocked();
+        sourcePacket=retiredSource.packet;
         memcpy(sourceMac,ticket.sourceMac,sizeof(sourceMac));
         incarnation=interfaceIncarnation;
         generation=radioGeneration;
@@ -2778,9 +3126,13 @@ mbuf_t popDirectedOriginTx(
     irq=IOSimpleLockLockDisableInterrupt(lock);
     const uint64_t finalNow=nowUs();
     const bool ready=directedOriginReadyLocked(interface)&&
-        radioGeneration==generation&&interfaceIncarnation==incarnation;
-    transferred=directedOriginGate.finishPop(ticket,finalNow,ready,
-        radioGeneration,interfaceIncarnation,valid&&encodedPacket!=nullptr);
+        radioGeneration==generation&&interfaceIncarnation==incarnation&&
+        (request.packetCount!=2||directedFastLeaseState(
+            ticket.ownerSerial,directedRxEpochs(ticket.epochs))==
+                DirectedFastLeaseState::Current);
+    transferred=directedOriginGate.finishPop(ticket,packetIdentity,finalNow,
+        ready,radioGeneration,interfaceIncarnation,
+        valid&&encodedPacket!=nullptr);
     if(directedOriginOperations)--directedOriginOperations;
     IOSimpleLockUnlockEnableInterrupt(lock,irq);
 
@@ -2789,9 +3141,90 @@ mbuf_t popDirectedOriginTx(
         if(!valid)add(TxExpired);
         return nullptr;
     }
-    *token=ticket.ticketSerial;
+    *identity=packetIdentity;
     add(TxEncoded);
     return encodedPacket; // Caller/HAL owns the exact 96-byte MPDU mbuf.
+}
+
+mbuf_t popDirectedOriginTx(
+    const NativeAwdlDirectedOriginTx::Ticket &ticket,
+    uint16_t wifiSequence,uint16_t awdlSequence,uint64_t *packetToken) {
+    if(packetToken)*packetToken=0;
+    if(!packetToken)return nullptr;
+    NativeAwdlDirectedOriginTx::PacketIdentity identity{};
+    mbuf_t packet=popDirectedOriginTx(ticket,wifiSequence,awdlSequence,
+                                      &identity);
+    if(packet)*packetToken=identity.packetSerial;
+    return packet;
+}
+
+bool recordDirectedTxDoorbell(
+    const NativeAwdlDirectedOriginTx::Ticket &ticket,
+    const NativeAwdlDirectedOriginTx::PacketIdentity &identity,
+    uint64_t submitUs) {
+    using namespace NativeAwdlDirectedOriginTx;
+    if(!bridgeLock())return false;
+    auto irq=IOSimpleLockLockDisableInterrupt(lock);
+    const uint64_t now=nowUs();
+    const OpenRequest &request=directedOriginGate.request();
+    const bool authorizationAllowed=request.packetCount!=2||
+        directedFastLeaseState(ticket.ownerSerial,
+            directedRxEpochs(ticket.epochs))==
+            DirectedFastLeaseState::Current;
+    const bool recorded=directedOriginGate.recordTxDoorbell(ticket,identity,
+        submitUs,now,radioGeneration,interfaceIncarnation,
+        authorizationAllowed);
+    if(recorded) {
+        updateExactReplyReceiptLocked(ticket,identity);
+        if(authorizationAllowed&&directedFastLeaseState(ticket.ownerSerial,
+               directedRxEpochs(ticket.epochs))!=DirectedFastLeaseState::Current)
+            (void)directedOriginGate.invalidateExactReplyAfterEnd(
+                ticket,identity);
+        updateExactReplyReceiptLocked(ticket,identity);
+    }
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+    return recorded;
+}
+
+bool recordDirectedTxCompletion(
+    const NativeAwdlDirectedOriginTx::Ticket &ticket,
+    const NativeAwdlDirectedOriginTx::PacketIdentity &identity,
+    bool frameAttemptSucceeded,uint64_t txResponseUs) {
+    using namespace NativeAwdlDirectedOriginTx;
+    if(!bridgeLock())return false;
+    auto irq=IOSimpleLockLockDisableInterrupt(lock);
+    const uint64_t now=nowUs();
+    const OpenRequest &request=directedOriginGate.request();
+    const bool authorizationAllowed=request.packetCount!=2||
+        directedFastLeaseState(ticket.ownerSerial,
+            directedRxEpochs(ticket.epochs))==
+            DirectedFastLeaseState::Current;
+    const bool recorded=directedOriginGate.recordTxCompletion(ticket,identity,
+        frameAttemptSucceeded,txResponseUs,now,radioGeneration,
+        interfaceIncarnation,authorizationAllowed);
+    if(recorded) {
+        updateExactReplyReceiptLocked(ticket,identity);
+        if(authorizationAllowed&&directedFastLeaseState(ticket.ownerSerial,
+               directedRxEpochs(ticket.epochs))!=DirectedFastLeaseState::Current)
+            (void)directedOriginGate.invalidateExactReplyAfterEnd(
+                ticket,identity);
+        updateExactReplyReceiptLocked(ticket,identity);
+    }
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+    return recorded;
+}
+
+bool snapshotDirectedExactReply(
+    const NativeAwdlDirectedOriginTx::Ticket &ticket,uint64_t packetSerial,
+    NativeAwdlDirectedOriginTx::ExactReplyReceipt *out) {
+    using namespace NativeAwdlDirectedOriginTx;
+    if(out)*out=ExactReplyReceipt{};
+    if(!out||!bridgeLock())return false;
+    auto irq=IOSimpleLockLockDisableInterrupt(lock);
+    const bool found=directedOriginGate.exactReplyReceipt(
+        ticket,packetSerial,out);
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+    return found;
 }
 
 void snapshotDirectedOriginTx(
@@ -2801,13 +3234,13 @@ void snapshotDirectedOriginTx(
     *out=NativeAwdlDirectedOriginTx::Snapshot{};
     out->profileCompiled=true;
     if(!bridgeLock())return;
-    mbuf_t expired=nullptr;
+    DirectedOriginPacketRetirement expired{};
     auto irq=IOSimpleLockLockDisableInterrupt(lock);
     const uint64_t now=nowUs();
     if(directedOriginGate.expire(now))
         expired=takeDirectedOriginPacketLocked();
     *out=directedOriginGate.snapshot(now,true);
-    out->packetQueued=directedOriginPacket!=nullptr;
+    out->packetQueued=directedOriginPacket!=nullptr||out->packetQueued;
     IOSimpleLockUnlockEnableInterrupt(lock,irq);
     freeDirectedOriginPacket(expired);
 }
@@ -2896,6 +3329,9 @@ Snapshot snapshot(){
         s.rx149Input=rx149Receipt;
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
         s.directedDataRxInput=directedRxReceipt;
+        memcpy(s.directedDataRxInput.exactReplies,
+               directedExactReplyReceipts,
+               sizeof(directedExactReplyReceipts));
 #endif
         IOSimpleLockUnlockEnableInterrupt(lock,irq);
     }

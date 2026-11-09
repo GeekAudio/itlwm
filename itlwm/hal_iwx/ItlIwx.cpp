@@ -21946,6 +21946,23 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
         const auto rememberDirectedWitness = [&] {
             txWitness.remember(directedWitness.command == IWX_BA_NOTIF,
                                directedWitness);
+            // A validated one-frame TX_RSP identifies the consumed descriptor
+            // through payload queue and next SSN. Raw RX header qid/index are
+            // observations only. Malformed envelopes and BA stay aggregate.
+            using namespace TahoeP2PDirectedDataTxWitness;
+            const uint32_t required = kQueue | kSsn | kFrameCount;
+            if (directedWitness.command == IWX_TX_CMD &&
+                (directedWitness.presence & required) == required &&
+                directedWitness.frameCount == 1) {
+                auto packetWitness =
+                    iwx_tahoe_p2p_directed_data_tx_witness_for_descriptor(
+                        &nativeP2pDirectedDataTx_,
+                        uint16_t(directedWitness.queue),
+                        uint16_t((directedWitness.ssn - 1) &
+                                 (IWX_TX_RING_COUNT - 1)));
+                if (packetWitness)
+                    packetWitness->remember(false, directedWitness);
+            }
         };
 #endif
         if (!iwx_rx_pkt_valid(pkt)) {

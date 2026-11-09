@@ -38,7 +38,8 @@ HELPERS = "\n".join(function_body(AIRPORT_SOURCE, marker) for marker in (
     "static bool validDirectedDataLocalIpv6(",
     "static bool validDirectedDataNonce(",
 ))
-DATA_ARM = declaration(DATA_HEADER, "struct TahoeP2PDirectedDataArm {")
+DATA_LIMIT = next(line for line in DATA_HEADER.splitlines() if line.startswith("static constexpr uint8_t kTahoeP2PDirectedDataMaxPackets"))
+DATA_ARM = DATA_LIMIT + "\n" + declaration(DATA_HEADER, "struct TahoeP2PDirectedDataArm {")
 READONLY_HELPER = function_body(
     AIRPORT_SOURCE, "static bool directedDataHasReadonlyKeys(")
 DATA_CALLBACK_CONTEXT = declaration(
@@ -353,6 +354,7 @@ static void testExactArmSuccessAndReceiptFailures() {
         assert(hal.lastArm.localIpv6[0] == 0xfe && hal.lastArm.localIpv6[1] == 0x80);
         assert(hal.lastArm.localIpv6[15] == 0x77);
         assert(hal.lastArm.nonce[0] == 1 && hal.lastArm.nonce[7] == 8);
+        assert(hal.lastArm.packetCount == 1);
         assert(std::memcmp(hal.lastArm.runToken,
                            "0123456789abcdef0123456789abcdef", 32) == 0);
         assert(hal.lastArm.runToken[32] == '\0');
@@ -376,6 +378,44 @@ static void testExactArmSuccessAndReceiptFailures() {
         assert(invoke(driver, input.request) == kIOReturnBusy);
         assert(hal.dataArmCalls == 1);
         assert(driver.getProperty("NativeP2PDirectedDataAcceptedRunToken") == nullptr);
+    }
+}
+
+static void testExactTwoPacketArm() {
+    OSNumber one(1), two(2), tooMany(3), wideCount(0x100000002ULL);
+    for (unsigned variant = 0; variant < 12; ++variant) {
+        AirportItlwm driver; ItlIwx hal; RequestObjects input;
+        configureProfile(driver, one); driver.fHalService = &hal;
+        OSData peerIp(bytes({0xfe, 0x80, 0, 0, 0, 0, 0, 0,
+                             0, 1, 2, 3, 4, 5, 6, 0x88}));
+        OSData nonce2(bytes({9, 10, 11, 12, 13, 14, 15, 16}));
+        input.request.add("NativeP2PDirectedDataPacketCount", &two);
+        input.request.add("NativeP2PDirectedDataPeerIPv6", &peerIp);
+        input.request.add("NativeP2PDirectedDataNonce2", &nonce2);
+        switch (variant) {
+        case 1: input.request.add("NativeP2PDirectedDataPacketCount", &one); break;
+        case 2: input.request.add("NativeP2PDirectedDataPacketCount", &tooMany); break;
+        case 3: input.request.add("NativeP2PDirectedDataPacketCount", &wideCount); break;
+        case 4: input.request.add("NativeP2PDirectedDataPacketCount", kOSBooleanTrue); break;
+        case 5: input.request.entries.erase("NativeP2PDirectedDataNonce2"); break;
+        case 6: input.request.add("NativeP2PDirectedDataNonce2", &input.nonce); break;
+        case 7: nonce2 = OSData(bytes({0, 0, 0, 0, 0, 0, 0, 0})); break;
+        case 8: input.request.add("NativeP2PDirectedDataPeerIPv6", &input.local); break;
+        case 9: peerIp = OSData(bytes({0xfe, 0x80})); break;
+        case 10: input.request.add("Unexpected", &one); break;
+        case 11: input.request.entries.erase("NativeP2PDirectedDataPeerIPv6"); break;
+        }
+        const auto result = invoke(driver, input.request);
+        if (variant == 0) {
+            assert(result == kIOReturnSuccess && hal.dataArmCalls == 1);
+            assert(hal.lastArm.packetCount == 2);
+            assert(std::memcmp(hal.lastArm.packetNonces[0], input.nonce.getBytesNoCopy(), 8) == 0);
+            assert(std::memcmp(hal.lastArm.packetNonces[1], nonce2.getBytesNoCopy(), 8) == 0);
+            assert(std::memcmp(hal.lastArm.peerIPv6, peerIp.getBytesNoCopy(), 16) == 0);
+        } else {
+            assert(result == kIOReturnBadArgument);
+            assertNoArm(driver, hal);
+        }
     }
 }
 
@@ -526,6 +566,7 @@ int main() {
     testAvailabilityNumberGate();
     testReadonlyPrefix();
     testExactArmSuccessAndReceiptFailures();
+    testExactTwoPacketArm();
     testAuthorizationAndProfileGates();
     testExactFiveKeysAndValidators();
 #else

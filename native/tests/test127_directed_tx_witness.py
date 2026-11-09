@@ -101,12 +101,20 @@ struct TahoeP2PTxQueueLease {
 };
 struct TahoeP2PDirectedDataContext {
     struct Binding { uint64_t runSerial; } binding;
+    struct PacketRecord {
+        uint64_t doorbellUs;
+        uint16_t firmwareStatus, sequenceControl, byteCount, frameControl;
+        uint16_t expectedNextSsn, descriptorIndex;
+        bool doorbellIssued, completionObserved, resourcesAbsent;
+    } packets[2]{};
     bool doorbellIssued;
-    unsigned queueId, stationId;
+    unsigned queueId, stationId, currentSlot, packetCount;
+    uint16_t ringSize;
     uint64_t queueAllocationSerial, stationAllocationSerial;
     TahoeP2PDirectedDataState state;
     IntelP2PActionTx::CompletionTracker completion{};
     bool quarantined = false;
+    bool enteredLiveCompletion = false;
 };
 static void iwx_tahoe_p2p_directed_data_quarantine(
     TahoeP2PDirectedDataContext *context, TahoeP2PDirectedDataReason)
@@ -117,9 +125,17 @@ static void bus_dmamap_sync(int, int, int, int, int) {}
 constexpr int IWX_RBUF_SIZE = 4096;
 constexpr int BUS_DMASYNC_POSTREAD = 1;
 ''' + cut(registers, '#define IWX_TX_RES_GET_TID', '/**') + cut(
+    action, 'static uint16_t directedDataReadLe16(',
+    'static bool directedDataSubmitHasDeadlineMargin(') + cut(
+    action, 'static bool directedDataHasDoorbellHistory(',
+    'struct DirectedDataGateCheck') + cut(
+    action, 'static bool directedDataMatchesRetiredResponse(',
+    'bool iwx_tahoe_p2p_directed_data_tx_response(') + cut(
     action, 'bool iwx_tahoe_p2p_directed_data_tx_response(',
     '    struct iwx_tx_ring *ring = nullptr;'
 ) + r'''
+    (void)currentPacket;
+    context->enteredLiveCompletion = true;
     return true; // End of the tested early-return prefix.
 }
 
@@ -184,8 +200,14 @@ int main()
     TahoeP2PStationLease sta{25};
     TahoeP2PTxQueueLease queue{26, 4, 3, TahoeP2PStationRole::kDirectedPeerLink,
                               0, TahoeP2PResourceState::kActive};
-    TahoeP2PDirectedDataContext context{{11}, true, 4, 3, 26, 25,
-                                        TahoeP2PDirectedDataState::kInFlight};
+    TahoeP2PDirectedDataContext context{};
+    context.binding.runSerial = 11;
+    context.doorbellIssued = true;
+    context.queueId = 4;
+    context.stationId = 3;
+    context.queueAllocationSerial = 26;
+    context.stationAllocationSerial = 25;
+    context.state = TahoeP2PDirectedDataState::kInFlight;
     TxPassThrough reason = TxPassThrough::kNone;
     const auto invoke = [&](TahoeP2PDirectedDataContext *ctx) {
         return iwx_tahoe_p2p_directed_data_tx_response(
@@ -200,8 +222,11 @@ int main()
     owner.onGate = true;
     assert(!invoke(nullptr) && reason == TxPassThrough::kInvalidArguments);
     context.doorbellIssued = false;
+    context.packetCount = 1;
+    context.packets[0].doorbellIssued = false;
     assert(!invoke(&context) && reason == TxPassThrough::kNoDoorbell);
     context.doorbellIssued = true;
+    context.packets[0].doorbellIssued = true;
     ++queue.allocationSerial;
     rsp->ra_tid = 0x41;
     assert(!invoke(&context) && reason == TxPassThrough::kAllocationAndRaTidMismatch);
@@ -211,6 +236,81 @@ int main()
     assert(!context.quarantined);
     rsp->ra_tid = 0x30;
     assert(invoke(&context) && context.quarantined); // Existing tombstone.
+
+    // A delayed exact slot-zero TX_RSP must be consumed while slot one is the
+    // live descriptor, even if the legacy aggregate doorbell flag is false.
+    auto prepareRetiredSlotOne = [&] {
+        context.quarantined = false;
+        context.enteredLiveCompletion = false;
+        context.doorbellIssued = false;
+        queue.allocationSerial = 26;
+        sta.allocationSerial = 25;
+        context.packetCount = 2;
+        context.currentSlot = 1;
+        context.ringSize = 64;
+        context.packets[0].doorbellIssued = true;
+        context.packets[0].completionObserved = true;
+        context.packets[0].resourcesAbsent = true;
+        context.packets[0].firmwareStatus = 1;
+        context.packets[0].sequenceControl = 0x310;
+        context.packets[0].byteCount = 96;
+        context.packets[0].frameControl = 8;
+        context.packets[0].expectedNextSsn = 1;
+        context.packets[1].doorbellIssued = true;
+        context.state = TahoeP2PDirectedDataState::kInFlight;
+        assert(context.completion.arm(7, 4, 64, 2, 0x420, 96, 8) ==
+               IntelP2PActionTx::Result::kReady);
+        rsp->frame_count = 1;
+        rsp->ra_tid = 0x30;
+        rsp->frame_ctrl = 8;
+        rsp->seq_ctl = 0x310;
+        rsp->byte_cnt = 96;
+        rsp->tx_queue = 4;
+        rsp->status.status = 1;
+        rawSsn = 0x1001;
+        memcpy(tx.get()->data + sizeof(iwx_tx_resp), &rawSsn,
+               sizeof(rawSsn));
+    };
+    prepareRetiredSlotOne();
+    assert(invoke(&context));
+    assert(!context.quarantined && !context.enteredLiveCompletion);
+
+    // Every truncated payload length from the status-only boundary through
+    // the complete 32-bit SSN boundary must avoid the retired-slot matcher.
+#define TEST_TRUNCATED_SSN(N) do { \
+    Packet<N> truncated(IWX_TX_CMD, 1, 4); \
+    auto *shortRsp = reinterpret_cast<iwx_tx_resp *>(truncated.get()->data); \
+    shortRsp->frame_count = 1; \
+    shortRsp->ra_tid = 0x30; \
+    shortRsp->frame_ctrl = 8; \
+    shortRsp->seq_ctl = 0x310; \
+    shortRsp->byte_cnt = 96; \
+    shortRsp->tx_queue = 4; \
+    shortRsp->status.status = 1; \
+    const size_t availableSsnBytes = (N) > sizeof(iwx_tx_resp) ? \
+        (N) - sizeof(iwx_tx_resp) : 0; \
+    if (availableSsnBytes) \
+        memset(truncated.get()->data + sizeof(iwx_tx_resp), 0x01, \
+               availableSsnBytes); \
+    context.enteredLiveCompletion = false; \
+    assert(iwx_tahoe_p2p_directed_data_tx_response( \
+        &owner, &sc, &sta, &queue, &context, truncated.get(), &data, \
+        &reason)); \
+    assert(context.enteredLiveCompletion && !context.quarantined); \
+} while (0)
+    TEST_TRUNCATED_SSN(44);
+    TEST_TRUNCATED_SSN(45);
+    TEST_TRUNCATED_SSN(46);
+    TEST_TRUNCATED_SSN(47);
+#undef TEST_TRUNCATED_SSN
+
+    // With no current slot doorbell and no prior slot doorbell, a response is
+    // still passed through; the history check must not consume unrelated RSPs.
+    context.packetCount = 2;
+    context.packets[0].doorbellIssued = false;
+    context.packets[1].doorbellIssued = false;
+    context.enteredLiveCompletion = false;
+    assert(!invoke(&context) && reason == TxPassThrough::kNoDoorbell);
 
     // A later consumed rejection cannot replace the first target pass-through.
     assert(readDirectedDataTxRx(ledger, tx.get(), 0x1c, kNotDispatched, row));

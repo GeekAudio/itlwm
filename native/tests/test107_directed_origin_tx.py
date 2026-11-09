@@ -86,7 +86,7 @@ def main() -> None:
         create_shims(directory)
         functional = compile_binary(directory, "origin-asan-ubsan",
                                     "address,undefined")
-        for case in range(1, 12):
+        for case in range(1, 18):
             run([str(functional), str(case)])
 
         tsan = compile_binary(directory, "origin-tsan", "thread")
@@ -95,7 +95,8 @@ def main() -> None:
 
     print(
         "Test107 production BSD host-shim coverage passed: "
-        "11 ASan/UBSan ownership/address-scope cases + 3 TSAN concurrency cases. "
+        "17 ASan/UBSan ownership/address-scope/2-packet proof cases + "
+        "3 TSAN concurrency cases. "
         "Native kernel, firmware, RF and peer delivery were not tested."
     )
 

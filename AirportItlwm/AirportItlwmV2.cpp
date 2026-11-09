@@ -261,6 +261,9 @@ static bool directedDataHasReadonlyKeys(OSDictionary *request)
             strcmp(name, "NativeP2PDirectedDataPeerMAC") &&
             strcmp(name, "NativeP2PDirectedDataLocalIPv6") &&
             strcmp(name, "NativeP2PDirectedDataNonce") &&
+            strcmp(name, "NativeP2PDirectedDataNonce2") &&
+            strcmp(name, "NativeP2PDirectedDataPeerIPv6") &&
+            strcmp(name, "NativeP2PDirectedDataPacketCount") &&
             strcmp(name, "NativeP2PDirectedDataRunToken")) {
             blocked = true;
             break;
@@ -642,8 +645,12 @@ IOReturn AirportItlwm::setProperties(OSObject *properties)
     OSObject *dataPeer = request ? request->getObject("NativeP2PDirectedDataPeerMAC") : nullptr;
     OSObject *dataLocal = request ? request->getObject("NativeP2PDirectedDataLocalIPv6") : nullptr;
     OSObject *dataNonce = request ? request->getObject("NativeP2PDirectedDataNonce") : nullptr;
+    OSObject *dataNonce2 = request ? request->getObject("NativeP2PDirectedDataNonce2") : nullptr;
+    OSObject *dataPeerIpv6 = request ? request->getObject("NativeP2PDirectedDataPeerIPv6") : nullptr;
+    OSObject *dataPacketCount = request ? request->getObject("NativeP2PDirectedDataPacketCount") : nullptr;
     OSObject *dataToken = request ? request->getObject("NativeP2PDirectedDataRunToken") : nullptr;
-    const bool hasDataFields = dataArm || dataPeer || dataLocal || dataNonce || dataToken;
+    const bool hasDataFields = dataArm || dataPeer || dataLocal || dataNonce ||
+        dataNonce2 || dataPeerIpv6 || dataPacketCount || dataToken;
     const bool hasDirectedFields = directedArm || directedPeer || directedToken;
     if (!arm && !rxArm && !hasDirectedFields && !hasDataFields) {
         if (rxToken)
@@ -661,8 +668,19 @@ IOReturn AirportItlwm::setProperties(OSObject *properties)
         directedArm == kOSBooleanTrue &&
         validDirectedPreparePeer(directedPeer) &&
         validDirectedPrepareRunToken(directedToken);
+    const bool legacyDataShape = request && request->getCount() == 5 &&
+        !dataNonce2 && !dataPeerIpv6 && !dataPacketCount;
+    auto packetCount = OSDynamicCast(OSNumber, dataPacketCount);
+    const bool twoPacketDataShape = request && request->getCount() == 8 &&
+        packetCount && packetCount->unsigned64BitValue() == 2 &&
+        validDirectedDataNonce(dataNonce) && validDirectedDataNonce(dataNonce2) &&
+        validDirectedDataLocalIpv6(dataLocal) && validDirectedDataLocalIpv6(dataPeerIpv6) &&
+        memcmp(OSDynamicCast(OSData, dataNonce)->getBytesNoCopy(),
+               OSDynamicCast(OSData, dataNonce2)->getBytesNoCopy(), 8) != 0 &&
+        memcmp(OSDynamicCast(OSData, dataLocal)->getBytesNoCopy(),
+               OSDynamicCast(OSData, dataPeerIpv6)->getBytesNoCopy(), 16) != 0;
     const bool dataArmRequest = request && dataArm && !arm && !rxArm &&
-        !hasDirectedFields && request->getCount() == 5 && dataArm == kOSBooleanTrue &&
+        !hasDirectedFields && (legacyDataShape || twoPacketDataShape) && dataArm == kOSBooleanTrue &&
         validDirectedPreparePeer(dataPeer) && validDirectedDataLocalIpv6(dataLocal) &&
         validDirectedDataNonce(dataNonce) && validDirectedPrepareRunToken(dataToken);
     if (!legacyArmRequest && !rxArmRequest && !directedArmRequest && !dataArmRequest)
@@ -687,6 +705,17 @@ IOReturn AirportItlwm::setProperties(OSObject *properties)
         memcpy(context.arm.peerMac, peer->getBytesNoCopy(), sizeof(context.arm.peerMac));
         memcpy(context.arm.localIpv6, local->getBytesNoCopy(), sizeof(context.arm.localIpv6));
         memcpy(context.arm.nonce, nonce->getBytesNoCopy(), sizeof(context.arm.nonce));
+        context.arm.packetCount = twoPacketDataShape ? 2 : 1;
+        if (twoPacketDataShape) {
+            memcpy(context.arm.peerIPv6,
+                OSDynamicCast(OSData, dataPeerIpv6)->getBytesNoCopy(),
+                sizeof(context.arm.peerIPv6));
+            memcpy(context.arm.packetNonces[0], nonce->getBytesNoCopy(),
+                sizeof(context.arm.packetNonces[0]));
+            memcpy(context.arm.packetNonces[1],
+                OSDynamicCast(OSData, dataNonce2)->getBytesNoCopy(),
+                sizeof(context.arm.packetNonces[1]));
+        }
         memcpy(context.arm.runToken, context.runToken->getCStringNoCopy(), 32);
         if (_fWorkloop->inGate())
             return armNativeP2PDirectedDataOnMainGate(this, &context, nullptr, nullptr, nullptr);
