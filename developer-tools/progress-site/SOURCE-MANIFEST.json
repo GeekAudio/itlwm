@@ -20,27 +20,27 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "9325847b941aa51f0861b0ab0c115a1c3cf40e51ee772c4e5a2bf1e98028d2dc"
+      "sha256": "59899d3bb82c8455fa85fde33182300d0016687b803aa79aa5849b0e82bd8e9c"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "4f6cf69bfbdf89f5abfb52546e728d32d93331251f5a27b28342bd834d289bd1"
+      "sha256": "866dea647bd9ac3b4b9d91ffde65dde93bb96a365230988a29192ff2fed5fcb4"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "daa0513c20ad987e6255e2a28dddea62af5a09732e4edec021fec47212948df6"
+      "sha256": "e8254d2d2eee9acfa3fbd8fb876c840be5ea1b98ea1bcd48de3feb44446dff6c"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "daa0513c20ad987e6255e2a28dddea62af5a09732e4edec021fec47212948df6"
+      "sha256": "e8254d2d2eee9acfa3fbd8fb876c840be5ea1b98ea1bcd48de3feb44446dff6c"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "18e12bb9a038678b93d992c046ccd7f35b8320c15df0598d43bd023e33488dfa"
+      "sha256": "a8bc276fb92eb70dc71a56a1ef58bb18b10df16873d8e5eb8b3fe290d6ef46ba"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
@@ -85,11 +85,11 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-09T12:36:30+08:00",
-  "runtime_scope": "25G416-Test124频道6受控单包实测为当前运行记录：9通过、5部分、1未通过、25未覆盖。固件发送完成、资源清理、radio ACK、正式peer receipt、空口交付与AirDrop未证明；25G416-Test125已部署并读回，尚未重启或进行RF验收。",
-  "running_candidate": "25G416-Test124",
-  "next_candidate": "25G416-Test125",
-  "website_delivery": "Test124受控单包运行结果与Test125部署读回状态的public-safe进度快照；Test124计数保持9通过、5部分、1未通过、25未覆盖。",
-  "deployment_state": "test125_deployed_waiting_reboot",
-  "site_preparation": "Test124 runtime partial; Test125 deployed and read back, reboot verification pending. No device addresses, packet nonce, run token, private path, or deployment hash included."
+  "updated_at": "2026-11-09T13:03:32+08:00",
+  "runtime_scope": "本轮只确认Test125加载、原生接口及本次诊断前后状态。频道许可发布记录为旧代，内核在驻留前返回EOPNOTSUPP；没有UDP发送、数据回包或AirDrop证据。Test124的单包返回保留在开发时间线，不计入Test125本轮；未覆盖不代表能力回退。",
+  "running_candidate": "25G416-Test125",
+  "next_candidate": null,
+  "website_delivery": "Test125驻留前阻断结果与MCC发布接线离线进展；无设备地址、私有收据或凭据。",
+  "deployment_state": "test125_boot_verified_pre_roc_blocked",
+  "site_preparation": "Test125 loaded. Native UDP not attempted. MCC publisher wiring fixed offline, not deployed."
 }

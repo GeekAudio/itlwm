@@ -1,29 +1,29 @@
 window.TEST_RECORDS = [
   {
-    "id": "record-test124-test124-runtime",
-    "version": "25G416-Test124",
-    "label": "Test124：受控单包原生输入已见；发送完成与清理未闭环",
+    "id": "record-test125-runtime",
+    "version": "25G416-Test125",
+    "label": "Test125已加载；本轮在驻留开始前被频道许可门禁拒绝，原生UDP未发出，发送完成修补尚未测到。",
     "tone": "warning",
     "date": "2026-11-09",
-    "state": "Test124 实机诊断：9项通过 · 5项部分通过 · 1项未通过 · 25项未覆盖",
-    "short_summary": "一个匹配返回到达同一awdl0 socket；固件完成、清理与AirDrop未证明",
-    "summary": "Test124在频道6执行一次受控单包诊断。OpenWrt AF_PACKET monitor排除PACKET_OUTGOING后匹配一个数据帧；对端解析器匹配请求并本地发送一次回复。同一个awdl0绑定IPv6 socket收到一个匹配返回，ifnet_delivery_proven=true。延迟IORegistry刷新在同一启动、运行身份与generation下确认Captured=Decoded=Delivered=1、inputResult=0，捕获和输入均位于100 ms租约内。firmwareAttempt、completion、cleanupAck、radioACK、peer_receipt_proven、over_air_delivery_proven、AirDrop均为false。helper exit 2 / wait_cleanup / ETIMEDOUT，HAL quarantine，ResourcesAbsent=false。初次路由恢复失败后由watchdog恢复，幂等只读校验确认radio0 AP ch6/20、radio1与四项配置哈希未变；WAN/LAN未改。en1为UP并有IP但未关联AP，默认路由en0；联网冒烟与睡眠跳过。",
+    "state": "Test125 本轮：3项通过 · 1项部分通过 · 0项未通过 · 36项未覆盖",
+    "short_summary": "驻留前置条件拒绝；原生UDP未发出",
+    "summary": "本轮只确认Test125加载、原生接口及本次诊断前后状态。频道许可发布记录为旧代，内核在驻留前返回EOPNOTSUPP；没有UDP发送、数据回包或AirDrop证据。Test124的单包返回保留在开发时间线，不计入Test125本轮；未覆盖不代表能力回退。",
     "evidence": [
-      "AF_PACKET monitor排除PACKET_OUTGOING后匹配一个请求；对端解析器request_matched=true、reply_local_send=true。该现场解析结果不替代正式peer_receipt_proven。",
-      "同一个awdl0绑定IPv6 socket收到一个匹配返回，ifnet_delivery_proven=true。",
-      "延迟IORegistry刷新在同一启动、运行身份与generation下记录Captured=Decoded=Delivered=1、inputResult=0；捕获与输入均在100 ms租约内。即时计数0是旧快照。",
-      "helper exit 2，phase=wait_cleanup，原因为ETIMEDOUT；HAL quarantine且ResourcesAbsent=false。firmwareAttempt、completion、cleanupAck、radioACK、peer_receipt_proven、over_air_delivery_proven与AirDrop均为false。",
-      "首次router restore exit 1（ubus Not found）；watchdog随后恢复。幂等restore为只读校验并确认radio0 AP ch6/20、radio1及四项配置哈希不变；最终无active/lock，WAN/LAN未改。",
-      "en1为UP并有IP但未关联AP，默认路由en0；联网冒烟及睡眠跳过。"
+      "25G416-Test125身份核对通过；awdl0已绑定并运行。",
+      "驻留START之前，EOPNOTSUPP；native_udp_attempted=false，未测到END/TX_RSP修补。",
+      "驱动当前代次5，发布source/response/applied代次3。已定位周期发布不在主gate而直接返回；内部同代许可是否完整仍待核实。",
+      "路由器恢复exit 0，四项配置哈希不变，监控接口和临时guard已清；驱动复位计数保持5。",
+      "Test124曾有同awdl0 socket匹配返回，但固件完成与清理未闭环。本轮未重复该通路，不宣称能力回退。",
+      "周期发布改走非阻塞main gate，沿用生命周期锁；保留真实响应代次和现有发射门禁。离线回归与主配置编译通过。",
+      "联网冒烟和睡眠继续跳过；本轮未进行AirDrop文件传输。"
     ],
     "blockers": [
-      "固件发送完成、radio ACK、正式peer receipt和空口交付未证明。",
-      "helper在wait_cleanup超时并进入HAL quarantine；cleanupAck与ResourcesAbsent未成立。",
-      "IPv6邻居发现、Bonjour、分享服务握手、持续双向传输和AirDrop均未覆盖。"
+      "MCC发布记录落后当前驱动代次。",
+      "Test125发送完成等待修补尚未获得实机验证。",
+      "真实原生收发、持续调度和AirDrop未闭环。"
     ],
     "next": [
-      "按Test124现有结果单独复核生命周期清理/timeout终态；不将失败的清理门禁折叠成成功。",
-      "25G416-Test125仍是未部署离线候选；其构建和复核不改变本轮实测计数。"
+      "先修正MCC快照发布并核清当前代真实许可。修补仅离线验证，未部署；本轮不再重复ARM，也不需要立即重启。"
     ]
   }
 ];
