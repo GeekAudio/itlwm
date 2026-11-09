@@ -2832,6 +2832,7 @@ int iwx_tahoe_p2p_directed_data_arm(
         return serialError;
 
     ++context->armSerialHighWater;
+    context->txWitness = {};
     memset(&context->arm, 0, sizeof(context->arm));
     memcpy(&context->arm, arm, sizeof(context->arm));
     memset(&context->binding, 0, sizeof(context->binding));
@@ -3410,6 +3411,17 @@ static int directedDataTxSubmitOnMainGate(
     context->sequenceReservationValid = false;
     context->state = TahoeP2PDirectedDataState::kInFlight;
     permit->valid = false; // A permit can authorize exactly one doorbell.
+    auto &witness = context->txWitness;
+    witness.schema = 1;
+    witness.size = sizeof(witness);
+    witness.ownerSerial = context->binding.ownerSerial;
+    witness.runSerial = context->binding.runSerial;
+    witness.stationAllocationSerial = context->stationAllocationSerial;
+    witness.queueAllocationSerial = context->queueAllocationSerial;
+    witness.doorbellUs = directedDataMonotonicUs();
+    witness.queue = context->queueId;
+    witness.station = context->stationId;
+    witness.descriptorIndex = index;
     IWX_WRITE(sc, IWX_HBUS_TARG_WRPTR, ring->qid << 16 | ring->cur);
     error = iwx_tahoe_p2p_tvqm_finish_tx_submit(queueLease);
     if (error) {
@@ -3482,26 +3494,35 @@ bool iwx_tahoe_p2p_directed_data_tx_response(
     TahoeP2PStationLease *stationLease,
     TahoeP2PTxQueueLease *queueLease,
     TahoeP2PDirectedDataContext *context,
-    struct iwx_rx_packet *packet, struct iwx_rx_data *rxData)
+    struct iwx_rx_packet *packet, struct iwx_rx_data *rxData,
+    TahoeP2PDirectedDataTxWitness::TxPassThrough *passThroughReason)
 {
+    using TahoeP2PDirectedDataTxWitness::TxPassThrough;
+    const auto passThrough = [passThroughReason](TxPassThrough reason) {
+        if (passThroughReason)
+            *passThroughReason = reason;
+        return false;
+    };
     if (!owner || !owner->tahoeP2pOnMainGate())
-        return false;
-    if (!sc || !stationLease || !queueLease || !context || !packet ||
-        !rxData || !context->binding.runSerial || !context->doorbellIssued)
-        return false;
+        return passThrough(owner ? TxPassThrough::kOutsideMainGate :
+                                   TxPassThrough::kMissingOwner);
+    if (!sc || !stationLease || !queueLease || !context || !packet || !rxData)
+        return passThrough(TxPassThrough::kInvalidArguments);
+    if (!context->binding.runSerial || !context->doorbellIssued)
+        return passThrough(TxPassThrough::kNoDoorbell);
     const size_t payloadLength = iwx_rx_packet_payload_len(packet);
     if (payloadLength < offsetof(struct iwx_tx_resp, tx_queue) +
                             sizeof(uint16_t))
-        return false; // No trustworthy payload qid; leave ordinary STA alone.
+        return passThrough(TxPassThrough::kShortPayload);
     bus_dmamap_sync(sc->sc_dmat, rxData->map, 0, IWX_RBUF_SIZE,
                     BUS_DMASYNC_POSTREAD);
     const uint8_t *payload = reinterpret_cast<const uint8_t *>(packet->data);
     uint16_t responseQueue = 0;
     if (!IntelP2PActionTx::extractTxResponseQueueId(payload, payloadLength,
             offsetof(struct iwx_tx_resp, tx_queue), &responseQueue))
-        return false;
+        return passThrough(TxPassThrough::kQueueDecodeFailed);
     if (responseQueue != context->queueId)
-        return false;
+        return passThrough(TxPassThrough::kQueueMismatch);
 
     const bool allocationMatches =
         queueLease->allocationSerial == context->queueAllocationSerial &&
@@ -3526,7 +3547,7 @@ bool iwx_tahoe_p2p_directed_data_tx_response(
     const bool terminalTombstone = !allocationMatches && responseHasStation;
     if (!liveOwned) {
         if (!allocationMatches && !terminalTombstone)
-            return false;
+            return passThrough(TxPassThrough::kAllocationAndRaTidMismatch);
         iwx_tahoe_p2p_directed_data_quarantine(context,
             previousTicket.completed ?
                 TahoeP2PDirectedDataReason::kResponseDuplicate :
@@ -3695,6 +3716,8 @@ static IOReturn directedDataCommitCloseAction(
         commit->result = ESTALE;
         return kIOReturnSuccess;
     }
+    context->txWitness.rememberClose(directedDataMonotonicUs(),
+                                    static_cast<uint32_t>(context->reason));
     if (!identity->originClosed && identity->ticketBound &&
         (!commit->bsdCloseSucceeded || !commit->originInactive)) {
         iwx_tahoe_p2p_directed_data_quarantine(context,
@@ -3979,6 +4002,41 @@ static bool directedDataCaptureSnapshot(
     value.hardStopDrained = context->hardStopDrained;
     *snapshot = value;
     return true;
+}
+
+struct DirectedDataTxWitnessCut {
+    TahoeP2PDirectedDataContext *context;
+    uint64_t ownerSerial;
+    uint64_t runSerial;
+    TahoeP2PDirectedDataTxWitness::Snapshot *out;
+};
+
+static IOReturn directedDataSealTxWitnessAction(
+    OSObject *, void *ownerArg, void *actionArg, void *, void *)
+{
+    auto *owner = static_cast<ItlIwx *>(ownerArg);
+    auto *cut = static_cast<DirectedDataTxWitnessCut *>(actionArg);
+    if (!owner || !owner->tahoeP2pOnMainGate() || !cut)
+        return kIOReturnBadArgument;
+    auto &witness = cut->context->txWitness;
+    if (!witness.seal(cut->ownerSerial, cut->runSerial,
+                      directedDataMonotonicUs()))
+        return kIOReturnNotFound;
+    *cut->out = witness;
+    return kIOReturnSuccess;
+}
+
+bool iwx_tahoe_p2p_directed_data_seal_tx_witness(
+    ItlIwx *owner, TahoeP2PDirectedDataContext *context,
+    const TahoeP2PDirectedDataBinding &binding,
+    TahoeP2PDirectedDataTxWitness::Snapshot *out)
+{
+    if (!context || !out || !binding.runSerial)
+        return false;
+    DirectedDataTxWitnessCut cut{context, binding.ownerSerial,
+                                 binding.runSerial, out};
+    return directedDataRunMainGateAction(owner, directedDataSealTxWitnessAction,
+                                         &cut) == kIOReturnSuccess;
 }
 
 struct DirectedDataSnapshotAction {

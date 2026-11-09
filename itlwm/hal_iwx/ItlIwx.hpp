@@ -958,7 +958,12 @@ public:
     void iwx_txd_done(struct iwx_softc *sc, struct iwx_tx_data *txd);
     void iwx_clear_oactive(struct iwx_softc *sc, struct iwx_tx_ring *ring);
     void iwx_ampdu_txq_advance(struct iwx_softc *sc, struct iwx_tx_ring *ring, int idx);
-    void iwx_rx_tx_ba_notif(struct iwx_softc *sc, struct iwx_rx_packet *pkt, struct iwx_rx_data *data);
+    void iwx_rx_tx_ba_notif(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
+                           struct iwx_rx_data *data
+#if defined(AIRPORT_TAHOE) && ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+                           , TahoeP2PDirectedDataTxWitness::Record *directedWitness
+#endif
+                           );
     void    iwx_rx_tx_cmd(struct iwx_softc *, struct iwx_rx_packet *,
             struct iwx_rx_data *);
     void    iwx_rx_bmiss(struct iwx_softc *, struct iwx_rx_packet *,

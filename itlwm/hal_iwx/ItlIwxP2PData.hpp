@@ -12,6 +12,7 @@
 #include "../../native/p2p_action_tx.hpp"
 #include "../../native/awdl_directed_origin_tx.hpp"
 #include "../../native/iwx_mcc_refresh_policy.hpp"
+#include "ItlIwxP2PDataTxWitness.hpp"
 
 class ItlIwx;
 struct iwx_softc;
@@ -172,6 +173,7 @@ constexpr uint32_t kTahoeP2PDirectedDataRequiredStopProofs =
 
 struct TahoeP2PDirectedDataContext {
     IntelP2PActionTx::CompletionTracker completion;
+    TahoeP2PDirectedDataTxWitness::Snapshot txWitness{};
     TahoeP2PDirectedDataArm arm;
     TahoeP2PDirectedDataBinding binding;
     // The main-gate validator compares this exact worker token with the live
@@ -294,7 +296,8 @@ bool iwx_tahoe_p2p_directed_data_tx_response(
     TahoeP2PStationLease *stationLease,
     TahoeP2PTxQueueLease *queueLease,
     TahoeP2PDirectedDataContext *context,
-    struct iwx_rx_packet *packet, struct iwx_rx_data *rxData);
+    struct iwx_rx_packet *packet, struct iwx_rx_data *rxData,
+    TahoeP2PDirectedDataTxWitness::TxPassThrough *passThroughReason);
 bool iwx_tahoe_p2p_directed_data_reject_ba(
     TahoeP2PTxQueueLease *queueLease,
     TahoeP2PDirectedDataContext *context, uint16_t queueId);
@@ -304,6 +307,11 @@ void iwx_tahoe_p2p_directed_data_quarantine(
 // Idempotently closes the exact BSD origin ticket when present. It does not
 // remove the queue; callers use the TX lease cleanup API after ROC END. A
 // possible doorbell stays quarantined and returns busy.
+bool iwx_tahoe_p2p_directed_data_seal_tx_witness(
+    ItlIwx *owner, TahoeP2PDirectedDataContext *context,
+    const TahoeP2PDirectedDataBinding &binding,
+    TahoeP2PDirectedDataTxWitness::Snapshot *out);
+
 int iwx_tahoe_p2p_directed_data_close(
     ItlIwx *owner, TahoeP2PDirectedDataContext *context,
     TahoeP2PDirectedDataReason reason);

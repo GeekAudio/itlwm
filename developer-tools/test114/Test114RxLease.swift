@@ -172,6 +172,13 @@ public func test114InitialWindow(_ object: [String: Any]) -> Test114RxLeaseWindo
     return Test114RxLeaseWindow(startUs: start, deadlineUs: deadline)
 }
 
+/// Builds that carry an origin-bound MCC lease require the Test126 witness
+/// fields. Test127 keeps the same MCC admission contract while adding its
+/// separate completion witness.
+public func test114RequiresMccOriginWitness(for build: String) -> Bool {
+    return ["25G416-Test126", "25G416-Test127"].contains(build)
+}
+
 /// Capture the core identity before allowing any short mirror-read retry.
 /// A partial/unstable initial publication is not a basis for adopting a later lease.
 public func test114InitialIdentity(_ object: [String: Any],

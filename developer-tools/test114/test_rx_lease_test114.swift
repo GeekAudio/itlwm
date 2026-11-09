@@ -91,6 +91,12 @@ expect(originalWindow == Test114RxLeaseWindow(startUs: 5_000_000, deadlineUs: 5_
 expect(originalIdentity != nil, "capture the first valid owner and MCC identity")
 expect(originalIdentity?.mccOrigin == nil,
        "preserve the older lease profile when origin witness fields are absent")
+expect(test114RequiresMccOriginWitness(for: "25G416-Test126"),
+       "keep Test126 on the origin-bound MCC witness path")
+expect(test114RequiresMccOriginWitness(for: "25G416-Test127"),
+       "select the same strict MCC witness path for Test127")
+expect(!test114RequiresMccOriginWitness(for: "25G416-Test125"),
+       "retain the prior lease parser for Test125")
 let success = test114CheckRxLease(
     first, originalWindow: originalWindow, originalIdentity: originalIdentity,
     monotonicUs: 5_020_000,
@@ -323,6 +329,16 @@ let (test126InitPoll, test126InitPollReads) = poll(
 expect(test126InitPoll.window != nil && test126InitPollReads == 0 &&
        test126InitPoll.trace.completionReason == "lease_valid",
        "select and accept Test126's strict init-origin lease path")
+
+let test127ChubLive = liveLease(test126Chub, build: "25G416-Test127")
+let (test127ChubPoll, test127ChubPollReads) = poll(
+    test127ChubLive, sequence: [test127ChubLive], expectedBuild: "25G416-Test127",
+    requireMccOriginWitness: test114RequiresMccOriginWitness(for: "25G416-Test127"))
+expect(test127ChubPoll.window != nil && test127ChubPollReads == 0 &&
+       test127ChubPoll.trace.completionReason == "lease_valid" &&
+       test127ChubPoll.trace.lastCheck?.safeNumericSnapshot["RxLeaseMccOrigin"] == 2 &&
+       test127ChubPoll.trace.lastCheck?.safeNumericSnapshot["RxLeaseMccRequestSequence"] == 0,
+       "accept Test127 only through the strict CHUB-origin lease profile")
 
 var changedInitSequence = test126InitLive
 changedInitSequence["NativeP2PDirectedDataRxLeaseMccRequestSequence"] = NSNumber(value: 34)

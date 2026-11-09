@@ -8010,6 +8010,9 @@ static void publishDirectedDataState(ItlIwx *owner, P2PProbeRun *probe,
     if (!controller || !probe)
         return;
 
+    if (stage == kDirectedDataPreparing)
+        controller->removeProperty("NativeP2PDirectedDataTxWitness");
+
     if (NativeP2PDirectedDataControl::publicationForStage(stage) ==
         NativeP2PDirectedDataControl::Publication::FastStateOnly) {
         if (stage == kDirectedDataReady) {
@@ -8042,6 +8045,17 @@ static void publishDirectedDataState(ItlIwx *owner, P2PProbeRun *probe,
     TahoeP2PDirectedDataSnapshot data{};
     const bool dataSnapshotValid = iwx_tahoe_p2p_directed_data_snapshot(
         owner, &owner->nativeP2pDirectedDataTx_, &data);
+    TahoeP2PDirectedDataTxWitness::Snapshot witness{};
+    if (iwx_tahoe_p2p_directed_data_seal_tx_witness(owner,
+            &owner->nativeP2pDirectedDataTx_, probe->directedDataBinding,
+            &witness)) {
+        // A single OSData replacement makes the terminal evidence atomic.
+        OSData *payload = OSData::withBytes(&witness, sizeof(witness));
+        if (payload) {
+            (void)controller->setProperty("NativeP2PDirectedDataTxWitness", payload);
+            payload->release();
+        }
+    }
     controller->setProperty("NativeP2PDirectedDataStage", stage, 32);
     controller->setProperty("NativeP2PDirectedDataResult",
                             static_cast<uint32_t>(result), 32);

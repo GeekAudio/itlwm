@@ -10082,6 +10082,98 @@ static void txCompletionSetBaTfdFacts(
     event->ba_tfd_index = le16toh(tfd->tfd_index);
 }
 
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+static bool readDirectedDataTxRx(
+    const TahoeP2PDirectedDataTxWitness::Snapshot &witness,
+    const struct iwx_rx_packet *pkt, uint32_t code,
+    TahoeP2PDirectedDataTxWitness::Outcome outcome,
+    TahoeP2PDirectedDataTxWitness::Record &record)
+{
+    using namespace TahoeP2PDirectedDataTxWitness;
+    if (!witness.active() ||
+        (pkt->hdr.cmd != IWX_TX_CMD && pkt->hdr.cmd != IWX_BA_NOTIF))
+        return false;
+
+    const bool ba = pkt->hdr.cmd == IWX_BA_NOTIF;
+    record = {};
+    record.observedUs = tahoeMonotonicNs() / 1000ULL;
+    record.outcome = outcome;
+    record.group = pkt->hdr.group_id;
+    record.command = pkt->hdr.cmd;
+    record.headerQueue = pkt->hdr.qid;
+    record.headerIndex = pkt->hdr.idx;
+    record.dispatchCode = code;
+    // Rejected RX envelopes carry header evidence only. Never read their payload.
+    if (outcome != kNotDispatched)
+        return true;
+
+    auto facts = txCompletionRxInput(ba ? IWX_TX_COMPLETION_BA :
+                                        IWX_TX_COMPLETION_TX_RSP, 0, 0, pkt);
+    const size_t length = facts.payload_length;
+    record.presence |= kPayloadLength;
+    record.payloadLength = facts.payload_length;
+    if (ba) {
+        const size_t headerSize = offsetof(struct iwx_compressed_ba_notif, tfd);
+        if (length >= headerSize) {
+            const auto *response =
+                reinterpret_cast<const struct iwx_compressed_ba_notif *>(pkt->data);
+            txCompletionSetBaFacts(&facts, response);
+            record.presence |= kBaStationAndCount;
+            record.baStation = facts.ba_sta_id;
+            record.baTfdCount = facts.ba_tfd_count;
+            if (facts.ba_tfd_count &&
+                facts.ba_tfd_count <= (length - headerSize) /
+                    sizeof(struct iwx_compressed_ba_tfd)) {
+                // Prefer the first target TFD even if unrelated queues
+                // precede it. Otherwise TFD 0 is the foreign-queue sample.
+                // The validated RX buffer bounds the scan.
+                const auto *tfd = &response->tfd[0];
+                for (uint32_t i = 0; i < facts.ba_tfd_count; ++i) {
+                    if (le16toh(response->tfd[i].q_num) == witness.queue) {
+                        tfd = &response->tfd[i];
+                        break;
+                    }
+                }
+                txCompletionSetBaTfdFacts(&facts, tfd);
+                record.presence |= kBaTfd;
+                record.baTid = facts.ba_tfd_tid;
+                record.baIndex = facts.ba_tfd_index;
+            }
+        }
+    } else {
+        txCompletionSetTxRspFacts(&facts, pkt, length);
+        const auto copy = [&](uint32_t source, Presence present,
+                              uint32_t value, uint32_t &field) {
+            if (facts.presence_flags & source) {
+                record.presence |= present;
+                field = value;
+            }
+        };
+        copy(IWX_TX_COMPLETION_HAS_RA_TID, kRaTid, facts.ra_tid, record.raTid);
+        copy(IWX_TX_COMPLETION_HAS_FRAME_COUNT, kFrameCount,
+             facts.frame_count, record.frameCount);
+        copy(IWX_TX_COMPLETION_HAS_RESPONSE_SEQUENCE_CONTROL, kSequenceControl,
+             facts.response_sequence_control, record.sequenceControl);
+        copy(IWX_TX_COMPLETION_HAS_RESPONSE_FRAME_CONTROL, kFrameControl,
+             facts.response_frame_control, record.frameControl);
+        copy(IWX_TX_COMPLETION_HAS_SSN, kSsn, facts.ssn, record.ssn);
+        copy(IWX_TX_COMPLETION_HAS_STATUS, kStatus, facts.status, record.status);
+        const size_t byteCountOffset = offsetof(struct iwx_tx_resp, byte_cnt);
+        uint16_t byteCount;
+        if (length >= byteCountOffset + sizeof(byteCount)) {
+            memcpy(&byteCount, pkt->data + byteCountOffset, sizeof(byteCount));
+            record.presence |= kByteCount;
+            record.byteCount = le16toh(byteCount);
+        }
+    }
+    if (facts.presence_flags & IWX_TX_COMPLETION_HAS_FIRMWARE_QID) {
+        record.presence |= kQueue;
+        record.queue = facts.firmware_qid;
+    }
+    return true;
+}
+#endif
+
 static bool recordTxCompletionEvent(
     struct iwx_softc *sc, iwx_tx_completion_event_input event,
     iwx_tx_completion_observation_snapshot *relatedCut = nullptr)
@@ -10139,7 +10231,12 @@ private:
 #endif
 
 void ItlIwx::
-iwx_rx_tx_ba_notif(struct iwx_softc *sc, struct iwx_rx_packet *pkt, struct iwx_rx_data *data)
+iwx_rx_tx_ba_notif(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
+                   struct iwx_rx_data *data
+#if defined(AIRPORT_TAHOE) && ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+                   , TahoeP2PDirectedDataTxWitness::Record *directedWitness
+#endif
+                   )
 {
     struct ieee80211com *ic = &sc->sc_ic;
     const size_t payloadLength = iwx_rx_packet_payload_len(pkt);
@@ -10202,8 +10299,13 @@ iwx_rx_tx_ba_notif(struct iwx_softc *sc, struct iwx_rx_packet *pkt, struct iwx_r
                 &nativeP2pTxQueue_, &nativeP2pActionTx_,
                 queueId);
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
-            (void)iwx_tahoe_p2p_directed_data_reject_ba(
+            const bool rejected = iwx_tahoe_p2p_directed_data_reject_ba(
                 &nativeP2pTxQueue_, &nativeP2pDirectedDataTx_, queueId);
+            if (rejected && directedWitness) {
+                directedWitness->outcome = TahoeP2PDirectedDataTxWitness::kBaRejected;
+                directedWitness->handlerReason = static_cast<uint32_t>(
+                    nativeP2pDirectedDataTx_.reason);
+            }
 #endif
         }
         baCompletion.setReason(IWX_TX_COMPLETION_BA_STA_ID_MISMATCH);
@@ -10344,6 +10446,11 @@ iwx_rx_tx_ba_notif(struct iwx_softc *sc, struct iwx_rx_packet *pkt, struct iwx_r
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
         if (iwx_tahoe_p2p_directed_data_reject_ba(
                 &nativeP2pTxQueue_, &nativeP2pDirectedDataTx_, queueId)) {
+            if (directedWitness) {
+                directedWitness->outcome = TahoeP2PDirectedDataTxWitness::kBaRejected;
+                directedWitness->handlerReason = static_cast<uint32_t>(
+                    nativeP2pDirectedDataTx_.reason);
+            }
             tfdCompletion.setReason(IWX_TX_COMPLETION_BA_TFD_P2P_OWNED);
             continue;
         }
@@ -21710,6 +21817,14 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
         tahoeRxPreOwnerEvent(NativeRxPreOwner::EventKind::NotificationSeen,
             rxRingSlot, uint32_t(qid), uint32_t(idx), 0, uint32_t(code));
 #endif
+#if defined(AIRPORT_TAHOE) && ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+        TahoeP2PDirectedDataTxWitness::Record directedWitness;
+        auto &txWitness = nativeP2pDirectedDataTx_.txWitness;
+        const auto rememberDirectedWitness = [&] {
+            txWitness.remember(directedWitness.command == IWX_BA_NOTIF,
+                               directedWitness);
+        };
+#endif
         if (!iwx_rx_pkt_valid(pkt)) {
 #if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
             if (tahoeP2pOnMainGate()) {
@@ -21745,6 +21860,12 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
                 IwxFirmwareDiagnostics::kSourceIsHintOnly;
             tahoeRecordFirmwareMetadata(sc, diagnosticEntry);
             rxParseStop.setReason(IWX_TX_COMPLETION_RX_DESCRIPTOR_INVALID);
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+            if (readDirectedDataTxRx(txWitness, pkt, code,
+                    TahoeP2PDirectedDataTxWitness::kDescriptorRejected,
+                    directedWitness))
+                rememberDirectedWitness();
+#endif
 #endif
             break;
         }
@@ -21812,6 +21933,12 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
             tahoeRecordFirmwareMetadata(sc, diagnosticEntry);
             rxParseStop.setReason(
                 IWX_TX_COMPLETION_RX_PACKET_LENGTH_INVALID);
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+            if (readDirectedDataTxRx(txWitness, pkt, code,
+                    TahoeP2PDirectedDataTxWitness::kLengthRejected,
+                    directedWitness))
+                rememberDirectedWitness();
+#endif
 #endif
             break;
         }
@@ -21868,6 +21995,12 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
         diagnosticEntry.payload_length = iwx_rx_packet_payload_len(pkt);
         tahoeRecordFirmwareMetadata(sc, diagnosticEntry);
         rxParseStop.dismiss();
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+        const bool observeDirected = readDirectedDataTxRx(txWitness, pkt, code,
+            TahoeP2PDirectedDataTxWitness::kNotDispatched, directedWitness);
+        if (observeDirected && code != IWX_TX_CMD && code != IWX_BA_NOTIF)
+            rememberDirectedWitness();
+#endif
 #endif
 
 #ifdef AIRPORT_TAHOE
@@ -22008,7 +22141,16 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
                 break;
             }
             case IWX_BA_NOTIF:
+#if defined(AIRPORT_TAHOE) && ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+                if (observeDirected)
+                    directedWitness.outcome = TahoeP2PDirectedDataTxWitness::kBaDispatched;
+                iwx_rx_tx_ba_notif(sc, pkt, data,
+                                   observeDirected ? &directedWitness : nullptr);
+                if (observeDirected)
+                    rememberDirectedWitness();
+#else
                 iwx_rx_tx_ba_notif(sc, pkt, data);
+#endif
                 break;
                 
             case IWX_TX_CMD:
@@ -22029,9 +22171,30 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
                         IWX_TX_PROGRESS_RESPONSE_TX_RSP, responsePresent,
                         responseQid, 0, 0, 0, 0, 0, false);
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
-                    if (iwx_tahoe_p2p_directed_data_tx_response(this, sc,
+                    using namespace TahoeP2PDirectedDataTxWitness;
+                    TxPassThrough passThrough = TxPassThrough::kNone;
+                    const bool targetWitness = observeDirected &&
+                        (directedWitness.presence & kQueue) != 0 &&
+                        directedWitness.queue == txWitness.queue;
+                    const bool directedConsumed =
+                        iwx_tahoe_p2p_directed_data_tx_response(this, sc,
                             &nativeP2pStation_, &nativeP2pTxQueue_,
-                            &nativeP2pDirectedDataTx_, pkt, data)) {
+                            &nativeP2pDirectedDataTx_, pkt, data,
+                            targetWitness ? &passThrough : nullptr);
+                    if (observeDirected) {
+                        directedWitness.outcome = kTxPassedThrough;
+                        directedWitness.handlerReason = static_cast<uint32_t>(passThrough);
+                        if (directedConsumed) {
+                            directedWitness.outcome =
+                                nativeP2pDirectedDataTx_.state ==
+                                    TahoeP2PDirectedDataState::kCompleted ?
+                                        kTxCompleted : kTxRejected;
+                            directedWitness.handlerReason = static_cast<uint32_t>(
+                                nativeP2pDirectedDataTx_.reason);
+                        }
+                        rememberDirectedWitness();
+                    }
+                    if (directedConsumed) {
                         iwx_tx_completion_event_input completionEvent =
                             txCompletionRxInput(
                                 IWX_TX_COMPLETION_TX_RSP,
