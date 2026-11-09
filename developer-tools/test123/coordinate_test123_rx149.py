@@ -805,31 +805,6 @@ def _configure_test123_profile():
     return restore
 
 
-def _active_manifest() -> dict:
-    value = RUNNER.ACTIVE_PACKET_MANIFEST
-    if not isinstance(value, dict):
-        raise RUNNER.ControlledRunError("TEST123_PACKETSET_NOT_BOUND")
-    return value
-
-
-def _active_nonce() -> str:
-    value = _active_manifest().get("wire_nonce_hex")
-    if not isinstance(value, str):
-        raise RUNNER.ControlledRunError("TEST123_WIRE_NONCE_NOT_BOUND")
-    return value
-
-
-def _active_run_token_from_line(line: str) -> str:
-    try:
-        value = json.loads(line)
-    except (ValueError, TypeError) as error:
-        raise RUNNER.ControlledRunError("TEST123_SENDER_RESULT_MALFORMED") from error
-    token = value.get("run_token") if isinstance(value, dict) else None
-    if not isinstance(token, str):
-        raise RUNNER.ControlledRunError("TEST123_SENDER_RUN_TOKEN_MISSING")
-    return token
-
-
 def finalize_capture_report(report: dict[str, Any]) -> dict[str, Any]:
     """Aggregate Test123 terminal evidence without changing frozen T087/T088.
 

@@ -146,9 +146,10 @@ def _sender_ready_line(nonce: str) -> str:
 class Test123CoordinatorIntegration(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        # This validates local receipts and paths only. It does not read live
-        # identity, contact OpenWrt, compile, arm, or open an interface.
-        COORD._configure_test123_run()
+        # Synthetic private artifacts exercise the real configuration/hash
+        # path without live identity, OpenWrt, compilation, ARM or interfaces.
+        fixture = load("test123_offline_setup", HERE / "offline_setup.py").configure(COORD)
+        cls.addClassCleanup(fixture.cleanup)
 
     def setUp(self):
         COORD.SENDER_PROTOCOL.clear_packet_set_binding()
@@ -404,11 +405,12 @@ class Test123CoordinatorIntegration(unittest.TestCase):
         """Exercise the frozen T104 preflight expression through run_once."""
         from types import SimpleNamespace
 
-        # Rebind the actual Test123 paths/receipts, then make only the inputs
+        # Rebind temporary Test123 artifacts/receipts, then make only the inputs
         # preceding T104's runtime hash gate deterministic. The T088 sentinel
         # is the first point after that gate; no barrier, claim, or device I/O
         # is allowed in this offline test.
-        COORD._configure_test123_run()
+        fixture = load("test123_offline_setup", HERE / "offline_setup.py").configure(COORD)
+        self.addCleanup(fixture.cleanup)
         runner = COORD.RUNNER
         packet_bytes, manifest = COORD.SENDER_PROTOCOL._PACKETSET.encode_packet_set(
             SENDER_FIXTURES.SOURCE, SENDER_FIXTURES.TARGET,

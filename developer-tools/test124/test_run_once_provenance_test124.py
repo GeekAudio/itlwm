@@ -168,9 +168,10 @@ def _cleanup_line(token: str) -> str:
 class Test124RunOnceProvenance(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        # Validate only the already-built private tool receipts.  No runtime
-        # identity, network, kernel, or router operation is performed here.
-        COORD._configure_test123_run()
+        # Only artifact/receipt I/O is stubbed. The real adapter wiring and
+        # run_once provenance path do not require a previous private build.
+        fixture = load("test124_offline_setup", TEST123 / "offline_setup.py").configure(COORD)
+        cls.addClassCleanup(fixture.cleanup)
 
     def setUp(self):
         COORD.BINDING.clear_active_run()
@@ -367,6 +368,9 @@ class Test124RunOnceProvenance(unittest.TestCase):
 
             self.assertEqual(run_directory, output_dir)
             persisted = read_json(output_dir / runner.RESULT_NAME)
+            self.assertEqual(
+                persisted["sender_build_receipt_sha256"],
+                hashlib.sha256(runner.SENDER_BUILD_RECEIPT.read_bytes()).hexdigest())
             return report, persisted, run_lines
 
     def test_actual_t104_run_once_uses_validated_wire_contract_for_timing_and_provenance(self):

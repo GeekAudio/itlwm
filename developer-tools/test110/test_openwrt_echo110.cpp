@@ -14,7 +14,7 @@ int main() {
     memcpy(ip+8,c.ip,16);ip[24]=0xff;ip[25]=2;ip[39]=1;
     set16(ip+40,49153);set16(ip+42,49152);set16(ip+44,16);
     memcpy(ip+48,c.nonce,8);uint16_t sum=udpChecksum(ip);set16(ip+46,sum?sum:0xffff);
-    NativeAwdlData::EncodeInput in{};in.destinationAddress[0]=0x33;in.destinationAddress[1]=0x33;in.destinationAddress[5]=1;
+    NativeAwdlData::EncodeInput in{};memcpy(in.destinationAddress,c.peerMac,6);
     memcpy(in.sourceAddress,c.mac,6);in.ipv6Packet=ip;in.ipv6Length=56;
     uint8_t good[96];size_t goodLen=0;
     assert(NativeAwdlData::encodeIpv6DataMpdu(&in,good,sizeof(good),&goodLen)==NativeAwdlData::Status::Ok);
@@ -24,6 +24,10 @@ int main() {
     for(unsigned index:mutations) {uint8_t bad[96];memcpy(bad,good,96);bad[index]^=1;assert(!requestMatches(bad,96,c));}
     Contract wrong=c;wrong.nonce[0]^=1;assert(!requestMatches(good,96,wrong));
     wrong=c;wrong.mac[5]^=1;assert(!requestMatches(good,96,wrong));
+    wrong=c;wrong.peerMac[5]^=1;assert(!requestMatches(good,96,wrong));
+    uint8_t oldGroup[96];memcpy(oldGroup,good,96);
+    const uint8_t group[6]={0x33,0x33,0,0,0,1};memcpy(oldGroup+4,group,6);
+    assert(!requestMatches(oldGroup,96,c));
     wrong=c;wrong.ip[15]^=1;assert(!requestMatches(good,96,wrong));
     // The radio observation must actually carry channel 6, and optionally FCS.
     uint8_t radio[128]{};radio[2]=14;radio[4]=0x0e;radio[8]=0;radio[9]=12;

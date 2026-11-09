@@ -41,6 +41,7 @@ TEST113_BUILD_ID = "25G332-Test113"
 TEST114_BUILD_ID = "25G332-Test114"
 TEST115_BUILD_ID = "25G332-Test115"
 TEST116_BUILD_ID = "25G332-Test116"
+TEST124_BUILD_ID = "25G416-Test124"
 COORDINATOR_SCHEMAS = {
     BUILD_ID: "test111-local-coordinator/v1",
     TEST112_BUILD_ID: "test112-local-coordinator/v1",
@@ -48,6 +49,7 @@ COORDINATOR_SCHEMAS = {
     TEST114_BUILD_ID: "test114-local-coordinator/v1",
     TEST115_BUILD_ID: "test115-local-coordinator/v1",
     TEST116_BUILD_ID: "test116-local-coordinator/v1",
+    TEST124_BUILD_ID: "test124-local-coordinator/v1",
 }
 BUNDLE_ID = "org.geekaudio.AirportItlwm"
 REMOTE_SCRIPT_NAME = "monitor_window111.sh"

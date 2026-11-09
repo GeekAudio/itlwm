@@ -61,12 +61,13 @@ inline bool requestMatches(const uint8_t *mpdu,size_t n,const Contract &c) {
     NativeAwdlData::DecodedFrame frame{};
     if (NativeAwdlData::decodeIpv6DataMpdu(mpdu,n,&frame)!=NativeAwdlData::Status::Ok ||
         frame.packetCount!=1 || frame.amsdu || frame.qosData) return false;
-    const uint8_t multicastMac[6]={0x33,0x33,0,0,0,1};
+    // Mode 4 preserves the BSD ff02::1 payload but directs the radio MPDU
+    // to the selected peer station (LINK/TID0). It is not a multicast DA.
     const uint8_t multicastIp[16]={0xff,2,0,0,0,0,0,0,0,0,0,0,0,0,0,1};
     const auto &packet=frame.packets[0]; const uint8_t *ip=packet.ipv6Packet;
     if (packet.ipv6Length!=56 || memcmp(frame.sourceAddress,c.mac,6) ||
-        memcmp(frame.destinationAddress,multicastMac,6) ||
-        memcmp(packet.sourceAddress,c.mac,6) || memcmp(packet.destinationAddress,multicastMac,6)) return false;
+        memcmp(frame.destinationAddress,c.peerMac,6) ||
+        memcmp(packet.sourceAddress,c.mac,6) || memcmp(packet.destinationAddress,c.peerMac,6)) return false;
     if ((ip[0]>>4)!=6 || be16(ip+4)!=16 || ip[6]!=17 || ip[7]!=1 ||
         memcmp(ip+8,c.ip,16) || memcmp(ip+24,multicastIp,16) ||
         be16(ip+40)!=49153 || be16(ip+42)!=49152 || be16(ip+44)!=16 ||
