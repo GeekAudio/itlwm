@@ -24,6 +24,9 @@ func fail130(_ message: String, _ code: Int32 = 1) -> Never {
         "peer_socket_matched": peerMatched,
         "peer_receipt_proven": false, "radio_ack_proven": false,
         "airdrop_proven": false, "automatic_retry_allowed": false]
+    if let transition = armTransitionFailureSnapshot130 {
+        result["arm_transition_snapshot"] = transition
+    }
     if armMayHaveChanged, let postArmFinalizer130 {
         result["post_arm_cleanup_observation"] = postArmFinalizer130()
     }
@@ -40,6 +43,51 @@ func number130(_ object: [String: Any], _ key: String) -> UInt64? {
     guard value.isFinite, value >= 0, value.rounded(.towardZero) == value,
           value < 18_446_744_073_709_551_616.0 else { return nil }
     return number.uint64Value
+}
+func armObservedValue130(_ object: [String: Any],
+                         _ key: String) -> Test130ArmObservedValue {
+    guard object.keys.contains(key) else { return .missing }
+    guard let value = number130(object, key) else { return .malformed }
+    return .value(value)
+}
+func armObservedReport130(_ value: Test130ArmObservedValue,
+                          _ valueKey: String) -> [String: Any] {
+    switch value {
+    case .missing:
+        return ["presence": "missing"]
+    case .malformed:
+        return ["presence": "malformed"]
+    case let .value(number):
+        return ["presence": "present", valueKey: number]
+    }
+}
+func armTransitionReport130(_ snapshot: [String: Any],
+                            stageSeenBefore: Bool,
+                            packetCountSeenBefore: Bool,
+                            runTokenMatches: Bool,
+                            buildMatches: Bool,
+                            outcome: Test130ArmTransitionOutcome)
+    -> [String: Any] {
+    var report: [String: Any] = [
+        "run_token_matches": runTokenMatches,
+        "build_matches": buildMatches,
+        "stage_seen_before": stageSeenBefore,
+        "stage_seen": outcome.stageSeen,
+        "packet_count_seen_before": packetCountSeenBefore,
+        "packet_count_seen": outcome.packetCountSeen
+    ]
+    report["stage"] = armObservedReport130(
+        armObservedValue130(snapshot, "NativeP2PDirectedDataStage"), "value")
+    report["packet_count"] = armObservedReport130(
+        armObservedValue130(snapshot, "NativeP2PDirectedDataPacketCount"), "value")
+    report["ready"] = armObservedReport130(
+        armObservedValue130(snapshot, "NativeP2PDirectedDataReady"), "value")
+    switch outcome.action {
+    case let .reject(reason): report["decision"] = reason
+    case .ready: report["decision"] = "ready"
+    case .wait: report["decision"] = "wait"
+    }
+    return report
 }
 func number32_130(_ object: [String: Any], _ key: String) -> UInt32? {
     guard let value = number130(object, key), value <= UInt64(UInt32.max) else { return nil }
@@ -405,6 +453,7 @@ var peerError = [Int32(0), Int32(0)]
 var peerElapsed = [UInt64(0), UInt64(0)]
 var options: [String: String] = [:]
 var postArmFinalizer130: (() -> [String: Any])?
+var armTransitionFailureSnapshot130: [String: Any]?
 
 let allowed: Set<String> = ["--expect-build", "--expect-uuid", "--peer-mac",
     "--local-ipv6", "--peer-ipv6", "--nonce", "--nonce-2", "--run-token",
@@ -674,19 +723,61 @@ accepted = true
 
 phase = "roc_ready"
 let readyEnd = DispatchTime.now().uptimeNanoseconds + 5_000_000_000
-while DispatchTime.now().uptimeNanoseconds < readyEnd {
+var transitionStageSeen = false
+var transitionPacketCountSeen = false
+var transitionReady = false
+while DispatchTime.now().uptimeNanoseconds < readyEnd && !transitionReady {
     snapshot = properties130()
-    guard snapshot["NativeP2PDirectedDataAcceptedRunToken"] as? String == runToken,
-          snapshot["NativeTestBuild"] as? String == build,
-          number130(snapshot, "NativeP2PDirectedDataPacketCount") == 2 else {
-        fail130("run_identity_changed_after_arm")
+    let runTokenMatches =
+        snapshot["NativeP2PDirectedDataAcceptedRunToken"] as? String == runToken
+    let buildMatches = snapshot["NativeTestBuild"] as? String == build
+    let transition = test130EvaluateArmTransition(Test130ArmTransitionInput(
+        runTokenMatches: runTokenMatches, buildMatches: buildMatches,
+        stage: armObservedValue130(snapshot, "NativeP2PDirectedDataStage"),
+        packetCount: armObservedValue130(snapshot,
+            "NativeP2PDirectedDataPacketCount"),
+        ready: armObservedValue130(snapshot, "NativeP2PDirectedDataReady"),
+        stageSeen: transitionStageSeen,
+        packetCountSeen: transitionPacketCountSeen, deadlineExpired: false))
+    switch transition.action {
+    case let .reject(reason):
+        armTransitionFailureSnapshot130 = armTransitionReport130(snapshot,
+            stageSeenBefore: transitionStageSeen,
+            packetCountSeenBefore: transitionPacketCountSeen,
+            runTokenMatches: runTokenMatches, buildMatches: buildMatches,
+            outcome: transition)
+        fail130("arm_transition_\(reason)")
+    case .ready:
+        transitionReady = true
+        armTransitionFailureSnapshot130 = nil
+    case .wait:
+        transitionStageSeen = transition.stageSeen
+        transitionPacketCountSeen = transition.packetCountSeen
+        usleep(500)
     }
-    if number130(snapshot, "NativeP2PDirectedDataStage") == 4 &&
-       number130(snapshot, "NativeP2PDirectedDataReady") == 1 { break }
-    if (number130(snapshot, "NativeP2PDirectedDataStage") ?? 0) >= 8 {
-        fail130("kernel_ended_before_first_send")
+}
+if !transitionReady {
+    snapshot = properties130()
+    let runTokenMatches =
+        snapshot["NativeP2PDirectedDataAcceptedRunToken"] as? String == runToken
+    let buildMatches = snapshot["NativeTestBuild"] as? String == build
+    let transition = test130EvaluateArmTransition(Test130ArmTransitionInput(
+        runTokenMatches: runTokenMatches, buildMatches: buildMatches,
+        stage: armObservedValue130(snapshot, "NativeP2PDirectedDataStage"),
+        packetCount: armObservedValue130(snapshot,
+            "NativeP2PDirectedDataPacketCount"),
+        ready: armObservedValue130(snapshot, "NativeP2PDirectedDataReady"),
+        stageSeen: transitionStageSeen,
+        packetCountSeen: transitionPacketCountSeen, deadlineExpired: true))
+    armTransitionFailureSnapshot130 = armTransitionReport130(snapshot,
+        stageSeenBefore: transitionStageSeen,
+        packetCountSeenBefore: transitionPacketCountSeen,
+        runTokenMatches: runTokenMatches, buildMatches: buildMatches,
+        outcome: transition)
+    if case let .reject(reason) = transition.action {
+        fail130("arm_transition_\(reason)")
     }
-    usleep(500)
+    fail130("arm_transition_timeout")
 }
 guard number130(snapshot, "NativeP2PDirectedDataStage") == 4,
       number130(snapshot, "NativeP2PDirectedDataReady") == 1,

@@ -201,6 +201,139 @@ public struct Test130GateOutcome {
     public let failures: [String]
 }
 
+public enum Test130ArmObservedValue: Equatable {
+    case missing
+    case malformed
+    case value(UInt64)
+}
+
+public enum Test130ArmTransitionAction: Equatable {
+    case wait
+    case ready
+    case reject(String)
+}
+
+public struct Test130ArmTransitionInput {
+    public let runTokenMatches: Bool
+    public let buildMatches: Bool
+    public let stage: Test130ArmObservedValue
+    public let packetCount: Test130ArmObservedValue
+    public let ready: Test130ArmObservedValue
+    public let stageSeen: Bool
+    public let packetCountSeen: Bool
+    public let deadlineExpired: Bool
+
+    public init(runTokenMatches: Bool, buildMatches: Bool,
+                stage: Test130ArmObservedValue,
+                packetCount: Test130ArmObservedValue,
+                ready: Test130ArmObservedValue,
+                stageSeen: Bool, packetCountSeen: Bool,
+                deadlineExpired: Bool) {
+        self.runTokenMatches = runTokenMatches
+        self.buildMatches = buildMatches
+        self.stage = stage
+        self.packetCount = packetCount
+        self.ready = ready
+        self.stageSeen = stageSeen
+        self.packetCountSeen = packetCountSeen
+        self.deadlineExpired = deadlineExpired
+    }
+}
+
+public struct Test130ArmTransitionOutcome: Equatable {
+    public let action: Test130ArmTransitionAction
+    public let stageSeen: Bool
+    public let packetCountSeen: Bool
+    public init(action: Test130ArmTransitionAction, stageSeen: Bool,
+                packetCountSeen: Bool) {
+        self.action = action
+        self.stageSeen = stageSeen
+        self.packetCountSeen = packetCountSeen
+    }
+}
+
+/// Allows only the documented asynchronous ARM publication window. Identity
+/// and every present field remain strict; a missing count is provisional only
+/// before READY (stage < 4), and may never disappear after first observation.
+public func test130EvaluateArmTransition(
+    _ input: Test130ArmTransitionInput) -> Test130ArmTransitionOutcome {
+    func reject(_ reason: String, _ stageSeen: Bool? = nil,
+                _ packetCountSeen: Bool? = nil) -> Test130ArmTransitionOutcome {
+        Test130ArmTransitionOutcome(action: .reject(reason),
+            stageSeen: stageSeen ?? input.stageSeen,
+            packetCountSeen: packetCountSeen ?? input.packetCountSeen)
+    }
+
+    guard input.runTokenMatches else { return reject("run_token_changed") }
+    guard input.buildMatches else { return reject("build_changed") }
+    if case .malformed = input.packetCount {
+        return reject("packet_count_malformed")
+    }
+    let count: UInt64?
+    switch input.packetCount {
+    case .missing:
+        if input.packetCountSeen {
+            return reject("packet_count_disappeared")
+        }
+        count = nil
+    case .malformed:
+        return reject("packet_count_malformed")
+    case let .value(value):
+        guard value == 2 else { return reject("packet_count_wrong") }
+        count = value
+    }
+    let seen = input.packetCountSeen || count == 2
+
+    if case .malformed = input.ready { return reject("ready_malformed", nil, seen) }
+    let readyValue: UInt64?
+    switch input.ready {
+    case .missing:
+        readyValue = nil
+    case .malformed:
+        return reject("ready_malformed", nil, seen)
+    case let .value(value):
+        guard value <= 1 else { return reject("ready_wrong", nil, seen) }
+        readyValue = value
+    }
+
+    if case .malformed = input.stage {
+        return reject("stage_malformed", nil, seen)
+    }
+    guard case let .value(stage) = input.stage else {
+        if input.stageSeen { return reject("stage_disappeared", true, seen) }
+        if readyValue == 1 { return reject("ready_stage_missing", false, seen) }
+        if input.deadlineExpired { return reject("ready_missing_at_timeout", false, seen) }
+        // ARM may be acknowledged before the worker's first stage publication.
+        // This provisional state can wait, but can never authorize a send.
+        return Test130ArmTransitionOutcome(action: .wait, stageSeen: false,
+                                           packetCountSeen: seen)
+    }
+    let stageSeen = true
+    if stage >= 8 { return reject("kernel_terminal_before_ready", stageSeen, seen) }
+    if stage > 4 { return reject("ready_stage_passed", stageSeen, seen) }
+
+    if let readyValue, readyValue == 1 {
+        guard stage == 4 else { return reject("ready_stage_mismatch", stageSeen, seen) }
+        guard count == 2 else { return reject("ready_packet_count_missing", stageSeen, seen) }
+        if input.deadlineExpired {
+            return reject("arm_transition_timeout", stageSeen, seen)
+        }
+        return Test130ArmTransitionOutcome(action: .ready, stageSeen: stageSeen,
+                                           packetCountSeen: seen)
+    }
+
+    // The worker publishes stage 4 just before READY=1. Permit that narrow
+    // property-write interval only when the two-packet count is already there.
+    if stage == 4 && count == nil {
+        return reject("packet_count_missing_at_ready_stage", stageSeen, seen)
+    }
+    if input.deadlineExpired {
+        return reject("ready_missing_at_timeout", stageSeen, seen)
+    }
+    return Test130ArmTransitionOutcome(action: .wait, stageSeen: stageSeen,
+                                       packetCountSeen: seen)
+}
+
 /// The only gate that permits the second send. An early UDP return by itself
 /// cannot advance the run; the origin receipt and slot-1 READY must also match.
 public func test130CanSendSecondPacket(_ input: Test130SecondPacketGateInput) -> Test130GateOutcome {

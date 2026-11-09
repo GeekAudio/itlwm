@@ -82,10 +82,106 @@ func terminal(_ packets: [Test130PacketReceipt],
         runResourcesAbsent: runResources, outerReleaseAccepted: outer,
         automaticRetryCount: retries)
 }
+func armTransition(stage: Test130ArmObservedValue,
+                   packetCount: Test130ArmObservedValue,
+                   ready: Test130ArmObservedValue,
+                   stageSeen: Bool = false, packetCountSeen: Bool = false,
+                   runTokenMatches: Bool = true, buildMatches: Bool = true,
+                   deadlineExpired: Bool = false) -> Test130ArmTransitionOutcome {
+    test130EvaluateArmTransition(Test130ArmTransitionInput(
+        runTokenMatches: runTokenMatches, buildMatches: buildMatches,
+        stage: stage, packetCount: packetCount, ready: ready,
+        stageSeen: stageSeen, packetCountSeen: packetCountSeen,
+        deadlineExpired: deadlineExpired))
+}
+func expectArm(_ outcome: Test130ArmTransitionOutcome,
+               _ action: Test130ArmTransitionAction, _ label: String) {
+    precondition(outcome.action == action,
+                 "\(label): expected \(action), got \(outcome.action)")
+}
 
 @main
 struct Test130Main {
 static func main() {
+let missing = Test130ArmObservedValue.missing
+let malformed = Test130ArmObservedValue.malformed
+let stage0 = Test130ArmObservedValue.value(0)
+let stage1 = Test130ArmObservedValue.value(1)
+let stage2 = Test130ArmObservedValue.value(2)
+let stage3 = Test130ArmObservedValue.value(3)
+let stage4 = Test130ArmObservedValue.value(4)
+let count2 = Test130ArmObservedValue.value(2)
+let ready0 = Test130ArmObservedValue.value(0)
+let ready1 = Test130ArmObservedValue.value(1)
+
+// ARM receipt can precede all three asynchronous worker properties. Unknown
+// stage/count may wait, but only exact stage 4 + count 2 + READY authorizes.
+var transition = armTransition(stage: missing, packetCount: missing, ready: missing)
+expectArm(transition, .wait, "initial absent ARM publication")
+precondition(!transition.stageSeen && !transition.packetCountSeen)
+for earlyStage in [stage0, stage1, stage2, stage3] {
+    transition = armTransition(stage: earlyStage, packetCount: missing, ready: ready0,
+                               stageSeen: transition.stageSeen,
+                               packetCountSeen: transition.packetCountSeen)
+    expectArm(transition, .wait, "pre-READY count may be absent")
+    precondition(transition.stageSeen && !transition.packetCountSeen)
+}
+transition = armTransition(stage: stage3, packetCount: count2, ready: ready0,
+                           stageSeen: transition.stageSeen,
+                           packetCountSeen: transition.packetCountSeen)
+expectArm(transition, .wait, "packet count published before READY")
+precondition(transition.packetCountSeen)
+transition = armTransition(stage: stage4, packetCount: count2, ready: ready0,
+                           stageSeen: transition.stageSeen,
+                           packetCountSeen: transition.packetCountSeen)
+expectArm(transition, .wait, "stage 4 precedes READY property")
+transition = armTransition(stage: stage4, packetCount: count2, ready: ready1,
+                           stageSeen: transition.stageSeen,
+                           packetCountSeen: transition.packetCountSeen)
+expectArm(transition, .ready, "ordered packet count and READY")
+
+expectArm(armTransition(stage: stage2, packetCount: .value(1), ready: ready0),
+          .reject("packet_count_wrong"), "wrong packet count")
+expectArm(armTransition(stage: stage2, packetCount: .value(3), ready: ready0),
+          .reject("packet_count_wrong"), "oversized packet count")
+expectArm(armTransition(stage: stage2, packetCount: malformed, ready: ready0),
+          .reject("packet_count_malformed"), "malformed packet count")
+expectArm(armTransition(stage: stage2, packetCount: count2, ready: ready0,
+                        runTokenMatches: false),
+          .reject("run_token_changed"), "run token changed")
+expectArm(armTransition(stage: stage2, packetCount: count2, ready: ready0,
+                        buildMatches: false),
+          .reject("build_changed"), "build changed")
+expectArm(armTransition(stage: stage3, packetCount: missing, ready: ready0,
+                        stageSeen: true, packetCountSeen: true),
+          .reject("packet_count_disappeared"), "seen count disappeared")
+expectArm(armTransition(stage: missing, packetCount: missing, ready: ready0,
+                        stageSeen: true),
+          .reject("stage_disappeared"), "seen stage disappeared")
+expectArm(armTransition(stage: missing, packetCount: count2, ready: ready1),
+          .reject("ready_stage_missing"), "READY without stage")
+expectArm(armTransition(stage: stage4, packetCount: missing, ready: ready0),
+          .reject("packet_count_missing_at_ready_stage"), "READY stage missing count")
+expectArm(armTransition(stage: stage4, packetCount: count2, ready: missing,
+                        stageSeen: true, packetCountSeen: true,
+                        deadlineExpired: true),
+          .reject("ready_missing_at_timeout"), "READY missing at deadline")
+expectArm(armTransition(stage: .value(8), packetCount: missing, ready: ready0),
+          .reject("kernel_terminal_before_ready"), "kernel terminal before READY")
+expectArm(armTransition(stage: .value(9), packetCount: count2, ready: ready0),
+          .reject("kernel_terminal_before_ready"), "terminal stage with count")
+expectArm(armTransition(stage: stage3, packetCount: count2, ready: ready1),
+          .reject("ready_stage_mismatch"), "READY before stage 4")
+expectArm(armTransition(stage: stage4, packetCount: count2, ready: ready1,
+                        deadlineExpired: true),
+          .reject("arm_transition_timeout"), "READY arrives after deadline")
+expectArm(armTransition(stage: .malformed, packetCount: count2, ready: ready0),
+          .reject("stage_malformed"), "malformed stage")
+expectArm(armTransition(stage: stage3, packetCount: count2, ready: .malformed),
+          .reject("ready_malformed"), "malformed READY")
+expectArm(armTransition(stage: stage3, packetCount: count2, ready: .value(2)),
+          .reject("ready_wrong"), "out-of-range READY")
+
 let firstId = identity(0)
 let secondId = identity(1)
 let firstReceipt = receipt(firstId, exactReply: exact(firstId, capture: 110, input: 130))
