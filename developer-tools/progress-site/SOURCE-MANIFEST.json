@@ -25,22 +25,22 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "d961eb433a2c3cc6af70f712c16e0f0cd484704622026e25a025b94f9bc42280"
+      "sha256": "9115ab18112d65698ecc663281a6506b1ef6b7032118a2c9f5aeecee88d533f1"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "5ea663c35982393132c2e6df1fcbd5038d42c15e77104abfa8367260e24fc302"
+      "sha256": "367ca8300de2850e4542daa54d141bca8f01dbc8ad1e8811401db0b02b68e433"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "5ea663c35982393132c2e6df1fcbd5038d42c15e77104abfa8367260e24fc302"
+      "sha256": "367ca8300de2850e4542daa54d141bca8f01dbc8ad1e8811401db0b02b68e433"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "9236dd0dd3e92c4a312fe17038cbf926669f9f9daaa03f74daa9fe8d21283176"
+      "sha256": "60f19e5e01282c6210a4335f4f3a89df435607cd23a131a0562542c55a8b452c"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
@@ -85,11 +85,11 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-03T18:10:15+08:00",
-  "runtime_scope": "Test123启动握手已修复，运行内核仍为25G332-Test122且EFI未改；77项离线验证通过。本轮有效149频道接收窗口有24条入口，Data/QoS/AWDL-BSSID候选为0，filter-match结果不可用；awdl0载荷为0。同一原始发送记录与对应帧集合离线重放校验通过，但现场汇总仍标记未验证；parser绑定错位仅为待查可能，根因未确认。三次State10失败生命周期均已清理；不证明RF发送、Intel归因或AirDrop。联网冒烟与睡眠按要求跳过。",
-  "running_candidate": "25G332-Test122",
-  "next_candidate": null,
-  "website_delivery": "本地刷新Test123同窗采集结果、开发总时间线与公开来源哈希；40项验收保持5通过、5部分、0未通过、30未覆盖。尚未提交、推送或发布；未改驱动/EFI。",
-  "deployment_state": "test122_running",
-  "site_preparation": "Local public-safe update: Test123 current run; offline sender replay passes while onsite summary remains unvalidated; receive data candidates are zero; cleanup verified; no RF/AirDrop claim; 40-item counts unchanged; local render only."
+  "updated_at": "2026-11-09T10:53:36.156770+08:00",
+  "runtime_scope": "最近完整证据来自Test122内核与Test123工具；实际系统25G416部署前加载Test100。Test124已写入EFI并读回，运行与回包仍待重启验收，不增加40项实测通过数。",
+  "running_candidate": "25G332-Test100",
+  "next_candidate": "25G416-Test124",
+  "website_delivery": "Test124部署状态与开发总时间线快照；实测计数保持5通过、5部分、0未通过、30未覆盖。",
+  "deployment_state": "test124_deployed_waiting_reboot",
+  "site_preparation": "Public-safe deployment update; configuration unchanged; minimal backup retained; runtime and native roundtrip pending."
 }
