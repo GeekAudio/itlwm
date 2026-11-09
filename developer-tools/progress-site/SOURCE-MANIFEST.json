@@ -20,27 +20,27 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "53ed9547660a471c77759eb4987af89892ebc45b03e60c9c79791f7b0c535a4c"
+      "sha256": "a863f4e0995f3d707ca0f52bbcb795a372bd558a2155cc0cbd256ad71c264b1b"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "bf70d60952540ab3b8e01408340f42ea51a2d20126cd1e8478520430598610a4"
+      "sha256": "53026103c0332ea4ebd40a913f70ef1d306a592f9428725e497958cb69f65d03"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "9c217f7ad167260378c7bbacf3e45c2a15fe303a3aa6ae608f245f448e4a2177"
+      "sha256": "932248a19234e9be413a33e11bf769c28b7277e935de84e0ef86e53f17ab2c91"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "9c217f7ad167260378c7bbacf3e45c2a15fe303a3aa6ae608f245f448e4a2177"
+      "sha256": "932248a19234e9be413a33e11bf769c28b7277e935de84e0ef86e53f17ab2c91"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "c464f90c72b4e8985ae0c6ae03a03a324599556cbbe886c106f572d13c14969d"
+      "sha256": "c200534c18747b9721ee0ccfd6e68beea3836852c410c6a88bb987baede5823b"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
@@ -85,11 +85,11 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-09T13:23:31+08:00",
-  "runtime_scope": "本轮只确认Test125加载、原生接口及本次诊断前后状态。频道许可发布记录为旧代，内核在驻留前返回EOPNOTSUPP；没有UDP发送、数据回包或AirDrop证据。Test124的单包返回保留在开发时间线，不计入Test125本轮；未覆盖不代表能力回退。",
-  "running_candidate": "25G416-Test125",
+  "updated_at": "2026-11-09T13:37:20+08:00",
+  "runtime_scope": "本轮越过Test125的驻留前许可阻塞。原生UDP提交8字节，驱动触发一次门铃；对端匹配本轮请求，Mac在100 ms租约内捕获、解码并交付1个匹配返回。350 ms完成等待耗尽后进入隔离，未取得精确TX completion和完整资源回收证明。受控单包不等于持续AWDL或AirDrop。",
+  "running_candidate": "25G416-Test126",
   "next_candidate": "25G416-Test126",
-  "website_delivery": "Test125运行结果保持不变；Test126同代MCC修复已离线验证、部署并读回，待重启验收。",
-  "deployment_state": "test126_deployed_waiting_reboot",
+  "website_delivery": "Test126实测单包回包及完成/清理阻塞已更新；没有下一候选部署。",
+  "deployment_state": "test126_runtime_return_observed_completion_blocked",
   "site_preparation": "Test125 current runtime; Test126 deployed and read back, not boot verified. No private runtime metadata published."
 }
