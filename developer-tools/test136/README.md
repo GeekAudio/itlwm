@@ -31,7 +31,7 @@ python3 developer-tools/test136/test136_diagnostics.py \
   /path/to/private/RuntimeTest136-query-capture-private.json
 ```
 
-The decoder checks QWS1 status, QWR1 layout and length, legacy QM identity and descriptor fields, and one exact DataTxTrace row. It also checks the row's qid, ring, descriptor index, sequence control, frame control, MPDU length, owner generation, and queue birth. The three clock samples are allowed to differ and are checked in producer order: legacy pre-doorbell, raw doorbell, DataTxTrace doorbell-issued, and raw finish.
+The decoder checks QWS1 status, QWR1 layout and length, legacy QM identity and descriptor fields, and one exact DataTxTrace row. It also checks the row's qid, ring, descriptor index, sequence control, frame control, MPDU length, owner generation, and queue birth. The clock samples are allowed to differ and are checked in producer order: legacy pre-doorbell, raw doorbell, DataTxTrace doorbell-issued, and raw finish.
 
 The ADRXWIN1 decoder reports each MPDU that reached `iwx_rx_mpdu_mq`, sorted within the published Discovery RX window and compared with the matched TX epochs and raw doorbell timestamp. It reports frame class, descriptor/status presence, channel/length/FC availability, command/ROC lease state, AWDL data-candidate bit, and the later early-route result. The lease-qualified flag describes the same command/ROC lease; it does not certify descriptor ownership, a peer, or protocol acceptance. RX service counters separately show work before and around MPDU dispatch. `BridgeRxPending` is a live depth and may decrease between window boundaries.
 
@@ -41,4 +41,4 @@ The RX decoder also requires `RocConfiguration=3` (`GO_NEGOTIATION`) so a window
 
 The receipt separates browse acceptance, terminal cleanup, raw local command/MPDU capture, submit-path timestamps, local TX response/completion, RX entry, lease classification, and ifnet bridge delivery. QWS1 status 10 means the local raw/facts properties were published successfully. A correlated DataTxTrace completion is a local driver/firmware event; the trace does not receive the full identity tuple from firmware. Neither the raw snapshot, a local TX response, nor an RX-window event proves RF airtime, peer receipt, an mDNS response, or a successful AirDrop transfer.
 
-The decoder tests use constructed byte records to verify schema and rejection boundaries. They are offline format tests, not runtime evidence.
+The decoder tests compile a small C++ fixture against the production QWR1, legacy facts, QWS1, TX ledger, and completion-result APIs, then pass those outputs through the Python decoder. Additional constructed records cover rejection boundaries. These are offline format tests, not runtime evidence.

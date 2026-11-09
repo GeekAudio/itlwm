@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Offline parser tests; constructed records are format fixtures, not runtime evidence."""
+"""Offline parser tests; producer and constructed records are format fixtures, not runtime evidence."""
 
 from __future__ import annotations
 
@@ -8,12 +8,16 @@ import copy
 import importlib.util
 import json
 import re
+import shutil
 import struct
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
 
 HERE = Path(__file__).resolve().parent
+REPO = HERE.parents[1]
 SPEC = importlib.util.spec_from_file_location(
     "test136_diagnostics_under_test", HERE / "test136_diagnostics.py")
 assert SPEC is not None and SPEC.loader is not None
@@ -95,7 +99,7 @@ def qwr1_bytes(overrides: dict | None = None) -> bytes:
         "mpdu_copied_length": WIRE["mpdu_length"],
         "command_copy_result": 0,
         "mpdu_copy_result": 0,
-        "reserved": 0,
+        "stage": D.QWR1_STAGED_AWAITING_PUBLISH,
         "doorbell_us": WIRE["raw_doorbell_us"],
         "finish_us": WIRE["raw_finish_us"],
     }
@@ -107,7 +111,7 @@ def qwr1_bytes(overrides: dict | None = None) -> bytes:
         "roc_token", "station_id", "queue_id", "ring_size", "descriptor_index",
         "sequence_control", "frame_control", "command_actual_length",
         "command_copied_length", "mpdu_actual_length", "mpdu_copied_length",
-        "command_copy_result", "mpdu_copy_result", "reserved", "doorbell_us", "finish_us")])
+        "command_copy_result", "mpdu_copy_result", "stage", "doorbell_us", "finish_us")])
     command = b"C" * raw["command_copied_length"]
     mpdu = b"M" * raw["mpdu_copied_length"]
     return (header + command.ljust(D.QWR1_COMMAND_CAPACITY, b"\0") +
@@ -171,7 +175,7 @@ def trace_properties(overrides: dict | None = None) -> dict:
         "MpduLength": WIRE["mpdu_length"],
         "QueueId": WIRE["queue_id"], "RingSize": WIRE["ring_size"],
         "DescriptorIndex": WIRE["descriptor_index"],
-        "SubmitCallResult": 0, "CompletionResult": 0,
+        "SubmitCallResult": 0, "CompletionResult": 10,
         "FirmwareEchoesFullIdentity": 0,
         "AmbiguousLateQueueUnknown": 1,
     }
@@ -255,6 +259,41 @@ def b64(payload: bytes) -> str:
     return base64.b64encode(payload).decode("ascii")
 
 
+def compile_production_fixture() -> dict[str, int | bytes]:
+    compiler = shutil.which("clang++") or shutil.which("c++")
+    if compiler is None:
+        raise RuntimeError("C++ compiler required for production encoder fixture")
+    with tempfile.TemporaryDirectory(prefix="test136-production-fixture-") as temp:
+        binary = Path(temp) / "test136-producer-fixture"
+        subprocess.run([
+            compiler, "-std=c++17", "-I", str(REPO / "native"),
+            str(HERE / "test136_producer_fixture.cpp"), "-o", str(binary),
+        ], check=True, capture_output=True, text=True)
+        result = subprocess.run([str(binary)], check=True, capture_output=True,
+                                text=True)
+    output: dict[str, int | bytes] = {}
+    for line in result.stdout.splitlines():
+        key, separator, value = line.partition("=")
+        if not separator:
+            raise AssertionError(f"invalid C++ fixture output line: {line!r}")
+        if key.endswith("_hex"):
+            output[key[:-4]] = bytes.fromhex(value)
+        else:
+            output[key] = int(value)
+    return output
+
+
+def trace_properties_from_production_fixture(values: dict[str, int | bytes]) -> dict:
+    properties = {}
+    for suffix in D.DATA_TX_TRACE_HEADER_SUFFIXES:
+        properties["NativeP2PDataTxTrace" + suffix] = values["header." + suffix]
+    for slot in range(D.DATA_TX_TRACE_SLOTS):
+        for suffix in D.DATA_TX_TRACE_RECORD_SUFFIXES:
+            properties[f"NativeP2PDataTxTraceRecord{slot}{suffix}"] = values[
+                f"record.{slot}.{suffix}"]
+    return properties
+
+
 def full_receipt(overrides: dict | None = None) -> dict:
     final = trace_properties()
     final.update(rx_properties())
@@ -270,7 +309,7 @@ def full_receipt(overrides: dict | None = None) -> dict:
         "schema": 1,
         "run_id": "format-fixture",
         "expected_build": "25G416-Test136",
-        "expected_uuid": "031A83FA-A95E-3D10-ADBB-B97ABBE387EF",
+        "expected_uuid": "39DC43C3-9054-399A-873E-45EE1DCFDC0B",
         "browse": {"callbacks": 0, "service_names_recorded": False},
         "cleanup": {"status": "cleanup_receipt_proven"},
         "publication": {"status": "published_diagnostics_observed"},
@@ -325,6 +364,11 @@ class TestTest136Diagnostics(unittest.TestCase):
         bad_descriptor = D.decode_qm_raw_publication(
             qwr1_bytes({"descriptor_index": 2}), qws1_bytes(), legacy)
         self.assertFalse(bad_descriptor["valid"])
+        unstaged = D.decode_qm_raw_publication(
+            qwr1_bytes({"stage": 2}), qws1_bytes(), legacy)
+        self.assertFalse(unstaged["valid"])
+        self.assertIn("raw_stage_not_staged_for_publish",
+                      unstaged["raw_snapshot"]["reasons"])
         self.assertFalse(D._decode_qwr1(qwr1_bytes()[:-1])["valid"])
 
     def test_exact_trace_row_joins_descriptor_owner_and_nonidentical_times(self):
@@ -343,6 +387,65 @@ class TestTest136Diagnostics(unittest.TestCase):
         no_row = D.decode_data_tx_trace(trace_properties(), wrong_epochs, WIRE)
         self.assertEqual(no_row["identity_match_status"], "identity_mismatch")
         self.assertIsNone(no_row["matched_record"])
+
+    def test_completion_success_uses_production_result_enum_value(self):
+        fixture = compile_production_fixture()
+        self.assertEqual(fixture["completion_enum_ready"], 0)
+        self.assertEqual(fixture["completion_enum_frame_failed"], 9)
+        self.assertEqual(fixture["completion_enum_completion"], 10)
+        for result in (0, 9, 11):
+            trace = D.decode_data_tx_trace(
+                trace_properties({
+                    "NativeP2PDataTxTraceRecord0CompletionResult": result,
+                }), IDENTITY, WIRE)
+            self.assertTrue(trace["valid"])
+            self.assertFalse(trace["matched_record_events"][
+                "local_completion_succeeded"])
+        successful = D.decode_data_tx_trace(
+            trace_properties({
+                "NativeP2PDataTxTraceRecord0CompletionResult":
+                    fixture["completion_enum_completion"],
+            }), IDENTITY, WIRE)
+        self.assertTrue(successful["matched_record_events"][
+            "local_completion_succeeded"])
+
+    def test_production_encoders_facts_status_and_ledger_decode_end_to_end(self):
+        fixture = compile_production_fixture()
+        raw = fixture["raw"]
+        facts = fixture["facts"]
+        status = fixture["status"]
+        self.assertEqual(len(raw), D.QWR1_TOTAL_BYTES)
+        self.assertEqual(len(facts), D._LEGACY.QM_WIRE_SIZE)
+        self.assertEqual(len(status), D.QWS1_BYTES)
+
+        legacy = D.decode_legacy_qm_wire_snapshot(facts)
+        self.assertTrue(legacy["valid"])
+        publication = D.decode_qm_raw_publication(raw, status, legacy)
+        self.assertTrue(publication["valid"], publication)
+        self.assertEqual(publication["status_code"], 10)
+        self.assertEqual(publication["identity"], {
+            "token": TOKEN, "context_generation": 4, "power_generation": 7,
+            "station_generation": 18, "roc_token": 4,
+        })
+
+        expected_wire = dict(publication["wire_fields"])
+        expected_wire.update({
+            "raw_doorbell_us": publication["doorbell_us"],
+            "raw_finish_us": publication["finish_us"],
+        })
+        trace = D.decode_data_tx_trace(
+            trace_properties_from_production_fixture(fixture),
+            D._identity_for_trace(legacy), expected_wire)
+        self.assertTrue(trace["valid"], trace["reasons"])
+        record = trace["matched_record"]
+        self.assertIsNotNone(record)
+        self.assertEqual(record["CompletionResult"], 10)
+        self.assertEqual(record["TxRspStatus"], 1)
+        self.assertEqual(record["TxRspHandlerDisposition"], 1)
+        self.assertEqual(record["AssociationStrength"], 3)
+        self.assertTrue(trace["matched_record_events"][
+            "local_completion_succeeded"])
+        self.assertFalse(trace["peer_receipt_proven"])
 
     def test_rx_event_parser_orders_only_exact_same_generation_events(self):
         window_values = rx_properties()

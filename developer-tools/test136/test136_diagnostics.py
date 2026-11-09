@@ -40,6 +40,7 @@ QWR1_COMMAND_TRUNCATED = 1 << 3
 QWR1_MPDU_TRUNCATED = 1 << 4
 QWR1_STAGE_ACCEPTED = 1 << 5
 QWR1_RAW_RESPONSE_CAPTURED = 1 << 6
+QWR1_STAGED_AWAITING_PUBLISH = 6
 QWR1_HEADER = struct.Struct("<IHHIIQQQQQHHHHHHIIIIiiIQQ")
 
 QWS1_MAGIC = 0x31535751
@@ -321,7 +322,7 @@ def _decode_qwr1(payload: Any) -> dict[str, Any]:
         "station_id", "queue_id", "ring_size", "descriptor_index",
         "sequence_control", "frame_control", "command_actual_length",
         "command_copied_length", "mpdu_actual_length", "mpdu_copied_length",
-        "command_copy_result", "mpdu_copy_result", "reserved", "doorbell_us",
+        "command_copy_result", "mpdu_copy_result", "stage", "doorbell_us",
         "finish_us")
     values = dict(zip(names, unpacked))
     reasons = []
@@ -342,8 +343,8 @@ def _decode_qwr1(payload: Any) -> dict[str, Any]:
         reasons.append("raw_payload_truncated")
     if values["flags"] & QWR1_RAW_RESPONSE_CAPTURED:
         reasons.append("unexpected_raw_response_capture")
-    if values["reserved"] != 0:
-        reasons.append("raw_reserved_nonzero")
+    if values["stage"] != QWR1_STAGED_AWAITING_PUBLISH:
+        reasons.append("raw_stage_not_staged_for_publish")
     identity = {key: values[key] for key in (
         "token", "context_generation", "power_generation",
         "station_generation", "roc_token")}
@@ -667,7 +668,9 @@ def decode_data_tx_trace(values: Mapping[str, Any],
             "tx_response_tap": observed("tx_response_tap", "TxRspTapUs"),
             "completion": completion_seen,
             "submit_call_end": observed("submit_call_end", "SubmitCallEndUs"),
-            "local_completion_succeeded": completion_seen and matched["CompletionResult"] == 0,
+            # IntelP2PActionTx::Result::kCompletion is 10. kReady (0) is a
+            # pre-submit state and kFrameFailed (9) is an unsuccessful MPDU.
+            "local_completion_succeeded": completion_seen and matched["CompletionResult"] == 10,
             "doorbell_issued_us": matched["DoorbellIssuedUs"] or None,
             "tx_response_tap_us": matched["TxRspTapUs"] or None,
             "completion_us": matched["CompletionUs"] or None,
