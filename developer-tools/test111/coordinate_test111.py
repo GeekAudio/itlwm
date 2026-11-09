@@ -47,6 +47,8 @@ TEST126_BUILD_ID = "25G416-Test126"
 TEST127_BUILD_ID = "25G416-Test127"
 TEST129_BUILD_ID = "25G416-Test129"
 TEST130_BUILD_ID = "25G416-Test130"
+TEST131_BUILD_ID = "25G416-Test131"
+TWO_PACKET_BUILD_IDS = (TEST130_BUILD_ID, TEST131_BUILD_ID)
 COORDINATOR_SCHEMAS = {
     BUILD_ID: "test111-local-coordinator/v1",
     TEST112_BUILD_ID: "test112-local-coordinator/v1",
@@ -60,6 +62,7 @@ COORDINATOR_SCHEMAS = {
     TEST127_BUILD_ID: "test127-local-coordinator/v1",
     TEST129_BUILD_ID: "test129-local-coordinator/v1",
     TEST130_BUILD_ID: "test130-local-coordinator/v1",
+    TEST131_BUILD_ID: "test131-local-coordinator/v1",
 }
 BUNDLE_ID = "org.geekaudio.AirportItlwm"
 REMOTE_SCRIPT_NAME = "monitor_window111.sh"
@@ -184,7 +187,7 @@ def validate_config(config: dict[str, Any], *, build_id: str = BUILD_ID) -> tupl
     if not isinstance(identity_raw, dict):
         raise CoordinatorError("identity must be an object")
     try:
-        if build_id == TEST130_BUILD_ID:
+        if build_id in TWO_PACKET_BUILD_IDS:
             identity = _ready_module.normalize_two_packet(identity_raw)
             identity["nonce"] = identity["nonces"][0]
             identity["nonce2"] = identity["nonces"][1]
@@ -220,8 +223,8 @@ def validate_config(config: dict[str, Any], *, build_id: str = BUILD_ID) -> tupl
     normalized["remote_script_path_resolved"] = str(paths["remote_script_source"][0])
     normalized["peer_binary_path_resolved"] = str(paths["peer_binary"][0])
     normalized["helper_source_path_resolved"] = str(paths["helper_source"][0])
-    script_name = "monitor_window130.sh" if build_id == TEST130_BUILD_ID else REMOTE_SCRIPT_NAME
-    peer_name = "openwrt_echo130" if build_id == TEST130_BUILD_ID else REMOTE_PEER_NAME
+    script_name = "monitor_window130.sh" if build_id in TWO_PACKET_BUILD_IDS else REMOTE_SCRIPT_NAME
+    peer_name = "openwrt_echo130" if build_id in TWO_PACKET_BUILD_IDS else REMOTE_PEER_NAME
     normalized["remote_script_remote_path"] = remote_dir + "/" + script_name
     normalized["peer_binary_remote_path"] = remote_dir + "/" + peer_name
 
@@ -251,7 +254,7 @@ def make_plan(config: dict[str, Any], *, build_id: str = BUILD_ID) -> dict[str, 
         "helper_sha256": hashes["helper"],
         "automatic_retry": False,
         "airdrop_proven": False,
-        "packet_count": 2 if build_id == TEST130_BUILD_ID else 1,
+        "packet_count": 2 if build_id in TWO_PACKET_BUILD_IDS else 1,
     }
 
 
@@ -511,7 +514,7 @@ def _peer_remote_args(config: dict[str, Any]) -> list[str]:
             "--peer-ipv6", identity["peer_ipv6"],
             "--nonce", identity["nonce"],
             "--run-token", identity["run_token"]]
-    if config.get("expected_build") == TEST130_BUILD_ID:
+    if config.get("expected_build") in TWO_PACKET_BUILD_IDS:
         args[-2:-2] = ["--packet-count", "2", "--nonce-2", identity["nonce2"]]
     return args
 
@@ -612,7 +615,7 @@ def _helper_argv(config: dict[str, Any], ready_path: Path) -> list[str]:
             "--run-token", identity["run_token"],
             "--peer-ipv6", identity["peer_ipv6"],
             "--peer-ready-file", str(ready_path)]
-    if config.get("expected_build") == TEST130_BUILD_ID:
+    if config.get("expected_build") in TWO_PACKET_BUILD_IDS:
         args += ["--nonce-2", identity["nonce2"]]
     args += ["--run"]
     return args
@@ -755,7 +758,7 @@ def execute_run(config: dict[str, Any], deps: Any = RealDeps, *,
         result["rf_window_attempted"] = True
         peer = deps.start_peer(normalized, directory)
         capture = (_ready_module.capture_ready_two_packet
-                   if build_id == TEST130_BUILD_ID else deps.capture_ready)
+                   if build_id in TWO_PACKET_BUILD_IDS else deps.capture_ready)
         receipt = capture(peer.ready_process, launched, identity, ready_path)
         if not ready_path.exists() or ready_path.is_symlink():
             raise CoordinatorError("live READY receipt was not created")

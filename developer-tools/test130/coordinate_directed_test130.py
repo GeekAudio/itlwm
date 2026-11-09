@@ -30,6 +30,10 @@ import build_monitor_test130
 
 BASE = ROOT.parent.parent
 BUILD = "25G416-Test130"
+ARCHIVE_NAME = "AirportItlwm-Test130.zip"
+PEER_BUILD = BUILD
+MONITOR_BUILD = BUILD
+TARGET_REVIEW_SCHEMA = "test130-target-os-review/v1"
 PRIVATE = BASE / "RuntimeTest130/research/preparation-private"
 MONITOR_PRIVATE = BASE / "RuntimeTest128/research/preparation-private"
 BUILD_RECEIPT = PRIVATE / "test130-build-private.json"
@@ -103,7 +107,7 @@ def _validate_build(config_path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
         if path.is_symlink() or not path.is_file() or digest(path.read_bytes()) != expected_hash:
             raise Test130Error("Test130 frozen production source changed: " + name)
 
-    archive = PRIVATE / "AirportItlwm-Test130.zip"
+    archive = PRIVATE / ARCHIVE_NAME
     if archive.is_symlink() or digest(archive.read_bytes()) != build["archive_sha256"]:
         raise Test130Error("Test130 archive hash mismatch")
     with zipfile.ZipFile(archive) as zf:
@@ -140,7 +144,7 @@ def _validate_build(config_path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
         raise Test130Error("Test130 deployment receipt binding mismatch")
 
     review, review_raw = _read(TARGET_REVIEW_RECEIPT, 128 * 1024)
-    if (review.get("schema") != "test130-target-os-review/v1" or
+    if (review.get("schema") != TARGET_REVIEW_SCHEMA or
             review.get("candidate") != BUILD or review.get("mach_o_uuid") != uuid or
             review.get("target_os_build") != "25G416" or
             review.get("review_passed") is not True or
@@ -184,7 +188,7 @@ def _validate_build(config_path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
 
     peer, peer_raw = _read(PEER_RECEIPT, 128 * 1024)
     if (peer.get("schema") != "test130-two-packet-peer-build/v1" or
-            peer.get("candidate") != BUILD or peer.get("status") != "built_offline" or
+            peer.get("candidate") != PEER_BUILD or peer.get("status") != "built_offline" or
             peer.get("uploaded") is not False or peer.get("rf_tested") is not False or
             peer.get("target") != "aarch64-linux-musl" or
             peer.get("wire_contract") != "test130-ordered-two-nonce-echo/v1" or
@@ -211,7 +215,7 @@ def _validate_build(config_path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     expected_adapter = build_monitor_test130.render(
         base_script.read_text(encoding="utf-8"), peer["binary_sha256"]).encode("utf-8")
     if (monitor.get("schema") != "test130-openwrt-monitor-adapter-build/v1" or
-            monitor.get("candidate") != BUILD or monitor.get("status") != "built_offline" or
+            monitor.get("candidate") != MONITOR_BUILD or monitor.get("status") != "built_offline" or
             monitor.get("router_mutated") is not False or monitor.get("rf_tested") is not False or
             monitor.get("binary_path") != str(MONITOR_SCRIPT) or
             monitor.get("binary_sha256") != digest(adapter_raw) or
@@ -271,6 +275,8 @@ def _packet_gate(helper: dict[str, Any], peer: dict[str, Any], identity: dict[st
     def require(ok: bool, name: str) -> None:
         if not ok:
             failures.append(name)
+    def sequence_in_range(value: Any, maximum: int) -> bool:
+        return _uint(value) and value <= maximum
     expected_nonces = identity["nonces"]
     helper_packets = helper.get("packet_receipts")
     peer_packets = peer.get("packets")
@@ -297,11 +303,12 @@ def _packet_gate(helper: dict[str, Any], peer: dict[str, Any], identity: dict[st
                     f"packet{slot}_ordered_nonce")
             require(all(_uint(packet.get(key), positive=True) for key in (
                 "packet_serial", "owner_serial", "run_serial", "ifindex",
-                "interface_incarnation", "context_generation", "station_generation",
-                "roc_generation")) and
-                _uint(packet.get("descriptor_index")) and
-                all(_uint(packet.get(key), positive=True) for key in
-                    ("wifi_sequence", "awdl_sequence", "ssn")),
+                "interface_incarnation", "context_generation", "power_generation",
+                "station_generation", "roc_generation")) and
+                sequence_in_range(packet.get("descriptor_index"), 0xff) and
+                sequence_in_range(packet.get("wifi_sequence"), 0x0fff) and
+                sequence_in_range(packet.get("awdl_sequence"), 0xffff) and
+                sequence_in_range(packet.get("ssn"), 0xff),
                 f"packet{slot}_identity_fields")
             require(packet.get("tx_rsp_seen") is True and packet.get("tx_rsp_success") is True and
                     packet.get("origin_doorbell_recorded") is True and
@@ -339,8 +346,12 @@ def _packet_gate(helper: dict[str, Any], peer: dict[str, Any], identity: dict[st
                     identities[0][0] != identities[1][0] and
                     _uint(identities[0][1]) and _uint(identities[1][1]) and
                     identities[0][1] != identities[1][1] and
-                    all(_uint(a, positive=True) and _uint(b, positive=True) and a != b
-                        for a, b in zip(identities[0][2:], identities[1][2:])),
+                    all(sequence_in_range(a, maximum) and
+                        sequence_in_range(b, maximum) and a != b
+                        for a, b, maximum in (
+                            (identities[0][2], identities[1][2], 0x0fff),
+                            (identities[0][3], identities[1][3], 0xffff),
+                            (identities[0][4], identities[1][4], 0xff))),
                     "unique_serial_descriptor_sequences_and_ssn")
             first = helper_packets[0]
             second = helper_packets[1]
@@ -451,8 +462,8 @@ def main(argv: list[str] | None = None) -> int:
                            "same_100ms_roc": True,
                            "automatic_retry": False})
         result.update(hashes)
-        result["test130_artifacts_validated"] = True
-        result["tool_campaign"] = "Test130"
+        result[BUILD.rsplit("-", 1)[-1].lower() + "_artifacts_validated"] = True
+        result["tool_campaign"] = BUILD.rsplit("-", 1)[-1]
         result["radio_ack_proven"] = False
         result["peer_receipt_proven"] = False
         result["airdrop_proven"] = False
@@ -461,7 +472,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
         return 0 if not args.run or result.get("orchestration_completed") is True else 1
     except Exception as error:
-        result = {"schema": "test130-local-coordinator/v1", "mode": "error",
+        result = {"schema": shared._coordinator_schema(BUILD), "mode": "error",
                   "build": BUILD, "hardware_action": None if delegated else False,
                   "ssh_attempted": None if delegated else False,
                   "arm_attempted": None if delegated else False,

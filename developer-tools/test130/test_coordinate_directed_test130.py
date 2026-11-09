@@ -141,6 +141,39 @@ def evidence() -> tuple[dict, dict]:
     return helper, peer
 
 
+def observed_runtime_packet0() -> tuple[dict, dict]:
+    """Return a sanitized first-receipt shape plus its raw slot generation.
+
+    The observed packet-zero receipt had zero Wi-Fi/AWDL sequences and omitted
+    packet power_generation even though its exact reply and raw slot carried it.
+    Nonce and monotonic timestamps are normalized for this offline test.
+    """
+    raw_slot = {"power_generation": 7}
+    observed = packet(
+        0, packet_serial=1, descriptor=0, wifi=0, awdl=0, ssn=1,
+        doorbell=100, tx_rsp=110, owner=1, run=1, ifindex=15,
+        incarnation=1, context=4, power=raw_slot["power_generation"],
+        station=15, roc=4, deadline=200,
+        exact_receipt=exact(
+            0, ticket=1, snapshot=8, packet_serial=1, doorbell=100,
+            capture=120, input_us=121, owner=1, run=1, ifindex=15,
+            incarnation=1, context=4, power=raw_slot["power_generation"],
+            station=15, roc=4))
+    observed.pop("power_generation")
+    return observed, raw_slot
+
+
+def observed_runtime_packet1() -> dict:
+    return packet(
+        1, packet_serial=2, descriptor=1, wifi=1, awdl=1, ssn=2,
+        doorbell=140, tx_rsp=150, owner=1, run=1, ifindex=15,
+        incarnation=1, context=4, power=7, station=15, roc=4, deadline=200,
+        exact_receipt=exact(
+            1, ticket=1, snapshot=10, packet_serial=2, doorbell=140,
+            capture=141, input_us=143, owner=1, run=1, ifindex=15,
+            incarnation=1, context=4, power=7, station=15, roc=4))
+
+
 class Test130CoordinatorContracts(unittest.TestCase):
     def gate(self, mutate_helper=None, mutate_peer=None, identity=None):
         helper, peer = evidence()
@@ -183,6 +216,93 @@ class Test130CoordinatorContracts(unittest.TestCase):
                 outcome = self.gate(mutate)
                 self.assertFalse(outcome["accepted"])
                 self.assertIn(expected, outcome["failures"])
+
+    def test_real_first_receipt_power_mapping_keeps_zero_sequences_and_one_packet_fails(self):
+        first, raw_slot = observed_runtime_packet0()
+        helper, peer = evidence()
+        helper["packet_receipts"] = [first, observed_runtime_packet1()]
+
+        # The unmodified packet JSON shape must not pass when power is absent.
+        missing_power = tool._packet_gate(helper, peer, IDENTITY, 200)
+        self.assertFalse(missing_power["accepted"])
+        self.assertIn("packet0_identity_fields", missing_power["failures"])
+        self.assertIn("packet0_exact_same_session", missing_power["failures"])
+
+        # The helper repair maps the exact raw slot generation onto packet 0.
+        helper["packet_receipts"][0]["power_generation"] = raw_slot["power_generation"]
+        repaired = tool._packet_gate(helper, peer, IDENTITY, 200)
+        self.assertTrue(repaired["accepted"], repaired["failures"])
+
+        one_packet_helper = deepcopy(helper)
+        one_packet_helper["packet_count"] = 1
+        one_packet_helper["native_udp_bytes"] = [8]
+        one_packet_helper["peer_socket_matched"] = [True]
+        one_packet_helper["tx_completion_observed"] = [True]
+        one_packet_helper["firmware_attempt_succeeded"] = [True]
+        one_packet_helper["ifnet_delivery_proven"] = [True]
+        one_packet_helper["packet_receipts"] = [helper["packet_receipts"][0]]
+        one_packet = tool._packet_gate(one_packet_helper, peer, IDENTITY, 200)
+        self.assertFalse(one_packet["accepted"])
+        self.assertIn("helper_two_packet_count", one_packet["failures"])
+        self.assertIn("two_independent_helper_packet_receipts", one_packet["failures"])
+
+    def test_zero_and_upper_ring_sequence_values_are_valid_but_sentinel_is_not(self):
+        helper, peer = evidence()
+        first, second = helper["packet_receipts"]
+        first.update(descriptor_index=254, wifi_sequence=0, awdl_sequence=0, ssn=255)
+        second.update(descriptor_index=255, wifi_sequence=0x0fff,
+                      awdl_sequence=0xffff, ssn=0)
+        outcome = tool._packet_gate(helper, peer, IDENTITY, 200)
+        self.assertTrue(outcome["accepted"], outcome["failures"])
+
+        for field, invalid in (("descriptor_index", 0xffffffff),
+                               ("wifi_sequence", 0x1000),
+                               ("awdl_sequence", 0x10000),
+                               ("ssn", 0x100),
+                               ("wifi_sequence", 0xffffffff),
+                               ("awdl_sequence", 0xffffffff),
+                               ("ssn", 0xffffffff)):
+            with self.subTest(field=field, invalid=invalid):
+                helper, peer = evidence()
+                helper["packet_receipts"][0][field] = invalid
+                rejected = tool._packet_gate(helper, peer, IDENTITY, 200)
+                self.assertFalse(rejected["accepted"])
+                self.assertIn("packet0_identity_fields", rejected["failures"])
+
+        helper, peer = evidence()
+        helper["packet_receipts"][0]["wifi_sequence"] = True
+        rejected = tool._packet_gate(helper, peer, IDENTITY, 200)
+        self.assertFalse(rejected["accepted"])
+        self.assertIn("packet0_identity_fields", rejected["failures"])
+
+    def test_zero_sequence_values_must_remain_distinct_between_packets(self):
+        for field in ("wifi_sequence", "awdl_sequence", "ssn"):
+            with self.subTest(field=field):
+                helper, peer = evidence()
+                helper["packet_receipts"][0][field] = 0
+                helper["packet_receipts"][1][field] = 0
+                outcome = tool._packet_gate(helper, peer, IDENTITY, 200)
+                self.assertFalse(outcome["accepted"])
+                self.assertIn("unique_serial_descriptor_sequences_and_ssn",
+                              outcome["failures"])
+
+    def test_power_generation_is_required_and_nonzero_identity_even_when_both_missing(self):
+        helper, peer = evidence()
+        for receipt in helper["packet_receipts"]:
+            receipt.pop("power_generation")
+            receipt["exact_reply"].pop("power_generation")
+        outcome = tool._packet_gate(helper, peer, IDENTITY, 200)
+        self.assertFalse(outcome["accepted"])
+        self.assertIn("packet0_identity_fields", outcome["failures"])
+        self.assertIn("packet1_identity_fields", outcome["failures"])
+
+        helper, peer = evidence()
+        for receipt in helper["packet_receipts"]:
+            receipt["power_generation"] = 0
+            receipt["exact_reply"]["power_generation"] = 0
+        outcome = tool._packet_gate(helper, peer, IDENTITY, 200)
+        self.assertFalse(outcome["accepted"])
+        self.assertIn("packet0_identity_fields", outcome["failures"])
 
     def test_peer_must_report_two_distinct_single_local_sends(self):
         cases = (

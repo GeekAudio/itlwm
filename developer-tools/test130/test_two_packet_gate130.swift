@@ -188,6 +188,15 @@ let firstReceipt = receipt(firstId, exactReply: exact(firstId, capture: 110, inp
 let secondReceipt = receipt(secondId, exactReply: exact(secondId, capture: 150, input: 160))
 expect(terminal([firstReceipt, secondReceipt]), true, "complete ordered run")
 
+let zeroSequenceFirstId = identity(0, wifiSequence: 0, awdlSequence: 0, ssn: 1)
+let zeroSequenceSecondId = identity(1, wifiSequence: 1, awdlSequence: 1, ssn: 2)
+let zeroSequenceFirst = receipt(zeroSequenceFirstId)
+let zeroSequenceSecond = receipt(zeroSequenceSecondId)
+expect(terminal([zeroSequenceFirst, zeroSequenceSecond]), true,
+       "initial allocated wifi and awdl sequence zero")
+expect(terminal([zeroSequenceFirst]), false,
+       "one zero-sequence receipt cannot pass the two-packet terminal gate")
+
 let validSecondGate = Test130SecondPacketGateInput(
     first: firstReceipt, peerSocketMatchedFirstNonce: true,
     secondReady: slotReady(), expectedSecondNonce: nonce(0x11), nowUs: 135)
