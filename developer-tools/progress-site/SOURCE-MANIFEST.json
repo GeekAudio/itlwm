@@ -20,27 +20,27 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "feed24891238afd4a2367643a778de516f3adc47362b89e2082c10690af6bb03"
+      "sha256": "296de87e1792b1f14ffea605405f65ff322a87fe964f6395dc5f5a22f3f873b3"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "1338a827ba0d300bde44b65f16695bf329fb3d497c80fac528fbdcecd80d50d5"
+      "sha256": "0aea368436c971d6653ec7e40f68d781890887045c7922227d1125026c0c92b0"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "efd8ff413f96dcd191e6a233cc65dfbb30079c4233bf205c7375678e5770f189"
+      "sha256": "92f33de798c45dea89c81d1fe3c1c291c02f3de988dcc20b658895dcedc3003a"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "efd8ff413f96dcd191e6a233cc65dfbb30079c4233bf205c7375678e5770f189"
+      "sha256": "92f33de798c45dea89c81d1fe3c1c291c02f3de988dcc20b658895dcedc3003a"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "b537b0632224bf4119da838969eb4ee779544ce88e866a6f2d369a8cef7cec79"
+      "sha256": "560b74751dcbd96e27098f38d9026035f73400ef723e42eb5a6431433ca441a3"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
@@ -90,11 +90,11 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-10T03:15:06+08:00",
-  "runtime_scope": "Test135修正查询新启动：16项通过、7项部分、17项未覆盖。真实QM固件完成及PSF/MIF接纳通过；原生数据RX与服务应答0。",
+  "updated_at": "2026-11-10T04:28:13+08:00",
+  "runtime_scope": "Test135当前实测：16项通过、7项部分、17项未覆盖。补取迟到QM摘要并对齐同包；Test136尚未实机运行。",
   "running_candidate": "25G416-Test135",
-  "next_candidate": null,
-  "website_delivery": "本轮实测及开发时间线同步；驱动与EFI未改，当前无需重启。",
-  "deployment_state": "test135_corrected_qm_tx_completed_rx_missing",
-  "site_preparation": "Corrected P2P plus AWDL helper drove one strict system target QM through descriptor/doorbell and a matching local TX_RSP. No peer ACK/native data RX. Pending-counter fail-closed guard built and boundary-checked offline."
+  "next_candidate": "25G416-Test136",
+  "website_delivery": "Test136已部署待重启；里程碑和开发总时间线同步，保留Test135实测口径。",
+  "deployment_state": "test136_deployed_waiting_reboot_disarmed",
+  "site_preparation": "Test136 raw QM command/MPDU and scoped RX-window observation; 104 production configurations, 12 producer-consumer regressions and independent offline review passed. Minimal Test135/config backup preserved; config unchanged. Internet smoke and sleep skipped. Peer return and AirDrop remain unproved."
 }
