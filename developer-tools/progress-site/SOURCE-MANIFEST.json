@@ -20,27 +20,27 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "2686b21c40106f52a1dc27ea78b5da3718b8b2458003e65bbf07d79e30210f07"
+      "sha256": "6f14318a25bd523179bc0a2e67c7c5eb9d0e8c0a16f6e396a65ec977d2e498b6"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "43684fb4d35d3b989085e0e9708cf020b1e2c742cd48291ac57f49e89021b8cd"
+      "sha256": "acee8cc66a56378ceb67242734dd1520a1903e915ebb6dd355c50f0ba63cb9a9"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "0a1a266067452f6ff69504dac01b3991a21cc2cfbff20bf9544ae9d0ed3bccba"
+      "sha256": "ae131de81f19d3f81beeaba641ace18c33e6b9cf2583ccef1cb279ac2bb7ccfd"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "0a1a266067452f6ff69504dac01b3991a21cc2cfbff20bf9544ae9d0ed3bccba"
+      "sha256": "ae131de81f19d3f81beeaba641ace18c33e6b9cf2583ccef1cb279ac2bb7ccfd"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "5d4983dd04028be990e0e3be42ba61d2308f7bfa9700a2bf028b5ffc4cd30d75"
+      "sha256": "2535b1d8e62056525d584d3970ed50b4f62fba693c830244c6d877e9aa2a7c38"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
@@ -85,11 +85,11 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-09T14:13:49+08:00",
+  "updated_at": "2026-11-09T14:31:01+08:00",
   "runtime_scope": "原生UDP提交8字节，对端匹配请求，Mac约52.4 ms收到同一标记返回，捕获、解码和交付各1帧。固定记录覆盖门铃到收尾约350 ms，7个TX/BA与首次拒绝槽均无事件；随后超时隔离，完成与安全释放仍未通过。这只说明已观测入口在该窗口未记录候选，不能断言固件从未产出或窗口外没有迟到。",
   "running_candidate": "25G416-Test127",
   "next_candidate": "25G416-Test127",
-  "website_delivery": "Test127实测回包、完成入口空记录及恢复结果已更新。",
+  "website_delivery": "Test127实测不变，Test128对端工具已准备；未重写EFI。",
   "deployment_state": "test127_runtime_return_observed_no_completion_candidate",
-  "site_preparation": "Test127 runtime evidence only; no next candidate deployed. No private runtime metadata published."
+  "site_preparation": "Test127 runtime evidence retained; Test128 peer tools ready, no new kext or RF."
 }

@@ -170,6 +170,9 @@ def validate_config(config: dict[str, Any], *, build_id: str = BUILD_ID) -> tupl
         raise CoordinatorError("expected_reset_count must be a nonnegative integer")
     if config["expected_build"] != build_id:
         raise CoordinatorError("expected_build must be " + build_id)
+    if ("prepare_peer_mac_required" in config and
+            type(config["prepare_peer_mac_required"]) is not bool):
+        raise CoordinatorError("prepare_peer_mac_required must be a boolean")
     if not isinstance(config["expected_uuid"], str) or not UUID_RE.fullmatch(config["expected_uuid"]):
         raise CoordinatorError("expected_uuid must be uppercase canonical UUID")
 
@@ -229,6 +232,7 @@ def make_plan(config: dict[str, Any], *, build_id: str = BUILD_ID) -> dict[str, 
         "ssh_attempted": False,
         "local_runtime_read": False,
         "remote_restore_required_after_prepare": True,
+        "automatic_ack_possible_during_prepare": normalized.get("prepare_peer_mac_required") is True,
         "build": normalized["expected_build"],
         "expected_boot_checked": False,
         "expected_uuid_checked": False,
@@ -679,6 +683,7 @@ def execute_run(config: dict[str, Any], deps: Any = RealDeps, *,
         "build": build_id,
         "hardware_action": False,
         "router_mutation_attempted": False,
+        "automatic_ack_possible_during_prepare": normalized.get("prepare_peer_mac_required") is True,
         "rf_window_attempted": False,
         "ssh_attempted": False,
         "arm_attempted": False,
@@ -718,6 +723,8 @@ def execute_run(config: dict[str, Any], deps: Any = RealDeps, *,
                         "--state-dir", normalized["remote_dir"],
                         "--run-token", identity["run_token"],
                         "--lease-seconds", "60"]
+        if normalized.get("prepare_peer_mac_required") is True:
+            prepare_args += ["--peer-mac", _colon_mac(identity["peer_mac"])]
         remote_touched = True
         result["router_mutation_attempted"] = True
         prepare = _invoke_remote(normalized, prepare_args, deps)
