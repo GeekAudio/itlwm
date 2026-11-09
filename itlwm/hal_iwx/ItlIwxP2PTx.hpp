@@ -10,6 +10,9 @@
 #ifndef ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
 #define ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332 0
 #endif
+#ifndef ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+#define ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332 0
+#endif
 
 class ItlIwx;
 struct iwx_softc;
@@ -32,12 +35,14 @@ enum class TahoeP2PResourceState : uint8_t {
 // lease, even though both currently use LONG_GROUP SCD_QUEUE_CFG v2.
 enum class TahoeP2PStationRole : uint8_t {
     kBroadcastGeneralPurpose = 0,
-    kDirectedPeerLink = 1
+    kDirectedPeerLink = 1,
+    kMulticastData = 2
 };
 
 enum class TahoeP2PQueueUse : uint8_t {
     kManagementTid15 = 0,
-    kDirectedNonQosDataTid0 = 1
+    kDirectedNonQosDataTid0 = 1,
+    kMulticastNonQosDataTid0 = 2
 };
 
 struct TahoeP2PStationLease {
@@ -50,9 +55,10 @@ struct TahoeP2PStationLease {
     uint8_t stationType;
     uint8_t addCommandVersion;
     uint8_t addNotificationVersion;
-#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
-    // HAL-issued owner-persistent identity for the exact LINK station
-    // allocation. This is independent of station ID and power generation.
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332 || \
+    ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+    // Owner-issued identity for this exact station allocation. This is
+    // independent of station ID and power generation.
     uint64_t allocationSerial {0};
 #endif
 };
@@ -63,6 +69,7 @@ struct TahoeP2PTxQueueLease {
     uint32_t generation;
     TahoeP2PResourceState state;
     TahoeP2PStationRole stationRole;
+    TahoeP2PQueueUse queueUse {TahoeP2PQueueUse::kManagementTid15};
     uint8_t firmwareTid;
     uint8_t peerAddress[6];
     uint32_t macIdAndColor;
@@ -82,11 +89,18 @@ struct TahoeP2PTxQueueLease {
     uint32_t retainedRingGeneration;
     uint16_t retainedRingQueueId;
     uint16_t firmwareWritePointer;
+    // Experimental multicast admission records a firmware-configured queue
+    // without installing or replacing sc->txq[]. queueId remains invalid;
+    // the assigned firmware queue and initial SSN live in these fields.
+    bool queueConfiguredUninstalled {false};
+    uint16_t pendingFirmwareQueueId {UINT16_MAX};
+    uint16_t pendingFirmwareSsn {0};
     bool unsubmittedAbortInProgress;
     bool idleAbortAfterEndInProgress;
-#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
-    // HAL-issued owner-persistent identity for the exact TID0 queue
-    // allocation. This is independent of qid and generation.
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332 || \
+    ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+    // Owner-issued identity for this exact queue allocation. This is
+    // independent of qid and generation.
     uint64_t allocationSerial {0};
 #endif
     // Portable lifecycle model is also used by the native tests. Do not copy
@@ -111,6 +125,14 @@ int iwx_tahoe_p2p_add_directed_peer_station(
     ItlIwx *owner, struct iwx_softc *sc,
     TahoeP2PStationLease *lease, uint8_t stationId,
     const uint8_t peerAddress[6], bool *resourceMayExist);
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+// Experimental admission only. Both the compile-time profile and the
+// explicit caller opt-in are required; this role has no live TX/Action path.
+int iwx_tahoe_p2p_add_multicast_data_station(
+    ItlIwx *owner, struct iwx_softc *sc,
+    TahoeP2PStationLease *lease, uint8_t stationId,
+    bool experimentOptIn, bool *resourceMayExist);
+#endif
 int iwx_tahoe_p2p_remove_broadcast_station(ItlIwx *owner,
                                            struct iwx_softc *sc,
                                            TahoeP2PStationLease *lease,
@@ -120,6 +142,12 @@ int iwx_tahoe_p2p_remove_directed_peer_station(
     ItlIwx *owner, struct iwx_softc *sc,
     TahoeP2PStationLease *lease, TahoeP2PTxQueueLease *queueLease,
     bool *resourceMayExist);
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+int iwx_tahoe_p2p_remove_multicast_data_station(
+    ItlIwx *owner, struct iwx_softc *sc,
+    TahoeP2PStationLease *lease, TahoeP2PTxQueueLease *queueLease,
+    bool *resourceMayExist);
+#endif
 int iwx_tahoe_p2p_tvqm_allocate(ItlIwx *owner, struct iwx_softc *sc,
                                 TahoeP2PTxQueueLease *lease,
                                 const TahoeP2PStationLease *stationLease,
@@ -128,11 +156,14 @@ int iwx_tahoe_p2p_tvqm_allocate(ItlIwx *owner, struct iwx_softc *sc,
                                 bool *resourceMayExist,
                                 TahoeP2PQueueUse use =
                                     TahoeP2PQueueUse::kManagementTid15);
-#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332 || \
+    ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
 int iwx_tahoe_p2p_tvqm_bind_allocation_serials(
     struct iwx_softc *sc, TahoeP2PStationLease *stationLease,
     TahoeP2PTxQueueLease *queueLease, uint64_t stationAllocationSerial,
     uint64_t queueAllocationSerial);
+#endif
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
 // Hard-stop-only retirement for the exact directed LINK/TID0 allocation.
 // The Data context carries the proofs recorded at the real MASTER_DISABLED,
 // SW_RESET, and post-stop owned-ring reset sites; this helper never accepts
@@ -155,6 +186,17 @@ int iwx_tahoe_p2p_tvqm_abort_unsubmitted(
     TahoeP2PStationLease *stationLease,
     TahoeP2PTxQueueLease *queueLease,
     bool *resourceMayExist);
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+// Revoke only an exact owner-serial-bound, configured-but-uninstalled
+// multicast TID0 queue. Any ambiguous command/response retains both leases.
+int iwx_tahoe_p2p_tvqm_abort_multicast_unsubmitted(
+    ItlIwx *owner, struct iwx_softc *sc,
+    TahoeP2PStationLease *stationLease,
+    TahoeP2PTxQueueLease *queueLease,
+    uint64_t expectedStationAllocationSerial,
+    uint64_t expectedQueueAllocationSerial,
+    bool *resourceMayExist);
+#endif
 // Abort an installed queue after a confirmed ROC END only when the caller
 // independently proves that no completion ticket was armed. A successful
 // exact TXPATH_FLUSH + REMOVE_STA ACK releases only the current P2P ring; a

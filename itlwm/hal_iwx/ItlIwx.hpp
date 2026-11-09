@@ -651,6 +651,15 @@ public:
     IntelP2PTx::StationRegistry nativeP2pStationRegistry_;
     TahoeP2PStationLease nativeP2pStation_ {};
     TahoeP2PTxQueueLease nativeP2pTxQueue_ {};
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+    // Multicast admission has a distinct firmware role and must never alias
+    // the management or directed-data leases above. These owner-persistent
+    // serials are not reset when a lease is withdrawn or the radio restarts.
+    TahoeP2PStationLease nativeP2pMulticastStation_ {};
+    TahoeP2PTxQueueLease nativeP2pMulticastTxQueue_ {};
+    uint64_t nativeP2pMulticastStationSerialHighWater_ {0};
+    uint64_t nativeP2pMulticastQueueSerialHighWater_ {0};
+#endif
     TahoeP2PActionTxContext nativeP2pActionTx_;
     uint32_t nativeP2pRocStage_ {0};
     uint32_t nativeP2pRocResult_ {0};

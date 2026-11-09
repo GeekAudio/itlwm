@@ -11,6 +11,7 @@ UNITS = ('ItlIwx.cpp', 'ItlIwxP2PProbe.cpp', 'ItlIwxP2PRoc.cpp',
 PROFILES = {
     'ordinary_wifi': (),
     'resident': ('LIFECYCLE', 'RESIDENT'),
+    'multicast_admission': ('LIFECYCLE', 'RESIDENT', 'MULTICAST_ADMISSION'),
     'discovery': ('LIFECYCLE', 'RESIDENT', 'TX_EVIDENCE', 'DISCOVERY_EXPERIMENT'),
     'discovery_rx_input': ('LIFECYCLE', 'RESIDENT', 'TX_EVIDENCE', 'DISCOVERY_EXPERIMENT', 'DISCOVERY_RX_INPUT'),
     'rx149_observation': ('LIFECYCLE', 'RESIDENT', 'TX_EVIDENCE', 'DISCOVERY_EXPERIMENT', 'RX149_OBSERVATION'),

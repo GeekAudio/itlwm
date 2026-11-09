@@ -616,6 +616,35 @@ IOReturn AirportItlwm::setProperties(OSObject *properties)
                     request->getObject("NativeP2PDirectedDataCompiled") ||
                     request->getObject("NativeP2PDirectedDataAcceptedRunToken") ||
                     request->getObject("NativeP2PDirectedDataReady") ||
+                    request->getObject("NativeP2PMulticastAdmissionEnabled") ||
+                    request->getObject("NativeP2PMulticastAdmissionStage") ||
+                    request->getObject("NativeP2PMulticastAdmissionOperationResult") ||
+                    request->getObject("NativeP2PMulticastAdmissionCleanupResult") ||
+                    request->getObject("NativeP2PMulticastAdmissionStationAddAck") ||
+                    request->getObject("NativeP2PMulticastAdmissionQueueConfiguredUninstalled") ||
+                    request->getObject("NativeP2PMulticastAdmissionNeverDoorbelled") ||
+                    request->getObject("NativeP2PMulticastAdmissionResourcesAbsent") ||
+                    request->getObject("NativeP2PMulticastAdmissionOldLeaseUnchanged") ||
+                    request->getObject("NativeP2PMulticastAdmissionGeneration") ||
+                    request->getObject("NativeP2PMulticastAdmissionStationSerial") ||
+                    request->getObject("NativeP2PMulticastAdmissionQueueSerial") ||
+                    request->getObject("NativeP2PMulticastAdmissionPrepareWitnessValid") ||
+                    request->getObject("NativeP2PMulticastAdmissionPrepareExpectedRocToken") ||
+                    request->getObject("NativeP2PMulticastAdmissionMacRemoveAckAccepted") ||
+                    request->getObject("NativeP2PMulticastAdmissionMacRemoveAckExpectedP2PEpoch") ||
+                    request->getObject("NativeP2PMulticastAdmissionMacRemoveAckExpectedDriverGeneration") ||
+                    request->getObject("NativeP2PMulticastAdmissionMacRemoveAckExpectedRocToken") ||
+                    request->getObject("NativeP2PMulticastAdmissionRocAbortAcknowledged") ||
+                    request->getObject("NativeP2PProbeAttempted") ||
+                    request->getObject("NativeP2PProbeState") ||
+                    request->getObject("NativeP2PProbeResourceMayExist") ||
+                    request->getObject("NativeP2PProbeRemoveResult") ||
+                    request->getObject("NativeP2PProbeContextGeneration") ||
+                    request->getObject("NativeP2PProbePowerGeneration") ||
+                    request->getObject("NativeP2PRocObserved") ||
+                    request->getObject("NativeP2PRocStartSeen") ||
+                    request->getObject("NativeP2PRocEndSeen") ||
+                    request->getObject("NativeP2PRocUnknown") ||
                     request->getObject("NativeP2PTxProbeEverDoorbelled") ||
                     request->getObject("NativeP2PAwdlActionFramesSubmitted") ||
                     request->getObject("NativeP2PAwdlPsfFrameSubmitted") ||
@@ -629,6 +658,7 @@ IOReturn AirportItlwm::setProperties(OSObject *properties)
                     request->getObject("NativeAwdlDiscoveryExperimentEnabled") ||
                     request->getObject("NativeAwdlDiscoveryMifCurrentSlotEnabled") ||
                     request->getObject("NativeAwdlDiscoveryCurrentAwFallbackEnabled") ||
+                    request->getObject("NativeAwdlDiscoveryRxInputEnabled") ||
                     request->getObject("NativeAwdlResidentEnabled") ||
                     request->getObject("NativeAwdlResidentCompiled")))
         return kIOReturnUnsupported;

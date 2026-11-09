@@ -13,6 +13,9 @@
 #include "../../native/p2p_rx149_observation.hpp"
 #include "../../native/rx149_live_start_snapshot.hpp"
 #include "../../native/rx_preowner_wire.hpp"
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+#include "../../native/awdl_discovery_rx_input.hpp"
+#endif
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
 #include "../../native/awdl_native_bsd_data_25G332.hpp"
 #include "../../native/p2p_directed_data_control.hpp"
@@ -57,6 +60,18 @@ namespace {
 static constexpr uint32_t kDirectedPrepareArmMode = 3u;
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
 static constexpr uint32_t kDirectedDataArmMode = 4u;
+#endif
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+enum MulticastAdmissionStage : uint32_t {
+    kMulticastAdmissionIdle = 0,
+    kMulticastAdmissionStarting = 1,
+    kMulticastAdmissionRocPrepared = 2,
+    kMulticastAdmissionStationAcknowledged = 3,
+    kMulticastAdmissionQueueConfigured = 4,
+    kMulticastAdmissionCleaning = 5,
+    kMulticastAdmissionComplete = 6,
+    kMulticastAdmissionQuarantined = 7
+};
 #endif
 
 static uint32_t tahoeP2pProbeReadLe32(const uint8_t *bytes)
@@ -209,6 +224,25 @@ struct P2PProbeRun {
     bool addAcknowledged;
     bool rx149ObservationOnly;
     bool directedPrepareOnly;
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+    bool multicastAdmissionOnly;
+    uint32_t multicastStage;
+    int32_t multicastOperationResult;
+    int32_t multicastCleanupResult;
+    bool multicastStationAddAck;
+    bool multicastQueueConfiguredUninstalled;
+    bool multicastNeverDoorbelled;
+    bool multicastResourcesAbsent;
+    bool multicastOldLeaseInitiallyAbsent;
+    bool multicastOldLeaseUnchanged;
+    bool multicastRocAbortAcknowledged;
+    bool multicastMacRemoveAttempted;
+    uint64_t multicastStationAllocationSerial;
+    uint64_t multicastQueueAllocationSerial;
+    NativeAwdlDiscoveryRxInput::RocCleanupWitness
+        multicastPrepareWitness;
+    TahoeP2PMacContextAckReceipt multicastMacRemoveAck;
+#endif
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
     bool directedDataOnly;
     TahoeP2PDirectedDataArm directedDataArm;
@@ -425,6 +459,131 @@ struct P2PProbeRun {
     uint8_t address[6];
     NativeP2PProbe::BlockedReason blocked;
 };
+
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+static bool multicastAdmissionOwnLeasesAbsent(ItlIwx *owner);
+static bool multicastAdmissionOldLeaseAbsent(ItlIwx *owner);
+static bool multicastAdmissionNeverDoorbelled(ItlIwx *owner);
+
+static void publishMulticastAdmissionDefaults(
+    IOEthernetController *controller)
+{
+    if (!controller || controller->getProperty(
+            "NativeP2PMulticastAdmissionStage"))
+        return;
+    controller->setProperty("NativeP2PMulticastAdmissionOperationResult",
+                            uint32_t(0), 32);
+    controller->setProperty("NativeP2PMulticastAdmissionCleanupResult",
+                            uint32_t(0), 32);
+    controller->setProperty("NativeP2PMulticastAdmissionStationAddAck",
+                            uint32_t(0), 32);
+    controller->setProperty(
+        "NativeP2PMulticastAdmissionQueueConfiguredUninstalled",
+        uint32_t(0), 32);
+    controller->setProperty("NativeP2PMulticastAdmissionNeverDoorbelled",
+                            uint32_t(0), 32);
+    controller->setProperty("NativeP2PMulticastAdmissionResourcesAbsent",
+                            uint32_t(0), 32);
+    controller->setProperty("NativeP2PMulticastAdmissionOldLeaseUnchanged",
+                            uint32_t(0), 32);
+    controller->setProperty("NativeP2PMulticastAdmissionGeneration",
+                            uint32_t(0), 32);
+    controller->setProperty("NativeP2PMulticastAdmissionStationSerial",
+                            uint64_t(0), 64);
+    controller->setProperty("NativeP2PMulticastAdmissionQueueSerial",
+                            uint64_t(0), 64);
+    controller->setProperty("NativeP2PMulticastAdmissionPrepareWitnessValid",
+                            uint32_t(0), 32);
+    controller->setProperty("NativeP2PMulticastAdmissionPrepareExpectedRocToken",
+                            uint32_t(0), 32);
+    controller->setProperty("NativeP2PMulticastAdmissionMacRemoveAckAccepted",
+                            uint32_t(0), 32);
+    controller->setProperty("NativeP2PMulticastAdmissionMacRemoveAckExpectedP2PEpoch",
+                            uint32_t(0), 32);
+    controller->setProperty("NativeP2PMulticastAdmissionMacRemoveAckExpectedDriverGeneration",
+                            uint32_t(0), 32);
+    controller->setProperty("NativeP2PMulticastAdmissionMacRemoveAckExpectedRocToken",
+                            uint32_t(0), 32);
+    controller->setProperty("NativeP2PMulticastAdmissionRocAbortAcknowledged",
+                            uint32_t(0), 32);
+    // Stage is the commit marker consumed by the offline receipt helper.
+    controller->setProperty("NativeP2PMulticastAdmissionStage", uint32_t(0), 32);
+}
+
+static void publishMulticastAdmissionState(ItlIwx *owner,
+                                           const P2PProbeRun *run)
+{
+    if (!owner || !run)
+        return;
+    IOEthernetController *controller = owner->tahoeP2pController();
+    if (!controller)
+        return;
+    controller->setProperty("NativeP2PMulticastAdmissionOperationResult",
+        static_cast<uint32_t>(run->multicastOperationResult), 32);
+    controller->setProperty("NativeP2PMulticastAdmissionCleanupResult",
+        static_cast<uint32_t>(run->multicastCleanupResult), 32);
+    controller->setProperty("NativeP2PMulticastAdmissionStationAddAck",
+        uint32_t(run->multicastStationAddAck), 32);
+    controller->setProperty(
+        "NativeP2PMulticastAdmissionQueueConfiguredUninstalled",
+        uint32_t(run->multicastQueueConfiguredUninstalled), 32);
+    controller->setProperty("NativeP2PMulticastAdmissionNeverDoorbelled",
+        uint32_t(run->multicastNeverDoorbelled), 32);
+    controller->setProperty("NativeP2PMulticastAdmissionResourcesAbsent",
+        uint32_t(run->multicastResourcesAbsent), 32);
+    controller->setProperty("NativeP2PMulticastAdmissionOldLeaseUnchanged",
+        uint32_t(run->multicastOldLeaseUnchanged), 32);
+    controller->setProperty("NativeP2PMulticastAdmissionGeneration",
+                            run->contextGeneration, 32);
+    controller->setProperty("NativeP2PMulticastAdmissionStationSerial",
+                            run->multicastStationAllocationSerial, 64);
+    controller->setProperty("NativeP2PMulticastAdmissionQueueSerial",
+                            run->multicastQueueAllocationSerial, 64);
+    controller->setProperty("NativeP2PMulticastAdmissionPrepareWitnessValid",
+        uint32_t(run->multicastPrepareWitness.valid), 32);
+    controller->setProperty("NativeP2PMulticastAdmissionPrepareExpectedRocToken",
+        run->multicastPrepareWitness.expectedToken, 32);
+    controller->setProperty("NativeP2PMulticastAdmissionMacRemoveAckAccepted",
+        run->multicastMacRemoveAck.accepted, 32);
+    controller->setProperty(
+        "NativeP2PMulticastAdmissionMacRemoveAckExpectedP2PEpoch",
+        run->multicastMacRemoveAck.expectedP2PEpoch, 32);
+    controller->setProperty(
+        "NativeP2PMulticastAdmissionMacRemoveAckExpectedDriverGeneration",
+        run->multicastMacRemoveAck.expectedDriverGeneration, 32);
+    controller->setProperty(
+        "NativeP2PMulticastAdmissionMacRemoveAckExpectedRocToken",
+        run->multicastMacRemoveAck.expectedRocToken, 32);
+    controller->setProperty("NativeP2PMulticastAdmissionRocAbortAcknowledged",
+        uint32_t(run->multicastRocAbortAcknowledged), 32);
+    // Publish the stage last so readers cannot observe terminal stage with
+    // stale result or cleanup evidence from the previous snapshot.
+    controller->setProperty("NativeP2PMulticastAdmissionStage",
+                            run->multicastStage, 32);
+}
+
+static bool nextMulticastAllocationSerial(uint64_t *highWater,
+                                          bool queueDomain,
+                                          uint64_t *serial)
+{
+    if (!highWater || !serial)
+        return false;
+    uint64_t observed = __atomic_load_n(highWater, __ATOMIC_ACQUIRE);
+    for (;;) {
+        constexpr uint64_t kDomainMask = uint64_t(1) << 63;
+        if (observed >= kDomainMask - 1)
+            return false;
+        const uint64_t next = observed + 1;
+        if (__atomic_compare_exchange_n(highWater, &observed, next, false,
+                __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            // Keep station and queue serial spaces disjoint while preserving
+            // a monotonic owner-local counter for each resource kind.
+            *serial = queueDomain ? (kDomainMask | next) : next;
+            return next != 0;
+        }
+    }
+}
+#endif
 
 struct P2PExerciseRecoveryAction {
     P2PProbeRun *run;
@@ -784,6 +943,52 @@ static bool manualProbeGateOpen(ItlIwx *owner, IOEthernetController *controller)
                          __ATOMIC_ACQUIRE) != 0);
 }
 
+static bool multicastAdmissionRequested(IOEthernetController *controller)
+{
+    return controller && controller->getProperty(
+        "NativeP2PMulticastAdmissionEnabled") == kOSBooleanTrue;
+}
+
+static bool multicastAdmissionProfileEnabled(
+    IOEthernetController *controller)
+{
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+    if (!controller || !multicastAdmissionRequested(controller) ||
+        controller->getProperty("NativeP2PManualTrigger") !=
+            kOSBooleanTrue ||
+        controller->getProperty("NativeP2PProbe") != kOSBooleanTrue ||
+        controller->getProperty("NativeP2PRocProbe") != kOSBooleanTrue ||
+        controller->getProperty("NativeP2PTxProbe") != kOSBooleanTrue ||
+        controller->getProperty("NativeAwdlResidentEnabled") !=
+            kOSBooleanTrue)
+        return false;
+    static const char *const forbidden[] = {
+        "NativeP2PAwdlPsfObservationOnly",
+        "NativeP2PAwdlMifFollowup",
+        "NativeP2PGp2Observation",
+        "NativeAwdlInitObservationOnly",
+        "NativeAwdlLifecycleObservationOnly",
+        "NativeAwdlTxEvidenceEnabled",
+        "NativeAwdlDiscoveryExperimentEnabled",
+        "NativeAwdlDiscoveryMifCurrentSlotEnabled",
+        "NativeAwdlDiscoveryCurrentAwFallbackEnabled",
+        "NativeAwdlDiscoveryRxInputEnabled",
+        "NativeP2PRx149ObservationOnly",
+        "NativeP2PRx149DataInputExperiment",
+        "NativeP2PDirectedPrepareEnabled",
+        "NativeP2PDirectedDataEnabled"
+    };
+    for (const char *key : forbidden) {
+        if (controller->getProperty(key) == kOSBooleanTrue)
+            return false;
+    }
+    return true;
+#else
+    (void)controller;
+    return false;
+#endif
+}
+
 static uint32_t manualProbeArmMode(ItlIwx *owner)
 {
     return owner ? __atomic_load_n(&owner->nativeP2pManualArmRequested_,
@@ -1028,6 +1233,11 @@ static bool mifFollowupProfileEnabled(IOEthernetController *controller)
 
 static bool probeEnabled(ItlIwx *owner, IOEthernetController *controller)
 {
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+    // This build selection has no fallback to the general probe or Action TX.
+    if (multicastAdmissionRequested(controller))
+        return false;
+#endif
     if (rx149ObservationOnlyRequested(controller) ||
         rx149ArmModeSelected(owner))
         return rx149ProfileStatus(owner, controller) ==
@@ -1051,6 +1261,13 @@ static bool probeEnabled(ItlIwx *owner, IOEthernetController *controller)
 
 static bool txProbeEnabled(ItlIwx *owner, IOEthernetController *controller)
 {
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+    if (multicastAdmissionRequested(controller))
+        return multicastAdmissionProfileEnabled(controller) &&
+            NativeP2PRx149Observation::isLegacyArmMode(
+                manualProbeArmMode(owner)) &&
+            manualProbeGateOpen(owner, controller);
+#endif
     if (rx149ObservationOnlyRequested(controller) ||
         rx149ArmModeSelected(owner))
         return false;
@@ -6353,6 +6570,33 @@ static int remove(void *opaque)
     auto run = static_cast<P2PProbeRun *>(opaque);
     if (!run || !run->owner || !run->owner->nativeP2pCommandAllowed())
         return EBUSY;
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+    if (run->multicastAdmissionOnly) {
+        if (!run->multicastResourcesAbsent ||
+            !run->multicastNeverDoorbelled ||
+            !run->multicastOldLeaseUnchanged ||
+            !run->multicastRocAbortAcknowledged ||
+            run->multicastCleanupResult != 0 ||
+            !NativeAwdlDiscoveryRxInput::cleanupWitnessCurrent(
+                run->multicastPrepareWitness, run->contextGeneration,
+                run->scGeneration) ||
+            !multicastAdmissionOwnLeasesAbsent(run->owner) ||
+            !multicastAdmissionNeverDoorbelled(run->owner) ||
+            !multicastAdmissionOldLeaseAbsent(run->owner) ||
+            run->owner->com.sc_p2p.binding_state !=
+                IWX_P2P_RESOURCE_ABSENT || run->owner->com.sc_p2p.phy_leased)
+            return ESTALE;
+        auto &ack = run->multicastMacRemoveAck;
+        ack = {};
+        ack.schemaVersion = TahoeP2PMacContextAckPolicy::kSchemaVersion;
+        ack.expectedP2PEpoch = run->contextGeneration;
+        ack.expectedRocToken = run->multicastPrepareWitness.expectedToken;
+        ack.expectedDriverGeneration = run->scGeneration;
+        run->multicastMacRemoveAttempted = true;
+        return run->owner->iwx_p2p_mac_context_remove_with_ack(
+            &run->owner->com, &ack);
+    }
+#endif
 #if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
     if (run->discoveryRxCleanupSelected) {
     NativeAwdlBSD::revokeDiscoveryRxInput();
@@ -7943,6 +8187,391 @@ struct DirectedNoTicketProof {
     bool snapshotValid;
     bool neverArmed;
 };
+
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+static bool multicastAdmissionOwnLeasesAbsent(ItlIwx *owner)
+{
+    if (!owner || !owner->nativeP2pTxLock_)
+        return false;
+    IOInterruptState interruptState = IOSimpleLockLockDisableInterrupt(
+        owner->nativeP2pTxLock_);
+    const auto queue = owner->nativeP2pMulticastTxQueue_.lifecycle.snapshot();
+    const auto &stationLease = owner->nativeP2pMulticastStation_;
+    const auto &queueLease = owner->nativeP2pMulticastTxQueue_;
+    const bool absent = stationLease.state == TahoeP2PResourceState::kAbsent &&
+        queueLease.state == TahoeP2PResourceState::kAbsent &&
+        queue.state == IntelP2PTx::QueueState::kAbsent &&
+        queueLease.queueId == IWX_INVALID_QUEUE &&
+        queueLease.pendingFirmwareQueueId == UINT16_MAX &&
+        queueLease.pendingRing == nullptr && queueLease.retainedRing == nullptr &&
+        !queueLease.queueConfiguredUninstalled && !queueLease.submissionBusy &&
+        !queueLease.everDoorbelled && !queueLease.unsubmittedAbortInProgress &&
+        !queueLease.idleAbortAfterEndInProgress;
+    IOSimpleLockUnlockEnableInterrupt(owner->nativeP2pTxLock_, interruptState);
+    return absent;
+}
+
+static bool multicastAdmissionOldLeaseAbsent(ItlIwx *owner)
+{
+    if (!owner || !owner->nativeP2pTxLock_)
+        return false;
+    IOInterruptState interruptState = IOSimpleLockLockDisableInterrupt(
+        owner->nativeP2pTxLock_);
+    const auto queue = owner->nativeP2pTxQueue_.lifecycle.snapshot();
+    const auto ticket = owner->nativeP2pActionTx_.completion.snapshot();
+    const bool absent = owner->nativeP2pStation_.state ==
+            TahoeP2PResourceState::kAbsent &&
+        owner->nativeP2pTxQueue_.state == TahoeP2PResourceState::kAbsent &&
+        queue.state == IntelP2PTx::QueueState::kAbsent &&
+        owner->nativeP2pTxQueue_.queueId == IWX_INVALID_QUEUE &&
+        owner->nativeP2pTxQueue_.pendingRing == nullptr &&
+        owner->nativeP2pTxQueue_.retainedRing == nullptr &&
+        !owner->nativeP2pTxQueue_.submissionBusy &&
+        !owner->nativeP2pTxQueue_.everDoorbelled &&
+        owner->nativeP2pActionTx_.state == TahoeP2PActionTxState::kIdle &&
+        !ticket.armed && !ticket.completed && queue.outstandingTx == 0;
+    IOSimpleLockUnlockEnableInterrupt(owner->nativeP2pTxLock_, interruptState);
+    return absent;
+}
+
+static bool multicastAdmissionNeverDoorbelled(ItlIwx *owner)
+{
+    if (!owner || !owner->nativeP2pTxLock_)
+        return false;
+    IOInterruptState interruptState = IOSimpleLockLockDisableInterrupt(
+        owner->nativeP2pTxLock_);
+    const auto ticket = owner->nativeP2pActionTx_.completion.snapshot();
+    const bool neverDoorbelled =
+        !owner->nativeP2pMulticastTxQueue_.everDoorbelled &&
+        !owner->nativeP2pMulticastTxQueue_.submissionBusy &&
+        !owner->nativeP2pTxQueue_.everDoorbelled &&
+        !ticket.armed && !ticket.completed &&
+        owner->nativeP2pActionTx_.state == TahoeP2PActionTxState::kIdle;
+    IOSimpleLockUnlockEnableInterrupt(owner->nativeP2pTxLock_, interruptState);
+    return neverDoorbelled;
+}
+
+struct MulticastPreparedAbortProof {
+    P2PProbeRun *probe;
+    bool snapshotValid;
+    bool neverDoorbelled;
+};
+
+static IOReturn captureMulticastPreparedAbortProofAction(
+    OSObject *, void *opaque, void *, void *, void *)
+{
+    auto proof = static_cast<MulticastPreparedAbortProof *>(opaque);
+    auto probe = proof ? proof->probe : nullptr;
+    auto owner = probe ? probe->owner : nullptr;
+    if (!proof || !probe || !owner || !probe->multicastAdmissionOnly ||
+        !owner->tahoeP2pOnMainGate() || !owner->nativeP2pBusy() ||
+        __atomic_load_n(&owner->nativeP2pProbeOwner_, __ATOMIC_ACQUIRE) !=
+            reinterpret_cast<void *>(probe->workerThread) ||
+        owner->nativeP2pProbeGeneration_ != probe->contextGeneration ||
+        uint32_t(owner->com.sc_generation) != probe->powerGeneration ||
+        uint32_t(owner->com.sc_generation) != probe->scGeneration ||
+        __atomic_load_n(&owner->com.sc_tx_rate_generation,
+                        __ATOMIC_ACQUIRE) != probe->stationGeneration ||
+        probe->p2pFirmwareGeneration != probe->powerGeneration ||
+        owner->com.sc_p2p.fw_generation != probe->p2pFirmwareGeneration)
+        return kIOReturnNotReady;
+
+    const auto &roc = owner->com.sc_p2p_roc;
+    if (roc.phase != IWX_P2P_ROC_PREPARED ||
+        roc.token != probe->contextGeneration ||
+        roc.fw_generation != probe->powerGeneration ||
+        roc.session_conf_id != IWX_SESSION_PROTECT_CONF_P2P_GO_NEGOTIATION ||
+        roc.session_submit_seen != 0 ||
+        roc.session_submit_result != EINPROGRESS ||
+        owner->com.sc_p2p.mac_state != IWX_P2P_RESOURCE_ACTIVE ||
+        owner->com.sc_p2p.binding_state != IWX_P2P_RESOURCE_ACTIVE ||
+        !owner->com.sc_p2p.phy_leased || !multicastAdmissionOwnLeasesAbsent(owner))
+        return kIOReturnNotReady;
+
+    P2PTxDiagnosticSnapshot snapshot{};
+    if (!captureP2PTxSnapshot(owner, &snapshot))
+        return kIOReturnNotReady;
+    proof->snapshotValid = true;
+    proof->neverDoorbelled = !probe->sessionSubmitReached &&
+        !snapshot.ticketArmed && !snapshot.ticketCompleted &&
+        !snapshot.queueDoorbelled && snapshot.outstandingTx == 0 &&
+        snapshot.actionState == static_cast<uint32_t>(
+            TahoeP2PActionTxState::kIdle) &&
+        owner->nativeP2pActionTx_.state == TahoeP2PActionTxState::kIdle &&
+        multicastAdmissionOldLeaseAbsent(owner);
+    return kIOReturnSuccess;
+}
+
+static int exerciseMulticastAdmissionOnly(P2PProbeRun *probe)
+{
+    ItlIwx *owner = probe ? probe->owner : nullptr;
+    if (!owner || !probe->multicastAdmissionOnly ||
+        !owner->nativeP2pCommandAllowed())
+        return EBUSY;
+
+    struct iwx_softc *sc = &owner->com;
+    const uint32_t generation = static_cast<uint32_t>(sc->sc_generation);
+    auto publish = [owner, probe](uint32_t stage) {
+        probe->multicastStage = stage;
+        publishMulticastAdmissionState(owner, probe);
+    };
+    probe->multicastStage = kMulticastAdmissionStarting;
+    probe->multicastOperationResult = EAGAIN;
+    probe->multicastCleanupResult = EAGAIN;
+    probe->multicastStationAddAck = false;
+    probe->multicastQueueConfiguredUninstalled = false;
+    probe->multicastNeverDoorbelled = true;
+    probe->multicastResourcesAbsent = false;
+    probe->multicastOldLeaseInitiallyAbsent =
+        multicastAdmissionOldLeaseAbsent(owner);
+    probe->multicastOldLeaseUnchanged = false;
+    probe->multicastRocAbortAcknowledged = false;
+    probe->multicastMacRemoveAttempted = false;
+    probe->multicastStationAllocationSerial = 0;
+    probe->multicastQueueAllocationSerial = 0;
+    probe->multicastPrepareWitness = {};
+    probe->multicastMacRemoveAck = {};
+    publish(kMulticastAdmissionStarting);
+
+    if (!probe->multicastOldLeaseInitiallyAbsent ||
+        !multicastAdmissionOwnLeasesAbsent(owner) || generation == 0 ||
+        generation != probe->powerGeneration ||
+        generation != probe->scGeneration ||
+        __atomic_load_n(&sc->sc_tx_rate_generation, __ATOMIC_ACQUIRE) !=
+            probe->stationGeneration ||
+        sc->sc_p2p.fw_generation != probe->p2pFirmwareGeneration ||
+        probe->p2pFirmwareGeneration != generation ||
+        sc->sc_p2p.mac_state != IWX_P2P_RESOURCE_ACTIVE ||
+        sc->sc_p2p.binding_state != IWX_P2P_RESOURCE_ABSENT ||
+        sc->sc_p2p_roc.phase != IWX_P2P_ROC_IDLE ||
+        sc->sc_p2p_roc.session_submit_seen != 0) {
+        probe->multicastOperationResult = EBUSY;
+        probe->multicastCleanupResult = EBUSY;
+        probe->multicastStage = kMulticastAdmissionQuarantined;
+        publish(probe->multicastStage);
+        return EBUSY;
+    }
+
+    const uint32_t configuration =
+        IWX_SESSION_PROTECT_CONF_P2P_GO_NEGOTIATION;
+    struct ieee80211_channel *channel = &sc->sc_ic.ic_channels[6];
+    const uint32_t beforeToken = sc->sc_p2p_roc.token;
+    __atomic_store_n(&owner->nativeP2pRocChannel_, 6u, __ATOMIC_RELEASE);
+    __atomic_store_n(&owner->nativeP2pRocDurationMs_, 0u, __ATOMIC_RELEASE);
+    int error = owner->tahoeP2pRocPrepare(
+        sc, channel, probe->contextGeneration, configuration);
+    probe->multicastPrepareWitness =
+        NativeAwdlDiscoveryRxInput::observePrepareToken(
+            probe->contextGeneration, probe->scGeneration, beforeToken,
+            sc->sc_p2p_roc.token, sc->sc_p2p_roc.fw_generation);
+    publish(kMulticastAdmissionRocPrepared);
+    if (error != 0) {
+        probe->multicastOperationResult = error;
+        const bool prepareCleanlyAbsent =
+            probe->multicastPrepareWitness.valid &&
+            probe->multicastPrepareWitness.expectedToken == 0 &&
+            sc->sc_p2p_roc.phase == IWX_P2P_ROC_IDLE &&
+            sc->sc_p2p_roc.session_submit_seen == 0 &&
+            sc->sc_p2p.binding_state == IWX_P2P_RESOURCE_ABSENT &&
+            !sc->sc_p2p.phy_leased;
+        if (!prepareCleanlyAbsent) {
+            probe->multicastCleanupResult = EBUSY;
+            probe->multicastStage = kMulticastAdmissionQuarantined;
+            publish(probe->multicastStage);
+            return error;
+        }
+        probe->multicastRocAbortAcknowledged = true;
+        probe->multicastResourcesAbsent = true;
+        probe->multicastOldLeaseUnchanged =
+            multicastAdmissionOldLeaseAbsent(owner);
+        probe->multicastCleanupResult = 0;
+        publish(kMulticastAdmissionCleaning);
+        return probe->multicastOldLeaseUnchanged ? 0 : EBUSY;
+    }
+    if (!probe->multicastPrepareWitness.valid ||
+        probe->multicastPrepareWitness.expectedToken !=
+            probe->contextGeneration ||
+        sc->sc_p2p_roc.phase != IWX_P2P_ROC_PREPARED ||
+        sc->sc_p2p_roc.token != probe->contextGeneration ||
+        sc->sc_p2p_roc.session_submit_seen != 0 ||
+        sc->sc_p2p_roc.session_submit_result != EINPROGRESS) {
+        probe->multicastOperationResult = ESTALE;
+        probe->multicastCleanupResult = EBUSY;
+        probe->multicastStage = kMulticastAdmissionQuarantined;
+        publish(probe->multicastStage);
+        return EBUSY;
+    }
+
+    bool stationReserved = false;
+    bool stationMayExist = false;
+    uint8_t reservedStationId = 0;
+    auto &station = owner->nativeP2pMulticastStation_;
+    auto &queue = owner->nativeP2pMulticastTxQueue_;
+    auto abortPreparedRoc = [&]() -> int {
+        if (!probe->multicastPrepareWitness.valid ||
+            probe->multicastPrepareWitness.expectedToken !=
+                probe->contextGeneration ||
+            !NativeAwdlDiscoveryRxInput::cleanupWitnessCurrent(
+                probe->multicastPrepareWitness, probe->contextGeneration,
+                probe->scGeneration) ||
+            !multicastAdmissionOwnLeasesAbsent(owner))
+            return EBUSY;
+        MulticastPreparedAbortProof proof{probe, false, false};
+        IOCommandGate *gate = owner->tahoeP2pCommandGate();
+        if (!gate || gate->runAction(captureMulticastPreparedAbortProofAction,
+                                     &proof) != kIOReturnSuccess ||
+            !proof.snapshotValid || !proof.neverDoorbelled)
+            return EBUSY;
+        const int abortError = owner->tahoeP2pRocAbortPrepared(
+            sc, probe->contextGeneration, configuration, true);
+        if (abortError)
+            return abortError;
+        const bool absent = sc->sc_p2p.binding_state ==
+                IWX_P2P_RESOURCE_ABSENT && !sc->sc_p2p.phy_leased &&
+            sc->sc_p2p_roc.phase == IWX_P2P_ROC_COMPLETE &&
+            sc->sc_p2p_roc.session_submit_seen == 0 &&
+            sc->sc_p2p_roc.token == probe->contextGeneration;
+        if (absent)
+            probe->multicastRocAbortAcknowledged = true;
+        return absent ? 0 : EBUSY;
+    };
+    auto finishCleanFailure = [&](int operationError) -> int {
+        if (operationError != 0)
+            probe->multicastOperationResult = operationError;
+        publish(kMulticastAdmissionCleaning);
+        int cleanupError = 0;
+        bool mayExist = false;
+        if (queue.queueConfiguredUninstalled || queue.pendingRing ||
+            queue.state != TahoeP2PResourceState::kAbsent) {
+            mayExist = true;
+            cleanupError = iwx_tahoe_p2p_tvqm_abort_multicast_unsubmitted(
+                owner, sc, &station, &queue,
+                probe->multicastStationAllocationSerial,
+                probe->multicastQueueAllocationSerial, &mayExist);
+            if (!cleanupError && !mayExist && stationReserved)
+                cleanupError = changeP2PStationReservation(
+                    owner, generation, station.stationId, 2);
+        } else if (station.state == TahoeP2PResourceState::kActive) {
+            mayExist = true;
+            cleanupError = iwx_tahoe_p2p_remove_multicast_data_station(
+                owner, sc, &station, &queue, &mayExist);
+            if (!cleanupError && !mayExist && stationReserved)
+                cleanupError = changeP2PStationReservation(
+                    owner, generation, station.stationId, 2);
+        } else if (stationMayExist || station.state ==
+                   TahoeP2PResourceState::kUnknown) {
+            cleanupError = EBUSY;
+        } else if (stationReserved) {
+            cleanupError = changeP2PStationReservation(
+                owner, generation, reservedStationId, 3);
+            stationReserved = false;
+        }
+        if (cleanupError || mayExist ||
+            !multicastAdmissionOwnLeasesAbsent(owner)) {
+            probe->multicastNeverDoorbelled =
+                probe->multicastNeverDoorbelled &&
+                multicastAdmissionNeverDoorbelled(owner);
+            probe->multicastCleanupResult = cleanupError ? cleanupError : EBUSY;
+            probe->multicastStage = kMulticastAdmissionQuarantined;
+            publish(probe->multicastStage);
+            return probe->multicastCleanupResult;
+        }
+        const int rocError = abortPreparedRoc();
+        probe->multicastNeverDoorbelled =
+            probe->multicastNeverDoorbelled &&
+            multicastAdmissionNeverDoorbelled(owner);
+        probe->multicastOldLeaseUnchanged =
+            probe->multicastOldLeaseInitiallyAbsent &&
+            multicastAdmissionOldLeaseAbsent(owner);
+        probe->multicastResourcesAbsent =
+            multicastAdmissionOwnLeasesAbsent(owner) && !sc->sc_p2p.phy_leased &&
+            sc->sc_p2p.binding_state == IWX_P2P_RESOURCE_ABSENT;
+        if (rocError || !probe->multicastRocAbortAcknowledged ||
+            !probe->multicastNeverDoorbelled ||
+            !probe->multicastOldLeaseUnchanged ||
+            !probe->multicastResourcesAbsent) {
+            probe->multicastCleanupResult = rocError ? rocError : EBUSY;
+            probe->multicastStage = kMulticastAdmissionQuarantined;
+            publish(probe->multicastStage);
+            return probe->multicastCleanupResult;
+        }
+        probe->multicastCleanupResult = 0;
+        publish(kMulticastAdmissionCleaning);
+        return 0; // Permit the outer exact MAC REMOVE after clean rejection.
+    };
+
+    if (!nextMulticastAllocationSerial(
+            &owner->nativeP2pMulticastStationSerialHighWater_, false,
+            &probe->multicastStationAllocationSerial) ||
+        !nextMulticastAllocationSerial(
+            &owner->nativeP2pMulticastQueueSerialHighWater_, true,
+            &probe->multicastQueueAllocationSerial))
+        return finishCleanFailure(EOVERFLOW);
+
+    uint8_t stationId = 0;
+    error = reserveP2PStation(owner, generation, &stationId);
+    if (error)
+        return finishCleanFailure(error);
+    stationReserved = true;
+    reservedStationId = stationId;
+
+    error = iwx_tahoe_p2p_add_multicast_data_station(
+        owner, sc, &station, stationId, true, &stationMayExist);
+    if (error) {
+        if (stationMayExist || station.state == TahoeP2PResourceState::kUnknown) {
+            (void)changeP2PStationReservation(owner, generation, stationId, 1);
+            probe->multicastOperationResult = error;
+            probe->multicastCleanupResult = EBUSY;
+            probe->multicastStage = kMulticastAdmissionQuarantined;
+            publish(probe->multicastStage);
+            return error;
+        }
+        return finishCleanFailure(error);
+    }
+    probe->multicastStationAddAck = true;
+    if (changeP2PStationReservation(owner, generation, stationId, 0) != 0) {
+        (void)changeP2PStationReservation(owner, generation, stationId, 1);
+        probe->multicastOperationResult = EBUSY;
+        probe->multicastCleanupResult = EBUSY;
+        probe->multicastStage = kMulticastAdmissionQuarantined;
+        publish(probe->multicastStage);
+        return EBUSY;
+    }
+
+    queue.stationId = stationId;
+    queue.generation = generation;
+    queue.stationRole = TahoeP2PStationRole::kMulticastData;
+    queue.queueUse = TahoeP2PQueueUse::kMulticastNonQosDataTid0;
+    queue.firmwareTid = 0;
+    memcpy(queue.peerAddress, station.address, sizeof(queue.peerAddress));
+    queue.macIdAndColor = station.macIdAndColor;
+    queue.stateLock = owner->nativeP2pTxLock_;
+    uint16_t queueId = 0;
+    bool queueMayExist = false;
+    error = iwx_tahoe_p2p_tvqm_allocate(
+        owner, sc, &queue, &station, IWX_DEFAULT_QUEUE_SIZE, &queueId,
+        &queueMayExist, TahoeP2PQueueUse::kMulticastNonQosDataTid0);
+    probe->multicastQueueConfiguredUninstalled =
+        queue.queueConfiguredUninstalled && queue.pendingRing != nullptr &&
+        queue.queueId == IWX_INVALID_QUEUE &&
+        queue.pendingFirmwareQueueId == queueId;
+    if (error || !probe->multicastQueueConfiguredUninstalled ||
+        queue.state != TahoeP2PResourceState::kPending ||
+        !multicastAdmissionNeverDoorbelled(owner)) {
+        return finishCleanFailure(error ? error : EBUSY);
+    }
+    error = iwx_tahoe_p2p_tvqm_bind_allocation_serials(
+        sc, &station, &queue, probe->multicastStationAllocationSerial,
+        probe->multicastQueueAllocationSerial);
+    if (error)
+        return finishCleanFailure(error);
+    probe->multicastStage = kMulticastAdmissionQueueConfigured;
+    probe->multicastOperationResult = 0;
+    probe->multicastNeverDoorbelled = true;
+    publish(probe->multicastStage);
+    return finishCleanFailure(0);
+}
+#endif
 
 static IOReturn captureDirectedNoTicketProofAction(
     OSObject *, void *opaque, void *, void *, void *)
@@ -12357,6 +12986,10 @@ static int exerciseRx149Observation(P2PProbeRun *probe)
 int ItlIwx::tahoeP2pExerciseRoc(void *opaque)
 {
     auto probe = static_cast<P2PProbeRun *>(opaque);
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+    if (probe && probe->multicastAdmissionOnly)
+        return exerciseMulticastAdmissionOnly(probe);
+#endif
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
     if (probe && probe->directedDataOnly)
         return exerciseDirectedDataTx(probe);
@@ -13212,6 +13845,10 @@ void ItlIwx::nativeP2pTick()
     tahoeRx149RecoverInput();
 
     IOEthernetController *controller = getController();
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+    if (multicastAdmissionRequested(controller))
+        publishMulticastAdmissionDefaults(controller);
+#endif
     tahoeRxPreOwnerPublish(controller);
 #if defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
     tahoeRxCompletionPublish(controller);
@@ -13575,6 +14212,79 @@ IOReturn ItlIwx::tahoeP2pLeaseAction(OSObject *, void *contextArg,
     return kIOReturnSuccess;
 }
 
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+static void finalizeMulticastAdmissionState(ItlIwx *owner,
+                                            P2PProbeRun *run)
+{
+    if (!owner || !run || !run->multicastAdmissionOnly ||
+        !owner->tahoeP2pOnMainGate())
+        return;
+    const auto outer = owner->nativeP2pProbe_.snapshot();
+    if (auto *controller = owner->tahoeP2pController()) {
+        controller->setProperty("NativeP2PProbeAttempted",
+                                outer.attempted, 32);
+        controller->setProperty("NativeP2PProbeAddResult",
+                                static_cast<uint32_t>(outer.addResult), 32);
+        controller->setProperty("NativeP2PProbeRemoveResult",
+                                static_cast<uint32_t>(outer.removeResult), 32);
+        controller->setProperty("NativeP2PProbeResourceMayExist",
+                                outer.resourceMayExist, 32);
+        controller->setProperty("NativeP2PProbeContextGeneration",
+                                outer.contextGeneration, 32);
+        controller->setProperty("NativeP2PProbePowerGeneration",
+                                outer.powerGeneration, 32);
+        controller->setProperty("NativeP2PProbeStationGeneration",
+                                outer.stationGeneration, 32);
+        controller->setProperty("NativeP2PProbeState", outer.state, 32);
+    }
+    const bool outerTerminal =
+        (outer.state == NativeP2PProbe::kComplete ||
+         outer.state == NativeP2PProbe::kExerciseFailedCleaned) &&
+        outer.removeResult == 0 && outer.resourceMayExist == 0 &&
+        outer.contextGeneration == run->contextGeneration &&
+        outer.powerGeneration == run->powerGeneration &&
+        outer.stationGeneration == run->stationGeneration;
+    const bool exactMacRemove = run->multicastMacRemoveAttempted &&
+        run->multicastMacRemoveAck.accepted == 1 &&
+        run->multicastMacRemoveAck.expectedP2PEpoch ==
+            run->contextGeneration &&
+        run->multicastMacRemoveAck.expectedDriverGeneration ==
+            run->scGeneration &&
+        run->multicastMacRemoveAck.expectedRocToken ==
+            run->multicastPrepareWitness.expectedToken &&
+        NativeAwdlDiscoveryRxInput::cleanupWitnessCurrent(
+            run->multicastPrepareWitness, run->contextGeneration,
+            run->scGeneration);
+    const bool finalResourcesAbsent =
+        multicastAdmissionOwnLeasesAbsent(owner) &&
+        owner->com.sc_p2p.mac_state == IWX_P2P_RESOURCE_ABSENT &&
+        owner->com.sc_p2p.binding_state == IWX_P2P_RESOURCE_ABSENT &&
+        !owner->com.sc_p2p.phy_leased &&
+        (owner->com.sc_p2p_roc.phase == IWX_P2P_ROC_COMPLETE ||
+         (run->multicastPrepareWitness.expectedToken == 0 &&
+          owner->com.sc_p2p_roc.phase == IWX_P2P_ROC_IDLE));
+    run->multicastNeverDoorbelled = run->multicastNeverDoorbelled &&
+        multicastAdmissionNeverDoorbelled(owner);
+    run->multicastOldLeaseUnchanged =
+        run->multicastOldLeaseInitiallyAbsent &&
+        multicastAdmissionOldLeaseAbsent(owner);
+    if (outerTerminal && exactMacRemove && finalResourcesAbsent &&
+        run->multicastCleanupResult == 0 &&
+        run->multicastRocAbortAcknowledged &&
+        run->multicastNeverDoorbelled &&
+        run->multicastOldLeaseUnchanged) {
+        run->multicastResourcesAbsent = true;
+        run->multicastStage = kMulticastAdmissionComplete;
+    } else {
+        run->multicastResourcesAbsent = finalResourcesAbsent;
+        run->multicastCleanupResult = outer.removeResult != 0 ?
+            outer.removeResult : EBUSY;
+        run->multicastStage = kMulticastAdmissionQuarantined;
+    }
+    publishMulticastAdmissionState(owner, run);
+}
+#endif
+
 IOReturn ItlIwx::tahoeP2pFinishAction(OSObject *, void *contextArg,
                                       void *, void *, void *)
 {
@@ -13664,6 +14374,9 @@ IOReturn ItlIwx::tahoeP2pFinishAction(OSObject *, void *contextArg,
     }
     if (run->canceled)
         owner->nativeP2pProbe_.cancelQueued();
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+    finalizeMulticastAdmissionState(owner, run);
+#endif
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
     if (run->directedDataOnly && owner->tahoeP2pOnMainGate()) {
         auto *controller = owner->tahoeP2pController();
@@ -13861,6 +14574,21 @@ IOReturn ItlIwx::tahoeP2pResetAction(OSObject *, void *contextArg,
         owner->nativeP2pTxQueue_.pendingRing == nullptr &&
         owner->nativeP2pTxQueue_.retainedRing == nullptr &&
         !owner->nativeP2pTxQueue_.submissionBusy &&
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+        owner->nativeP2pMulticastStation_.state ==
+            TahoeP2PResourceState::kAbsent &&
+        owner->nativeP2pMulticastTxQueue_.state ==
+            TahoeP2PResourceState::kAbsent &&
+        owner->nativeP2pMulticastTxQueue_.lifecycle.snapshot().state ==
+            IntelP2PTx::QueueState::kAbsent &&
+        owner->nativeP2pMulticastTxQueue_.queueId == IWX_INVALID_QUEUE &&
+        owner->nativeP2pMulticastTxQueue_.pendingFirmwareQueueId == UINT16_MAX &&
+        owner->nativeP2pMulticastTxQueue_.pendingRing == nullptr &&
+        owner->nativeP2pMulticastTxQueue_.retainedRing == nullptr &&
+        !owner->nativeP2pMulticastTxQueue_.queueConfiguredUninstalled &&
+        !owner->nativeP2pMulticastTxQueue_.submissionBusy &&
+        !owner->nativeP2pMulticastTxQueue_.everDoorbelled &&
+#endif
         IntelP2PTx::noP2pResourcesRetained(stationSnapshot, queueSnapshot);
     IOSimpleLockUnlockEnableInterrupt(owner->nativeP2pTxLock_, interruptState);
     if (!leasesAbsent) {
@@ -13885,6 +14613,21 @@ IOReturn ItlIwx::tahoeP2pResetAction(OSObject *, void *contextArg,
         owner->nativeP2pTxQueue_.pendingRing == nullptr &&
         owner->nativeP2pTxQueue_.retainedRing == nullptr &&
         !owner->nativeP2pTxQueue_.submissionBusy &&
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+        owner->nativeP2pMulticastStation_.state ==
+            TahoeP2PResourceState::kAbsent &&
+        owner->nativeP2pMulticastTxQueue_.state ==
+            TahoeP2PResourceState::kAbsent &&
+        owner->nativeP2pMulticastTxQueue_.lifecycle.snapshot().state ==
+            IntelP2PTx::QueueState::kAbsent &&
+        owner->nativeP2pMulticastTxQueue_.queueId == IWX_INVALID_QUEUE &&
+        owner->nativeP2pMulticastTxQueue_.pendingFirmwareQueueId == UINT16_MAX &&
+        owner->nativeP2pMulticastTxQueue_.pendingRing == nullptr &&
+        owner->nativeP2pMulticastTxQueue_.retainedRing == nullptr &&
+        !owner->nativeP2pMulticastTxQueue_.queueConfiguredUninstalled &&
+        !owner->nativeP2pMulticastTxQueue_.submissionBusy &&
+        !owner->nativeP2pMulticastTxQueue_.everDoorbelled &&
+#endif
         owner->nativeP2pActionTx_.state == TahoeP2PActionTxState::kIdle &&
         IntelP2PTx::noP2pResourcesRetained(stationSnapshot, queueSnapshot);
     IntelP2PTx::Result registryResult = IntelP2PTx::Result::kSuccess;
@@ -13994,6 +14737,25 @@ void ItlIwx::tahoeP2pProbeTask(void *opaque)
         directedPrepareProfileEnabled(controller);
     const bool manualTrigger = controller && controller->getProperty(
         "NativeP2PManualTrigger") == kOSBooleanTrue;
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+    const bool multicastAdmissionRequestedValue =
+        multicastAdmissionRequested(controller);
+    const bool multicastAdmissionLatched =
+        multicastAdmissionRequestedValue &&
+        NativeP2PRx149Observation::isLegacyArmMode(armMode) &&
+        multicastAdmissionProfileEnabled(controller);
+    if (multicastAdmissionRequestedValue && !multicastAdmissionLatched) {
+        // A mutable property or different one-shot mode cannot fall through
+        // to the historical Action-frame TX exercise.
+        __atomic_store_n(&owner->nativeP2pProbeQueued_, 0u,
+                         __ATOMIC_RELEASE);
+        __atomic_store_n(&owner->nativeP2pCancelRequested_, 0u,
+                         __ATOMIC_RELEASE);
+        return;
+    }
+#else
+    const bool multicastAdmissionLatched = false;
+#endif
     // The once-per-boot arm latch freezes the selected profile. A mutable
     // property that no longer agrees with this mode is a hard stop, never a
     // request to enter the other profile.
@@ -14025,6 +14787,9 @@ void ItlIwx::tahoeP2pProbeTask(void *opaque)
     }
     run.rx149ObservationOnly = rx149Latched;
     run.directedPrepareOnly = directedPrepareLatched;
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+    run.multicastAdmissionOnly = multicastAdmissionLatched;
+#endif
     if (run.directedPrepareOnly) {
         memcpy(run.directedPeerMac, owner->nativeP2pDirectedPreparePeer_,
                sizeof(run.directedPeerMac));
@@ -14038,6 +14803,15 @@ void ItlIwx::tahoeP2pProbeTask(void *opaque)
         run.directedDataArm = owner->nativeP2pDirectedDataArmInput_;
 #endif
     run.txProbeEnabled = txProbeEnabled(owner, owner->getController());
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+    if (run.multicastAdmissionOnly && !run.txProbeEnabled) {
+        __atomic_store_n(&owner->nativeP2pProbeQueued_, 0u,
+                         __ATOMIC_RELEASE);
+        __atomic_store_n(&owner->nativeP2pCancelRequested_, 0u,
+                         __ATOMIC_RELEASE);
+        return;
+    }
+#endif
     run.awdlPsfProbeEnabled = awdlPsfProbeEnabled(
         owner, owner->getController());
     run.awdlMifFollowupEnabled = mifFollowupProfileEnabled(

@@ -23,6 +23,42 @@ static constexpr uint16_t kLegacyP2pCollisionPilotQueue = 3;
 static constexpr uint8_t kLegacyP2pCollisionPilotStation = 3;
 static_assert(kFirmwareManagementTid == 15,
               "P2P management queue uses firmware TID 15");
+static constexpr uint8_t kMulticastDataStationAddress[6] =
+    {0x03, 0x00, 0x00, 0x00, 0x00, 0x00};
+
+static bool multicastDataStationAddress(const uint8_t address[6])
+{
+    return address && memcmp(address, kMulticastDataStationAddress,
+                             sizeof(kMulticastDataStationAddress)) == 0;
+}
+
+static bool exactSynchronousCommandReply(
+    const struct iwx_softc *sc, uint32_t requestId,
+    uint32_t expectedGeneration, const IwxStaAuthSubmitReceipt &submission,
+    const struct iwx_rx_packet *response)
+{
+    if (!sc || !response || requestId != submission.command_id ||
+        submission.state != IWX_STA_SUBMIT_LOCAL_ENQUEUE ||
+        submission.driver_generation != expectedGeneration ||
+        submission.queue_id != IWX_DQA_CMD_QUEUE ||
+        submission.queue_index >=
+            sc->txq[IWX_DQA_CMD_QUEUE].ring_count ||
+        submission.raw_command_result != 0)
+        return false;
+
+    const uint32_t normalizedId = iwx_cmd_groupid(requestId) == 0 ?
+        IWX_WIDE_ID(IWX_LONG_GROUP, requestId) : requestId;
+    const uint32_t expectedCommand = iwx_cmd_opcode(normalizedId);
+    const uint32_t expectedGroup = iwx_cmd_groupid(normalizedId);
+    const uint32_t packetLength = iwx_rx_packet_len(response);
+    return packetLength >= sizeof(response->hdr) &&
+        response->hdr.cmd == expectedCommand &&
+        (response->hdr.group_id & IWX_CMD_FAILED_MSK) == 0 &&
+        (response->hdr.group_id & ~IWX_CMD_FAILED_MSK) == expectedGroup &&
+        (response->hdr.qid & 0x80u) == 0 &&
+        response->hdr.qid == submission.queue_id &&
+        response->hdr.idx == submission.queue_index;
+}
 
 static bool validUnicastAddress(const uint8_t address[6])
 {
@@ -74,6 +110,7 @@ static bool queueBindingMatchesStation(
         return stationTypeMatches && station->addCommandVersion == 12 &&
             station->addNotificationVersion == 2 &&
             allOnesAddress(station->address) &&
+            queue->queueUse == TahoeP2PQueueUse::kManagementTid15 &&
             queue->firmwareTid == kFirmwareManagementTid;
     }
     case TahoeP2PStationRole::kDirectedPeerLink:
@@ -81,7 +118,29 @@ static bool queueBindingMatchesStation(
             station->addCommandVersion == 12 &&
             station->addNotificationVersion == 2 &&
             validUnicastAddress(station->address) &&
+            queue->queueUse == TahoeP2PQueueUse::kDirectedNonQosDataTid0 &&
             queue->firmwareTid == 0;
+    case TahoeP2PStationRole::kMulticastData:
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+        return isset(sc->sc_ucode_api, IWX_UCODE_TLV_API_STA_TYPE) &&
+            sc->sc_p2p.mac_id == 1 &&
+            station->stationType == IWX_STA_MULTICAST &&
+            station->addCommandVersion == 12 &&
+            station->addNotificationVersion == 2 &&
+            multicastDataStationAddress(station->address) &&
+            queue->queueUse ==
+                TahoeP2PQueueUse::kMulticastNonQosDataTid0 &&
+            queue->firmwareTid == 0 && queue->queueConfiguredUninstalled &&
+            queue->state == TahoeP2PResourceState::kPending &&
+            queue->queueId == IWX_INVALID_QUEUE && queue->pendingRing &&
+            queue->pendingFirmwareQueueId < nitems(sc->txq) &&
+            queue->pendingFirmwareQueueId != IWX_DQA_CMD_QUEUE &&
+            queue->pendingRing->qid == IWX_INVALID_QUEUE &&
+            queue->lifecycle.snapshot().state ==
+                IntelP2PTx::QueueState::kAllocationPending;
+#else
+        return false;
+#endif
     }
     return false;
 }
@@ -294,11 +353,16 @@ static int flushLegacyP2pStationQueue(ItlIwx *owner, struct iwx_softc *sc,
 
 static int flushLegacyP2pAllocationBinding(
     ItlIwx *owner, struct iwx_softc *sc, uint8_t stationId,
-    uint16_t queueId, uint16_t expectedTid, uint16_t writePointer)
+    uint16_t queueId, uint16_t expectedTid, uint16_t writePointer,
+    bool requireCorrelatedReply = false, uint32_t expectedGeneration = 0)
 {
     if (!owner || !sc || !owner->nativeP2pCommandAllowed() ||
         __atomic_load_n(&owner->nativeP2pNswqPaused_, __ATOMIC_ACQUIRE) == 0)
         return EBUSY;
+    if (requireCorrelatedReply && (expectedGeneration == 0 ||
+        static_cast<uint32_t>(__atomic_load_n(
+            &sc->sc_generation, __ATOMIC_ACQUIRE)) != expectedGeneration))
+        return ESTALE;
 
     struct iwx_tx_path_flush_cmd command{};
     command.sta_id = htole32(stationId);
@@ -311,13 +375,25 @@ static int flushLegacyP2pAllocationBinding(
     hostCommand.data[0] = &command;
     hostCommand.len[0] = sizeof(command);
 
-    int error = owner->iwx_send_cmd(sc, &hostCommand);
+    IwxStaAuthSubmitReceipt submitReceipt{};
+    int error = requireCorrelatedReply ?
+        owner->iwx_send_cmd(sc, &hostCommand, &submitReceipt) :
+        owner->iwx_send_cmd(sc, &hostCommand);
     if (error) {
         if (hostCommand.resp_pkt)
             owner->iwx_free_resp(sc, &hostCommand);
         return error;
     }
     struct iwx_rx_packet *packet = hostCommand.resp_pkt;
+    if (requireCorrelatedReply &&
+        (static_cast<uint32_t>(__atomic_load_n(
+             &sc->sc_generation, __ATOMIC_ACQUIRE)) != expectedGeneration ||
+         !exactSynchronousCommandReply(sc, IWX_TXPATH_FLUSH,
+             expectedGeneration, submitReceipt, packet))) {
+        if (packet)
+            owner->iwx_free_resp(sc, &hostCommand);
+        return EIO;
+    }
     if (!packet || (packet->hdr.group_id & IWX_CMD_FAILED_MSK) ||
         iwx_rx_packet_payload_len(packet) !=
             sizeof(struct iwx_tx_path_flush_cmd_rsp)) {
@@ -363,13 +439,17 @@ static int flushLegacyP2pAllocationBinding(
     // The returned queue table must still be from the same serialized probe
     // window. This is a binding witness only; it does not retire old DMA.
     return owner->nativeP2pCommandAllowed() &&
-        __atomic_load_n(&owner->nativeP2pNswqPaused_, __ATOMIC_ACQUIRE) != 0
+        __atomic_load_n(&owner->nativeP2pNswqPaused_, __ATOMIC_ACQUIRE) != 0 &&
+        (!requireCorrelatedReply || static_cast<uint32_t>(__atomic_load_n(
+            &sc->sc_generation, __ATOMIC_ACQUIRE)) == expectedGeneration)
         ? 0 : EBUSY;
 }
 
 static int removeLegacyP2pStationWithAck(ItlIwx *owner,
                                          struct iwx_softc *sc,
-                                         uint8_t stationId)
+                                         uint8_t stationId,
+                                         bool requireCorrelatedReply = false,
+                                         uint32_t expectedGeneration = 0)
 {
     if (!owner || !sc)
         return EINVAL;
@@ -386,13 +466,25 @@ static int removeLegacyP2pStationWithAck(ItlIwx *owner,
     hostCommand.data[0] = &command;
     hostCommand.len[0] = sizeof(command);
 
-    int error = owner->iwx_send_cmd(sc, &hostCommand);
+    IwxStaAuthSubmitReceipt submitReceipt{};
+    int error = requireCorrelatedReply ?
+        owner->iwx_send_cmd(sc, &hostCommand, &submitReceipt) :
+        owner->iwx_send_cmd(sc, &hostCommand);
     if (error) {
         if (hostCommand.resp_pkt)
             owner->iwx_free_resp(sc, &hostCommand);
         return error;
     }
     struct iwx_rx_packet *packet = hostCommand.resp_pkt;
+    if (requireCorrelatedReply &&
+        (static_cast<uint32_t>(__atomic_load_n(
+             &sc->sc_generation, __ATOMIC_ACQUIRE)) != expectedGeneration ||
+         !exactSynchronousCommandReply(sc, IWX_REMOVE_STA,
+             expectedGeneration, submitReceipt, packet))) {
+        if (packet)
+            owner->iwx_free_resp(sc, &hostCommand);
+        return EIO;
+    }
     if (!packet || (packet->hdr.group_id & IWX_CMD_FAILED_MSK)) {
         if (packet)
             owner->iwx_free_resp(sc, &hostCommand);
@@ -476,6 +568,15 @@ static bool stationLeaseMatchesLiveContext(
             memcmp(station->address, sc->sc_ic.ic_myaddr, 6) != 0 &&
             sc->sc_ic.ic_bss &&
             memcmp(station->address, sc->sc_ic.ic_bss->ni_macaddr, 6) != 0;
+    case TahoeP2PStationRole::kMulticastData:
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+        return isset(sc->sc_ucode_api, IWX_UCODE_TLV_API_STA_TYPE) &&
+            station->stationType == IWX_STA_MULTICAST &&
+            sc->sc_p2p.mac_id == 1 &&
+            multicastDataStationAddress(station->address);
+#else
+        return false;
+#endif
     }
     return false;
 }
@@ -799,6 +900,48 @@ static bool queueHasNoHostOwner(const struct iwx_softc *sc,
     return true;
 }
 
+static bool queueLeaseMayOwnFirmwareQueue(
+    TahoeP2PTxQueueLease *lease, uint16_t queueId)
+{
+    if (!lease)
+        return false;
+    IOInterruptState interruptState = 0;
+    if (lease->stateLock)
+        interruptState = IOSimpleLockLockDisableInterrupt(lease->stateLock);
+    const bool absent = lease->state == TahoeP2PResourceState::kAbsent &&
+        lease->pendingRing == nullptr;
+    const bool ownsKnownQueue = !absent &&
+        (lease->queueId == queueId ||
+         (lease->queueConfiguredUninstalled &&
+          lease->pendingFirmwareQueueId == queueId));
+    // A live or unresolved lease without a known qid cannot establish that
+    // the firmware slot is free, so block admission until it is resolved.
+    const bool unresolvedQueue = !absent && !ownsKnownQueue &&
+        lease->queueId == IWX_INVALID_QUEUE &&
+        !lease->queueConfiguredUninstalled;
+    if (lease->stateLock)
+        IOSimpleLockUnlockEnableInterrupt(lease->stateLock, interruptState);
+    return ownsKnownQueue || unresolvedQueue;
+}
+
+static bool multicastQueueConflictsWithOwnerLease(
+    ItlIwx *owner, TahoeP2PTxQueueLease *candidate, uint16_t queueId)
+{
+    if (!owner)
+        return true;
+    TahoeP2PTxQueueLease *management = &owner->nativeP2pTxQueue_;
+    if (management != candidate &&
+        queueLeaseMayOwnFirmwareQueue(management, queueId))
+        return true;
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+    TahoeP2PTxQueueLease *multicast = &owner->nativeP2pMulticastTxQueue_;
+    if (multicast != candidate &&
+        queueLeaseMayOwnFirmwareQueue(multicast, queueId))
+        return true;
+#endif
+    return false;
+}
+
 static bool queueHasCompletePlaceholderBacking(
     const struct iwx_tx_ring *ring, uint16_t queueId)
 {
@@ -828,6 +971,27 @@ static bool queueHasCompletePlaceholderBacking(
         }
     }
     return true;
+}
+
+static bool multicastQueueSlotHasNoOwner(
+    const struct iwx_softc *sc, uint16_t queueId,
+    NativeQueueSlotDiagnostic *diagnostic)
+{
+    const NativeQueueSlotDiagnostic snapshot =
+        captureQueueSlotDiagnostic(sc, queueId);
+    if (diagnostic)
+        *diagnostic = snapshot;
+    if (!snapshot.valid || !queueHasNoHostOwner(sc, queueId))
+        return false;
+    if (snapshot.rejectMask == 0)
+        return true;
+
+    // The admission-only path leaves an existing static empty placeholder
+    // untouched. It may share the firmware qid only when its complete backing
+    // and idle state are still verifiable and no host TID owns the slot.
+    const struct iwx_tx_ring *ring = &sc->txq[queueId];
+    return snapshot.staticPlaceholderProof != 0 &&
+        queueHasCompletePlaceholderBacking(ring, queueId);
 }
 
 struct NativeDynamicRingSnapshot {
@@ -1117,6 +1281,60 @@ static int retainAcknowledgedPending(
     return error ? error : EBUSY;
 }
 
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+static int retainMulticastConfiguredUninstalled(
+    TahoeP2PTxQueueLease *lease, struct iwx_tx_ring *ring,
+    uint32_t generation, uint8_t stationId, uint16_t queueId,
+    uint16_t writePointer, bool outcomeUnknown, int error)
+{
+    IOInterruptState interruptState;
+    if (!lockQueueLease(lease, &interruptState)) {
+        lease->generation = generation;
+        lease->stationId = stationId;
+        lease->queueId = IWX_INVALID_QUEUE;
+        lease->pendingRing = ring;
+        lease->queueConfiguredUninstalled = true;
+        lease->pendingFirmwareQueueId = queueId;
+        lease->pendingFirmwareSsn = writePointer;
+        lease->state = TahoeP2PResourceState::kUnknown;
+        return error ? error : EBUSY;
+    }
+
+    const IntelP2PTx::QueueSnapshot before = lease->lifecycle.snapshot();
+    const bool pendingMatch =
+        before.state == IntelP2PTx::QueueState::kAllocationPending &&
+        before.generation == generation && before.stationId == stationId &&
+        lease->generation == generation && lease->stationId == stationId &&
+        lease->pendingRing == ring && !lease->everDoorbelled &&
+        !lease->submissionBusy;
+    lease->generation = generation;
+    lease->stationId = stationId;
+    lease->queueId = IWX_INVALID_QUEUE;
+    lease->pendingRing = ring;
+    lease->queueConfiguredUninstalled = true;
+    lease->pendingFirmwareQueueId = queueId;
+    lease->pendingFirmwareSsn = writePointer;
+    lease->firmwareWritePointer = 0;
+    if (!pendingMatch || outcomeUnknown) {
+        if (pendingMatch)
+            (void)lease->lifecycle.allocationOutcomeUnknown(
+                generation, stationId);
+        else if (before.state == IntelP2PTx::QueueState::kAllocationPending)
+            (void)lease->lifecycle.allocationOutcomeUnknown(
+                generation, stationId);
+        else
+            lease->state = TahoeP2PResourceState::kUnknown;
+        syncQueueState(lease);
+        unlockQueueLease(lease, interruptState);
+        return error ? error : EBUSY;
+    }
+
+    syncQueueState(lease);
+    unlockQueueLease(lease, interruptState);
+    return error;
+}
+#endif
+
 // Caller holds lease->stateLock.
 static bool queueLeaseHasInstalledRingLocked(
     struct iwx_softc *sc, const TahoeP2PTxQueueLease *lease)
@@ -1194,7 +1412,8 @@ static int addP2pStationRole(ItlIwx *owner, struct iwx_softc *sc,
                              TahoeP2PStationLease *lease, uint8_t stationId,
                              TahoeP2PStationRole role,
                              const uint8_t peerAddress[6],
-                             bool *resourceMayExist)
+                             bool *resourceMayExist,
+                             bool requireCorrelatedReply = false)
 {
     if (resourceMayExist)
         *resourceMayExist = false;
@@ -1226,14 +1445,20 @@ static int addP2pStationRole(ItlIwx *owner, struct iwx_softc *sc,
 
     const bool directed =
         role == TahoeP2PStationRole::kDirectedPeerLink;
-    if ((!directed && role != TahoeP2PStationRole::kBroadcastGeneralPurpose) ||
+    const bool multicast = role == TahoeP2PStationRole::kMulticastData;
+    const bool stationTypeApi =
+        isset(sc->sc_ucode_api, IWX_UCODE_TLV_API_STA_TYPE) != 0;
+    if ((!directed && !multicast &&
+         role != TahoeP2PStationRole::kBroadcastGeneralPurpose) ||
         (directed && (!peerAddress || !validUnicastAddress(peerAddress) ||
          !memcmp(peerAddress, sc->sc_p2p.mac_address, 6) ||
          !memcmp(peerAddress, sc->sc_ic.ic_myaddr, 6) ||
          !sc->sc_ic.ic_bss ||
          !memcmp(peerAddress, sc->sc_ic.ic_bss->ni_macaddr, 6) ||
          sc->sc_p2p.mac_id != 1 ||
-         !isset(sc->sc_ucode_api, IWX_UCODE_TLV_API_STA_TYPE))))
+         !stationTypeApi)) ||
+        (multicast && (!requireCorrelatedReply || !stationTypeApi ||
+         sc->sc_p2p.mac_id != 1)))
         return EOPNOTSUPP;
 
     IOEthernetController *controller = owner->tahoeP2pController();
@@ -1256,15 +1481,16 @@ static int addP2pStationRole(ItlIwx *owner, struct iwx_softc *sc,
         sc->sc_p2p.mac_id, sc->sc_p2p.mac_color));
     if (directed)
         memcpy(command.addr, peerAddress, sizeof(command.addr));
+    else if (multicast)
+        memcpy(command.addr, kMulticastDataStationAddress,
+               sizeof(command.addr));
     else
         memset(command.addr, 0xff, sizeof(command.addr));
-    const bool stationTypeApi =
-        isset(sc->sc_ucode_api, IWX_UCODE_TLV_API_STA_TYPE) != 0;
     if (directed && !stationTypeApi)
         return EOPNOTSUPP;
     if (stationTypeApi)
         command.station_type = directed ? IWX_STA_LINK :
-                                          IWX_STA_GENERAL_PURPOSE;
+            (multicast ? IWX_STA_MULTICAST : IWX_STA_GENERAL_PURPOSE);
 
     const auto retainIdentity = [&]() {
         lease->stationId = stationId;
@@ -1272,6 +1498,9 @@ static int addP2pStationRole(ItlIwx *owner, struct iwx_softc *sc,
         lease->role = role;
         if (directed)
             memcpy(lease->address, peerAddress, sizeof(lease->address));
+        else if (multicast)
+            memcpy(lease->address, kMulticastDataStationAddress,
+                   sizeof(lease->address));
         else
             memset(lease->address, 0xff, sizeof(lease->address));
         lease->macIdAndColor = le32toh(command.mac_id_n_color);
@@ -1281,9 +1510,42 @@ static int addP2pStationRole(ItlIwx *owner, struct iwx_softc *sc,
     };
 
     uint32_t status = UINT32_MAX;
-    const int error = owner->iwx_send_cmd_pdu_status(
-        sc, IWX_ADD_STA, sizeof(command), &command, &status);
-    const bool statusValid = error == 0;
+    int error = 0;
+    bool statusValid = false;
+    if (requireCorrelatedReply) {
+        struct iwx_host_cmd hostCommand{};
+        hostCommand.id = IWX_ADD_STA;
+        hostCommand.flags = IWX_CMD_WANT_RESP;
+        hostCommand.resp_pkt_len = sizeof(struct iwx_rx_packet) +
+            sizeof(struct iwx_cmd_response);
+        hostCommand.data[0] = &command;
+        hostCommand.len[0] = sizeof(command);
+        const uint32_t commandGeneration = generation;
+        IwxStaAuthSubmitReceipt submitReceipt{};
+        error = owner->iwx_send_cmd(sc, &hostCommand, &submitReceipt);
+        struct iwx_rx_packet *packet = hostCommand.resp_pkt;
+        const bool exactReply = error == 0 &&
+            static_cast<uint32_t>(__atomic_load_n(
+                &sc->sc_generation, __ATOMIC_ACQUIRE)) == commandGeneration &&
+            exactSynchronousCommandReply(
+                sc, IWX_ADD_STA, commandGeneration, submitReceipt, packet) &&
+            iwx_rx_packet_payload_len(packet) ==
+                sizeof(struct iwx_cmd_response);
+        if (exactReply) {
+            const auto *response = reinterpret_cast<
+                const struct iwx_cmd_response *>(packet->data);
+            status = le32toh(response->status);
+            statusValid = true;
+        } else if (error == 0) {
+            error = EIO;
+        }
+        if (packet)
+            owner->iwx_free_resp(sc, &hostCommand);
+    } else {
+        error = owner->iwx_send_cmd_pdu_status(
+            sc, IWX_ADD_STA, sizeof(command), &command, &status);
+        statusValid = error == 0;
+    }
     publishAddStationDiagnostic(owner, stationId,
         le32toh(command.mac_id_n_color), command.station_type, stationTypeApi,
         sizeof(command), addCommandVersion, addNotificationVersion,
@@ -1346,11 +1608,27 @@ int iwx_tahoe_p2p_add_directed_peer_station(
         resourceMayExist);
 }
 
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+int iwx_tahoe_p2p_add_multicast_data_station(
+    ItlIwx *owner, struct iwx_softc *sc, TahoeP2PStationLease *lease,
+    uint8_t stationId, bool experimentOptIn, bool *resourceMayExist)
+{
+    if (!experimentOptIn) {
+        if (resourceMayExist)
+            *resourceMayExist = false;
+        return EOPNOTSUPP;
+    }
+    return addP2pStationRole(owner, sc, lease, stationId,
+        TahoeP2PStationRole::kMulticastData, nullptr, resourceMayExist, true);
+}
+#endif
+
 static int removeP2pStationRole(ItlIwx *owner, struct iwx_softc *sc,
                                 TahoeP2PStationLease *lease,
                                 TahoeP2PTxQueueLease *queueLease,
                                 TahoeP2PStationRole expectedRole,
-                                bool *resourceMayExist)
+                                bool *resourceMayExist,
+                                bool requireCorrelatedReply = false)
 {
     if (resourceMayExist)
         *resourceMayExist = false;
@@ -1433,13 +1711,22 @@ static int removeP2pStationRole(ItlIwx *owner, struct iwx_softc *sc,
     if (firmwareApi != IntelP2PTx::QueueApi::kLegacyDynamicDqa)
         return EOPNOTSUPP;
 
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+    if (expectedRole == TahoeP2PStationRole::kMulticastData &&
+        (queueLease->state != TahoeP2PResourceState::kAbsent ||
+         queueLease->pendingRing != nullptr ||
+         queueLease->queueConfiguredUninstalled))
+        return EBUSY;
+#endif
+
     *resourceMayExist = true;
     if (!stationLeaseMatchesLiveContext(owner, sc, lease, expectedRole)) {
         lease->state = TahoeP2PResourceState::kUnknown;
         return EBUSY;
     }
     const int error = removeLegacyP2pStationWithAck(
-        owner, sc, lease->stationId);
+        owner, sc, lease->stationId, requireCorrelatedReply,
+        lease->generation);
     if (error) {
         lease->state = TahoeP2PResourceState::kUnknown;
         return error;
@@ -1452,7 +1739,8 @@ static int removeP2pStationRole(ItlIwx *owner, struct iwx_softc *sc,
         return ESTALE;
     }
     lease->state = TahoeP2PResourceState::kAbsent;
-#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332 || \
+    ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
     lease->allocationSerial = 0;
 #endif
     *resourceMayExist = false;
@@ -1479,6 +1767,16 @@ int iwx_tahoe_p2p_remove_directed_peer_station(
         TahoeP2PStationRole::kDirectedPeerLink,
         resourceMayExist);
 }
+
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+int iwx_tahoe_p2p_remove_multicast_data_station(
+    ItlIwx *owner, struct iwx_softc *sc, TahoeP2PStationLease *lease,
+    TahoeP2PTxQueueLease *queueLease, bool *resourceMayExist)
+{
+    return removeP2pStationRole(owner, sc, lease, queueLease,
+        TahoeP2PStationRole::kMulticastData, resourceMayExist, true);
+}
+#endif
 
 int iwx_tahoe_p2p_tvqm_allocate(ItlIwx *owner, struct iwx_softc *sc,
                                 TahoeP2PTxQueueLease *lease,
@@ -1548,6 +1846,7 @@ int iwx_tahoe_p2p_tvqm_allocate(ItlIwx *owner, struct iwx_softc *sc,
         sc->sc_device_family < IWX_DEVICE_FAMILY_22000)
         return EINVAL;
     uint8_t firmwareTid = UINT8_MAX;
+    bool multicastAdmission = false;
     if (use == TahoeP2PQueueUse::kManagementTid15 &&
         stationLease->role == TahoeP2PStationRole::kBroadcastGeneralPurpose) {
         firmwareTid = static_cast<uint8_t>(kFirmwareManagementTid);
@@ -1563,6 +1862,21 @@ int iwx_tahoe_p2p_tvqm_allocate(ItlIwx *owner, struct iwx_softc *sc,
         sc->sc_p2p.mac_id == 1 &&
         isset(sc->sc_ucode_api, IWX_UCODE_TLV_API_STA_TYPE)) {
         firmwareTid = 0;
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+    } else if (use == TahoeP2PQueueUse::kMulticastNonQosDataTid0 &&
+        stationLease->role == TahoeP2PStationRole::kMulticastData &&
+        stationLease->stationType == IWX_STA_MULTICAST &&
+        stationLease->addCommandVersion == 12 &&
+        stationLease->addNotificationVersion == 2 &&
+        multicastDataStationAddress(stationLease->address) &&
+        stationLease->macIdAndColor == static_cast<uint32_t>(
+            IWX_FW_CMD_ID_AND_COLOR(sc->sc_p2p.mac_id,
+                                    sc->sc_p2p.mac_color)) &&
+        sc->sc_p2p.mac_id == 1 &&
+        isset(sc->sc_ucode_api, IWX_UCODE_TLV_API_STA_TYPE)) {
+        firmwareTid = 0;
+        multicastAdmission = true;
+#endif
     } else {
         return EINVAL;
     }
@@ -1615,7 +1929,8 @@ int iwx_tahoe_p2p_tvqm_allocate(ItlIwx *owner, struct iwx_softc *sc,
     // later displaced, this allocation becomes its retained DMA owner.
     NativeDynamicRingSnapshot dynamicSnapshot{};
     dynamicSnapshot.queueId = IWX_INVALID_QUEUE;
-    captureDynamicRingSnapshot(owner, sc, &dynamicSnapshot);
+    if (!multicastAdmission)
+        captureDynamicRingSnapshot(owner, sc, &dynamicSnapshot);
 
     struct iwx_tx_queue_cfg_cmd legacyCommand{};
     struct iwx_host_cmd hostCommand{};
@@ -1623,8 +1938,8 @@ int iwx_tahoe_p2p_tvqm_allocate(ItlIwx *owner, struct iwx_softc *sc,
     hostCommand.resp_pkt_len = sizeof(struct iwx_rx_packet) +
                                sizeof(struct iwx_tx_queue_cfg_rsp);
     legacyCommand.sta_id = stationId;
-    // Existing management queues use firmware TID15. The directed prepare
-    // candidate uses the ordinary non-QoS data TID0 and remains no-doorbell.
+    // Management queues use TID15. Directed and experimental multicast use
+    // ordinary non-QoS data TID0; multicast remains admission-only.
     legacyCommand.tid = firmwareTid;
     legacyCommand.flags = htole16(IWX_TX_QUEUE_CFG_ENABLE_QUEUE);
     legacyCommand.cb_size = htole32(
@@ -1673,11 +1988,16 @@ int iwx_tahoe_p2p_tvqm_allocate(ItlIwx *owner, struct iwx_softc *sc,
     lease->stationId = stationId;
     lease->generation = generation;
     lease->stationRole = stationLease->role;
+    lease->queueUse = use;
     lease->firmwareTid = firmwareTid;
     memcpy(lease->peerAddress, stationLease->address,
            sizeof(lease->peerAddress));
     lease->macIdAndColor = stationLease->macIdAndColor;
     lease->queueId = IWX_INVALID_QUEUE;
+    lease->queueConfiguredUninstalled = false;
+    lease->pendingFirmwareQueueId = UINT16_MAX;
+    lease->pendingFirmwareSsn = 0;
+    lease->firmwareWritePointer = 0;
     lease->pendingRing = ring;
     lease->submissionBusy = false;
     lease->submissionDescriptorIndex = IWX_INVALID_QUEUE;
@@ -1688,16 +2008,18 @@ int iwx_tahoe_p2p_tvqm_allocate(ItlIwx *owner, struct iwx_softc *sc,
     // Snapshot only positive proof for the complete attach-time static
     // placeholder. Clear proof before submission; any timeout or malformed
     // response must never make this slot reclaimable on a later attempt.
-    placeholderSnapshot = captureUnsubmittedPlaceholder(
-        sc, &placeholderCaptureFailureMask);
-    clearUnsubmittedPlaceholderProofs(sc);
+    if (!multicastAdmission) {
+        placeholderSnapshot = captureUnsubmittedPlaceholder(
+            sc, &placeholderCaptureFailureMask);
+        clearUnsubmittedPlaceholderProofs(sc);
+    }
     ring->nativeUnsubmittedPlaceholder = 0;
     unlockQueueLease(lease, interruptState);
     NativeQueueSlotDiagnostic emptySlotDiagnostic;
     publishQueueSlotDiagnostic(owner, UINT32_MAX, false,
         emptySlotDiagnostic, placeholderCaptureFailureMask,
         placeholderSlotDiagnostic);
-    if (controller) {
+    if (controller && !multicastAdmission) {
         controller->setProperty("NativeP2PTxPlaceholderCaptured",
                                 uint32_t(placeholderSnapshot.valid), 32);
         controller->setProperty("NativeP2PTxPlaceholderQueueId",
@@ -1706,7 +2028,21 @@ int iwx_tahoe_p2p_tvqm_allocate(ItlIwx *owner, struct iwx_softc *sc,
     }
     *resourceMayExist = true;
 
-    const int sendError = owner->iwx_send_cmd(sc, &hostCommand);
+    IwxStaAuthSubmitReceipt queueSubmitReceipt{};
+    int sendError = 0;
+    if (multicastAdmission) {
+        sendError = owner->iwx_send_cmd(
+            sc, &hostCommand, &queueSubmitReceipt);
+        if (!sendError &&
+            (static_cast<uint32_t>(__atomic_load_n(
+                 &sc->sc_generation, __ATOMIC_ACQUIRE)) != generation ||
+             !exactSynchronousCommandReply(
+                 sc, IWX_SCD_QUEUE_CFG, generation, queueSubmitReceipt,
+                 hostCommand.resp_pkt)))
+            sendError = EIO;
+    } else {
+        sendError = owner->iwx_send_cmd(sc, &hostCommand);
+    }
     if (sendError) {
         publishQueueDiagnostic(owner, true, sendError, UINT32_MAX,
                                false, 0, 0, 0,
@@ -1754,6 +2090,12 @@ int iwx_tahoe_p2p_tvqm_allocate(ItlIwx *owner, struct iwx_softc *sc,
         !stationLeaseMatchesLiveContext(owner, sc, stationLease,
                                         stationLease->role)) {
         clearDynamicRingSnapshot(&dynamicSnapshot);
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+        if (multicastAdmission)
+            return retainMulticastConfiguredUninstalled(
+                lease, ring, generation, stationId, firmwareQueue,
+                writePointer, true, ESTALE);
+#endif
         return retainAcknowledgedPending(
             lease, ring, generation, stationId, firmwareQueue,
             writePointer, ESTALE);
@@ -1766,6 +2108,45 @@ int iwx_tahoe_p2p_tvqm_allocate(ItlIwx *owner, struct iwx_softc *sc,
     // and write pointer, and this machine's Test048 completed PSF/MIF with
     // flags=1, so the field is not a universal failure verdict. The reserved
     // word is still required to be zero.
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+    if (multicastAdmission) {
+        NativeQueueSlotDiagnostic hostSlotDiagnostic =
+            captureQueueSlotDiagnostic(sc, firmwareQueue);
+        const bool hostSlotAvailable = firmwareQueue < nitems(sc->txq) &&
+            firmwareQueue != IWX_DQA_CMD_QUEUE &&
+            multicastQueueSlotHasNoOwner(sc, firmwareQueue,
+                                         &hostSlotDiagnostic);
+        const bool ownerLeaseConflict = firmwareQueue < nitems(sc->txq) &&
+            multicastQueueConflictsWithOwnerLease(owner, lease,
+                                                  firmwareQueue);
+        publishQueueSlotDiagnostic(owner, firmwareQueue, true,
+            hostSlotDiagnostic, placeholderCaptureFailureMask,
+            placeholderSlotDiagnostic);
+
+        // A malformed queue ACK or any qid already owned by a command, host
+        // TID, active queue, or unresolved owner lease is quarantined. In
+        // particular, do not flush a conflicting qid: it may serve production
+        // traffic. The raw firmware qid/SSN remain attached to the UNKNOWN
+        // lease for diagnostics and queue completion isolation.
+        if (responseReserved != 0 || firmwareQueue >= nitems(sc->txq) ||
+            firmwareQueue == IWX_DQA_CMD_QUEUE || !hostSlotAvailable ||
+            ownerLeaseConflict)
+            return retainMulticastConfiguredUninstalled(
+                lease, ring, generation, stationId, firmwareQueue,
+                writePointer, true,
+                responseReserved != 0 ? EIO : EBUSY);
+
+        const int retainResult = retainMulticastConfiguredUninstalled(
+            lease, ring, generation, stationId, firmwareQueue,
+            writePointer, false, 0);
+        if (retainResult != 0)
+            return retainResult;
+        *queueId = firmwareQueue;
+        *resourceMayExist = true;
+        return 0;
+    }
+#endif
+
     if (responseReserved != 0 || firmwareQueue >= nitems(sc->txq) ||
         writePointer >= ring->ring_count) {
         const int error = responseReserved != 0 ? EIO : EBUSY;
@@ -2001,6 +2382,10 @@ int iwx_tahoe_p2p_tvqm_remove(ItlIwx *owner, struct iwx_softc *sc,
         !queueLease || !resourceMayExist ||
         !owner->nativeP2pCommandAllowed())
         return EBUSY;
+    if (stationLease->role == TahoeP2PStationRole::kMulticastData ||
+        queueLease->queueUse ==
+            TahoeP2PQueueUse::kMulticastNonQosDataTid0)
+        return EOPNOTSUPP;
     *resourceMayExist = iwx_tahoe_p2p_tvqm_may_exist(queueLease);
     const uint32_t generation = static_cast<uint32_t>(sc->sc_generation);
     if (stationLease->state != TahoeP2PResourceState::kActive ||
@@ -2152,6 +2537,10 @@ int iwx_tahoe_p2p_tvqm_abort_unsubmitted(
         *resourceMayExist = false;
         return 0;
     }
+    if (stationLease->role == TahoeP2PStationRole::kMulticastData ||
+        queueLease->queueUse ==
+            TahoeP2PQueueUse::kMulticastNonQosDataTid0)
+        return EOPNOTSUPP;
     const uint32_t generation = static_cast<uint32_t>(sc->sc_generation);
     if (stationLease->generation != generation)
         return ESTALE;
@@ -2318,6 +2707,264 @@ int iwx_tahoe_p2p_tvqm_abort_unsubmitted(
     return 0;
 }
 
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+static bool multicastPendingRingIsUnsubmitted(
+    const struct iwx_tx_ring *ring)
+{
+    if (!ring || ring->ring_count < 8 ||
+        ring->ring_count > IWX_TFD_QUEUE_SIZE_MAX ||
+        (ring->ring_count & (ring->ring_count - 1)) != 0 ||
+        ring->qid != IWX_INVALID_QUEUE || ring->cur != 0 ||
+        ring->tail != 0 || ring->queued != 0 || ring->desc == nullptr ||
+        ring->cmd == nullptr || ring->desc_dma.vaddr != ring->desc ||
+        ring->cmd_dma.vaddr != ring->cmd || ring->desc_dma.paddr == 0 ||
+        ring->cmd_dma.paddr == 0 || ring->bc_tbl.vaddr == nullptr ||
+        ring->bc_tbl.paddr == 0)
+        return false;
+    for (size_t slot = 0; slot < nitems(ring->data); ++slot) {
+        const struct iwx_tx_data *data = &ring->data[slot];
+        if (data->m != nullptr || data->in != nullptr ||
+            (slot < ring->ring_count ? data->map == nullptr :
+                                       data->map != nullptr))
+            return false;
+    }
+    return true;
+}
+
+static void markMulticastAllocationUnknown(
+    ItlIwx *owner, TahoeP2PStationLease *stationLease,
+    TahoeP2PTxQueueLease *queueLease, uint32_t generation)
+{
+    if (stationLease)
+        stationLease->state = TahoeP2PResourceState::kUnknown;
+    if (!queueLease)
+        return;
+    if (!queueLease->stateLock && owner)
+        queueLease->stateLock = owner->nativeP2pTxLock_;
+    IOInterruptState interruptState;
+    if (!lockQueueLease(queueLease, &interruptState)) {
+        queueLease->state = TahoeP2PResourceState::kUnknown;
+        queueLease->unsubmittedAbortInProgress = false;
+        return;
+    }
+    const IntelP2PTx::QueueSnapshot current =
+        queueLease->lifecycle.snapshot();
+    if (current.state == IntelP2PTx::QueueState::kAllocationPending &&
+        current.generation == generation &&
+        current.stationId == queueLease->stationId)
+        (void)queueLease->lifecycle.allocationOutcomeUnknown(
+            generation, queueLease->stationId);
+    queueLease->unsubmittedAbortInProgress = false;
+    queueLease->state = TahoeP2PResourceState::kUnknown;
+    unlockQueueLease(queueLease, interruptState);
+}
+
+int iwx_tahoe_p2p_tvqm_abort_multicast_unsubmitted(
+    ItlIwx *owner, struct iwx_softc *sc,
+    TahoeP2PStationLease *stationLease,
+    TahoeP2PTxQueueLease *queueLease,
+    uint64_t expectedStationAllocationSerial,
+    uint64_t expectedQueueAllocationSerial,
+    bool *resourceMayExist)
+{
+    if (resourceMayExist)
+        *resourceMayExist = true;
+    if (!owner || !sc || sc != &owner->com || !stationLease ||
+        !queueLease || !resourceMayExist)
+        return EINVAL;
+    if (stationLease->role != TahoeP2PStationRole::kMulticastData ||
+        queueLease->stationRole != TahoeP2PStationRole::kMulticastData ||
+        queueLease->queueUse !=
+            TahoeP2PQueueUse::kMulticastNonQosDataTid0 ||
+        !expectedStationAllocationSerial || !expectedQueueAllocationSerial ||
+        expectedStationAllocationSerial == expectedQueueAllocationSerial ||
+        stationLease->allocationSerial != expectedStationAllocationSerial ||
+        queueLease->allocationSerial != expectedQueueAllocationSerial)
+        return EBUSY;
+    if (!owner->nativeP2pCommandAllowed() ||
+        __atomic_load_n(&owner->nativeP2pNswqPaused_, __ATOMIC_ACQUIRE) == 0)
+        return EBUSY;
+
+    const uint32_t generation = static_cast<uint32_t>(__atomic_load_n(
+        &sc->sc_generation, __ATOMIC_ACQUIRE));
+    if (stationLease->state != TahoeP2PResourceState::kActive ||
+        stationLease->generation != generation ||
+        queueLease->generation != generation ||
+        !stationLeaseMatchesLiveContext(owner, sc, stationLease,
+            TahoeP2PStationRole::kMulticastData) ||
+        !queueBindingMatchesStation(sc, stationLease, queueLease))
+        return ESTALE;
+
+    IntelP2PTx::QueueApi firmwareApi;
+    const int apiError = queueApiForFirmware(owner, sc, &firmwareApi);
+    if (apiError || firmwareApi != IntelP2PTx::QueueApi::kLegacyDynamicDqa)
+        return apiError ? apiError : EOPNOTSUPP;
+
+    if (!queueLease->stateLock)
+        queueLease->stateLock = owner->nativeP2pTxLock_;
+    IOInterruptState interruptState;
+    if (!lockQueueLease(queueLease, &interruptState))
+        return EBUSY;
+    const IntelP2PTx::QueueSnapshot before =
+        queueLease->lifecycle.snapshot();
+    struct iwx_tx_ring *pendingRing = queueLease->pendingRing;
+    const uint16_t firmwareQueue = queueLease->pendingFirmwareQueueId;
+    const uint16_t writePointer = queueLease->pendingFirmwareSsn;
+    const bool eligible =
+        queueLease->state == TahoeP2PResourceState::kPending &&
+        before.state == IntelP2PTx::QueueState::kAllocationPending &&
+        before.api == IntelP2PTx::QueueApi::kLegacyDynamicDqa &&
+        before.generation == generation &&
+        before.stationId == stationLease->stationId &&
+        queueLease->queueConfiguredUninstalled &&
+        queueLease->queueId == IWX_INVALID_QUEUE && pendingRing != nullptr &&
+        firmwareQueue < nitems(sc->txq) &&
+        firmwareQueue != IWX_DQA_CMD_QUEUE &&
+        !queueLease->everDoorbelled && !queueLease->submissionBusy &&
+        !queueLease->unsubmittedAbortInProgress &&
+        !queueLease->idleAbortAfterEndInProgress &&
+        before.outstandingTx == 0 && !before.completionObserved &&
+        before.ringMustRemainOwned &&
+        stationLease->allocationSerial == expectedStationAllocationSerial &&
+        queueLease->allocationSerial == expectedQueueAllocationSerial &&
+        multicastPendingRingIsUnsubmitted(pendingRing) &&
+        queueLease->generation == generation &&
+        queueLease->stationId == stationLease->stationId &&
+        queueBindingMatchesStation(sc, stationLease, queueLease);
+    if (!eligible) {
+        unlockQueueLease(queueLease, interruptState);
+        *resourceMayExist = true;
+        return EBUSY;
+    }
+    queueLease->unsubmittedAbortInProgress = true;
+    unlockQueueLease(queueLease, interruptState);
+
+    // Full station flush is the only exact witness for this uninstalled
+    // firmware queue. Its response is additionally tied to this command-ring
+    // receipt and driver generation. A qid conflict never reaches this path:
+    // conflicting ACKs were retained as UNKNOWN at admission time.
+    int error = flushLegacyP2pAllocationBinding(
+        owner, sc, stationLease->stationId, firmwareQueue, 0, writePointer,
+        true, generation);
+    if (!error && (!owner->nativeP2pCommandAllowed() ||
+        __atomic_load_n(&owner->nativeP2pNswqPaused_, __ATOMIC_ACQUIRE) == 0 ||
+        static_cast<uint32_t>(__atomic_load_n(
+            &sc->sc_generation, __ATOMIC_ACQUIRE)) != generation ||
+        stationLease->allocationSerial != expectedStationAllocationSerial ||
+        queueLease->allocationSerial != expectedQueueAllocationSerial ||
+        !stationLeaseMatchesLiveContext(owner, sc, stationLease,
+            TahoeP2PStationRole::kMulticastData) ||
+        !queueBindingMatchesStation(sc, stationLease, queueLease)))
+        error = ESTALE;
+    if (!error) {
+        if (!lockQueueLease(queueLease, &interruptState)) {
+            error = EBUSY;
+        } else {
+            const IntelP2PTx::QueueSnapshot afterFlush =
+                queueLease->lifecycle.snapshot();
+            const bool unchanged =
+                queueLease->state == TahoeP2PResourceState::kPending &&
+                afterFlush.state == IntelP2PTx::QueueState::kAllocationPending &&
+                afterFlush.generation == generation &&
+                afterFlush.stationId == stationLease->stationId &&
+                queueLease->pendingRing == pendingRing &&
+                queueLease->queueConfiguredUninstalled &&
+                queueLease->pendingFirmwareQueueId == firmwareQueue &&
+                queueLease->pendingFirmwareSsn == writePointer &&
+                queueLease->allocationSerial ==
+                    expectedQueueAllocationSerial &&
+                stationLease->allocationSerial ==
+                    expectedStationAllocationSerial &&
+                queueLease->unsubmittedAbortInProgress &&
+                !queueLease->everDoorbelled && !queueLease->submissionBusy &&
+                multicastPendingRingIsUnsubmitted(pendingRing) &&
+                queueBindingMatchesStation(sc, stationLease, queueLease);
+            unlockQueueLease(queueLease, interruptState);
+            if (!unchanged)
+                error = EBUSY;
+        }
+    }
+    if (!error && (!owner->nativeP2pCommandAllowed() ||
+        __atomic_load_n(&owner->nativeP2pNswqPaused_, __ATOMIC_ACQUIRE) == 0 ||
+        static_cast<uint32_t>(__atomic_load_n(
+            &sc->sc_generation, __ATOMIC_ACQUIRE)) != generation))
+        error = ESTALE;
+    if (!error)
+        error = removeLegacyP2pStationWithAck(
+            owner, sc, stationLease->stationId, true, generation);
+    if (error) {
+        markMulticastAllocationUnknown(owner, stationLease, queueLease,
+                                       generation);
+        *resourceMayExist = true;
+        return error;
+    }
+
+    if (static_cast<uint32_t>(__atomic_load_n(
+            &sc->sc_generation, __ATOMIC_ACQUIRE)) != generation ||
+        stationLease->allocationSerial != expectedStationAllocationSerial ||
+        queueLease->allocationSerial != expectedQueueAllocationSerial ||
+        !queueBindingMatchesStation(sc, stationLease, queueLease)) {
+        markMulticastAllocationUnknown(owner, stationLease, queueLease,
+                                       generation);
+        *resourceMayExist = true;
+        return ESTALE;
+    }
+
+    if (!lockQueueLease(queueLease, &interruptState)) {
+        markMulticastAllocationUnknown(owner, stationLease, queueLease,
+                                       generation);
+        return EBUSY;
+    }
+    const IntelP2PTx::QueueSnapshot afterRemove =
+        queueLease->lifecycle.snapshot();
+    const bool removable =
+        queueLease->state == TahoeP2PResourceState::kPending &&
+        afterRemove.state == IntelP2PTx::QueueState::kAllocationPending &&
+        afterRemove.generation == generation &&
+        afterRemove.stationId == stationLease->stationId &&
+        queueLease->pendingRing == pendingRing &&
+        queueLease->queueConfiguredUninstalled &&
+        queueLease->pendingFirmwareQueueId == firmwareQueue &&
+        queueLease->pendingFirmwareSsn == writePointer &&
+        queueLease->unsubmittedAbortInProgress &&
+        queueLease->allocationSerial == expectedQueueAllocationSerial &&
+        stationLease->allocationSerial == expectedStationAllocationSerial &&
+        !queueLease->everDoorbelled && !queueLease->submissionBusy &&
+        multicastPendingRingIsUnsubmitted(pendingRing) &&
+        queueBindingMatchesStation(sc, stationLease, queueLease);
+    if (!removable || queueLease->lifecycle.allocationRejected(
+            generation, stationLease->stationId) !=
+                IntelP2PTx::Result::kSuccess) {
+        queueLease->state = TahoeP2PResourceState::kUnknown;
+        queueLease->unsubmittedAbortInProgress = false;
+        stationLease->state = TahoeP2PResourceState::kUnknown;
+        unlockQueueLease(queueLease, interruptState);
+        *resourceMayExist = true;
+        return EBUSY;
+    }
+    stationLease->state = TahoeP2PResourceState::kAbsent;
+    queueLease->state = TahoeP2PResourceState::kAbsent;
+    queueLease->queueId = IWX_INVALID_QUEUE;
+    queueLease->queueConfiguredUninstalled = false;
+    queueLease->pendingFirmwareQueueId = UINT16_MAX;
+    queueLease->pendingFirmwareSsn = 0;
+    queueLease->pendingRing = nullptr;
+    queueLease->firmwareWritePointer = 0;
+    queueLease->submissionBusy = false;
+    queueLease->submissionDescriptorIndex = IWX_INVALID_QUEUE;
+    queueLease->allocationSerial = 0;
+    stationLease->allocationSerial = 0;
+    queueLease->unsubmittedAbortInProgress = false;
+    syncQueueState(queueLease);
+    unlockQueueLease(queueLease, interruptState);
+
+    destroyUnsubmittedRing(owner, sc, pendingRing);
+    *resourceMayExist = false;
+    publishRetainedRingDiagnostic(owner, queueLease);
+    return 0;
+}
+#endif
+
 enum class P2PIdleAbortMode : uint8_t {
     kAfterConfirmedRocEnd,
     kBeforeAnySessionSubmission
@@ -2335,6 +2982,10 @@ static int abortIdleP2pQueue(
     if (!owner || !sc || sc != &owner->com || !stationLease ||
         !queueLease || !resourceMayExist)
         return EINVAL;
+    if (stationLease->role == TahoeP2PStationRole::kMulticastData ||
+        queueLease->queueUse ==
+            TahoeP2PQueueUse::kMulticastNonQosDataTid0)
+        return EOPNOTSUPP;
     if (!authorityConfirmed || !noTicketArmed ||
         !owner->nativeP2pCommandAllowed() ||
         __atomic_load_n(&owner->nativeP2pNswqPaused_, __ATOMIC_ACQUIRE) == 0)
@@ -2590,12 +3241,16 @@ bool iwx_tahoe_p2p_tvqm_queue_owned(
         return false;
     if (!lease->stateLock)
         return lease->state != TahoeP2PResourceState::kAbsent &&
-            lease->queueId == queueId;
+            (lease->queueId == queueId ||
+             (lease->queueConfiguredUninstalled &&
+              lease->pendingFirmwareQueueId == queueId));
     IOInterruptState interruptState;
     if (!lockQueueLease(lease, &interruptState))
         return true;
     const bool owned = lease->state != TahoeP2PResourceState::kAbsent &&
-        lease->queueId == queueId;
+        (lease->queueId == queueId ||
+         (lease->queueConfiguredUninstalled &&
+          lease->pendingFirmwareQueueId == queueId));
     unlockQueueLease(lease, interruptState);
     return owned;
 }
@@ -2837,7 +3492,8 @@ int iwx_tahoe_p2p_tvqm_confirm_drained(ItlIwx *owner, struct iwx_softc *sc,
     return 0;
 }
 
-#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332 || \
+    ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
 int iwx_tahoe_p2p_tvqm_bind_allocation_serials(
     struct iwx_softc *sc, TahoeP2PStationLease *stationLease,
     TahoeP2PTxQueueLease *queueLease, uint64_t stationAllocationSerial,
@@ -2846,13 +3502,35 @@ int iwx_tahoe_p2p_tvqm_bind_allocation_serials(
     if (!sc || !stationLease || !queueLease ||
         !stationAllocationSerial || !queueAllocationSerial ||
         stationAllocationSerial == queueAllocationSerial ||
-        stationLease->role != TahoeP2PStationRole::kDirectedPeerLink ||
         stationLease->state != TahoeP2PResourceState::kActive ||
         stationLease->generation != static_cast<uint32_t>(sc->sc_generation) ||
-        queueLease->stationRole != TahoeP2PStationRole::kDirectedPeerLink ||
-        queueLease->firmwareTid != 0 ||
         queueLease->stationId != stationLease->stationId ||
         queueLease->generation != stationLease->generation)
+        return EINVAL;
+
+    const bool directed =
+        stationLease->role == TahoeP2PStationRole::kDirectedPeerLink &&
+        queueLease->stationRole == TahoeP2PStationRole::kDirectedPeerLink &&
+        queueLease->queueUse ==
+            TahoeP2PQueueUse::kDirectedNonQosDataTid0 &&
+        queueLease->firmwareTid == 0;
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+    const bool multicast =
+        stationLease->role == TahoeP2PStationRole::kMulticastData &&
+        queueLease->stationRole == TahoeP2PStationRole::kMulticastData &&
+        queueLease->queueUse ==
+            TahoeP2PQueueUse::kMulticastNonQosDataTid0 &&
+        queueLease->firmwareTid == 0 &&
+        stationLease->stationType == IWX_STA_MULTICAST &&
+        isset(sc->sc_ucode_api, IWX_UCODE_TLV_API_STA_TYPE) &&
+        sc->sc_p2p.mac_id == 1 &&
+        multicastDataStationAddress(stationLease->address) &&
+        stationLease->addCommandVersion == 12 &&
+        stationLease->addNotificationVersion == 2;
+#else
+    const bool multicast = false;
+#endif
+    if (!directed && !multicast)
         return EINVAL;
 
     IOInterruptState interruptState;
@@ -2863,8 +3541,10 @@ int iwx_tahoe_p2p_tvqm_bind_allocation_serials(
     struct iwx_tx_ring *ring = nullptr;
     if (queueLease->queueId < nitems(sc->txq))
         ring = &sc->txq[queueLease->queueId];
-    const bool active = queueLease->state == TahoeP2PResourceState::kActive &&
+    const bool directedActive = directed &&
+        queueLease->state == TahoeP2PResourceState::kActive &&
         snapshot.state == IntelP2PTx::QueueState::kActive &&
+        snapshot.api == IntelP2PTx::QueueApi::kLegacyDynamicDqa &&
         snapshot.generation == stationLease->generation &&
         snapshot.stationId == stationLease->stationId &&
         snapshot.queueId == queueLease->queueId &&
@@ -2874,7 +3554,28 @@ int iwx_tahoe_p2p_tvqm_bind_allocation_serials(
         queueBindingMatchesStation(sc, stationLease, queueLease) && ring &&
         ring->qid == queueLease->queueId && ring->ring_count >= 8 &&
         ring->queued == 0 && ring->cur == ring->tail;
-    if (!active ||
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+    const bool multicastConfiguredUninstalled = multicast &&
+        queueLease->state == TahoeP2PResourceState::kPending &&
+        snapshot.state == IntelP2PTx::QueueState::kAllocationPending &&
+        snapshot.api == IntelP2PTx::QueueApi::kLegacyDynamicDqa &&
+        snapshot.generation == stationLease->generation &&
+        snapshot.stationId == stationLease->stationId &&
+        snapshot.outstandingTx == 0 && !snapshot.completionObserved &&
+        snapshot.ringMustRemainOwned &&
+        queueLease->queueId == IWX_INVALID_QUEUE &&
+        queueLease->queueConfiguredUninstalled &&
+        queueLease->pendingFirmwareQueueId < nitems(sc->txq) &&
+        queueLease->pendingFirmwareQueueId != IWX_DQA_CMD_QUEUE &&
+        !queueLease->everDoorbelled && !queueLease->submissionBusy &&
+        !queueLease->unsubmittedAbortInProgress &&
+        !queueLease->idleAbortAfterEndInProgress &&
+        queueBindingMatchesStation(sc, stationLease, queueLease) &&
+        multicastPendingRingIsUnsubmitted(queueLease->pendingRing);
+#else
+    const bool multicastConfiguredUninstalled = false;
+#endif
+    if (!(directedActive || multicastConfiguredUninstalled) ||
         (stationLease->allocationSerial != 0 &&
          stationLease->allocationSerial != stationAllocationSerial) ||
         (queueLease->allocationSerial != 0 &&
@@ -2888,6 +3589,10 @@ int iwx_tahoe_p2p_tvqm_bind_allocation_serials(
     return 0;
 }
 
+#endif // ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332 || \
+         ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
 int iwx_tahoe_p2p_tvqm_release_after_directed_data_hardstop(
     ItlIwx *owner, struct iwx_softc *sc,
     TahoeP2PStationLease *stationLease,

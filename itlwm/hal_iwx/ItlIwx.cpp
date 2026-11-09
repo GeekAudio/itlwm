@@ -1852,7 +1852,8 @@ bool ItlIwx::nativeP2pResourcesRetained()
         kStopBlockedByP2pMac = 1u << 3,
         kStopBlockedByBinding = 1u << 4,
         kStopBlockedByPhy = 1u << 5,
-        kStopBlockedByDirectedData = 1u << 6
+        kStopBlockedByDirectedData = 1u << 6,
+        kStopBlockedByMulticast = 1u << 7
     };
 
     const bool workerBusy = nativeP2pBusy();
@@ -1864,6 +1865,14 @@ bool ItlIwx::nativeP2pResourcesRetained()
     uint32_t macState = UINT32_MAX, bindingState = UINT32_MAX;
     uint32_t phyLeased = UINT32_MAX, firmwareGeneration = UINT32_MAX;
     uint32_t queuePending = UINT32_MAX;
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+    uint32_t multicastQueueState = UINT32_MAX;
+    uint32_t multicastQueueId = UINT32_MAX;
+    uint32_t multicastQueueGeneration = UINT32_MAX;
+    uint32_t multicastQueuePending = UINT32_MAX;
+    uint32_t multicastStationState = UINT32_MAX;
+    uint32_t multicastStationId = UINT32_MAX;
+#endif
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
     const uint32_t directedDataMayOwn = __atomic_load_n(
         &nativeP2pDirectedDataTx_.mayOwnResource, __ATOMIC_ACQUIRE);
@@ -1918,6 +1927,82 @@ bool ItlIwx::nativeP2pResourcesRetained()
             reason |= kStopBlockedByTxQueue;
         if (nativeP2pStation_.state != TahoeP2PResourceState::kAbsent)
             reason |= kStopBlockedByStation;
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+        TahoeP2PResourceState localMulticastQueueState;
+        TahoeP2PResourceState localMulticastStationState;
+        uint16_t localMulticastQueueId;
+        uint16_t localMulticastFirmwareQueueId;
+        uint32_t localMulticastQueueGeneration;
+        uint8_t localMulticastStationId;
+        bool localMulticastConfiguredUninstalled;
+        bool localMulticastQueuePending;
+        if (nativeP2pTxLock_) {
+            IOInterruptState irq = IOSimpleLockLockDisableInterrupt(
+                nativeP2pTxLock_);
+            localMulticastQueueState =
+                nativeP2pMulticastTxQueue_.state;
+            localMulticastStationState =
+                nativeP2pMulticastStation_.state;
+            localMulticastQueueId =
+                nativeP2pMulticastTxQueue_.queueId;
+            localMulticastFirmwareQueueId =
+                nativeP2pMulticastTxQueue_.pendingFirmwareQueueId;
+            localMulticastQueueGeneration =
+                nativeP2pMulticastTxQueue_.generation;
+            localMulticastStationId =
+                nativeP2pMulticastStation_.stationId;
+            localMulticastConfiguredUninstalled =
+                nativeP2pMulticastTxQueue_.queueConfiguredUninstalled;
+            localMulticastQueuePending =
+                nativeP2pMulticastTxQueue_.pendingRing != nullptr ||
+                nativeP2pMulticastTxQueue_.retainedRing != nullptr ||
+                nativeP2pMulticastTxQueue_.submissionBusy ||
+                nativeP2pMulticastTxQueue_.everDoorbelled ||
+                localMulticastConfiguredUninstalled;
+            IOSimpleLockUnlockEnableInterrupt(nativeP2pTxLock_, irq);
+        } else {
+            // Before lock allocation or during serialized teardown, no P2P
+            // owner can be concurrently changing these leases.
+            localMulticastQueueState =
+                nativeP2pMulticastTxQueue_.state;
+            localMulticastStationState =
+                nativeP2pMulticastStation_.state;
+            localMulticastQueueId =
+                nativeP2pMulticastTxQueue_.queueId;
+            localMulticastFirmwareQueueId =
+                nativeP2pMulticastTxQueue_.pendingFirmwareQueueId;
+            localMulticastQueueGeneration =
+                nativeP2pMulticastTxQueue_.generation;
+            localMulticastStationId =
+                nativeP2pMulticastStation_.stationId;
+            localMulticastConfiguredUninstalled =
+                nativeP2pMulticastTxQueue_.queueConfiguredUninstalled;
+            localMulticastQueuePending =
+                nativeP2pMulticastTxQueue_.pendingRing != nullptr ||
+                nativeP2pMulticastTxQueue_.retainedRing != nullptr ||
+                nativeP2pMulticastTxQueue_.submissionBusy ||
+                nativeP2pMulticastTxQueue_.everDoorbelled ||
+                localMulticastConfiguredUninstalled;
+        }
+        multicastQueueState =
+            static_cast<uint32_t>(localMulticastQueueState);
+        multicastQueueId = localMulticastQueueState ==
+                TahoeP2PResourceState::kAbsent ? UINT32_MAX :
+            (localMulticastConfiguredUninstalled ?
+                uint32_t(localMulticastFirmwareQueueId) :
+                uint32_t(localMulticastQueueId));
+        multicastQueueGeneration = localMulticastQueueGeneration;
+        multicastQueuePending = localMulticastQueuePending ? 1u : 0u;
+        multicastStationState =
+            static_cast<uint32_t>(localMulticastStationState);
+        multicastStationId = localMulticastStationState ==
+                TahoeP2PResourceState::kAbsent ? UINT32_MAX :
+            uint32_t(localMulticastStationId);
+        if (localMulticastQueueState != TahoeP2PResourceState::kAbsent ||
+            localMulticastQueuePending ||
+            localMulticastStationState != TahoeP2PResourceState::kAbsent)
+            reason |= kStopBlockedByMulticast;
+#endif
         if (com.sc_p2p.mac_state != IWX_P2P_RESOURCE_ABSENT)
             reason |= kStopBlockedByP2pMac;
         if (com.sc_p2p.binding_state != IWX_P2P_RESOURCE_ABSENT)
@@ -1987,6 +2072,14 @@ bool ItlIwx::nativeP2pResourcesRetained()
     mix(bindingState);
     mix(phyLeased);
     mix(firmwareGeneration);
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+    mix(multicastQueueState);
+    mix(multicastQueueId);
+    mix(multicastQueueGeneration);
+    mix(multicastQueuePending);
+    mix(multicastStationState);
+    mix(multicastStationId);
+#endif
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
     mix(directedDataMayOwn);
     mix(directedDataSnapshotAttempted);
@@ -2620,6 +2713,12 @@ bool ItlIwx::attach(IOPCIDevice *device)
         return false;
     }
     nativeP2pTxQueue_.stateLock = nativeP2pTxLock_;
+    nativeP2pTxQueue_.queueId = IWX_INVALID_QUEUE;
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+    nativeP2pMulticastTxQueue_.stateLock = nativeP2pTxLock_;
+    nativeP2pMulticastTxQueue_.queueId = IWX_INVALID_QUEUE;
+    nativeP2pMulticastTxQueue_.pendingFirmwareQueueId = UINT16_MAX;
+#endif
 #endif
 #if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
     // Diagnostic allocation failure must not fail the driver's attach.
@@ -2901,6 +3000,18 @@ detach(IOPCIDevice *device)
         }
     }
 #endif
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+    // An unresolved multicast allocation is a separate firmware owner. A
+    // successful legacy stop/reset does not prove its uninstalled DMA ring
+    // can be released, so retain the complete HAL owner on any uncertainty.
+    if (nativeP2pResourcesRetained()) {
+        XYLog("multicast P2P resource remains owned during detach; preserving device resources\n");
+        if (lifecycleLocked)
+            IORecursiveLockUnlock(nativeLifecycleLock_);
+        retainPmfDetachResources();
+        return;
+    }
+#endif
     // Preserve the established stop path above. Once stop has succeeded,
     // synchronously remove the actual event source before freeing any ring.
     quiesceRxInterruptSource();
@@ -3019,9 +3130,22 @@ void ItlIwx::free()
         nativeLifecycleLock_ = nullptr;
     }
     if (nativeP2pTxLock_) {
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+        KASSERT(nativeP2pMulticastStation_.state ==
+                    TahoeP2PResourceState::kAbsent &&
+                nativeP2pMulticastTxQueue_.state ==
+                    TahoeP2PResourceState::kAbsent &&
+                nativeP2pMulticastTxQueue_.pendingRing == nullptr &&
+                nativeP2pMulticastTxQueue_.retainedRing == nullptr &&
+                !nativeP2pMulticastTxQueue_.queueConfiguredUninstalled,
+                "multicast P2P owner must be retired before HAL free");
+#endif
         IOSimpleLockFree(nativeP2pTxLock_);
         nativeP2pTxLock_ = nullptr;
         nativeP2pTxQueue_.stateLock = nullptr;
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+        nativeP2pMulticastTxQueue_.stateLock = nullptr;
+#endif
     }
     if (tahoe_scan_lock_) {
         IOSimpleLockFree(tahoe_scan_lock_);
@@ -6675,7 +6799,11 @@ iwx_tvqm_enable_txq(struct iwx_softc *sc, int tid, int ssn, uint32_t size)
 #ifdef AIRPORT_TAHOE
     // The one-shot P2P worker owns firmware queue allocation while active.
     // Unknown outcomes keep that lease after the worker has returned.
-    if (nativeP2pBusy() || iwx_tahoe_p2p_tvqm_may_exist(&nativeP2pTxQueue_))
+    if (nativeP2pBusy() || iwx_tahoe_p2p_tvqm_may_exist(&nativeP2pTxQueue_)
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+        || iwx_tahoe_p2p_tvqm_may_exist(&nativeP2pMulticastTxQueue_)
+#endif
+        )
         return -EBUSY;
 #endif
     int err = -1;
@@ -6800,6 +6928,18 @@ iwx_tvqm_enable_txq(struct iwx_softc *sc, int tid, int ssn, uint32_t size)
                                 IWX_TXQ_OBS_CONFIG_COLLISION);
         return -EBUSY;
     }
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+    if (iwx_tahoe_p2p_tvqm_queue_owned(
+            &nativeP2pMulticastTxQueue_, fwqid)) {
+        // The acknowledged multicast qid remains a firmware owner even
+        // though its queue is deliberately absent from sc->txq[].
+        XYLog("STA TVQM queue %d collides with retained multicast P2P lease\n",
+              fwqid);
+        queueObservation.finish(static_cast<uint32_t>(fwqid),
+                                IWX_TXQ_OBS_CONFIG_COLLISION);
+        return -EBUSY;
+    }
+#endif
 #endif
     ring->cur = wr_idx;
     ring->qid = fwqid;
@@ -10447,7 +10587,12 @@ iwx_rx_tx_ba_notif(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
             struct iwx_compressed_ba_tfd *ba_tfd = &ba_res->tfd[i];
             const uint16_t queueId = le16toh(ba_tfd->q_num);
             if (queueId >= nitems(sc->txq) ||
-                iwx_tahoe_p2p_tvqm_queue_owned(&nativeP2pTxQueue_, queueId))
+                iwx_tahoe_p2p_tvqm_queue_owned(&nativeP2pTxQueue_, queueId)
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+                || iwx_tahoe_p2p_tvqm_queue_owned(
+                    &nativeP2pMulticastTxQueue_, queueId)
+#endif
+                )
                 continue;
             ring = &sc->txq[queueId];
             if (!IwxTxRingCapacity::rateQueueCanInspect(
@@ -10529,6 +10674,13 @@ iwx_rx_tx_ba_notif(struct iwx_softc *sc, struct iwx_rx_packet *pkt,
                 directedWitness->handlerReason = static_cast<uint32_t>(
                     nativeP2pDirectedDataTx_.reason);
             }
+            tfdCompletion.setReason(IWX_TX_COMPLETION_BA_TFD_P2P_OWNED);
+            continue;
+        }
+#endif
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+        if (iwx_tahoe_p2p_tvqm_queue_owned(
+                &nativeP2pMulticastTxQueue_, queueId)) {
             tfdCompletion.setReason(IWX_TX_COMPLETION_BA_TFD_P2P_OWNED);
             continue;
         }
@@ -22397,6 +22549,31 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
                         IWX_TX_PROGRESS_RESPONSE_DISPATCH,
                         IWX_TX_PROGRESS_RESPONSE_TX_RSP, responsePresent,
                         responseQid, 0, 0, 0, 0, 0, false);
+#if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+                    if ((responsePresent & IWX_TX_PROGRESS_HAS_QID) != 0 &&
+                        iwx_tahoe_p2p_tvqm_queue_owned(
+                            &nativeP2pMulticastTxQueue_,
+                            static_cast<uint16_t>(responseQid))) {
+                        // A configured-but-uninstalled multicast qid is a
+                        // separate firmware owner. Never let its late or
+                        // unexpected completion reclaim a STA ring.
+                        iwx_tx_completion_event_input completionEvent =
+                            txCompletionRxInput(
+                                IWX_TX_COMPLETION_TX_RSP,
+                                IWX_TX_COMPLETION_STAGE_TX_RSP_TERMINAL,
+                                IWX_TX_COMPLETION_TX_RSP_P2P_OWNER_CONSUMED,
+                                pkt);
+                        txCompletionSetTxRspFacts(&completionEvent, pkt,
+                                                  responseLength);
+                        recordTxCompletionEvent(sc, completionEvent);
+                        recordTxProgressEvent(sc,
+                            IWX_TX_PROGRESS_RESPONSE_DISPATCH,
+                            IWX_TX_PROGRESS_RESPONSE_P2P_CONSUMED,
+                            responsePresent, responseQid, 0, 0, 0, 0, 0,
+                            false);
+                        break;
+                    }
+#endif
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
                     using namespace TahoeP2PDirectedDataTxWitness;
                     TxPassThrough passThrough = TxPassThrough::kNone;

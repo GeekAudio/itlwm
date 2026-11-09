@@ -36,6 +36,20 @@ def unresolved_project_symbols(undefined: str) -> list[str]:
 
 
 def receive149_profile_errors(args):
+    if getattr(args, 'native_awdl_multicast_admission', False):
+        required = ('p2p_tx_probe', 'p2p_manual_trigger', 'native_awdl_resident_data')
+        excluded = ('p2p_awdl_psf_observation_only', 'p2p_awdl_mif_followup',
+                    'p2p_gp2_observation', 'native_awdl_init_observation_only',
+                    'native_awdl_lifecycle_observation_only', 'native_awdl_tx_evidence',
+                    'native_awdl_discovery_experiment', 'native_awdl_discovery_mif_current_slot',
+                    'native_awdl_discovery_current_aw_fallback', 'native_awdl_discovery_rx_input',
+                    'native_awdl_rx149_observation_only', 'native_awdl_rx149_data_input',
+                    'native_rx_preowner_observation', 'native_awdl_reply_shadow',
+                    'native_awdl_directed_prepare', 'native_awdl_directed_data_tx')
+        if (not all(getattr(args, name, False) for name in required) or
+                any(getattr(args, name, False) for name in excluded)):
+            return ['Multicast admission requires manual resident TX control and excludes all frame TX/RX experiments']
+        return []
     data_input = getattr(args, 'native_awdl_rx149_data_input', False)
     discovery_rx = getattr(args, 'native_awdl_discovery_rx_input', False)
     if discovery_rx and (args.native_awdl_rx149_observation_only or not (
@@ -104,6 +118,8 @@ def resident_build_flags(args):
         flags += ' -DITL_NATIVE_AWDL_DIRECTED_PREPARE_25G332=1'
     if getattr(args, 'native_awdl_directed_data_tx', False):
         flags += ' -DITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332=1'
+    if getattr(args, 'native_awdl_multicast_admission', False):
+        flags += ' -DITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332=1'
     return flags
 
 
@@ -136,6 +152,7 @@ def apply_artifact_profile(personality, args):
         'NativeP2PDirectedPrepareEnabled': bool(getattr(args, 'native_awdl_directed_prepare', False)),
         'NativeP2PDirectedDataCompiled': bool(getattr(args, 'native_awdl_directed_data_tx', False)),
         'NativeP2PDirectedDataEnabled': bool(getattr(args, 'native_awdl_directed_data_tx', False)),
+        'NativeP2PMulticastAdmissionEnabled': bool(getattr(args, 'native_awdl_multicast_admission', False)),
     })
 
 
@@ -195,6 +212,8 @@ def main():
                         help='Test105: compile one administrator-armed peer LINK/TID0 prepare-only experiment; no data doorbell')
     parser.add_argument('--native-awdl-directed-data-tx', action='store_true',
                         help='Test107: compile one administrator-armed native UDP/LINK-TID0 data attempt on active channel 6')
+    parser.add_argument('--native-awdl-multicast-admission', action='store_true',
+                        help='Manual MULTICAST/TID0 allocation and acknowledged withdrawal only; no session or frame doorbell')
     args = parser.parse_args()
     for error in receive149_profile_errors(args):
         parser.error(error)
@@ -213,7 +232,7 @@ def main():
         parser.error('TX time evidence requires resident data with manual PSF/MIF')
     if args.native_awdl_resident_data and not (
             args.p2p_manual_trigger and
-            (args.native_awdl_rx149_observation_only or
+            (args.native_awdl_rx149_observation_only or args.native_awdl_multicast_admission or
              (args.p2p_tx_probe and args.p2p_awdl_mif_followup)) and
             not args.native_awdl_init_observation_only and not args.native_awdl_lifecycle_observation_only):
         parser.error('Resident data requires manual PSF/MIF and excludes observation-only lifecycle profiles')
@@ -321,6 +340,7 @@ def main():
                           'native_awdl_directed_prepare_enabled': args.native_awdl_directed_prepare,
                           'native_awdl_directed_data_compiled': args.native_awdl_directed_data_tx,
                           'native_awdl_directed_data_enabled': args.native_awdl_directed_data_tx,
+                          'native_awdl_multicast_admission': args.native_awdl_multicast_admission,
                           'test_build': build_tag, 'mach_o_uuid': match.group(1),
                           'log': str(log_path)}, ensure_ascii=False))
 
