@@ -52,7 +52,29 @@ constexpr uint32_t kResponseHeaderV3Size = 16;
 constexpr uint32_t kResponseHeaderV4Size = 20;
 constexpr uint32_t kRequestOriginInitGetCurrent = 1;
 constexpr uint32_t kRequestOriginChubNotification = 2;
+constexpr uint32_t kMccSourceGetCurrent = 0x10;
+constexpr uint32_t kMccSourceDefault = 7;
 constexpr uint32_t kGateRetiredByStop = 10;
+
+struct DirectedDataWitness {
+    uint32_t origin;
+    uint32_t requestSequence;
+    uint32_t noticeEpoch;
+    uint32_t firmwareGeneration;
+    uint32_t responseStatus;
+    uint32_t channelCount;
+};
+
+constexpr bool sameDirectedDataWitness(const DirectedDataWitness &left,
+                                       const DirectedDataWitness &right)
+{
+    return left.origin == right.origin &&
+        left.requestSequence == right.requestSequence &&
+        left.noticeEpoch == right.noticeEpoch &&
+        left.firmwareGeneration == right.firmwareGeneration &&
+        left.responseStatus == right.responseStatus &&
+        left.channelCount == right.channelCount;
+}
 
 /* A private, bounded copy of MCC_UPDATE_CMD response data. The host IRQ/RX
  * buffer is released before this object is dispatched through the command
@@ -251,6 +273,22 @@ enum class ProfileAction : uint32_t {
     kNoChange = 1,
     kApplyComplete = 2,
 };
+
+inline bool completeInitProfileForDirectedData(const ProfileResponse &response)
+{
+    return response.commandAttempted == 1 && response.responseValid == 1 &&
+        response.requestOrigin == kRequestOriginInitGetCurrent &&
+        response.requestSource == kMccSourceGetCurrent &&
+        response.requestSequence != 0 && response.firmwareGeneration != 0 &&
+        response.noticeGeneration == 0 &&
+        response.profileAction == static_cast<uint32_t>(ProfileAction::kApplyComplete) &&
+        (response.status == kMccResponseNewChannelProfile ||
+         response.status == kMccResponseSameChannelProfile) &&
+        response.channelCount == 51 &&
+        validMcc(response.mcc) && response.mcc != 0x3030U &&
+        response.mcc != 0x5a5aU && validChubSource(response.source) &&
+        response.source != kMccSourceDefault;
+}
 
 /* Firmware replies may omit a profile when it reports that the profile is
  * unchanged. Any partial map is rejected: applying only its prefix would

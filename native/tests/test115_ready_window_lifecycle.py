@@ -81,6 +81,7 @@ prefix = r'''
 #include <cstring>
 #include <iostream>
 #include "native/p2p_directed_data_control.hpp"
+#include "native/iwx_mcc_refresh_policy.hpp"
 
 using TahoeP2PDirectedDataEpochs=NativeAwdlDirectedOriginTx::Epochs;
 '''
@@ -147,7 +148,8 @@ static void productionArm(TahoeP2PDirectedDataContext *context,
                           const TahoeP2PDirectedDataArm *arm,
                           void *workerThread, uint64_t ownerSerial,
                           const TahoeP2PDirectedDataEpochs *epochs,
-                          uint32_t generation, TestSoftc *sc) {
+                          uint32_t generation, TestSoftc *sc,
+                          const IwxMccRefreshPolicy::DirectedDataWitness &mcc) {
 '''.replace("\n", "\n") + arm_seed + arm_flags + arm_state_and_copy + "}\n"
 
 probe_copy_function = (
@@ -204,12 +206,15 @@ static Fixture startedFixture() {
     const TahoeP2PDirectedDataEpochs epochs{37,8,19,37};
     TahoeP2PDirectedDataBinding returned{};
     TahoeP2PDirectedDataArm arm{};
+    const IwxMccRefreshPolicy::DirectedDataWitness mcc{
+        IwxMccRefreshPolicy::kRequestOriginInitGetCurrent, 9, 0, 8, 1, 51};
     productionArm(&f.owner.nativeP2pDirectedDataTx_, &returned, &arm,
                   reinterpret_cast<void *>(0x1000), 22, &epochs, 8,
-                  &softc);
+                  &softc, mcc);
     ArmRun run{};
     run.binding=returned;
     productionProbeCopy(&f.probe, run);
+    assert(IwxMccRefreshPolicy::sameDirectedDataWitness(f.probe.directedDataBinding.mcc, mcc));
     assert(f.probe.directedDataBinding.rocToken==0);
     assert(f.probe.directedDataBinding.rocStartUs==0);
     assert(f.probe.directedDataBinding.deadlineUs==0);

@@ -2741,6 +2741,8 @@ bool ItlIwx::attach(IOPCIDevice *device)
     com.sc_native_mcc_response_profile149_flags_present = 0;
     com.sc_native_mcc_applied_notice_generation = 0;
     com.sc_native_mcc_applied_firmware_generation = 0;
+    com.sc_native_mcc_init_applied_request_sequence = 0;
+    com.sc_native_mcc_init_notice_epoch = 0;
     com.sc_native_mcc_applied_channel149_flags = 0;
     com.sc_native_mcc_applied_channel149_flags_present = 0;
     com.sc_native_mcc_applied_channel149_frequency = 0;
@@ -14398,6 +14400,60 @@ static uint32_t iwx_mcc_profile_149_index(const struct iwx_softc *sc)
 }
 } // namespace
 
+bool ItlIwx::tahoeDirectedDataMccWitness(
+    IwxMccRefreshPolicy::DirectedDataWitness &out)
+{
+    out = {};
+    if (!tahoeP2pOnMainGate() || !tahoeTryLifecycleFence())
+        return false;
+
+    const auto &sc = com;
+    const uint32_t generation = static_cast<uint32_t>(sc.sc_generation);
+    const uint32_t notice = __atomic_load_n(
+        &sc.sc_native_mcc_notice_generation, __ATOMIC_ACQUIRE);
+    const uint32_t pending = __atomic_load_n(
+        &sc.sc_native_mcc_pending, __ATOMIC_ACQUIRE);
+    const uint32_t origin = sc.sc_native_mcc_request_origin;
+    const uint32_t sequence = sc.sc_native_mcc_request_sequence;
+    const uint32_t status = sc.sc_native_mcc_response_status;
+    const uint32_t count = sc.sc_native_mcc_response_channel_count;
+    const bool chub = origin == IwxMccRefreshPolicy::kRequestOriginChubNotification &&
+        notice != 0 &&
+        sc.sc_native_mcc_request_notice_generation == notice &&
+        sc.sc_native_mcc_response_notice_generation == notice &&
+        sc.sc_native_mcc_applied_notice_generation == notice;
+    const bool init = origin == IwxMccRefreshPolicy::kRequestOriginInitGetCurrent &&
+        sc.sc_native_mcc_init_applied_request_sequence == sequence &&
+        sc.sc_native_mcc_init_notice_epoch == notice &&
+        __atomic_load_n(&sc.sc_native_mcc_notice_valid, __ATOMIC_ACQUIRE) == 0 &&
+        sc.sc_native_mcc_request_notice_generation == 0 &&
+        sc.sc_native_mcc_response_notice_generation == 0 &&
+        sc.sc_native_mcc_applied_notice_generation == 0;
+    const auto *channel = &sc.sc_ic.ic_channels[6];
+    uint32_t noIrMask = 0;
+#ifdef IEEE80211_CHAN_NO_IR
+    noIrMask = IEEE80211_CHAN_NO_IR;
+#endif
+    const bool channelAllowed = IwxMccRefreshPolicy::directedDataChannel6TxAllowed(
+        status, count, ieee80211_chan2ieee(&com.sc_ic,
+            const_cast<struct ieee80211_channel *>(channel)),
+        channel->ic_freq, channel->ic_flags, IEEE80211_CHAN_2GHZ,
+        IEEE80211_CHAN_PASSIVE, IEEE80211_CHAN_DFS, noIrMask);
+    const bool valid = generation != 0 && sequence != 0 &&
+        (notice & 1U) == 0 && pending == 0 &&
+        sc.sc_native_mcc_response_present == 1 &&
+        sc.sc_native_mcc_request_firmware_generation == generation &&
+        sc.sc_native_mcc_response_firmware_generation == generation &&
+        sc.sc_native_mcc_applied_firmware_generation == generation &&
+        (chub || init) && channelAllowed &&
+        __atomic_load_n(&sc.sc_native_mcc_notice_generation,
+                        __ATOMIC_ACQUIRE) == notice;
+    if (valid)
+        out = {origin, sequence, notice, generation, status, count};
+    tahoeReleaseLifecycleFence(false);
+    return valid;
+}
+
 void ItlIwx::tahoePublishMccSnapshot(IOEthernetController *controller)
 {
     if (!controller)
@@ -14515,6 +14571,9 @@ void ItlIwx::tahoePublishMccSnapshot(IOEthernetController *controller)
          sc->sc_native_mcc_applied_notice_generation},
         {"AppliedFirmwareGeneration",
          sc->sc_native_mcc_applied_firmware_generation},
+        {"InitAppliedRequestSequence",
+         sc->sc_native_mcc_init_applied_request_sequence},
+        {"InitNoticeEpoch", sc->sc_native_mcc_init_notice_epoch},
         {"AppliedChannel149Flags",
          sc->sc_native_mcc_applied_channel149_flags},
         {"AppliedChannel149FlagsPresent",
@@ -15046,6 +15105,9 @@ iwx_mcc_update(struct iwx_softc *sc, struct iwx_mcc_chub_notif *notif)
 {
     if (!sc || !notif)
         return;
+#if defined(AIRPORT_TAHOE) && ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    NativeAwdlBSD::revokeDirectedDataRxInput();
+#endif
 #if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
     // Revoke this ROC even if no data packet has activated its BSD lease yet.
     const auto traceOwner = nativeAwdlRxEventTimeline_.snapshot();
@@ -18949,6 +19011,13 @@ iwx_send_update_mcc_cmd(struct iwx_softc *sc, const char *alpha2)
         static_cast<uint8_t>(alpha2[1]));
     const uint8_t requestSource = iwx_mcc_multi_source_supported(sc) ?
         IWX_MCC_SOURCE_GET_CURRENT : IWX_MCC_SOURCE_OLD_FW;
+    const uint32_t firmwareGeneration = static_cast<uint32_t>(sc->sc_generation);
+    const uint32_t noticeEpoch = __atomic_load_n(
+        &sc->sc_native_mcc_notice_generation, __ATOMIC_ACQUIRE);
+    const bool noticeInactive = (noticeEpoch & 1U) == 0 &&
+        __atomic_load_n(&sc->sc_native_mcc_notice_valid, __ATOMIC_ACQUIRE) == 0 &&
+        __atomic_load_n(&sc->sc_native_mcc_pending, __ATOMIC_ACQUIRE) == 0;
+    sc->sc_native_mcc_init_applied_request_sequence = 0;
     IwxMccRefreshPolicy::ProfileResponse response{};
     uint32_t sequence = sc->sc_native_mcc_request_sequence + 1U;
     if (sequence == 0)
@@ -18959,18 +19028,21 @@ iwx_send_update_mcc_cmd(struct iwx_softc *sc, const char *alpha2)
     sc->sc_native_mcc_request_origin =
         IwxMccRefreshPolicy::kRequestOriginInitGetCurrent;
     sc->sc_native_mcc_request_notice_generation = 0;
-    sc->sc_native_mcc_request_firmware_generation =
-        static_cast<uint32_t>(sc->sc_generation);
+    sc->sc_native_mcc_request_firmware_generation = firmwareGeneration;
     response.requestSequence = sequence;
     response.requestMcc = requestMcc;
     response.requestSource = requestSource;
     response.requestOrigin =
         IwxMccRefreshPolicy::kRequestOriginInitGetCurrent;
-    response.firmwareGeneration = static_cast<uint32_t>(sc->sc_generation);
+    response.firmwareGeneration = firmwareGeneration;
     const int initError = iwx_request_mcc_profile(sc, requestMcc,
         requestSource, &response, false);
     if (initError)
         return initError;
+    if (firmwareGeneration != static_cast<uint32_t>(sc->sc_generation) ||
+        response.firmwareGeneration != firmwareGeneration ||
+        response.requestSequence != sc->sc_native_mcc_request_sequence)
+        return ENXIO;
     if (response.profileAction == static_cast<uint32_t>(
             IwxMccRefreshPolicy::ProfileAction::kApplyComplete)) {
         iwx_init_channel_map(sc, NULL, response.channelFlags,
@@ -18995,7 +19067,7 @@ iwx_send_update_mcc_cmd(struct iwx_softc *sc, const char *alpha2)
     sc->sc_native_mcc_response_present = 1;
     sc->sc_native_mcc_response_notice_generation = 0;
     sc->sc_native_mcc_response_firmware_generation =
-        static_cast<uint32_t>(sc->sc_generation);
+        response.firmwareGeneration;
     sc->sc_native_mcc_response_mcc = response.mcc;
     sc->sc_native_mcc_response_source = response.source;
     sc->sc_native_mcc_response_status = response.status;
@@ -19007,8 +19079,17 @@ iwx_send_update_mcc_cmd(struct iwx_softc *sc, const char *alpha2)
         response.profile149Flags;
     sc->sc_native_mcc_response_profile149_flags_present =
         response.profile149Present ? 1U : 0U;
-    sc->sc_native_mcc_applied_firmware_generation =
-        static_cast<uint32_t>(sc->sc_generation);
+    sc->sc_native_mcc_applied_notice_generation = 0;
+    sc->sc_native_mcc_applied_firmware_generation = response.firmwareGeneration;
+    if (noticeInactive &&
+        IwxMccRefreshPolicy::completeInitProfileForDirectedData(response) &&
+        __atomic_load_n(&sc->sc_native_mcc_notice_valid, __ATOMIC_ACQUIRE) == 0 &&
+        __atomic_load_n(&sc->sc_native_mcc_pending, __ATOMIC_ACQUIRE) == 0 &&
+        __atomic_load_n(&sc->sc_native_mcc_notice_generation,
+                        __ATOMIC_ACQUIRE) == noticeEpoch) {
+        sc->sc_native_mcc_init_notice_epoch = noticeEpoch;
+        sc->sc_native_mcc_init_applied_request_sequence = response.requestSequence;
+    }
     const uint16_t returnedMcc = htole16(static_cast<uint16_t>(response.mcc));
     sc->sc_fw_mcc_int = returnedMcc;
     snprintf(sc->sc_fw_mcc, sizeof(sc->sc_fw_mcc), "%c%c",

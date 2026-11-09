@@ -11,6 +11,7 @@
 #include <sys/mbuf.h>
 #include "../../native/p2p_action_tx.hpp"
 #include "../../native/awdl_directed_origin_tx.hpp"
+#include "../../native/iwx_mcc_refresh_policy.hpp"
 
 class ItlIwx;
 struct iwx_softc;
@@ -38,6 +39,7 @@ struct TahoeP2PDirectedDataBinding {
     uint64_t rocToken;   // zero until the matching START is observed
     uint64_t rocStartUs; // zero until bind_origin_window
     uint64_t deadlineUs; // immutable, in clock_get_uptime microseconds
+    IwxMccRefreshPolicy::DirectedDataWitness mcc;
 };
 
 // Copy of the actual BSD origin ticket returned after ROC START. The packet
@@ -126,6 +128,7 @@ struct TahoeP2PDirectedDataSnapshot {
     uint64_t deadlineUs;
     uint32_t generation;
     uint32_t p2pFirmwareGeneration;
+    IwxMccRefreshPolicy::DirectedDataWitness mcc;
     uint32_t ifindex;
     uint16_t queueId;
     uint16_t stationId;

@@ -532,6 +532,7 @@ public:
     uint32_t tahoeRecordReset(IwxResetTrace::ResetReason, struct iwx_softc *);
     void tahoePublishResetTrace(IOEthernetController *);
     void tahoePublishMccSnapshot(IOEthernetController *);
+    bool tahoeDirectedDataMccWitness(IwxMccRefreshPolicy::DirectedDataWitness &);
     void tahoeMccScheduleIfReady(struct iwx_softc *);
     int iwx_request_mcc_profile(struct iwx_softc *, uint16_t requestMcc,
         uint8_t requestSource, IwxMccRefreshPolicy::ProfileResponse *,

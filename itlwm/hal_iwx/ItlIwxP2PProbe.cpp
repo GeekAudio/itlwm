@@ -212,6 +212,7 @@ struct P2PProbeRun {
     bool directedDataOnly;
     TahoeP2PDirectedDataArm directedDataArm;
     TahoeP2PDirectedDataBinding directedDataBinding;
+    IwxMccRefreshPolicy::DirectedDataWitness directedDataPreflightMcc;
     TahoeP2PDirectedDataOriginTicket directedDataOriginTicket;
     bool directedDataHalArmed;
     bool directedDataTicketBound;
@@ -8122,82 +8123,47 @@ static void publishDirectedDataState(ItlIwx *owner, P2PProbeRun *probe,
 }
 
 struct DirectedDataMccWitness {
-    uint64_t revision=0;
-    uint64_t noticeGeneration=0;
-    uint64_t sourceGeneration=0;
-    uint64_t appliedNoticeGeneration=0;
-    uint32_t responseStatus=UINT32_MAX;
-    uint32_t responseChannelCount=0;
+    uint64_t revision;
+    IwxMccRefreshPolicy::DirectedDataWitness identity;
 };
 
-static bool directedDataMccChannel6Active(IOEthernetController *controller,
-                                          struct iwx_softc *sc,
-                                          DirectedDataMccWitness *witness=nullptr)
+static bool directedDataMccChannel6Active(ItlIwx *owner,
+                                         DirectedDataMccWitness &witness)
 {
-    if (!controller || !sc)
+    auto *controller = owner ? owner->tahoeP2pController() : nullptr;
+    IwxMccRefreshPolicy::DirectedDataWitness live{};
+    if (!controller || !owner->tahoeDirectedDataMccWitness(live))
         return false;
-    uint64_t revision = 0, begin = 0, end = 0, notice = 0;
-    uint64_t pending = 0, responsePresent = 0, responseStatusPresent = 0;
-    uint64_t responseStatus = 0, responseChannelCount = 0;
-    uint64_t responseFirmwareGeneration = 0;
-    uint64_t appliedNotice = 0, appliedFirmwareGeneration = 0;
-    uint64_t source = 0;
+    uint64_t revision = 0;
     if (!directedDataNumber(controller, "NativeMCCSnapshotValid", 1) ||
         !directedDataValue(controller, "NativeMCCSnapshotRevision", &revision) ||
-        !directedDataValue(controller, "NativeMCCSnapshotBegin", &begin) ||
-        !directedDataValue(controller, "NativeMCCSnapshotEnd", &end))
-        return false;
-    const uint64_t power = static_cast<uint32_t>(sc->sc_generation);
-    if (!revision || (revision & 1u) || begin != revision || end != revision ||
-        !directedDataNumber(controller, "NativeMCCSourceGeneration", power) ||
-        !directedDataValue(controller, "NativeMCCNoticeGeneration", &notice) ||
-        !directedDataValue(controller, "NativeMCCPending", &pending) ||
-        !directedDataValue(controller, "NativeMCCResponsePresent", &responsePresent) ||
-        !directedDataValue(controller, "NativeMCCResponseStatusPresent",
-                           &responseStatusPresent) ||
-        !directedDataValue(controller, "NativeMCCResponseStatus", &responseStatus) ||
-        !directedDataValue(controller, "NativeMCCResponseChannelCount",
-                           &responseChannelCount) ||
-        !directedDataValue(controller, "NativeMCCResponseFirmwareGeneration",
-                           &responseFirmwareGeneration) ||
-        !directedDataValue(controller, "NativeMCCAppliedNoticeGeneration",
-                           &appliedNotice) ||
-        !directedDataValue(controller, "NativeMCCAppliedFirmwareGeneration",
-                           &appliedFirmwareGeneration) ||
-        !directedDataValue(controller, "NativeMCCSourceGeneration", &source))
-        return false;
-    if (!notice || (notice & 1u) || pending != 0 || responsePresent != 1 ||
-        responseStatusPresent != 1 || source != power ||
-        responseFirmwareGeneration != power ||
-        appliedFirmwareGeneration != power || appliedNotice != notice ||
-        nitems(sc->sc_ic.ic_channels) <= 6)
+        !revision || (revision & 1u) != 0 ||
+        !directedDataNumber(controller, "NativeMCCSnapshotBegin", revision) ||
+        !directedDataNumber(controller, "NativeMCCSnapshotEnd", revision))
         return false;
 
-    if (!IwxMccRefreshPolicy::mccTxPropertyValuesFitUint32(
-            responseStatus, responseChannelCount))
+    const bool init = live.origin == IwxMccRefreshPolicy::kRequestOriginInitGetCurrent;
+    const uint32_t appliedNotice = init ? 0 : live.noticeEpoch;
+    if (!directedDataNumber(controller, "NativeMCCSourceGeneration", live.firmwareGeneration) ||
+        !directedDataNumber(controller, "NativeMCCRequestFirmwareGeneration", live.firmwareGeneration) ||
+        !directedDataNumber(controller, "NativeMCCResponseFirmwareGeneration", live.firmwareGeneration) ||
+        !directedDataNumber(controller, "NativeMCCAppliedFirmwareGeneration", live.firmwareGeneration) ||
+        !directedDataNumber(controller, "NativeMCCRequestOrigin", live.origin) ||
+        !directedDataNumber(controller, "NativeMCCRequestSequence", live.requestSequence) ||
+        !directedDataNumber(controller, "NativeMCCNoticeGeneration", live.noticeEpoch) ||
+        !directedDataNumber(controller, "NativeMCCResponseNoticeGeneration", appliedNotice) ||
+        !directedDataNumber(controller, "NativeMCCAppliedNoticeGeneration", appliedNotice) ||
+        !directedDataNumber(controller, "NativeMCCPending", 0) ||
+        !directedDataNumber(controller, "NativeMCCResponsePresent", 1) ||
+        !directedDataNumber(controller, "NativeMCCResponseStatusPresent", 1) ||
+        !directedDataNumber(controller, "NativeMCCResponseStatus", live.responseStatus) ||
+        !directedDataNumber(controller, "NativeMCCResponseChannelCount", live.channelCount))
         return false;
-
-    const struct ieee80211_channel *channel = &sc->sc_ic.ic_channels[6];
-    uint32_t noIrMask = 0;
-#ifdef IEEE80211_CHAN_NO_IR
-    noIrMask = IEEE80211_CHAN_NO_IR;
-#endif
-    const bool allowed=IwxMccRefreshPolicy::directedDataChannel6TxAllowed(
-        static_cast<uint32_t>(responseStatus),
-        static_cast<uint32_t>(responseChannelCount),
-        ieee80211_chan2ieee(&sc->sc_ic,
-            const_cast<struct ieee80211_channel *>(channel)),
-        channel->ic_freq, channel->ic_flags, IEEE80211_CHAN_2GHZ,
-        IEEE80211_CHAN_PASSIVE, IEEE80211_CHAN_DFS, noIrMask);
-    if(allowed&&witness) {
-        witness->revision=revision;
-        witness->noticeGeneration=notice;
-        witness->sourceGeneration=source;
-        witness->appliedNoticeGeneration=appliedNotice;
-        witness->responseStatus=static_cast<uint32_t>(responseStatus);
-        witness->responseChannelCount=static_cast<uint32_t>(responseChannelCount);
-    }
-    return allowed;
+    if (init && (!directedDataNumber(controller, "NativeMCCInitAppliedRequestSequence", live.requestSequence) ||
+        !directedDataNumber(controller, "NativeMCCInitNoticeEpoch", live.noticeEpoch)))
+        return false;
+    witness = {revision, live};
+    return true;
 }
 
 static bool publishDirectedDataRxLeaseProperties(
@@ -8251,6 +8217,12 @@ static bool publishDirectedDataRxLeaseProperties(
                "NativeP2PDirectedDataRxLeaseMccRevision",
                lease->mccRevision,64)&&
            controller->setProperty(
+               "NativeP2PDirectedDataRxLeaseMccOrigin",lease->mccOrigin,32)&&
+           controller->setProperty(
+               "NativeP2PDirectedDataRxLeaseMccRequestSequence",lease->mccRequestSequence,32)&&
+           controller->setProperty(
+               "NativeP2PDirectedDataRxLeaseMccNoticeEpoch",lease->mccNoticeEpoch,32)&&
+           controller->setProperty(
                "NativeP2PDirectedDataRxLeaseMccNoticeGeneration",
                lease->mccNoticeGeneration,64)&&
            controller->setProperty(
@@ -8284,6 +8256,12 @@ static bool publishDirectedDataRxLeaseProperties(
                "NativeP2PDirectedDataRxLeaseChannel",uint32_t(0),32)&&
            controller->setProperty(
                "NativeP2PDirectedDataRxLeaseMccRevision",uint64_t(0),64)&&
+           controller->setProperty(
+               "NativeP2PDirectedDataRxLeaseMccOrigin",uint32_t(0),32)&&
+           controller->setProperty(
+               "NativeP2PDirectedDataRxLeaseMccRequestSequence",uint32_t(0),32)&&
+           controller->setProperty(
+               "NativeP2PDirectedDataRxLeaseMccNoticeEpoch",uint32_t(0),32)&&
            controller->setProperty(
                "NativeP2PDirectedDataRxLeaseMccNoticeGeneration",uint64_t(0),64)&&
            controller->setProperty(
@@ -8517,9 +8495,11 @@ static IOReturn directedDataPreflightAction(OSObject *, void *opaque,
         sc.sc_ic.ic_state == IEEE80211_S_RUN &&
         (sc.sc_flags & (IWX_FLAG_HW_ERR | IWX_FLAG_SHUTDOWN |
                         IWX_FLAG_RFKILL)) == 0 &&
-        directedDataProfileEnabled(owner->tahoeP2pController()) &&
-        directedDataMccChannel6Active(owner->tahoeP2pController(), &sc);
-    check->valid = current;
+        directedDataProfileEnabled(owner->tahoeP2pController());
+    DirectedDataMccWitness mcc{};
+    check->valid = current && directedDataMccChannel6Active(owner, mcc);
+    if (check->valid)
+        probe->directedDataPreflightMcc = mcc.identity;
     return kIOReturnSuccess;
 }
 
@@ -8597,8 +8577,10 @@ static IOReturn directedDataStartCheckAction(OSObject *, void *opaque,
                         IWX_FLAG_RFKILL)) == 0;
     state.profileReady = directedDataProfileEnabled(
         owner->tahoeP2pController());
-    state.mccReady = directedDataMccChannel6Active(
-        owner->tahoeP2pController(), &sc);
+    DirectedDataMccWitness mcc{};
+    state.mccReady = directedDataMccChannel6Active(owner, mcc) &&
+        IwxMccRefreshPolicy::sameDirectedDataWitness(
+            mcc.identity, probe->directedDataBinding.mcc);
     // runAction may wait behind other work-loop actions, and these gate checks
     // can themselves take time. Sample after they finish, immediately before
     // the final admission decision.
@@ -8626,6 +8608,13 @@ static IOReturn directedDataArmAction(OSObject *, void *opaque,
     ItlIwx *owner = probe ? probe->owner : nullptr;
     if (!run || !probe || !owner || !owner->tahoeP2pOnMainGate())
         return kIOReturnBadArgument;
+    DirectedDataMccWitness mcc{};
+    if (!directedDataMccChannel6Active(owner, mcc) ||
+        !IwxMccRefreshPolicy::sameDirectedDataWitness(
+            mcc.identity, probe->directedDataPreflightMcc)) {
+        run->result = ESTALE;
+        return kIOReturnSuccess;
+    }
     run->result = iwx_tahoe_p2p_directed_data_arm(
         owner, &owner->com, &owner->nativeP2pDirectedDataTx_,
         &probe->directedDataArm, run->ownerSerial, &run->epochs,
@@ -10083,8 +10072,8 @@ bool ItlIwx::tahoeP2pDirectedDataRxLease(
     gateEvidence.radioReady=radioReady;
     const bool profileReady=controller&&directedDataProfileEnabled(controller);
     gateEvidence.profileReady=profileReady;
-    const bool mccOwnerCurrent=controller&&
-        directedDataMccChannel6Active(controller,&sc,&mcc);
+    const bool mccOwnerCurrent = directedDataMccChannel6Active(this, mcc) &&
+        IwxMccRefreshPolicy::sameDirectedDataWitness(mcc.identity, data.mcc);
     const bool ownerCurrent=ownerIdentityCurrent&&rxLeaseCurrent&&
         resourcesCurrent&&dataSnapshotCurrent&&traceCurrent&&radioReady&&
         profileReady&&mccOwnerCurrent;
@@ -10101,9 +10090,7 @@ bool ItlIwx::tahoeP2pDirectedDataRxLease(
         now<session.startObservedMonotonicUs+
             NativeP2PDirectedDataRxInput::kSessionWindowUs;
     gateEvidence.windowCurrent=windowCurrent;
-    bool mccStartCurrent=false;
-    if(sessionCurrent&&windowCurrent)
-        mccStartCurrent=directedDataMccChannel6Active(controller,&sc,nullptr);
+    const bool mccStartCurrent = sessionCurrent && windowCurrent && mccOwnerCurrent;
     bool channelCurrent=false;
     if(sessionCurrent&&windowCurrent&&mccStartCurrent)
         channelCurrent=isCurrentIeeeChannel6(
@@ -10152,11 +10139,15 @@ bool ItlIwx::tahoeP2pDirectedDataRxLease(
         NativeP2PDirectedDataRxInput::kSessionWindowUs;
     out->nowUs=now;
     out->mccRevision=mcc.revision;
-    out->mccNoticeGeneration=mcc.noticeGeneration;
-    out->mccSourceGeneration=mcc.sourceGeneration;
-    out->mccAppliedNoticeGeneration=mcc.appliedNoticeGeneration;
-    out->mccResponseStatus=mcc.responseStatus;
-    out->mccResponseChannelCount=mcc.responseChannelCount;
+    const bool init = mcc.identity.origin == IwxMccRefreshPolicy::kRequestOriginInitGetCurrent;
+    out->mccOrigin = mcc.identity.origin;
+    out->mccRequestSequence = init ? mcc.identity.requestSequence : 0;
+    out->mccNoticeEpoch = mcc.identity.noticeEpoch;
+    out->mccNoticeGeneration = init ? 0 : mcc.identity.noticeEpoch;
+    out->mccSourceGeneration = mcc.identity.firmwareGeneration;
+    out->mccAppliedNoticeGeneration = out->mccNoticeGeneration;
+    out->mccResponseStatus = mcc.identity.responseStatus;
+    out->mccResponseChannelCount = mcc.identity.channelCount;
     memcpy(out->peerMac,arm.peerMac,sizeof(out->peerMac));
     memcpy(out->localMac,localMac,sizeof(out->localMac));
     const bool leasePolicyCurrent=

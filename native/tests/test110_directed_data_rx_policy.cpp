@@ -32,6 +32,8 @@ static Lease lease()
     value.mccNoticeGeneration = 14;
     value.mccSourceGeneration = value.epochs.power;
     value.mccAppliedNoticeGeneration = value.mccNoticeGeneration;
+    value.mccOrigin = IwxMccRefreshPolicy::kRequestOriginChubNotification;
+    value.mccNoticeEpoch = 14;
     value.mccResponseStatus = 1;
     value.mccResponseChannelCount = 51;
     const uint8_t peer[6] = {0x02, 1, 2, 3, 4, 5};
@@ -69,6 +71,27 @@ int main()
            permit.ownerSerial == current.ownerSerial && permit.macIndex == 1);
     assert(stillCurrent(permit, current, 1011));
     assert(!stillCurrent(permit, current, current.startUs + kSessionWindowUs));
+
+    Lease init = current;
+    init.mccOrigin = IwxMccRefreshPolicy::kRequestOriginInitGetCurrent;
+    init.mccRequestSequence = 9;
+    init.mccNoticeEpoch = 0;
+    init.mccNoticeGeneration = init.mccAppliedNoticeGeneration = 0;
+    assert(leaseCurrent(init, 1010) && !stillCurrent(permit, init, 1011));
+    assert(makePermit(init, frame, &permit));
+    assert(stillCurrent(permit, init, 1011));
+    assert(!sameLeaseIdentity(init, current));
+    ++init.mccRequestSequence;
+    assert(!stillCurrent(permit, init, 1011));
+    --init.mccRequestSequence;
+    init.mccNoticeEpoch = 2;
+    assert(!stillCurrent(permit, init, 1011));
+    init.mccNoticeEpoch = 1;
+    assert(!leaseCurrent(init, 1010));
+    init.mccNoticeEpoch = 0;
+    init.mccAppliedNoticeGeneration = 14;
+    assert(!leaseCurrent(init, 1010));
+    assert(makePermit(current, frame, &permit));
 
     for (unsigned field = 0; field < 14; ++field) {
         Lease invalid = current;

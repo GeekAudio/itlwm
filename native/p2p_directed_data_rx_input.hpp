@@ -4,6 +4,7 @@
 
 #include <stdint.h>
 #include <string.h>
+#include "iwx_mcc_refresh_policy.hpp"
 
 namespace NativeP2PDirectedDataRxInput {
 
@@ -53,6 +54,9 @@ struct Lease {
     uint64_t mccNoticeGeneration;
     uint64_t mccSourceGeneration;
     uint64_t mccAppliedNoticeGeneration;
+    uint32_t mccOrigin;
+    uint32_t mccRequestSequence;
+    uint32_t mccNoticeEpoch;
     uint32_t mccResponseStatus;
     uint32_t mccResponseChannelCount;
     uint8_t peerMac[6];
@@ -90,6 +94,10 @@ struct Permit {
     uint64_t leaseDeadlineUs;
     uint64_t capturedUs;
     uint64_t deadlineUs;
+    uint64_t mccRevision;
+    uint32_t mccOrigin;
+    uint32_t mccRequestSequence;
+    uint32_t mccNoticeEpoch;
     uint16_t ieeeChannel;
     uint8_t macIndex;
     uint32_t decodeMode;
@@ -123,6 +131,9 @@ inline bool sameLeaseIdentity(const Lease &left, const Lease &right)
         left.mccNoticeGeneration == right.mccNoticeGeneration &&
         left.mccSourceGeneration == right.mccSourceGeneration &&
         left.mccAppliedNoticeGeneration == right.mccAppliedNoticeGeneration &&
+        left.mccOrigin == right.mccOrigin &&
+        left.mccRequestSequence == right.mccRequestSequence &&
+        left.mccNoticeEpoch == right.mccNoticeEpoch &&
         left.mccResponseStatus == right.mccResponseStatus &&
         left.mccResponseChannelCount == right.mccResponseChannelCount &&
         sameEpochs(left.epochs, right.epochs) &&
@@ -132,6 +143,13 @@ inline bool sameLeaseIdentity(const Lease &left, const Lease &right)
 
 inline bool leaseCurrent(const Lease &lease, uint64_t nowUs)
 {
+    const bool chub = lease.mccOrigin == IwxMccRefreshPolicy::kRequestOriginChubNotification &&
+        lease.mccRequestSequence == 0 && lease.mccNoticeEpoch != 0 &&
+        lease.mccNoticeGeneration == lease.mccNoticeEpoch &&
+        lease.mccAppliedNoticeGeneration == lease.mccNoticeGeneration;
+    const bool init = lease.mccOrigin == IwxMccRefreshPolicy::kRequestOriginInitGetCurrent &&
+        lease.mccRequestSequence != 0 && lease.mccNoticeGeneration == 0 &&
+        lease.mccAppliedNoticeGeneration == 0;
     return lease.compiled && lease.runtimeEnabled && lease.profileEnabled &&
         lease.profileSelected && lease.ownerCurrent && lease.epochsMatch &&
         lease.tokenMatches && lease.commandReturned && lease.commandSucceeded &&
@@ -142,9 +160,8 @@ inline bool leaseCurrent(const Lease &lease, uint64_t nowUs)
         lease.startUs <= UINT64_MAX - kSessionWindowUs &&
         lease.deadlineUs == lease.startUs + kSessionWindowUs &&
         lease.mccRevision != 0 && (lease.mccRevision & 1u) == 0 &&
-        lease.mccNoticeGeneration != 0 &&
+        (chub || init) && (lease.mccNoticeEpoch & 1u) == 0 &&
         lease.mccSourceGeneration == lease.epochs.power &&
-        lease.mccAppliedNoticeGeneration == lease.mccNoticeGeneration &&
         (lease.mccResponseStatus == 0 || lease.mccResponseStatus == 1) &&
         lease.mccResponseChannelCount == 51 &&
         validUnicastMac(lease.peerMac) && validUnicastMac(lease.localMac) &&
@@ -189,6 +206,10 @@ inline bool makePermit(const Lease &lease, const Descriptor &descriptor,
     permit.capturedUs = lease.nowUs;
     permit.deadlineUs = sessionDeadline < queueDeadline ?
         sessionDeadline : queueDeadline;
+    permit.mccRevision = lease.mccRevision;
+    permit.mccOrigin = lease.mccOrigin;
+    permit.mccRequestSequence = lease.mccRequestSequence;
+    permit.mccNoticeEpoch = lease.mccNoticeEpoch;
     permit.ieeeChannel = descriptor.ieeeChannel;
     permit.macIndex = descriptor.macPhyIndex & 0x0fu;
     permit.decodeMode = descriptor.decodeMode;
@@ -204,6 +225,10 @@ inline bool samePermitIdentity(const Lease &lease, const Permit &permit)
     return lease.ownerSerial == permit.ownerSerial &&
         lease.startUs == permit.startUs &&
         lease.deadlineUs == permit.leaseDeadlineUs &&
+        lease.mccRevision == permit.mccRevision &&
+        lease.mccOrigin == permit.mccOrigin &&
+        lease.mccRequestSequence == permit.mccRequestSequence &&
+        lease.mccNoticeEpoch == permit.mccNoticeEpoch &&
         sameEpochs(lease.epochs, permit.epochs) &&
         memcmp(lease.peerMac, permit.peerMac, sizeof(permit.peerMac)) == 0 &&
         memcmp(lease.localMac, permit.localMac, sizeof(permit.localMac)) == 0;

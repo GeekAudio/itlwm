@@ -48,6 +48,8 @@ Input::Lease lease() {
     value.nowUs=fakeTime;value.mccRevision=12;
     value.mccNoticeGeneration=14;value.mccSourceGeneration=value.epochs.power;
     value.mccAppliedNoticeGeneration=value.mccNoticeGeneration;
+    value.mccOrigin=IwxMccRefreshPolicy::kRequestOriginChubNotification;
+    value.mccNoticeEpoch=14;
     value.mccResponseStatus=1;value.mccResponseChannelCount=51;
     memcpy(value.peerMac,peerMac,6);memcpy(value.localMac,ownMac,6);
     return value;

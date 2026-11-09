@@ -140,6 +140,8 @@ struct iwx_softc {
     uint32_t sc_native_mcc_response_profile149_flags_present = 0;
     uint32_t sc_native_mcc_applied_notice_generation = 0;
     uint32_t sc_native_mcc_applied_firmware_generation = 0;
+    uint32_t sc_native_mcc_init_applied_request_sequence = 0;
+    uint32_t sc_native_mcc_init_notice_epoch = 0;
     uint32_t sc_native_mcc_applied_channel149_flags = 0;
     uint32_t sc_native_mcc_applied_channel149_flags_present = 0;
     uint32_t sc_native_mcc_applied_channel149_frequency = 0;

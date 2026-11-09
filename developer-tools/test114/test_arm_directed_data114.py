@@ -57,6 +57,29 @@ class ArmDirectedData114PlanTests(unittest.TestCase):
                 self.assertFalse(payload["arm_may_have_changed"])
                 self.assertFalse(payload["native_udp_attempted"])
 
+    def test_test126_plan_uses_the_matched_return_rx_lease_path(self):
+        result = self.invoke(build="25G416-Test126")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        payload = json.loads(result.stdout)
+        self.assertEqual(payload["build"], "25G416-Test126")
+        self.assertTrue(payload["peer_ready_required"])
+        self.assertEqual(payload["native_udp_count"], 1)
+        self.assertEqual(payload["matched_return_capture_max_ms"], 100)
+        self.assertTrue(payload["rx_lease_poll_within_original_window"])
+        self.assertEqual(payload["rx_lease_max_checks"], 128)
+        self.assertFalse(payload["hardware_action"])
+        self.assertFalse(payload["airdrop_proven"])
+
+    def test_test126_requires_both_fresh_peer_inputs(self):
+        for kwargs in ({"peer_ipv6": False}, {"ready_file": False}):
+            with self.subTest(kwargs=kwargs):
+                result = self.invoke(build="25G416-Test126", **kwargs)
+                self.assertNotEqual(result.returncode, 0)
+                payload = json.loads(result.stdout)
+                self.assertEqual(payload["phase"], "arguments")
+                self.assertFalse(payload["arm_may_have_changed"])
+                self.assertFalse(payload["native_udp_attempted"])
+
     def test_test113_compatibility_remains_matched_return(self):
         result = self.invoke(build="25G332-Test113")
         self.assertEqual(result.returncode, 0, result.stderr)

@@ -79,7 +79,7 @@ let requiredOptions: Set<String> = ["--expect-build", "--expect-uuid", "--peer-m
 guard optionIndex == optionArguments.count,
       Set(options.keys).isSuperset(of: requiredOptions),
       let build = options["--expect-build"],
-      ["25G332-Test107", "25G332-Test108", "25G332-Test109", "25G332-Test110", "25G332-Test111", "25G332-Test112", "25G332-Test113", "25G332-Test114", "25G332-Test115", "25G332-Test116", "25G416-Test124", "25G416-Test125"].contains(build),
+      ["25G332-Test107", "25G332-Test108", "25G332-Test109", "25G332-Test110", "25G332-Test111", "25G332-Test112", "25G332-Test113", "25G332-Test114", "25G332-Test115", "25G332-Test116", "25G416-Test124", "25G416-Test125", "25G416-Test126"].contains(build),
       let expectedUUID = options["--expect-uuid"],
       matches(expectedUUID, "^[0-9A-F]{8}(-[0-9A-F]{4}){3}-[0-9A-F]{12}$"),
       let peerMACText = options["--peer-mac"],
@@ -89,10 +89,11 @@ guard optionIndex == optionArguments.count,
       nonceText.contains(where: { $0 != "0" }),
       let runToken = options["--run-token"], matches(runToken, "^[0-9a-f]{32}$"),
       runToken.contains(where: { $0 != "0" }) else {
-    stop("Usage: --expect-build 25G332-Test107|25G332-Test108|25G332-Test109|25G332-Test110|25G332-Test111|25G332-Test112|25G332-Test113|25G332-Test114|25G332-Test115|25G332-Test116|25G416-Test124|25G416-Test125 --expect-uuid UUID --peer-mac MAC --local-ipv6 fe80::ADDRESS --nonce 16hex --run-token 32hex [--peer-ipv6 fe80::ADDRESS --peer-ready-file PRIVATE_JSON] [--run]")
+    stop("Usage: --expect-build 25G332-Test107|25G332-Test108|25G332-Test109|25G332-Test110|25G332-Test111|25G332-Test112|25G332-Test113|25G332-Test114|25G332-Test115|25G332-Test116|25G416-Test124|25G416-Test125|25G416-Test126 --expect-uuid UUID --peer-mac MAC --local-ipv6 fe80::ADDRESS --nonce 16hex --run-token 32hex [--peer-ipv6 fe80::ADDRESS --peer-ready-file PRIVATE_JSON] [--run]")
 }
-let matchedReturnBuild = ["25G332-Test110", "25G332-Test111", "25G332-Test112", "25G332-Test113", "25G332-Test114", "25G332-Test115", "25G332-Test116", "25G416-Test124", "25G416-Test125"].contains(build)
-let rxLeasePollingBuild = ["25G332-Test114", "25G332-Test115", "25G332-Test116", "25G416-Test124", "25G416-Test125"].contains(build)
+let matchedReturnBuild = ["25G332-Test110", "25G332-Test111", "25G332-Test112", "25G332-Test113", "25G332-Test114", "25G332-Test115", "25G332-Test116", "25G416-Test124", "25G416-Test125", "25G416-Test126"].contains(build)
+let rxLeasePollingBuild = ["25G332-Test114", "25G332-Test115", "25G332-Test116", "25G416-Test124", "25G416-Test125", "25G416-Test126"].contains(build)
+let requireMccOriginWitness = build == "25G416-Test126"
 guard matchedReturnBuild == (options["--peer-ipv6"] != nil),
       matchedReturnBuild == (options["--peer-ready-file"] != nil) else {
     stop("Matched-return builds require peer IPv6 and fresh peer READY file; older identities do not accept them")
@@ -327,13 +328,15 @@ func pollForTest114RxLease(initial: [String: Any]) -> Test114RxLeaseWindow? {
             var nowUs: UInt64 = 0
             return t110CurrentUptimeUs(&nowUs) == 0 ? nowUs : nil
         },
-        sleepMicroseconds: { usleep($0) })
+        sleepMicroseconds: { usleep($0) },
+        requireMccOriginWitness: requireMccOriginWitness)
     rxLeasePollTrace = outcome.trace
     return outcome.window
 }
 func checkPriorMatchedReturnLeaseOnce(_ initial: [String: Any]) -> Test114RxLeaseWindow? {
     let originalWindow = test114InitialWindow(initial)
-    let originalIdentity = test114InitialIdentity(initial)
+    let originalIdentity = test114InitialIdentity(
+        initial, requireMccOriginWitness: requireMccOriginWitness)
     var nowUs: UInt64 = 0
     let monotonicUs = t110CurrentUptimeUs(&nowUs) == 0 ? nowUs : nil
     let check = test114CheckRxLease(

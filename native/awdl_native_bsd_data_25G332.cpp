@@ -376,12 +376,7 @@ bool sameDirectedRxLeaseIdentity(
 bool sameDirectedRxPermitIdentity(
     const NativeP2PDirectedDataRxInput::Lease &lease,
     const NativeP2PDirectedDataRxInput::Permit &permit) {
-    return lease.ownerSerial==permit.ownerSerial&&
-        lease.startUs==permit.startUs&&
-        lease.deadlineUs==permit.leaseDeadlineUs&&
-        NativeP2PDirectedDataRxInput::sameEpochs(lease.epochs,permit.epochs)&&
-        memcmp(lease.peerMac,permit.peerMac,sizeof(permit.peerMac))==0&&
-        memcmp(lease.localMac,permit.localMac,sizeof(permit.localMac))==0;
+    return NativeP2PDirectedDataRxInput::samePermitIdentity(lease,permit);
 }
 void clearDirectedRxRetryWindowLocked() {
     memset(directedRxRetryWindow,0,sizeof(directedRxRetryWindow));

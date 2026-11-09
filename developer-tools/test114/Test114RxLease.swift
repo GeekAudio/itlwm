@@ -24,6 +24,10 @@ public struct Test114RxLeaseIdentity: Equatable {
     public let mccNoticeGeneration: UInt64
     public let mccSourceGeneration: UInt64
     public let mccAppliedNoticeGeneration: UInt64
+    /// Present only for Test126's origin-bound MCC witness profile.
+    public let mccOrigin: UInt64?
+    public let mccRequestSequence: UInt64?
+    public let mccNoticeEpoch: UInt64?
     public let mccResponseStatus: UInt64
     public let mccResponseChannelCount: UInt64
     public let channel: UInt64
@@ -33,6 +37,8 @@ public struct Test114RxLeaseIdentity: Equatable {
                      rocGeneration: UInt64, startUs: UInt64, deadlineUs: UInt64,
                      mccRevision: UInt64, mccNoticeGeneration: UInt64,
                      mccSourceGeneration: UInt64, mccAppliedNoticeGeneration: UInt64,
+                     mccOrigin: UInt64?, mccRequestSequence: UInt64?,
+                     mccNoticeEpoch: UInt64?,
                      mccResponseStatus: UInt64, mccResponseChannelCount: UInt64,
                      channel: UInt64) {
         self.ownerSerial = ownerSerial
@@ -46,6 +52,9 @@ public struct Test114RxLeaseIdentity: Equatable {
         self.mccNoticeGeneration = mccNoticeGeneration
         self.mccSourceGeneration = mccSourceGeneration
         self.mccAppliedNoticeGeneration = mccAppliedNoticeGeneration
+        self.mccOrigin = mccOrigin
+        self.mccRequestSequence = mccRequestSequence
+        self.mccNoticeEpoch = mccNoticeEpoch
         self.mccResponseStatus = mccResponseStatus
         self.mccResponseChannelCount = mccResponseChannelCount
         self.channel = channel
@@ -122,6 +131,9 @@ private let leaseNumericKeys = [
     "NativeP2PDirectedDataRxLeaseMccNoticeGeneration",
     "NativeP2PDirectedDataRxLeaseMccSourceGeneration",
     "NativeP2PDirectedDataRxLeaseMccAppliedNoticeGeneration",
+    "NativeP2PDirectedDataRxLeaseMccOrigin",
+    "NativeP2PDirectedDataRxLeaseMccRequestSequence",
+    "NativeP2PDirectedDataRxLeaseMccNoticeEpoch",
     "NativeP2PDirectedDataRxLeaseMccResponseStatus",
     "NativeP2PDirectedDataRxLeaseMccResponseChannelCount",
     "NativeP2PDirectedDataRxLeaseChannel",
@@ -143,6 +155,11 @@ private func strictUInt64(_ object: [String: Any], _ key: String) -> UInt64? {
     return value.uint64Value
 }
 
+private func strictUInt32(_ object: [String: Any], _ key: String) -> UInt64? {
+    guard let value = strictUInt64(object, key), value <= UInt64(UInt32.max) else { return nil }
+    return value
+}
+
 /// Capture the immutable ROC window from the first coherent lease publication.
 /// A later poll is never allowed to replace or extend this window.
 public func test114InitialWindow(_ object: [String: Any]) -> Test114RxLeaseWindow? {
@@ -157,7 +174,8 @@ public func test114InitialWindow(_ object: [String: Any]) -> Test114RxLeaseWindo
 
 /// Capture the core identity before allowing any short mirror-read retry.
 /// A partial/unstable initial publication is not a basis for adopting a later lease.
-public func test114InitialIdentity(_ object: [String: Any]) -> Test114RxLeaseIdentity? {
+public func test114InitialIdentity(_ object: [String: Any],
+                                   requireMccOriginWitness: Bool = false) -> Test114RxLeaseIdentity? {
     guard let begin = strictUInt64(object, "NativeP2PDirectedDataRxLeaseRevisionBegin"),
           let end = strictUInt64(object, "NativeP2PDirectedDataRxLeaseRevisionEnd"),
           begin > 0, begin == end, begin & 1 == 0,
@@ -173,20 +191,46 @@ public func test114InitialIdentity(_ object: [String: Any]) -> Test114RxLeaseIde
           deadline > start, deadline - start == 100_000,
           let mccRevision = strictUInt64(object, "NativeP2PDirectedDataRxLeaseMccRevision"),
           mccRevision > 0, mccRevision & 1 == 0,
-          let mccNotice = strictUInt64(object, "NativeP2PDirectedDataRxLeaseMccNoticeGeneration"), mccNotice > 0,
+          let mccNotice = strictUInt64(object, "NativeP2PDirectedDataRxLeaseMccNoticeGeneration"),
           let mccSource = strictUInt64(object, "NativeP2PDirectedDataRxLeaseMccSourceGeneration"),
           mccSource == power,
           let mccApplied = strictUInt64(object, "NativeP2PDirectedDataRxLeaseMccAppliedNoticeGeneration"),
-          mccApplied == mccNotice,
           let mccStatus = strictUInt64(object, "NativeP2PDirectedDataRxLeaseMccResponseStatus"), mccStatus <= 1,
           let mccChannels = strictUInt64(object, "NativeP2PDirectedDataRxLeaseMccResponseChannelCount"), mccChannels == 51,
           let channel = strictUInt64(object, "NativeP2PDirectedDataRxLeaseChannel"), channel == 6 else { return nil }
+    var mccOrigin: UInt64?
+    var mccRequestSequence: UInt64?
+    var mccNoticeEpoch: UInt64?
+    if requireMccOriginWitness {
+        guard let origin = strictUInt32(object, "NativeP2PDirectedDataRxLeaseMccOrigin"),
+              let requestSequence = strictUInt32(object, "NativeP2PDirectedDataRxLeaseMccRequestSequence"),
+              let noticeEpoch = strictUInt32(object, "NativeP2PDirectedDataRxLeaseMccNoticeEpoch"),
+              noticeEpoch & 1 == 0 else {
+            return nil
+        }
+        switch origin {
+        case 1:
+            guard requestSequence > 0, mccNotice == 0, mccApplied == 0 else { return nil }
+        case 2:
+            guard requestSequence == 0, noticeEpoch > 0,
+                  mccNotice == noticeEpoch, mccApplied == noticeEpoch else { return nil }
+        default:
+            return nil
+        }
+        mccOrigin = origin
+        mccRequestSequence = requestSequence
+        mccNoticeEpoch = noticeEpoch
+    } else {
+        guard mccNotice > 0, mccApplied == mccNotice else { return nil }
+    }
     return Test114RxLeaseIdentity(
         ownerSerial: owner, contextGeneration: context, powerGeneration: power,
         stationGeneration: station, rocGeneration: roc, startUs: start,
         deadlineUs: deadline, mccRevision: mccRevision,
         mccNoticeGeneration: mccNotice, mccSourceGeneration: mccSource,
-        mccAppliedNoticeGeneration: mccApplied, mccResponseStatus: mccStatus,
+        mccAppliedNoticeGeneration: mccApplied, mccOrigin: mccOrigin,
+        mccRequestSequence: mccRequestSequence, mccNoticeEpoch: mccNoticeEpoch,
+        mccResponseStatus: mccStatus,
         mccResponseChannelCount: mccChannels, channel: channel)
 }
 
@@ -206,6 +250,7 @@ public func test114CheckRxLease(
         if !condition { failures.append(name) }
     }
     func value(_ key: String) -> UInt64? { strictUInt64(object, key) }
+    func value32(_ key: String) -> UInt64? { strictUInt32(object, key) }
 
     let begin = value("NativeP2PDirectedDataRxLeaseRevisionBegin")
     let end = value("NativeP2PDirectedDataRxLeaseRevisionEnd")
@@ -221,6 +266,9 @@ public func test114CheckRxLease(
     let mccNotice = value("NativeP2PDirectedDataRxLeaseMccNoticeGeneration")
     let mccSource = value("NativeP2PDirectedDataRxLeaseMccSourceGeneration")
     let mccApplied = value("NativeP2PDirectedDataRxLeaseMccAppliedNoticeGeneration")
+    let mccOrigin = value32("NativeP2PDirectedDataRxLeaseMccOrigin")
+    let mccRequestSequence = value32("NativeP2PDirectedDataRxLeaseMccRequestSequence")
+    let mccNoticeEpoch = value32("NativeP2PDirectedDataRxLeaseMccNoticeEpoch")
     let mccStatus = value("NativeP2PDirectedDataRxLeaseMccResponseStatus")
     let mccChannels = value("NativeP2PDirectedDataRxLeaseMccResponseChannelCount")
     let channel = value("NativeP2PDirectedDataRxLeaseChannel")
@@ -245,9 +293,43 @@ public func test114CheckRxLease(
     require(start != nil && deadline != nil && deadline! > start! && deadline! - start! == 100_000,
             "lease_window_exactly_100ms")
     require(mccRevision.map { $0 > 0 && $0 & 1 == 0 } == true, "mcc_revision_nonzero_even")
-    require(mccNotice.map { $0 > 0 } == true, "mcc_notice_nonzero")
     require(mccSource != nil && mccSource == power, "mcc_source_matches_power")
-    require(mccApplied != nil && mccApplied == mccNotice, "mcc_applied_notice_matches")
+    if let originalIdentity, let initialOrigin = originalIdentity.mccOrigin {
+        require(mccOrigin != nil, "mcc_origin_uint32")
+        require(mccRequestSequence != nil, "mcc_request_sequence_uint32")
+        require(mccNoticeEpoch != nil, "mcc_notice_epoch_uint32")
+        require(mccOrigin == 1 || mccOrigin == 2, "mcc_origin_supported")
+        switch initialOrigin {
+        case 1:
+            require(mccRequestSequence.map { $0 > 0 } == true,
+                    "mcc_init_request_sequence_nonzero")
+            require(mccNoticeEpoch != nil, "mcc_init_notice_epoch_numeric")
+            require(mccNoticeEpoch.map { $0 & 1 == 0 } == true,
+                    "mcc_init_notice_epoch_even")
+            require(mccNotice == 0, "mcc_init_notice_generation_zero")
+            require(mccApplied == 0, "mcc_init_applied_notice_generation_zero")
+        case 2:
+            require(mccRequestSequence == 0, "mcc_chub_request_sequence_zero")
+            require(mccNoticeEpoch.map { $0 > 0 } == true, "mcc_chub_notice_epoch_nonzero")
+            require(mccNoticeEpoch.map { $0 & 1 == 0 } == true,
+                    "mcc_chub_notice_epoch_even")
+            require(mccNoticeEpoch != nil && mccNoticeEpoch == mccNotice,
+                    "mcc_chub_epoch_matches_notice")
+            require(mccNotice.map { $0 > 0 } == true, "mcc_notice_nonzero")
+            require(mccApplied != nil && mccApplied == mccNotice,
+                    "mcc_applied_notice_matches")
+        default:
+            require(false, "mcc_origin_supported")
+        }
+        require(mccOrigin == originalIdentity.mccOrigin, "mcc_origin_matches_initial")
+        require(mccRequestSequence == originalIdentity.mccRequestSequence,
+                "mcc_request_sequence_matches_initial")
+        require(mccNoticeEpoch == originalIdentity.mccNoticeEpoch,
+                "mcc_notice_epoch_matches_initial")
+    } else {
+        require(mccNotice.map { $0 > 0 } == true, "mcc_notice_nonzero")
+        require(mccApplied != nil && mccApplied == mccNotice, "mcc_applied_notice_matches")
+    }
     require(mccStatus.map { $0 <= 1 } == true, "mcc_status_success")
     require(mccChannels == 51, "mcc_channel_count")
     require(channel == 6, "lease_channel_6")
@@ -330,10 +412,12 @@ public func test114PollRxLease(
     readProperties: () -> [String: Any],
     monotonicUs: () -> UInt64?,
     sleepMicroseconds: (UInt32) -> Void,
-    maximumChecks: Int = 128
+    maximumChecks: Int = 128,
+    requireMccOriginWitness: Bool = false
 ) -> Test114RxLeasePollOutcome {
     let originalWindow = test114InitialWindow(initial)
-    let originalIdentity = test114InitialIdentity(initial)
+    let originalIdentity = test114InitialIdentity(
+        initial, requireMccOriginWitness: requireMccOriginWitness)
     var trace = Test114RxLeasePollTrace()
     var current = initial
     var firstRead = true

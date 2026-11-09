@@ -67,6 +67,8 @@ FUNCTIONS = [
     function(DRIVER, "void ItlIwx::tahoeMccScheduleIfReady(struct iwx_softc *sc)"),
     function(DRIVER, "static void tahoeRetireNativeMccNotice("),
     function(DRIVER, "void ItlIwx::\niwx_mcc_update("),
+    function(DRIVER, "int ItlIwx::\niwx_send_update_mcc_cmd("),
+    function(DRIVER, "bool ItlIwx::tahoeDirectedDataMccWitness("),
 ]
 
 TICK = function(P2P_PROBE, "void ItlIwx::nativeP2pTick()")
@@ -104,6 +106,11 @@ constexpr uint32_t IWX_LONG_GROUP = 1, IWX_MCC_UPDATE_CMD = 0xc8;
 constexpr uint32_t IWX_FW_CMD_VER_UNKNOWN = 0xff;
 constexpr uint32_t IWX_UCODE_TLV_CAPA_MCC_UPDATE_11AX_SUPPORT = 89;
 constexpr uint32_t IWX_CMD_WANT_RESP = 1, IWX_CMD_FAILED_MSK = 0x80;
+constexpr uint8_t IWX_MCC_SOURCE_GET_CURRENT = 0x10, IWX_MCC_SOURCE_OLD_FW = 0;
+constexpr uint32_t IEEE80211_CHAN_2GHZ = 1, IEEE80211_CHAN_PASSIVE = 2,
+    IEEE80211_CHAN_DFS = 4;
+#define IEEE80211_CHAN_NO_IR 8U
+#define XYLog(...) ((void)0)
 constexpr size_t IWX_CMD_RESP_MAX = 512;
 constexpr int IEEE80211_EVT_COUNTRY_CODE_UPDATE = 1;
 
@@ -118,6 +125,8 @@ struct ieee80211com {
     ieee80211_channel ic_channels[256] {};
     void (*ic_event_handler)(ieee80211com *, int, void *) = nullptr;
 };
+static unsigned ieee80211_chan2ieee(ieee80211com *, ieee80211_channel *channel)
+{ return channel->ic_freq == 2437 ? 6 : 0; }
 struct iwx_nvm { uint32_t lar_enabled = 0; };
 struct task { bool queued = false; };
 struct taskq { bool paused = false; int enterError = 0; int lockDepth = 0; unsigned adds = 0; };
@@ -169,6 +178,8 @@ struct iwx_host_cmd {
     uint32_t sc_native_mcc_response_profile149_flags_present = 0; \
     uint32_t sc_native_mcc_applied_notice_generation = 0; \
     uint32_t sc_native_mcc_applied_firmware_generation = 0; \
+    uint32_t sc_native_mcc_init_applied_request_sequence = 0; \
+    uint32_t sc_native_mcc_init_notice_epoch = 0; \
     uint32_t sc_native_mcc_applied_channel149_flags = 0; \
     uint32_t sc_native_mcc_applied_channel149_flags_present = 0; \
     uint32_t sc_native_mcc_applied_channel149_frequency = 0; \
@@ -222,11 +233,15 @@ struct ItlIwx {
     static IOReturn iwx_native_mcc_apply_action(OSObject *, void *, void *, void *, void *);
     static void iwx_native_mcc_refresh_task(void *);
     int iwx_request_mcc_profile(iwx_softc *, uint16_t, uint8_t, ProfileResponse *, bool);
+    int iwx_send_update_mcc_cmd(iwx_softc *, const char *);
+    bool tahoeDirectedDataMccWitness(DirectedDataWitness &);
     void iwx_mcc_update(iwx_softc *, iwx_mcc_chub_notif *);
     void tahoeMccScheduleIfReady(iwx_softc *);
     uint8_t iwx_lookup_cmd_ver(iwx_softc *, uint8_t, uint8_t) { return 1; }
     uint8_t iwx_lookup_notif_ver(iwx_softc *, uint8_t, uint8_t) { return 5; }
     bool tahoeP2pOnMainGate() const { return mainGate; }
+    bool tahoeTryLifecycleFence() const { return lifecycleAllowed; }
+    void tahoeReleaseLifecycleFence(bool) {}
     bool nativeP2pBusy() const { return p2pBusy; }
     bool nativeP2pResourcesRetained() const { return p2pRetained; }
     IOEthernetController *getController() { return &controller; }
@@ -239,6 +254,8 @@ struct ItlIwx {
         lastMap149 = flags[42];
         com.sc_ic.ic_channels[149].ic_flags = 0x20U;
         com.sc_ic.ic_channels[149].ic_freq = 5745U;
+        com.sc_ic.ic_channels[6].ic_freq = 2437;
+        com.sc_ic.ic_channels[6].ic_flags = IEEE80211_CHAN_2GHZ;
     }
 };
 #define container_of(ptr, type, member) reinterpret_cast<type *>(reinterpret_cast<char *>(ptr) - offsetof(type, member))
@@ -562,6 +579,76 @@ static void testStopRetiresPendingNoticeAndStaleReply()
         nullptr, &o, &o.com, &old, nullptr) == kIOReturnNotReady);
     assert(o.mapCalls == 0 && g_countryEvents == 0);
 }
+static void testInitProfileKeepsItsOwnGenerationAndNoticeIdentity()
+{
+    ItlIwx o{};
+    init(o);
+    // Real stop/retirement advances the notice epoch without producing CHUB.
+    tahoeRetireNativeMccNotice(&o.com);
+    assert(o.com.sc_native_mcc_notice_generation == 2);
+    g_payload = response(kUS, 5);
+    assert(o.iwx_send_update_mcc_cmd(&o.com, "ZZ") == 0);
+    assert(g_lastCommandSource == IWX_MCC_SOURCE_GET_CURRENT && o.mapCalls == 1);
+    DirectedDataWitness first{};
+    assert(o.tahoeDirectedDataMccWitness(first));
+    assert(first.origin == kRequestOriginInitGetCurrent && first.noticeEpoch == 2);
+    assert(first.firmwareGeneration == 17 && first.requestSequence == 1);
+    assert(o.com.sc_native_mcc_response_notice_generation == 0);
+    assert(o.com.sc_native_mcc_applied_notice_generation == 0);
+
+    DirectedDataWitness later{};
+    ++o.com.sc_generation;
+    assert(!o.tahoeDirectedDataMccWitness(later));
+    --o.com.sc_generation;
+    o.com.sc_ic.ic_channels[6].ic_flags |= IEEE80211_CHAN_NO_IR;
+    assert(!o.tahoeDirectedDataMccWitness(later));
+    o.com.sc_ic.ic_channels[6].ic_flags = IEEE80211_CHAN_2GHZ;
+    o.lifecycleAllowed = false;
+    assert(!o.tahoeDirectedDataMccWitness(later));
+    o.lifecycleAllowed = true;
+    assert(o.iwx_send_update_mcc_cmd(&o.com, "ZZ") == 0);
+    assert(o.tahoeDirectedDataMccWitness(later));
+    assert(!sameDirectedDataWitness(first, later));
+
+    iwx_mcc_chub_notif invalidNotice {kUS, 0x10};
+    o.iwx_mcc_update(&o.com, &invalidNotice);
+    assert(!o.tahoeDirectedDataMccWitness(later));
+    assert(o.iwx_send_update_mcc_cmd(&o.com, "ZZ") == 0);
+    assert(o.tahoeDirectedDataMccWitness(later));
+    iwx_mcc_chub_notif notice {kUS, 5};
+    o.iwx_mcc_update(&o.com, &notice);
+    assert(!o.tahoeDirectedDataMccWitness(later));
+    ItlIwx::iwx_native_mcc_refresh_task(&o.com);
+    assert(o.tahoeDirectedDataMccWitness(later));
+    assert(later.origin == kRequestOriginChubNotification &&
+           later.noticeEpoch == o.com.sc_native_mcc_applied_notice_generation);
+}
+
+static void testInitRequiresACompleteSuccessfulAuthoritativeResponse()
+{
+    ItlIwx o{};
+    init(o);
+    DirectedDataWitness witness{};
+    g_payload = response(kUS, 5);
+    g_payload.resize(20);
+    putLE32(g_payload, 16, 0);
+    assert(o.iwx_send_update_mcc_cmd(&o.com, "ZZ") == 0);
+    assert(o.mapCalls == 0 && !o.tahoeDirectedDataMccWitness(witness));
+
+    g_payload = response(kUS, 7);
+    assert(o.iwx_send_update_mcc_cmd(&o.com, "ZZ") == 0);
+    assert(o.mapCalls == 1 && !o.tahoeDirectedDataMccWitness(witness));
+    g_payload = response(kUS, 5);
+    putLE32(g_payload, 0, kMccResponseIllegal);
+    assert(o.iwx_send_update_mcc_cmd(&o.com, "ZZ") == 0);
+    assert(!o.tahoeDirectedDataMccWitness(witness));
+    g_payload = response(kUS, 5);
+    g_payload.resize(g_payload.size() - 4);
+    putLE32(g_payload, 16, 50);
+    assert(o.iwx_send_update_mcc_cmd(&o.com, "ZZ") == EPROTO);
+    assert(!o.tahoeDirectedDataMccWitness(witness));
+}
+
 int main()
 {
     testCommandAndParserErrorsConsumeOnlyCurrentNotice();
@@ -572,6 +659,8 @@ int main()
     testResponseMccOwnsCountryAndEventDedup();
     testP2PLeaseAndFirmwareRolloverFence();
     testStopRetiresPendingNoticeAndStaleReply();
+    testInitProfileKeepsItsOwnGenerationAndNoticeIdentity();
+    testInitRequiresACompleteSuccessfulAuthoritativeResponse();
     return 0;
 }
 """

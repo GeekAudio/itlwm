@@ -39,19 +39,38 @@ func goodLease(start: UInt64 = 5_000_000) -> [String: Any] {
     ]
 }
 
-func liveLease() -> [String: Any] {
-    var lease = goodLease()
+func goodTest126InitLease(start: UInt64 = 5_000_000) -> [String: Any] {
+    var lease = goodLease(start: start)
+    lease["NativeP2PDirectedDataRxLeaseMccNoticeGeneration"] = NSNumber(value: 0)
+    lease["NativeP2PDirectedDataRxLeaseMccAppliedNoticeGeneration"] = NSNumber(value: 0)
+    lease["NativeP2PDirectedDataRxLeaseMccOrigin"] = NSNumber(value: 1)
+    lease["NativeP2PDirectedDataRxLeaseMccRequestSequence"] = NSNumber(value: 33)
+    lease["NativeP2PDirectedDataRxLeaseMccNoticeEpoch"] = NSNumber(value: 0)
+    return lease
+}
+
+func goodTest126ChubLease(start: UInt64 = 5_000_000) -> [String: Any] {
+    var lease = goodLease(start: start)
+    lease["NativeP2PDirectedDataRxLeaseMccOrigin"] = NSNumber(value: 2)
+    lease["NativeP2PDirectedDataRxLeaseMccRequestSequence"] = NSNumber(value: 0)
+    lease["NativeP2PDirectedDataRxLeaseMccNoticeEpoch"] = NSNumber(value: 12)
+    return lease
+}
+
+func liveLease(_ source: [String: Any] = goodLease(), build: String = "25G332-Test114") -> [String: Any] {
+    var lease = source
     lease["NativeP2PDirectedDataAcceptedRunToken"] = "fixture-run"
-    lease["NativeTestBuild"] = "25G332-Test114"
+    lease["NativeTestBuild"] = build
     return lease
 }
 
 func poll(_ initial: [String: Any], sequence: [[String: Any]], now initialNow: UInt64 = 5_020_000,
-          maximumChecks: Int = 128) -> (Test114RxLeasePollOutcome, Int) {
+          maximumChecks: Int = 128, expectedBuild: String = "25G332-Test114",
+          requireMccOriginWitness: Bool = false) -> (Test114RxLeasePollOutcome, Int) {
     var now = initialNow
     var reads = 0
     let outcome = test114PollRxLease(
-        initial: initial, expectedRunToken: "fixture-run", expectedBuild: "25G332-Test114",
+        initial: initial, expectedRunToken: "fixture-run", expectedBuild: expectedBuild,
         readProperties: {
             let index = min(reads, sequence.count - 1)
             reads += 1
@@ -59,7 +78,8 @@ func poll(_ initial: [String: Any], sequence: [[String: Any]], now initialNow: U
         },
         monotonicUs: { now },
         sleepMicroseconds: { now += UInt64($0) },
-        maximumChecks: maximumChecks)
+        maximumChecks: maximumChecks,
+        requireMccOriginWitness: requireMccOriginWitness)
     return (outcome, reads)
 }
 
@@ -69,11 +89,102 @@ let originalIdentity = test114InitialIdentity(first)
 expect(originalWindow == Test114RxLeaseWindow(startUs: 5_000_000, deadlineUs: 5_100_000),
        "capture coherent original 100 ms window")
 expect(originalIdentity != nil, "capture the first valid owner and MCC identity")
+expect(originalIdentity?.mccOrigin == nil,
+       "preserve the older lease profile when origin witness fields are absent")
 let success = test114CheckRxLease(
     first, originalWindow: originalWindow, originalIdentity: originalIdentity,
     monotonicUs: 5_020_000,
     bindOriginAccepted: true, buildMatches: true, stageReady: true)
 expect(success.valid && success.falsePredicates.isEmpty, "accept complete valid lease")
+
+let test126Init = goodTest126InitLease()
+let test126InitIdentity = test114InitialIdentity(test126Init, requireMccOriginWitness: true)
+expect(test126InitIdentity?.mccOrigin == 1 && test126InitIdentity?.mccRequestSequence == 33 &&
+       test126InitIdentity?.mccNoticeEpoch == 0,
+       "accept init witness with nonzero request sequence and zero invalidation epoch")
+let test126InitCheck = test114CheckRxLease(
+    test126Init, originalWindow: test114InitialWindow(test126Init),
+    originalIdentity: test126InitIdentity, monotonicUs: 5_020_000,
+    bindOriginAccepted: true, buildMatches: true, stageReady: true)
+expect(test126InitCheck.valid, "accept complete Test126 initialization witness")
+
+let test126Chub = goodTest126ChubLease()
+let test126ChubIdentity = test114InitialIdentity(test126Chub, requireMccOriginWitness: true)
+expect(test126ChubIdentity?.mccOrigin == 2 &&
+       test126ChubIdentity?.mccRequestSequence == 0 &&
+       test126ChubIdentity?.mccNoticeEpoch == 12,
+       "accept CHUB witness only with sequence zero and matching nonzero notice epoch")
+let test126ChubCheck = test114CheckRxLease(
+    test126Chub, originalWindow: test114InitialWindow(test126Chub),
+    originalIdentity: test126ChubIdentity, monotonicUs: 5_020_000,
+    bindOriginAccepted: true, buildMatches: true, stageReady: true)
+expect(test126ChubCheck.valid, "accept complete Test126 CHUB witness")
+
+var zeroOrigin = test126Init
+zeroOrigin["NativeP2PDirectedDataRxLeaseMccOrigin"] = NSNumber(value: 0)
+expect(test114InitialIdentity(zeroOrigin, requireMccOriginWitness: true) == nil,
+       "reject zero or stale origin in Test126 identity capture")
+var unsupportedOrigin = test126Init
+unsupportedOrigin["NativeP2PDirectedDataRxLeaseMccOrigin"] = NSNumber(value: 3)
+let unsupportedOriginCheck = test114CheckRxLease(
+    unsupportedOrigin, originalWindow: test114InitialWindow(test126Init),
+    originalIdentity: test126InitIdentity, monotonicUs: 5_020_000,
+    bindOriginAccepted: true, buildMatches: true, stageReady: true)
+expect(unsupportedOriginCheck.falsePredicates.contains("mcc_origin_supported"),
+       "reject an origin outside the init and CHUB domains")
+
+var zeroInitSequence = test126Init
+zeroInitSequence["NativeP2PDirectedDataRxLeaseMccRequestSequence"] = NSNumber(value: 0)
+let zeroInitSequenceCheck = test114CheckRxLease(
+    zeroInitSequence, originalWindow: test114InitialWindow(test126Init),
+    originalIdentity: test126InitIdentity, monotonicUs: 5_020_000,
+    bindOriginAccepted: true, buildMatches: true, stageReady: true)
+expect(zeroInitSequenceCheck.falsePredicates.contains("mcc_init_request_sequence_nonzero"),
+       "reject an init witness without a real request sequence")
+var mixedInitNotice = test126Init
+mixedInitNotice["NativeP2PDirectedDataRxLeaseMccNoticeGeneration"] = NSNumber(value: 12)
+mixedInitNotice["NativeP2PDirectedDataRxLeaseMccAppliedNoticeGeneration"] = NSNumber(value: 12)
+let mixedInitNoticeCheck = test114CheckRxLease(
+    mixedInitNotice, originalWindow: test114InitialWindow(test126Init),
+    originalIdentity: test126InitIdentity, monotonicUs: 5_020_000,
+    bindOriginAccepted: true, buildMatches: true, stageReady: true)
+expect(mixedInitNoticeCheck.falsePredicates.contains("mcc_init_notice_generation_zero") &&
+       mixedInitNoticeCheck.falsePredicates.contains("mcc_init_applied_notice_generation_zero"),
+       "reject CHUB notice fields mixed into an init-origin witness")
+var mixedChubSequence = test126Chub
+mixedChubSequence["NativeP2PDirectedDataRxLeaseMccRequestSequence"] = NSNumber(value: 33)
+let mixedChubSequenceCheck = test114CheckRxLease(
+    mixedChubSequence, originalWindow: test114InitialWindow(test126Chub),
+    originalIdentity: test126ChubIdentity, monotonicUs: 5_020_000,
+    bindOriginAccepted: true, buildMatches: true, stageReady: true)
+expect(mixedChubSequenceCheck.falsePredicates.contains("mcc_chub_request_sequence_zero"),
+       "reject an init request sequence mixed into a CHUB-origin witness")
+var staleChubEpoch = test126Chub
+staleChubEpoch["NativeP2PDirectedDataRxLeaseMccNoticeEpoch"] = NSNumber(value: 11)
+let staleChubEpochCheck = test114CheckRxLease(
+    staleChubEpoch, originalWindow: test114InitialWindow(test126Chub),
+    originalIdentity: test126ChubIdentity, monotonicUs: 5_020_000,
+    bindOriginAccepted: true, buildMatches: true, stageReady: true)
+expect(staleChubEpochCheck.falsePredicates.contains("mcc_chub_epoch_matches_notice"),
+       "reject a CHUB epoch that does not identify its notice")
+var oddInitEpoch = test126Init
+oddInitEpoch["NativeP2PDirectedDataRxLeaseMccNoticeEpoch"] = NSNumber(value: 1)
+expect(test114InitialIdentity(oddInitEpoch, requireMccOriginWitness: true) == nil,
+       "reject an odd initialization invalidation epoch")
+var oversizedOrigin = test126Init
+oversizedOrigin["NativeP2PDirectedDataRxLeaseMccOrigin"] = NSNumber(value: UInt64(UInt32.max) + 1)
+expect(test114InitialIdentity(oversizedOrigin, requireMccOriginWitness: true) == nil,
+       "reject an MCC origin value outside its uint32 property width")
+var oversizedSequence = test126Init
+oversizedSequence["NativeP2PDirectedDataRxLeaseMccRequestSequence"] =
+    NSNumber(value: UInt64(UInt32.max) + 1)
+expect(test114InitialIdentity(oversizedSequence, requireMccOriginWitness: true) == nil,
+       "reject a request sequence outside its uint32 property width")
+var oversizedEpoch = test126Init
+oversizedEpoch["NativeP2PDirectedDataRxLeaseMccNoticeEpoch"] =
+    NSNumber(value: UInt64(UInt32.max) + 1)
+expect(test114InitialIdentity(oversizedEpoch, requireMccOriginWitness: true) == nil,
+       "reject a notice epoch outside its uint32 property width")
 
 var staleMirror = first
 staleMirror["NativeP2PRocStartSeen"] = NSNumber(value: 0)
@@ -202,6 +313,76 @@ let (ownerInterleave, ownerInterleaveReads) = poll(currentStartLag, sequence: [o
 expect(ownerInterleave.window == nil && ownerInterleaveReads == 1 &&
        ownerInterleave.trace.completionReason == "non_mirror_lease_predicate_failed",
        "stop actual polling when the lease owner changes")
+
+let test126InitLive = liveLease(test126Init, build: "25G416-Test126")
+var test126InitStartLag = test126InitLive
+test126InitStartLag["NativeP2PRocStartSeen"] = NSNumber(value: 0)
+let (test126InitPoll, test126InitPollReads) = poll(
+    test126InitLive, sequence: [test126InitLive], expectedBuild: "25G416-Test126",
+    requireMccOriginWitness: true)
+expect(test126InitPoll.window != nil && test126InitPollReads == 0 &&
+       test126InitPoll.trace.completionReason == "lease_valid",
+       "select and accept Test126's strict init-origin lease path")
+
+var changedInitSequence = test126InitLive
+changedInitSequence["NativeP2PDirectedDataRxLeaseMccRequestSequence"] = NSNumber(value: 34)
+let (sequenceChangedPoll, sequenceChangedReads) = poll(
+    test126InitStartLag, sequence: [changedInitSequence, test126InitLive],
+    expectedBuild: "25G416-Test126", requireMccOriginWitness: true)
+expect(sequenceChangedPoll.window == nil && sequenceChangedReads == 1 &&
+       sequenceChangedPoll.trace.completionReason == "non_mirror_lease_predicate_failed" &&
+       sequenceChangedPoll.trace.lastCheck?.falsePredicates.contains(
+           "mcc_request_sequence_matches_initial") == true,
+       "stop polling when the init request sequence changes within a lease")
+
+let changedInitOrigin = liveLease(test126Chub, build: "25G416-Test126")
+let (originChangedPoll, originChangedReads) = poll(
+    test126InitStartLag, sequence: [changedInitOrigin, test126InitLive],
+    expectedBuild: "25G416-Test126", requireMccOriginWitness: true)
+expect(originChangedPoll.window == nil && originChangedReads == 1 &&
+       originChangedPoll.trace.lastCheck?.falsePredicates.contains(
+           "mcc_origin_matches_initial") == true,
+       "stop polling when the MCC witness switches from init to CHUB origin")
+
+var changedInitEpoch = test126InitLive
+changedInitEpoch["NativeP2PDirectedDataRxLeaseMccNoticeEpoch"] = NSNumber(value: 2)
+let (epochChangedPoll, epochChangedReads) = poll(
+    test126InitStartLag, sequence: [changedInitEpoch, test126InitLive],
+    expectedBuild: "25G416-Test126", requireMccOriginWitness: true)
+expect(epochChangedPoll.window == nil && epochChangedReads == 1 &&
+       epochChangedPoll.trace.lastCheck?.falsePredicates.contains(
+           "mcc_notice_epoch_matches_initial") == true,
+       "stop polling when the init invalidation epoch changes")
+
+var changedInitGeneration = test126InitLive
+changedInitGeneration["NativeP2PDirectedDataRxLeaseMccSourceGeneration"] = NSNumber(value: 9)
+let (generationChangedPoll, generationChangedReads) = poll(
+    test126InitStartLag, sequence: [changedInitGeneration, test126InitLive],
+    expectedBuild: "25G416-Test126", requireMccOriginWitness: true)
+expect(generationChangedPoll.window == nil && generationChangedReads == 1 &&
+       generationChangedPoll.trace.lastCheck?.falsePredicates.contains(
+           "mcc_source_matches_power") == true,
+       "keep the real MCC source generation tied to the lease power generation")
+
+var missingInitEpoch = test126InitLive
+missingInitEpoch.removeValue(forKey: "NativeP2PDirectedDataRxLeaseMccNoticeEpoch")
+let (missingEpochPoll, missingEpochReads) = poll(
+    test126InitStartLag, sequence: [missingInitEpoch, test126InitLive],
+    expectedBuild: "25G416-Test126", requireMccOriginWitness: true)
+expect(missingEpochPoll.window == nil && missingEpochReads == 1 &&
+       missingEpochPoll.trace.lastCheck?.falsePredicates.contains(
+           "mcc_notice_epoch_uint32") == true,
+       "stop polling when a strict Test126 witness field disappears")
+
+var missingInitialSequence = test126InitLive
+missingInitialSequence.removeValue(forKey: "NativeP2PDirectedDataRxLeaseMccRequestSequence")
+let (missingInitialPoll, missingInitialReads) = poll(
+    missingInitialSequence, sequence: [test126InitLive], expectedBuild: "25G416-Test126",
+    requireMccOriginWitness: true)
+expect(missingInitialPoll.window == nil && missingInitialReads == 0 &&
+       missingInitialPoll.trace.firstFailure?.falsePredicates.contains(
+           "initial_identity_profile_available") == true,
+       "refuse to poll later into a lease whose initial strict identity was incomplete")
 
 var revokedWhileWaiting = live
 revokedWhileWaiting["NativeP2PDirectedDataRxLeaseReady"] = NSNumber(value: 0)

@@ -2470,40 +2470,9 @@ static bool directedDataMainGateCheck(ItlIwx *owner,
     if (!directedDataCurrent(owner, sc, context, true))
         return false;
 
-    const uint32_t noticeBefore = __atomic_load_n(
-        &sc->sc_native_mcc_notice_generation, __ATOMIC_ACQUIRE);
-    const uint32_t responsePresent = sc->sc_native_mcc_response_present;
-    const uint32_t responseNotice = sc->sc_native_mcc_response_notice_generation;
-    const uint32_t responseGeneration =
-        sc->sc_native_mcc_response_firmware_generation;
-    const uint32_t responseStatus = sc->sc_native_mcc_response_status;
-    const uint32_t responseChannelCount =
-        sc->sc_native_mcc_response_channel_count;
-    const uint32_t appliedNotice = sc->sc_native_mcc_applied_notice_generation;
-    const uint32_t appliedGeneration =
-        sc->sc_native_mcc_applied_firmware_generation;
-    const uint32_t pending = __atomic_load_n(
-        &sc->sc_native_mcc_pending, __ATOMIC_ACQUIRE);
-    const uint32_t noticeAfter = __atomic_load_n(
-        &sc->sc_native_mcc_notice_generation, __ATOMIC_ACQUIRE);
-    const uint32_t generation = static_cast<uint32_t>(sc->sc_generation);
-    const struct ieee80211_channel *channel = &sc->sc_ic.ic_channels[6];
-    uint32_t noIrMask = 0;
-#ifdef IEEE80211_CHAN_NO_IR
-    noIrMask = IEEE80211_CHAN_NO_IR;
-#endif
-    const bool channelAllowed =
-        IwxMccRefreshPolicy::directedDataChannel6TxAllowed(
-            responseStatus, responseChannelCount,
-            ieee80211_chan2ieee(&sc->sc_ic,
-                const_cast<struct ieee80211_channel *>(channel)),
-            channel->ic_freq, channel->ic_flags, IEEE80211_CHAN_2GHZ,
-            IEEE80211_CHAN_PASSIVE, IEEE80211_CHAN_DFS, noIrMask);
-    return noticeBefore != 0 && (noticeBefore & 1u) == 0 &&
-        noticeBefore == noticeAfter && responsePresent == 1 &&
-        responseNotice == noticeBefore && responseGeneration == generation &&
-        appliedNotice == noticeBefore && appliedGeneration == generation &&
-        pending == 0 && channelAllowed;
+    IwxMccRefreshPolicy::DirectedDataWitness mcc{};
+    return owner->tahoeDirectedDataMccWitness(mcc) &&
+        IwxMccRefreshPolicy::sameDirectedDataWitness(mcc, context->binding.mcc);
 }
 
 static IOReturn directedDataMainGateCheckAction(
@@ -2843,6 +2812,10 @@ int iwx_tahoe_p2p_directed_data_arm(
         !NativeAwdlRxTrace::sameEpochs(trace.epochs, expected))
         return ESTALE;
 
+    IwxMccRefreshPolicy::DirectedDataWitness mcc{};
+    if (!owner->tahoeDirectedDataMccWitness(mcc))
+        return ESTALE;
+
     uint64_t stationSerial = stationLease->allocationSerial;
     uint64_t queueSerial = queueLease->allocationSerial;
     if (!stationSerial)
@@ -2868,6 +2841,7 @@ int iwx_tahoe_p2p_directed_data_arm(
     context->binding.epochs = *epochs;
     context->binding.generation = generation;
     context->binding.p2pFirmwareGeneration = sc->sc_p2p.fw_generation;
+    context->binding.mcc = mcc;
     memset(&context->originTicket, 0, sizeof(context->originTicket));
     memset(&context->permit, 0, sizeof(context->permit));
     context->reason = TahoeP2PDirectedDataReason::kNone;
@@ -3977,6 +3951,7 @@ static bool directedDataCaptureSnapshot(
     value.deadlineUs = context->binding.deadlineUs;
     value.generation = context->binding.generation;
     value.p2pFirmwareGeneration = context->binding.p2pFirmwareGeneration;
+    value.mcc = context->binding.mcc;
     value.ifindex = context->ifindex;
     value.queueId = context->queueId;
     value.stationId = context->stationId;
