@@ -9,7 +9,9 @@ private let expectedBuild = "25G416-Test135"
 private let expectedUUID = "7ED85846-F29A-33EB-BED1-EBA2D9009D36"
 private let maximumRunSeconds: UInt64 = 20
 private let terminalStates: Set<Int64> = [7, 8, 9, 10]
-private let includeP2P = DNSServiceFlags(kDNSServiceFlagsIncludeP2P)
+// Generic P2P does not include AWDL. Both transports must be requested.
+private let browseFlags = DNSServiceFlags(
+    kDNSServiceFlagsIncludeP2P | kDNSServiceFlagsIncludeAWDL)
 private let browseType = "_airdrop._tcp."
 private let browseDomain = "local."
 
@@ -104,7 +106,7 @@ private func help() -> Never {
     writeLine("""
     Test135 one-shot system Bonjour browse and manual ARM helper.
     Default: read-only build/profile preflight.
-    --run: starts one DNSServiceBrowse(_airdrop._tcp., local., IncludeP2P),
+    --run: starts one DNSServiceBrowse(_airdrop._tcp., local., IncludeP2P | IncludeAWDL),
            issues NativeP2PArmOnce once, and records up to 20 seconds.
     Required loaded build: \(expectedBuild), UUID: \(expectedUUID)
     Output: one JSON receipt on stdout; no service instance names are recorded.
@@ -325,6 +327,8 @@ private func browseSummary(_ counters: BrowseCounters) -> [String: Any] {
         "service_type": browseType,
         "domain": browseDomain,
         "include_p2p": true,
+        "include_awdl": true,
+        "requested_flags": UInt32(browseFlags),
         "interface_index": "any",
         "callbacks": counters.callbacks,
         "additions": counters.additions,
@@ -392,7 +396,8 @@ private func run(_ options: Options) -> Never {
 
     let counters = BrowseCounters()
     var browseRef: DNSServiceRef?
-    let browseResult = DNSServiceBrowse(&browseRef, includeP2P,
+    let browseStartedNs = DispatchTime.now().uptimeNanoseconds
+    let browseResult = DNSServiceBrowse(&browseRef, browseFlags,
         UInt32(kDNSServiceInterfaceIndexAny), browseType, browseDomain,
         browseCallback, Unmanaged.passUnretained(counters).toOpaque())
     guard browseResult == kDNSServiceErr_NoError, let activeBrowse = browseRef else {
@@ -462,6 +467,8 @@ private func run(_ options: Options) -> Never {
             stableTerminalReads = 0
         }
     }
+    let browseElapsedSeconds = Double(DispatchTime.now().uptimeNanoseconds - browseStartedNs) / 1_000_000_000
+    let observationElapsedSeconds = Double(DispatchTime.now().uptimeNanoseconds - start) / 1_000_000_000
     DNSServiceRefDeallocate(activeBrowse)
     let afterRunLoaded = loadedUUIDs()
     final = snapshot(service)
@@ -523,6 +530,8 @@ private func run(_ options: Options) -> Never {
         "arm_set_result": Int(armResult),
         "terminal_observed": terminal,
         "terminal_deadline_seconds": Int(maximumRunSeconds),
+        "observation_elapsed_seconds": observationElapsedSeconds,
+        "browse_elapsed_seconds": browseElapsedSeconds,
         "cleanup": cleanup,
         "counter_deltas_from_before_arm": deltas,
         "qm_wire_snapshot_changed": initialQM != nil && finalQM != nil ? initialQM != finalQM : NSNull(),
@@ -533,7 +542,7 @@ private func run(_ options: Options) -> Never {
         "radio_ack_proven": false,
         "peer_receipt_proven": false,
         "airdrop_proven": false,
-        "scope": "One Bonjour IncludeP2P browse plus one Test135 manual ARM; local driver and ifnet receipts only.",
+        "scope": "One Bonjour IncludeP2P | IncludeAWDL browse plus one Test135 manual ARM; local driver and ifnet receipts only.",
     ], exitCode: terminalIdentityValid &&
         (cleanup["status"] as? String == "cleanup_receipt_proven") ? 0 : 1)
 }
