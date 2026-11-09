@@ -230,7 +230,11 @@ private func profileProblems(_ values: [String: Any], loaded: [String]?) -> [Str
         }
     }
     for key in ["NativeAwdlDataTxPending", "NativeAwdlDataRxPending"] {
-        if let pending = number(values, key), pending != 0 { problems.append(key + "_not_empty") }
+        guard let pending = number(values, key) else {
+            problems.append(key + "_missing_or_invalid")
+            continue
+        }
+        if pending != 0 { problems.append(key + "_not_empty") }
     }
     return Array(Set(problems)).sorted()
 }
