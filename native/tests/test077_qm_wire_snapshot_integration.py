@@ -24,24 +24,52 @@ assert "dataInfo.packets[0].ipv6Packet + 24" not in action_submit
 candidate_index = action_submit.index("const bool qmWireSnapshotCandidate")
 assert "dataInfo." not in action_submit[candidate_index:]
 
-# The submit path records a fixed value-only snapshot after queue finish. It
-# has no IORegistry publication and no GP2/MMIO sample.
+# The submit path records fixed value-only facts and bounded raw bytes after
+# queue finish. It has no IORegistry publication and no GP2/MMIO sample.
 finish = action_submit.index("iwx_tahoe_p2p_tvqm_finish_tx_submit(queueLease)")
-stage = action_submit.index("stageQmWireSnapshot(qmWireSnapshot)")
+stage = action_submit.index("stageQmWireSnapshot(qmWireSnapshot,")
 assert finish < stage
 assert "setProperty(" not in action_submit
 assert "read_prph" not in action_submit and "IWX_READ_PRPH" not in action_submit
 assert "CurrentGp2" not in action_submit
-assert re.search(r"else if\s*\(qmWireSnapshotValid\)\s*\{", action_submit)
+assert re.search(r"else if\s*\(qmWireRawSnapshotCandidate\s*&&\s*"
+                 r"qmWireRawSnapshotReady\)\s*\{", action_submit)
+assert "const uint32_t txFlags" in action_submit
+tx_flags = action_submit.split("const uint32_t txFlags", 1)[1].split(";", 1)[0]
+assert "qmWireSnapshotCandidate" in tx_flags
+assert "qmWireRawSnapshotCandidate" not in tx_flags
+assert "mbuf_copydata(frame, 0," in action_submit
+assert "qmWireRawSnapshot.mpduBytes +" in action_submit
+assert "deviceCommand->data" in action_submit
+raw_capture = action_submit.index("Copy diagnostic bytes before the final submit-time/epoch gate")
+assert raw_capture < action_submit.index("const uint64_t submitNanoseconds")
+assert raw_capture < action_submit.index("controlSubmitFenceTimeValid(")
+assert "qmWireRawSnapshot.doorbellUs = p2pActionMonotonicUs()" in action_submit
+assert "qmWireRawSnapshot.finishUs = p2pActionMonotonicUs()" in action_submit
 
-# One immutable OSData property is the complete publication. If allocation or
-# setProperty fails, state is failed and no independent completion marker is
-# emitted; this cannot expose a partially updated field set.
-assert "OSData::withBytes(encoded.bytes, sizeof(encoded.bytes))" in publisher
-assert publisher.count("setProperty(") == 1
+# Legacy facts and private raw bytes are separate immutable blobs. Both carry
+# the same token/epoch identity; the final status object is published last.
+assert re.search(r"OSData::withBytes\(\s*encodedFacts.bytes,\s*"
+                 r"sizeof\(encodedFacts.bytes\)\)", publisher)
+assert re.search(r"OSData::withBytes\(\s*encodedRaw.bytes,\s*"
+                 r"sizeof\(encodedRaw.bytes\)\)", publisher)
+assert re.search(r"OSData::withBytes\(\s*encodedStatus.bytes,\s*"
+                 r"sizeof\(encodedStatus.bytes\)\)", publisher)
+assert publisher.count("setProperty(") == 4
+assert '"NativeP2PQmWireStageRejectCount"' in publisher
 assert '"NativeP2PQmWireSnapshot"' in publisher
-assert "published ? 4u : 5u" in publisher
-assert "NativeP2PQmWireSnapshotComplete" not in SOURCE
+assert '"NativeP2PQmWireRawSnapshotPrivate"' in publisher
+assert '"NativeP2PQmWireRawSnapshotPrivateStatus"' in publisher
+assert publisher.index('"NativeP2PQmWireSnapshot"') < publisher.index(
+    '"NativeP2PQmWireRawSnapshotPrivate"'
+)
+assert publisher.index('"NativeP2PQmWireStageRejectCount"') < publisher.index(
+    '"NativeP2PQmWireRawSnapshotPrivateStatus"'
+)
+assert publisher.index('"NativeP2PQmWireRawSnapshotPrivate"') < publisher.index(
+    '"NativeP2PQmWireRawSnapshotPrivateStatus"'
+)
+assert "finalStage == QmWireRawStage::kPublished" in publisher
 assert publisher.index("tahoeP2pOnMainGate()") < publisher.index(
     "pendingQmWireSnapshotState, &expected"
 )
@@ -50,6 +78,25 @@ record_definition = (ROOT / "native" / "awdl_qm_wire_snapshot.hpp").read_text().
 )[1].split("};", 1)[0]
 assert "*" not in record_definition
 assert "mbuf_t" not in record_definition
+raw_header = (ROOT / "native" / "awdl_qm_wire_snapshot.hpp").read_text()
+raw_definition = raw_header.split("struct Record {", 2)[2].split("};", 1)[0]
+assert "*" not in raw_definition
+assert "mbuf_t" not in raw_definition
+assert "paddr" not in raw_definition
+assert "sameIdentity" in raw_header
+assert "claimFirstSlot" in raw_header
+stage_function = SOURCE.split("static bool stageQmWireSnapshot(", 1)[1].split(
+    "static bool stageQmWireOutcome(", 1
+)[0]
+assert "claimFirstSlot" in stage_function
+assert "sameIdentity" in stage_function
+assert stage_function.index("claimFirstSlot") < stage_function.index(
+    "pendingQmWirePublication.facts = facts"
+)
+outcome_stage = SOURCE.split("static bool stageQmWireOutcome(", 1)[1].split(
+    "#endif", 1
+)[0]
+assert "claimFirstSlot" in outcome_stage
 
 assert "bool iwx_tahoe_p2p_action_publish_pending_qm_wire_snapshot(ItlIwx *owner);" in HEADER.read_text()
 probe_source = PROBE.read_text()

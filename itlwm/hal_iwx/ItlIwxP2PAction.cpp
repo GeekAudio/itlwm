@@ -55,6 +55,17 @@ static uint64_t p2pActionMonotonicUs()
 }
 
 using QmWireSnapshotRecord = NativeAwdlQmWireSnapshot::Record;
+using QmWireRawRecord = NativeAwdlQmWireSnapshot::Raw::Record;
+using QmWireRawIdentity = NativeAwdlQmWireSnapshot::Raw::Identity;
+using QmWireRawStage = NativeAwdlQmWireSnapshot::Raw::Stage;
+
+struct PendingQmWirePublication {
+    QmWireSnapshotRecord facts;
+    QmWireRawRecord raw;
+    NativeAwdlQmWireSnapshot::Raw::StatusRecord status;
+    bool factsValid;
+    bool rawValid;
+};
 
 static bool hasEligibleQmTraceToken(
     TahoeP2PActionTxContext *context, uint64_t token)
@@ -73,20 +84,70 @@ static bool hasEligibleQmTraceToken(
     return false;
 }
 
-// One capture is staged after a successful queue finish. The deferred main-gate
-// collector serializes it and performs one atomic IORegistry property replace.
-static QmWireSnapshotRecord pendingQmWireSnapshot{};
+// The first target packet is staged after queue finish. The deferred main-gate
+// collector publishes legacy facts, private raw bytes, then their identity-bound
+// status marker; later packets cannot replace that first identity.
+static PendingQmWirePublication pendingQmWirePublication{};
 static uint32_t pendingQmWireSnapshotState; // 0 empty, 1 writing, 2 ready, 3 draining, 4 done, 5 failed
+static uint32_t pendingQmWireStageRejectCount;
 
-static bool stageQmWireSnapshot(const QmWireSnapshotRecord &record)
+static bool stageQmWireSnapshot(const QmWireSnapshotRecord &facts,
+                                const QmWireRawRecord &raw,
+                                bool factsValid)
 {
-    if (!record.token)
+    const QmWireRawIdentity factsIdentity = {
+        facts.token, facts.contextGeneration, facts.powerGeneration,
+        facts.stationGeneration, facts.rocToken
+    };
+    if (!facts.token || !raw.identity.token ||
+        !NativeAwdlQmWireSnapshot::Raw::sameIdentity(
+            factsIdentity, raw.identity)) {
+        __atomic_add_fetch(&pendingQmWireStageRejectCount, 1u,
+                           __ATOMIC_RELAXED);
         return false;
-    uint32_t expected = 0;
-    if (!__atomic_compare_exchange_n(&pendingQmWireSnapshotState, &expected,
-            1u, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
+    }
+    if (!NativeAwdlQmWireSnapshot::Raw::claimFirstSlot(
+            &pendingQmWireSnapshotState)) {
+        __atomic_add_fetch(&pendingQmWireStageRejectCount, 1u,
+                           __ATOMIC_RELAXED);
         return false;
-    pendingQmWireSnapshot = record;
+    }
+    pendingQmWirePublication.facts = facts;
+    pendingQmWirePublication.raw = raw;
+    pendingQmWirePublication.raw.flags |=
+        NativeAwdlQmWireSnapshot::Raw::kStageAccepted;
+    if (pendingQmWirePublication.raw.stage ==
+            QmWireRawStage::kCapturedAwaitingFinish)
+        pendingQmWirePublication.raw.stage =
+            QmWireRawStage::kStagedAwaitingPublish;
+    pendingQmWirePublication.status.stage = factsValid ?
+        pendingQmWirePublication.raw.stage :
+        QmWireRawStage::kHeaderOrCopyRejected;
+    pendingQmWirePublication.status.identity = raw.identity;
+    pendingQmWirePublication.factsValid = factsValid;
+    pendingQmWirePublication.rawValid = true;
+    __atomic_store_n(&pendingQmWireSnapshotState, 2u, __ATOMIC_RELEASE);
+    return true;
+}
+
+static bool stageQmWireOutcome(const QmWireRawIdentity &identity,
+                               QmWireRawStage stage)
+{
+    if (!identity.token || stage == QmWireRawStage::kNone) {
+        __atomic_add_fetch(&pendingQmWireStageRejectCount, 1u,
+                           __ATOMIC_RELAXED);
+        return false;
+    }
+    if (!NativeAwdlQmWireSnapshot::Raw::claimFirstSlot(
+            &pendingQmWireSnapshotState)) {
+        __atomic_add_fetch(&pendingQmWireStageRejectCount, 1u,
+                           __ATOMIC_RELAXED);
+        return false;
+    }
+    pendingQmWirePublication.status.stage = stage;
+    pendingQmWirePublication.status.identity = identity;
+    pendingQmWirePublication.factsValid = false;
+    pendingQmWirePublication.rawValid = false;
     __atomic_store_n(&pendingQmWireSnapshotState, 2u, __ATOMIC_RELEASE);
     return true;
 }
@@ -1081,26 +1142,78 @@ bool iwx_tahoe_p2p_action_publish_pending_qm_wire_snapshot(ItlIwx *owner)
     if (!controller)
         return false;
 
+    // A later eligible QM packet cannot overwrite the first receipt. Publish
+    // this independent overflow/rejection count on a later idle main-gate
+    // tick so the retained first packet keeps its identity and bytes intact.
+    const uint32_t stageRejectCount = __atomic_load_n(
+        &pendingQmWireStageRejectCount, __ATOMIC_ACQUIRE);
+    (void)controller->setProperty("NativeP2PQmWireStageRejectCount",
+                                  stageRejectCount, 32);
+
     uint32_t expected = 2u;
     if (!__atomic_compare_exchange_n(&pendingQmWireSnapshotState, &expected,
             3u, false, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE))
         return false;
 
-    // This runs after the probe's publication-busy guard, outside the TX
-    // doorbell/finish path. A single small immutable OSData object gives the
-    // registry reader an all-or-nothing snapshot; no field-by-field marker is
-    // needed, and allocation/property failure leaves no completion record.
-    const QmWireSnapshotRecord record = pendingQmWireSnapshot;
-    const NativeAwdlQmWireSnapshot::EncodedSnapshot encoded =
-        NativeAwdlQmWireSnapshot::encode(record);
-    OSData *payload = OSData::withBytes(encoded.bytes, sizeof(encoded.bytes));
-    const bool published = payload && controller->setProperty(
-        "NativeP2PQmWireSnapshot", payload);
-    if (payload)
-        payload->release();
+    // Publication runs on the main gate after the probe's busy guard and
+    // outside TX submit. Each byte blob is immutable. The final status object
+    // is written last and binds the raw bytes to the legacy facts identity;
+    // readers must reject absent, stale, or mismatched status/raw/facts.
+    const PendingQmWirePublication publication = pendingQmWirePublication;
+    QmWireRawStage finalStage = publication.status.stage;
+    bool factsPublished = !publication.factsValid;
+    bool rawPublished = !publication.rawValid;
+
+    if (publication.factsValid) {
+        const NativeAwdlQmWireSnapshot::EncodedSnapshot encodedFacts =
+            NativeAwdlQmWireSnapshot::encode(publication.facts);
+        OSData *factsPayload = OSData::withBytes(
+            encodedFacts.bytes, sizeof(encodedFacts.bytes));
+        if (!factsPayload) {
+            finalStage = QmWireRawStage::kAllocationFailed;
+        } else {
+            factsPublished = controller->setProperty(
+                "NativeP2PQmWireSnapshot", factsPayload);
+            factsPayload->release();
+            if (!factsPublished)
+                finalStage = QmWireRawStage::kFactsPropertyFailed;
+        }
+    }
+
+    if (factsPublished && publication.rawValid) {
+        const NativeAwdlQmWireSnapshot::Raw::EncodedSnapshot encodedRaw =
+            NativeAwdlQmWireSnapshot::Raw::encode(publication.raw);
+        OSData *rawPayload = OSData::withBytes(
+            encodedRaw.bytes, sizeof(encodedRaw.bytes));
+        if (!rawPayload) {
+            finalStage = QmWireRawStage::kAllocationFailed;
+        } else {
+            rawPublished = controller->setProperty(
+                "NativeP2PQmWireRawSnapshotPrivate", rawPayload);
+            rawPayload->release();
+            if (!rawPublished)
+                finalStage = QmWireRawStage::kRawPropertyFailed;
+        }
+    }
+
+    if (factsPublished && rawPublished && publication.factsValid &&
+        publication.rawValid && publication.raw.stage ==
+            QmWireRawStage::kStagedAwaitingPublish)
+        finalStage = QmWireRawStage::kPublished;
+
+    NativeAwdlQmWireSnapshot::Raw::StatusRecord status = publication.status;
+    status.stage = finalStage;
+    const NativeAwdlQmWireSnapshot::Raw::EncodedStatus encodedStatus =
+        NativeAwdlQmWireSnapshot::Raw::encodeStatus(status);
+    OSData *statusPayload = OSData::withBytes(
+        encodedStatus.bytes, sizeof(encodedStatus.bytes));
+    const bool statusPublished = statusPayload && controller->setProperty(
+        "NativeP2PQmWireRawSnapshotPrivateStatus", statusPayload);
+    if (statusPayload)
+        statusPayload->release();
     __atomic_store_n(&pendingQmWireSnapshotState,
-                     published ? 4u : 5u, __ATOMIC_RELEASE);
-    return published;
+                     statusPublished ? 4u : 5u, __ATOMIC_RELEASE);
+    return statusPublished && finalStage == QmWireRawStage::kPublished;
 }
 #endif
 
@@ -1195,6 +1308,11 @@ int iwx_tahoe_p2p_action_tx_submit(
                           EBUSY);
         return EBUSY;
     }
+#if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
+    QmWireRawRecord qmWireRawSnapshot{};
+    bool qmWireRawSnapshotCandidate = false;
+    bool qmWireRawSnapshotReady = false;
+#endif
     // The only accepted Action frame submit path remains the legacy GP/TID15
     // management lease. A prepared LINK/TID0 peer queue is not a data-doorbell
     // capability; it must have a separate, independently reviewed submitter.
@@ -1343,9 +1461,26 @@ int iwx_tahoe_p2p_action_tx_submit(
         return EINVAL;
     }
 #if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
-    const bool qmWireSnapshotCandidate = nativeDataToken && validData &&
+    const bool strictQmTraceCandidate = nativeDataToken && validData &&
         nativeDataPacketCount == 1 &&
         hasEligibleQmTraceToken(context, nativeDataToken);
+    const bool qmWireSnapshotCandidate = strictQmTraceCandidate;
+    // Keep the historical candidate as the TX-policy input. Raw-copy capture
+    // has its own name and is diagnostic only; it never selects TX flags.
+    qmWireRawSnapshotCandidate = strictQmTraceCandidate;
+    if (qmWireRawSnapshotCandidate) {
+        qmWireRawSnapshot.identity.token = nativeDataToken;
+        qmWireRawSnapshot.identity.contextGeneration = rocToken;
+        qmWireRawSnapshot.identity.powerGeneration = generation;
+        qmWireRawSnapshot.identity.rocToken = rocToken;
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332)
+        qmWireRawSnapshot.identity.stationGeneration =
+            experimentalStationGeneration;
+#endif
+        qmWireRawSnapshot.flags |=
+            NativeAwdlQmWireSnapshot::Raw::kCandidate;
+        qmWireRawSnapshot.stage = QmWireRawStage::kCandidate;
+    }
 #endif
     if (frameInfo.headerLength != ieee80211_get_hdrlen(
             reinterpret_cast<const struct ieee80211_frame *>(frameHeaderAndBody))) {
@@ -1569,6 +1704,84 @@ int iwx_tahoe_p2p_action_tx_submit(
                                   plan.numTbs);
 
 #if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
+    if (qmWireRawSnapshotCandidate) {
+        using NativeAwdlQmWireSnapshot::Raw::beginCapture;
+        using NativeAwdlQmWireSnapshot::Raw::finishCapture;
+        qmWireRawSnapshot.stationId = static_cast<uint16_t>(
+            queueLease->stationId);
+        qmWireRawSnapshot.queueId = static_cast<uint16_t>(ring->qid);
+        qmWireRawSnapshot.ringSize = static_cast<uint16_t>(ring->ring_count);
+        qmWireRawSnapshot.descriptorIndex = index;
+        qmWireRawSnapshot.sequenceControl = frameInfo.sequenceControl;
+        qmWireRawSnapshot.frameControl = frameInfo.frameControl;
+
+        // Copy diagnostic bytes before the final submit-time/epoch gate so
+        // that gate still covers the added bounded-copy work. A failed later
+        // gate returns without staging or publishing this local record.
+        const size_t commandHeaderLength = sizeof(deviceCommand->hdr);
+        const size_t commandDataLength = txCommandLength +
+            frameInfo.headerLength;
+        const size_t commandLength = commandHeaderLength + commandDataLength;
+        const size_t payloadLength = frameLength - frameInfo.headerLength;
+        if (beginCapture(&qmWireRawSnapshot, commandLength,
+                         frameInfo.headerLength, payloadLength)) {
+            const size_t commandCopiedLength = commandLength <
+                NativeAwdlQmWireSnapshot::Raw::kCommandCapacity ?
+                commandLength :
+                NativeAwdlQmWireSnapshot::Raw::kCommandCapacity;
+            const size_t commandHeaderCopied = commandHeaderLength <
+                commandCopiedLength ? commandHeaderLength :
+                commandCopiedLength;
+            if (commandHeaderCopied)
+                memcpy(qmWireRawSnapshot.commandBytes, &deviceCommand->hdr,
+                       commandHeaderCopied);
+            const size_t commandDataCopied = commandCopiedLength -
+                commandHeaderCopied;
+            if (commandDataCopied)
+                memcpy(qmWireRawSnapshot.commandBytes + commandHeaderCopied,
+                       deviceCommand->data, commandDataCopied);
+
+            const size_t mpduHeaderCopied = frameInfo.headerLength <
+                NativeAwdlQmWireSnapshot::Raw::kMpduCapacity ?
+                frameInfo.headerLength :
+                NativeAwdlQmWireSnapshot::Raw::kMpduCapacity;
+            if (mpduHeaderCopied)
+                memcpy(qmWireRawSnapshot.mpduBytes,
+                    reinterpret_cast<const uint8_t *>(deviceCommand->data) +
+                        txCommandLength,
+                    mpduHeaderCopied);
+            size_t payloadCopiedLength = 0;
+            int payloadCopyResult = 0;
+            const size_t payloadCapacity =
+                NativeAwdlQmWireSnapshot::Raw::kMpduCapacity -
+                mpduHeaderCopied;
+            const size_t payloadRequested = payloadLength < payloadCapacity ?
+                payloadLength : payloadCapacity;
+            if (payloadRequested) {
+                payloadCopyResult = mbuf_copydata(frame, 0,
+                    static_cast<int>(payloadRequested),
+                    reinterpret_cast<caddr_t>(qmWireRawSnapshot.mpduBytes +
+                        mpduHeaderCopied));
+                if (payloadCopyResult == 0)
+                    payloadCopiedLength = payloadRequested;
+                else
+                    memset(qmWireRawSnapshot.mpduBytes + mpduHeaderCopied, 0,
+                           payloadRequested);
+            }
+            const size_t mpduCopiedLength = mpduHeaderCopied +
+                payloadCopiedLength;
+            (void)finishCapture(&qmWireRawSnapshot, commandCopiedLength,
+                mpduCopiedLength, 0,
+                static_cast<int32_t>(payloadCopyResult));
+        } else {
+            qmWireRawSnapshot.stage =
+                QmWireRawStage::kHeaderOrCopyRejected;
+        }
+        qmWireRawSnapshotReady = true;
+    }
+#endif
+
+#if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
     if (nativeDataToken)
         (void)context->dataTxTrace.markDescriptorReady(nativeDataToken,
                                                        p2pActionMonotonicUs());
@@ -1759,6 +1972,7 @@ int iwx_tahoe_p2p_action_tx_submit(
         qmWireSnapshot.hostPreDoorbellUs = p2pActionMonotonicUs();
         qmWireSnapshotValid = qmWireSnapshot.header.valid;
     }
+
 #endif
     ring->cur = (index + 1) % ring->ring_count;
     ++ring->queued;
@@ -1804,6 +2018,8 @@ int iwx_tahoe_p2p_action_tx_submit(
 #endif
     IWX_WRITE(sc, IWX_HBUS_TARG_WRPTR, ring->qid << 16 | ring->cur);
 #if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
+    if (qmWireRawSnapshotCandidate && qmWireRawSnapshotReady)
+        qmWireRawSnapshot.doorbellUs = p2pActionMonotonicUs();
     if (nativeDataToken)
         (void)context->dataTxTrace.markDoorbellIssued(nativeDataToken,
                                                        p2pActionMonotonicUs());
@@ -1828,14 +2044,28 @@ int iwx_tahoe_p2p_action_tx_submit(
         context->state = TahoeP2PActionTxState::kQuarantined;
         recordSubmitStage(context,
             TahoeP2PActionTxSubmitStage::kPostDoorbellFinish, error);
+#if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
+        if (qmWireRawSnapshotCandidate && qmWireRawSnapshotReady)
+            (void)stageQmWireOutcome(qmWireRawSnapshot.identity,
+                                     QmWireRawStage::kFinishFailed);
+#endif
         XYLog("%s: finish after P2P Action doorbell failed (%d); slot retained\n",
               sc->sc_dev.dv_xname, error);
     }
 #if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
-    else if (qmWireSnapshotValid) {
+    else if (qmWireRawSnapshotCandidate && qmWireRawSnapshotReady) {
         // No context, mbuf, or packet-buffer pointer survives submit. Staging
         // occurs only after finish_tx_submit has confirmed queue ownership.
-        (void)stageQmWireSnapshot(qmWireSnapshot);
+        qmWireRawSnapshot.finishUs = p2pActionMonotonicUs();
+        if (qmWireRawSnapshot.doorbellUs == 0 ||
+            qmWireRawSnapshot.finishUs == 0 ||
+            qmWireRawSnapshot.finishUs < qmWireRawSnapshot.doorbellUs)
+            qmWireRawSnapshot.stage =
+                QmWireRawStage::kHeaderOrCopyRejected;
+        if (!stageQmWireSnapshot(qmWireSnapshot, qmWireRawSnapshot,
+                                 qmWireSnapshotValid))
+            (void)stageQmWireOutcome(qmWireRawSnapshot.identity,
+                                     QmWireRawStage::kStageCasFailed);
     }
 #endif
     return 0;

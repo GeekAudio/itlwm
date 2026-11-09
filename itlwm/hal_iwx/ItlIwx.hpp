@@ -158,6 +158,7 @@
 #include "../../native/awdl_peer_runtime_table.hpp"
 #if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
 #include "../../native/awdl_discovery_rx_input.hpp"
+#include "../../native/awdl_discovery_rx_window.hpp"
 #endif
 #include "../../native/p2p_hal_probe.hpp"
 #include "../../native/intel_roc_event_state.hpp"
@@ -581,11 +582,25 @@ public:
     // Main-gate only; publication never originates from a copied worker lease.
     bool tahoeP2pDiscoveryRxLease(NativeAwdlDiscoveryRxInput::Lease *,
         NativeAwdlDiscoveryRxInput::MainGate *);
+    bool tahoeDiscoveryRxWindowEpochs(
+        NativeAwdlDiscoveryRxWindow::Epochs *, bool *ownerQualified = nullptr);
+    void tahoeDiscoveryRxWindowService(
+        NativeAwdlDiscoveryRxWindow::ServiceEvent, uint64_t nowUs);
+    void tahoeDiscoveryRxWindowPublish(IOEthernetController *);
+    void tahoeDiscoveryRxWindowInvalidate(
+        NativeAwdlDiscoveryRxWindow::CloseReason, uint64_t nowUs);
     NativeAwdlDiscoveryRxInput::Lease nativeDiscoveryRxLease_ {};
     NativeAwdlDiscoveryRxInput::TxOwnership nativeDiscoveryRxTx_ {};
     IwxMccRefreshPolicy::DirectedDataWitness nativeDiscoveryRxMcc_ {};
     uint8_t nativeDiscoveryRxPeerSlot_ {0xff};
     bool nativeDiscoveryRxBound_ {false};
+    NativeAwdlDiscoveryRxWindow::Observer nativeDiscoveryRxWindow_ {};
+    NativeAwdlDiscoveryRxWindow::Snapshot nativeDiscoveryRxWindowSnapshot_ {};
+    uint64_t nativeDiscoveryRxWindowWords_[
+        NativeAwdlDiscoveryRxWindow::kMaxWireWordCount] {};
+    uint32_t nativeDiscoveryRxWindowSnapshotVersion_ {0};
+    uint32_t nativeDiscoveryRxWindowPublishVersion_ {0};
+    bool nativeDiscoveryRxWindowPublishedOnce_ {false};
 #endif
     NativeP2PRx149DataInput::EarlyRoute
     tahoeP2pCaptureAwdlDataBeforeStaDedup(

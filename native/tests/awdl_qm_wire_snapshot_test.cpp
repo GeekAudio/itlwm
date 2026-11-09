@@ -4,6 +4,8 @@
 #include <assert.h>
 #include <string.h>
 
+namespace QmRaw = NativeAwdlQmWireSnapshot::Raw;
+
 int main()
 {
     using namespace NativeAwdlQmWireSnapshot;
@@ -113,5 +115,126 @@ int main()
     assert(readLe64(encoded.bytes + kQueueId * 8) == 4);
     assert(readLe64(encoded.bytes + kChannel * 8) == 6);
     assert(readLe64(encoded.bytes + kCurrentGp2Valid * 8) == 0);
+
+    static_assert(QmRaw::kHeaderSize == 112, "raw QWR1 header changed");
+    static_assert(QmRaw::kSerializedSize == 2224, "raw QWR1 size changed");
+    static_assert(QmRaw::kStatusSerializedSize == 56, "QWS1 status size changed");
+
+    QmRaw::Record raw{};
+    raw.identity = {45, 7, 8, 9, 10};
+    raw.stationId = 3;
+    raw.queueId = 4;
+    raw.ringSize = 256;
+    raw.descriptorIndex = 2;
+    raw.sequenceControl = 32;
+    raw.frameControl = 8;
+    uint8_t command[56];
+    uint8_t mpduHeader[24];
+    uint8_t payload[101];
+    for (size_t i = 0; i < sizeof(command); ++i)
+        command[i] = static_cast<uint8_t>(i + 1);
+    for (size_t i = 0; i < sizeof(mpduHeader); ++i)
+        mpduHeader[i] = static_cast<uint8_t>(0x40 + i);
+    for (size_t i = 0; i < sizeof(payload); ++i)
+        payload[i] = static_cast<uint8_t>(0x80 + i);
+    assert(QmRaw::captureBytes(&raw, command, sizeof(command), mpduHeader,
+                        sizeof(mpduHeader), payload, sizeof(payload), 0));
+    assert(raw.stage == QmRaw::Stage::kCapturedAwaitingFinish);
+    assert(raw.commandActualLength == sizeof(command));
+    assert(raw.commandCopiedLength == sizeof(command));
+    assert(raw.mpduActualLength == sizeof(mpduHeader) + sizeof(payload));
+    assert(raw.mpduCopiedLength == raw.mpduActualLength);
+    assert(raw.flags & QmRaw::kCandidate);
+    assert(raw.flags & QmRaw::kCommandCaptured);
+    assert(raw.flags & QmRaw::kMpduCaptured);
+    raw.doorbellUs = 500;
+    raw.finishUs = 525;
+    raw.stage = QmRaw::Stage::kStagedAwaitingPublish;
+    raw.flags |= QmRaw::kStageAccepted;
+    const QmRaw::EncodedSnapshot rawEncoded = QmRaw::encode(raw);
+    assert(QmRaw::readLe32(rawEncoded.bytes) == QmRaw::kMagic);
+    assert(readLe16(rawEncoded.bytes + 4) == QmRaw::kSchemaVersion);
+    assert(readLe16(rawEncoded.bytes + 6) == QmRaw::kHeaderSize);
+    assert(QmRaw::readLe32(rawEncoded.bytes + 8) == QmRaw::kSerializedSize);
+    assert(readLe64(rawEncoded.bytes + 16) == 45);
+    assert(readLe64(rawEncoded.bytes + 24) == 7);
+    assert(readLe64(rawEncoded.bytes + 32) == 8);
+    assert(readLe64(rawEncoded.bytes + 40) == 9);
+    assert(readLe64(rawEncoded.bytes + 48) == 10);
+    assert(readLe16(rawEncoded.bytes + 56) == 3);
+    assert(readLe16(rawEncoded.bytes + 58) == 4);
+    assert(QmRaw::readLe32(rawEncoded.bytes + 68) == sizeof(command));
+    assert(QmRaw::readLe32(rawEncoded.bytes + 72) == sizeof(command));
+    assert(QmRaw::readLe32(rawEncoded.bytes + 76) == 125);
+    assert(QmRaw::readLe32(rawEncoded.bytes + 80) == 125);
+    assert(readLe64(rawEncoded.bytes + 96) == 500);
+    assert(readLe64(rawEncoded.bytes + 104) == 525);
+    assert(memcmp(rawEncoded.bytes + QmRaw::kCommandOffset, command,
+                  sizeof(command)) == 0);
+    assert(memcmp(rawEncoded.bytes + QmRaw::kMpduOffset, mpduHeader,
+                  sizeof(mpduHeader)) == 0);
+    assert(memcmp(rawEncoded.bytes + QmRaw::kMpduOffset + sizeof(mpduHeader), payload,
+                  sizeof(payload)) == 0);
+
+    QmRaw::StatusRecord publishedStatus{};
+    publishedStatus.stage = QmRaw::Stage::kPublished;
+    publishedStatus.identity = raw.identity;
+    const QmRaw::EncodedStatus statusEncoded = QmRaw::encodeStatus(publishedStatus);
+    assert(QmRaw::readLe32(statusEncoded.bytes) == QmRaw::kStatusMagic);
+    assert(readLe16(statusEncoded.bytes + 4) == QmRaw::kSchemaVersion);
+    assert(readLe16(statusEncoded.bytes + 6) == QmRaw::kStatusSerializedSize);
+    assert(QmRaw::readLe32(statusEncoded.bytes + 8) ==
+           static_cast<uint32_t>(QmRaw::Stage::kPublished));
+    const QmRaw::Identity legacyIdentity = {45, 7, 8, 9, 10};
+    assert(QmRaw::sameIdentity(legacyIdentity, raw.identity));
+    QmRaw::Identity staleIdentity = legacyIdentity;
+    ++staleIdentity.token;
+    assert(!QmRaw::sameIdentity(staleIdentity, raw.identity));
+    staleIdentity = legacyIdentity;
+    ++staleIdentity.contextGeneration;
+    assert(!QmRaw::sameIdentity(staleIdentity, raw.identity));
+    staleIdentity = legacyIdentity;
+    ++staleIdentity.powerGeneration;
+    assert(!QmRaw::sameIdentity(staleIdentity, raw.identity));
+    staleIdentity = legacyIdentity;
+    ++staleIdentity.stationGeneration;
+    assert(!QmRaw::sameIdentity(staleIdentity, raw.identity));
+    staleIdentity = legacyIdentity;
+    ++staleIdentity.rocToken;
+    assert(!QmRaw::sameIdentity(staleIdentity, raw.identity));
+
+    // A later eligible packet cannot replace the first staged identity.
+    uint32_t oneShotState = 0;
+    QmRaw::Identity firstIdentity = raw.identity;
+    assert(QmRaw::claimFirstSlot(&oneShotState));
+    const QmRaw::Identity retainedIdentity = firstIdentity;
+    assert(!QmRaw::claimFirstSlot(&oneShotState));
+    assert(QmRaw::sameIdentity(firstIdentity, retainedIdentity));
+
+    // Oversize input is bounded, explicitly truncated, and never marked as a
+    // complete command or MPDU capture.
+    QmRaw::Record truncated{};
+    uint8_t longCommand[70]{};
+    uint8_t longPayload[2025]{};
+    assert(!QmRaw::captureBytes(&truncated, longCommand, sizeof(longCommand),
+        mpduHeader, sizeof(mpduHeader), longPayload, sizeof(longPayload), 0));
+    assert(truncated.commandActualLength == 70);
+    assert(truncated.commandCopiedLength == QmRaw::kCommandCapacity);
+    assert(truncated.flags & QmRaw::kCommandTruncated);
+    assert(!(truncated.flags & QmRaw::kCommandCaptured));
+    assert(truncated.mpduActualLength == 2049);
+    assert(truncated.mpduCopiedLength == QmRaw::kMpduCapacity);
+    assert(truncated.flags & QmRaw::kMpduTruncated);
+    assert(!(truncated.flags & QmRaw::kMpduCaptured));
+    assert(truncated.stage == QmRaw::Stage::kHeaderOrCopyRejected);
+
+    QmRaw::Record payloadReadFailed{};
+    assert(!QmRaw::captureBytes(&payloadReadFailed, command, sizeof(command),
+        mpduHeader, sizeof(mpduHeader), payload, sizeof(payload), 5));
+    assert(payloadReadFailed.commandCopiedLength == sizeof(command));
+    assert(payloadReadFailed.mpduCopiedLength == sizeof(mpduHeader));
+    assert(payloadReadFailed.mpduCopyResult == 5);
+    assert(!(payloadReadFailed.flags & QmRaw::kMpduCaptured));
+    assert(payloadReadFailed.stage == QmRaw::Stage::kHeaderOrCopyRejected);
     return 0;
 }

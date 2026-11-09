@@ -9468,6 +9468,13 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
     bool rxStageAwdlDataCandidate = false;
     NativeAwdlRxEntry::Epochs rxEntryEpochs{};
     NativeAwdlRxEntry::Dispatch rxEntryDispatch{};
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+    NativeAwdlDiscoveryRxWindow::Epochs discoveryWindowEpochs{};
+    uint32_t discoveryWindowEventSlot = UINT32_MAX;
+    bool discoveryWindowLeaseQualified = false;
+    const bool discoveryWindowActive = tahoeDiscoveryRxWindowEpochs(
+        &discoveryWindowEpochs, &discoveryWindowLeaseQualified);
+#endif
 #endif
     
     desc = (struct iwx_rx_mpdu_desc *)pktdata;
@@ -9513,6 +9520,9 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
     const bool ownerQualified = tahoeP2pCurrentRxDiagnosticEpochs(
         sc, &rxEntryEpochs, preOwnerObserve ? &ownerReason : nullptr);
     if (ownerQualified || preOwnerObserve
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+        || discoveryWindowActive
+#endif
 #if defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
         || rocCopyToken.valid
 #endif
@@ -9648,6 +9658,62 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
             NativeAwdlData::isAwdlDataCandidate(
                 static_cast<const uint8_t *>(pktdata) + desc_size,
                 inspection.mpduLength);
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+        if (discoveryWindowActive) {
+            NativeAwdlDiscoveryRxWindow::MpduEvent event{};
+            event.monotonicUs = tahoeMonotonicNs() / 1000ULL;
+            event.frameClass = NativeAwdlDiscoveryRxWindow::FrameClass::Unknown;
+            if (inspection.frameControlPresent) {
+                switch (inspection.frameType) {
+                case 0:
+                    event.frameClass =
+                        NativeAwdlDiscoveryRxWindow::FrameClass::Management;
+                    break;
+                case 1:
+                    event.frameClass =
+                        NativeAwdlDiscoveryRxWindow::FrameClass::Control;
+                    break;
+                case 2:
+                    event.frameClass =
+                        NativeAwdlDiscoveryRxWindow::FrameClass::Data;
+                    break;
+                case 3:
+                    event.frameClass =
+                        NativeAwdlDiscoveryRxWindow::FrameClass::Extension;
+                    break;
+                }
+                event.flags |= NativeAwdlDiscoveryRxWindow::FrameControlPresent;
+                event.frameControl = inspection.frameControl;
+            }
+            if (inspection.descriptorPresent)
+                event.flags |= NativeAwdlDiscoveryRxWindow::DescriptorPresent;
+            if (inspection.statusPresent) {
+                event.flags |= NativeAwdlDiscoveryRxWindow::RawStatusPresent;
+                if (inspection.crcOk)
+                    event.flags |= NativeAwdlDiscoveryRxWindow::CrcOk;
+                if (inspection.overrunOk)
+                    event.flags |= NativeAwdlDiscoveryRxWindow::OverrunOk;
+            }
+            if (inspection.channelPresent) {
+                event.flags |= NativeAwdlDiscoveryRxWindow::ChannelPresent;
+                event.channel = inspection.channel;
+            }
+            if (inspection.mpduLengthPresent) {
+                event.flags |= NativeAwdlDiscoveryRxWindow::MpduLengthPresent;
+                event.mpduLength = inspection.mpduLength;
+            }
+            if (discoveryWindowLeaseQualified) {
+                event.flags |= NativeAwdlDiscoveryRxWindow::LeaseQualified;
+                event.leaseState = 1;
+            } else {
+                event.leaseState = 2;
+            }
+            if (awdlBssidCandidate)
+                event.flags |= NativeAwdlDiscoveryRxWindow::AwdlDataCandidate;
+            discoveryWindowEventSlot = nativeDiscoveryRxWindow_.recordMpdu(
+                discoveryWindowEpochs, uint32_t(sc->sc_generation), event);
+        }
+#endif
         if (preOwnerObserve) {
             NativeRxPreOwner::Event event{};
             event.nowUs = tahoeMonotonicNs() / 1000ULL;
@@ -9931,6 +9997,31 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
         const auto earlyRoute = tahoeP2pCaptureAwdlDataBeforeStaDedup(
             sc, mtod(m, const uint8_t *), mbuf_len(m), chanidx,
             uint32_t(desc->mac_phy_idx), &originalData);
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+        if (discoveryWindowActive && discoveryWindowEventSlot != UINT32_MAX) {
+            NativeAwdlDiscoveryRxWindow::DataRoute route =
+                NativeAwdlDiscoveryRxWindow::DataRoute::PassToSta;
+            switch (earlyRoute) {
+            case NativeP2PRx149DataInput::EarlyRoute::PassToSta:
+                route = NativeAwdlDiscoveryRxWindow::DataRoute::PassToSta;
+                break;
+            case NativeP2PRx149DataInput::EarlyRoute::QueuedForNative:
+                route = NativeAwdlDiscoveryRxWindow::DataRoute::QueuedForNative;
+                break;
+            case NativeP2PRx149DataInput::EarlyRoute::DuplicateRetry:
+                route = NativeAwdlDiscoveryRxWindow::DataRoute::DuplicateRetry;
+                break;
+            }
+            NativeAwdlDiscoveryRxWindow::Epochs routeEpochs{};
+            if (tahoeDiscoveryRxWindowEpochs(&routeEpochs, nullptr) &&
+                NativeAwdlDiscoveryRxWindow::sameEpochs(
+                    routeEpochs, discoveryWindowEpochs))
+                (void)nativeDiscoveryRxWindow_.recordDataRoute(
+                    routeEpochs, uint32_t(sc->sc_generation),
+                    discoveryWindowEventSlot, route,
+                    tahoeMonotonicNs() / 1000ULL);
+        }
+#endif
         if (earlyRoute != NativeP2PRx149DataInput::EarlyRoute::PassToSta) {
             tahoe_awdl_rx_stage_counters_.recordData(
                 rxStageOwnerGeneration,
@@ -22133,6 +22224,11 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
         idx = pkt->hdr.idx;
         
         code = IWX_WIDE_ID(pkt->hdr.group_id, pkt->hdr.cmd);
+#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+        gateOwner->tahoeDiscoveryRxWindowService(
+            NativeAwdlDiscoveryRxWindow::ServiceEvent::NotificationSeen,
+            tahoeMonotonicNs() / 1000ULL);
+#endif
 #if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
         if (tahoeP2pOnMainGate()) {
             const uint64_t nowUs = tahoeMonotonicNs() / 1000ULL;
@@ -22205,6 +22301,11 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
         };
 #endif
         if (!iwx_rx_pkt_valid(pkt)) {
+#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+            gateOwner->tahoeDiscoveryRxWindowService(
+                NativeAwdlDiscoveryRxWindow::ServiceEvent::HeaderRejected,
+                tahoeMonotonicNs() / 1000ULL);
+#endif
 #if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
             if (tahoeP2pOnMainGate()) {
                 const uint64_t nowUs = tahoeMonotonicNs() / 1000ULL;
@@ -22273,6 +22374,11 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
         
         len = sizeof(pkt->len_n_flags) + iwx_rx_packet_len(pkt);
         if (len < minsz || len > (IWX_RBUF_SIZE - offset)) {
+#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+            gateOwner->tahoeDiscoveryRxWindowService(
+                NativeAwdlDiscoveryRxWindow::ServiceEvent::LengthRejected,
+                tahoeMonotonicNs() / 1000ULL);
+#endif
 #if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
             if (tahoeP2pOnMainGate()) {
                 const uint64_t nowUs = tahoeMonotonicNs() / 1000ULL;
@@ -22355,6 +22461,15 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
         }
 #endif
 #ifdef AIRPORT_TAHOE
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+        gateOwner->tahoeDiscoveryRxWindowService(
+            NativeAwdlDiscoveryRxWindow::ServiceEvent::NotificationValidated,
+            tahoeMonotonicNs() / 1000ULL);
+        if (code == IWX_REPLY_RX_MPDU_CMD)
+            gateOwner->tahoeDiscoveryRxWindowService(
+                NativeAwdlDiscoveryRxWindow::ServiceEvent::MpduDispatch,
+                tahoeMonotonicNs() / 1000ULL);
+#endif
         IwxFirmwareDiagnostics::Entry diagnosticEntry{};
         diagnosticEntry.phase = static_cast<uint32_t>(
             IwxFirmwareDiagnostics::Phase::RxValidated);
@@ -22443,6 +22558,11 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
         if (code == IWX_REPLY_RX_MPDU_CMD && ++nmpdu == 1) {
             /* Take mbuf m0 off the RX ring. */
             if (iwx_rx_addbuf(sc, IWX_RBUF_SIZE, sc->rxq.cur)) {
+#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+                gateOwner->tahoeDiscoveryRxWindowService(
+                    NativeAwdlDiscoveryRxWindow::ServiceEvent::AddbufFailed,
+                    tahoeMonotonicNs() / 1000ULL);
+#endif
 #if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
                 recordRocNotification(
                     NativeIwxRocRxCorrelation::NotificationOutcome::kAddbufFailed, true);
@@ -22492,6 +22612,11 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
                      */
                     mbuf_copym(m0, 0, MBUF_COPYALL, MBUF_DONTWAIT, &m);
                     if (m == NULL) {
+#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+                        gateOwner->tahoeDiscoveryRxWindowService(
+                            NativeAwdlDiscoveryRxWindow::ServiceEvent::CopyFailed,
+                            tahoeMonotonicNs() / 1000ULL);
+#endif
 #if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
                         recordRocNotification(
                             NativeIwxRocRxCorrelation::NotificationOutcome::kCopyFailed, true);
@@ -23174,6 +23299,12 @@ iwx_notif_intr(struct iwx_softc *sc)
 {
     struct mbuf_list ml = MBUF_LIST_INITIALIZER();
     uint16_t hw;
+#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+    if (tahoeP2pOnMainGate())
+        tahoeDiscoveryRxWindowService(
+            NativeAwdlDiscoveryRxWindow::ServiceEvent::RxDrain,
+            tahoeMonotonicNs() / 1000ULL);
+#endif
 #if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
     const uint64_t drainUs = tahoeMonotonicNs() / 1000ULL;
     tahoeRxRocCorrelationSync(drainUs);
@@ -23195,6 +23326,12 @@ iwx_notif_intr(struct iwx_softc *sc)
     DPRINTFN(3, ("%s hw=%d\n", __FUNCTION__, hw));
     while (sc->rxq.cur != hw) {
         const uint32_t ringSlot = static_cast<uint32_t>(sc->rxq.cur);
+#if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+        if (tahoeP2pOnMainGate())
+            tahoeDiscoveryRxWindowService(
+                NativeAwdlDiscoveryRxWindow::ServiceEvent::RxRingSlot,
+                tahoeMonotonicNs() / 1000ULL);
+#endif
 #if defined(AIRPORT_TAHOE) && defined(ITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332)
         NativeIwxRocRxCorrelation::Token rocCopyToken;
         const uint64_t hostUptimeUs = tahoeMonotonicNs() / 1000ULL;
