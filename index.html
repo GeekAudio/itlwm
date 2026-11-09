@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <meta name="description" content="IntelWirelessNative 项目的本轮实测、40 项验收与下一步计划。">
-  <meta name="iw-site-version" content="bded139e863afb142985d7809dfe55fc206bb27d45daff05af1920aaf8eba7f7">
+  <meta name="iw-site-version" content="1cffe45481a35d09fea7c33fff8708d11cae5d084b202f18f3cd67629a87508c">
   <script>
 /* Check the live manifest on each visit, including back/forward restoration. */
 (function () {
@@ -852,9 +852,10 @@ window.TEST_RECORDS = [{"id":"record-test127-runtime","version":"25G416-Test127"
   const stages = data?.milestones || [];
   const checkpoints = stages.flatMap(stage => stage.checkpoints || []);
   const records = window.TEST_RECORDS || [];
+  const candidateVersion = shortVersion(data?.runningCandidate);
   const evidenceMatches = records.length === 1 && records[0].version === data?.runningCandidate &&
-    records[0].state === data?.validationLabel &&
-    shortVersion(data?.validationLabel) === shortVersion(data?.runningCandidate);
+    shortVersion(records[0].state) === candidateVersion &&
+    shortVersion(data?.validationLabel) === candidateVersion;
   if (stages.length !== 8 || checkpoints.length !== 40 ||
       stages.some((stage, index) => stage.stage !== index + 1 || stage.checkpoints?.length !== 5 ||
         stage.checkpoints.some((point, offset) => point.id !== `${index + 1}-${offset + 1}`)) ||
