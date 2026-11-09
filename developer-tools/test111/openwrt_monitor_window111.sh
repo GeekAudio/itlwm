@@ -8,14 +8,14 @@ export PATH
 LC_ALL=C
 export LC_ALL
 
-SCHEMA='test111-openwrt-monitor-window/v1'
+SCHEMA='test111-openwrt-monitor-window/v2'
 RADIO0='radio0'
 RADIO1='radio1'
-PHY0='6'
-PHY1='7'
+PHY0=''
+PHY1=''
 MON='iw111mon'
 ECHO_NAME='openwrt_echo110'
-ECHO_SHA256='ed7d33fb127d95b9593102cb3c80109021b302726d203cca01ff8cb1419415be'
+ECHO_SHA256='72f50bb507b708157207f8f1520470ed2066eaf5caf6ad0752e89d60a1fec9a3'
 ACTIVE='/tmp/iw111echo.active'
 LOCK='/tmp/iw111echo.lock'
 PROC_ROOT='/proc'
@@ -36,7 +36,7 @@ say() { printf '%s\n' "$*" >&2; }
 die() { say "ERROR: $*"; exit 1; }
 
 plan() {
-    printf '{"schema":"%s","mode":"plan","echo_rf_action":false,"runtime_wifi_change":true,"persistent_config_write":false,"wan_lan_change":false,"steps":["verify radio0 maps only to phy6 and radio1 maps only to phy7","snapshot four config SHA256 values and radio1 interface signature","start and confirm a per-run 60-second nohup watchdog","stop only radio0 through ubus","remove only reserved iw111mon if it is a phy6 monitor","create iw111mon on phy6, tune channel 6, record fresh ifindex/wdev","require iwinfo channel 6 at 2437 MHz; unchanged echo110 then enforces direct GET_INTERFACE 2437 MHz offset 0 before READY","stream the original echo110 stdout unchanged","on every exit terminate this run echo, confirm exit, remove owned monitor, ubus-up radio0, verify AP channel 6/20 MHz, radio1 and four config hashes","cancel watchdog only after successful restoration"]}\n' "$SCHEMA"
+    printf '{"schema":"%s","mode":"plan","echo_rf_action":false,"runtime_wifi_change":true,"persistent_config_write":false,"wan_lan_change":false,"steps":["discover radio0/radio1 wiphy mapping from live interfaces; require one distinct wiphy per radio","save the verified mapping in this run private state before any radio change","snapshot four config SHA256 values and radio1 interface signature","start and confirm a per-run 60-second nohup watchdog","stop only radio0 through ubus","remove only reserved iw111mon if it belongs to this run mapped wiphy","create iw111mon on that wiphy, tune channel 6, record fresh ifindex/wdev","require iwinfo channel 6 at 2437 MHz; unchanged echo110 then enforces direct GET_INTERFACE 2437 MHz offset 0 before READY","stream the original echo110 stdout unchanged","on every exit terminate this run echo, confirm exit, remove owned monitor, ubus-up radio0, verify AP channel 6/20 MHz, radio1 and four config hashes","cancel watchdog only after successful restoration"]}\n' "$SCHEMA"
 }
 
 usage() {
@@ -173,6 +173,63 @@ assert_radio_map() {
     done
 }
 
+valid_phy_id() {
+    case "$1" in ''|*[!0-9]*) return 1 ;; esac
+    case "$1" in
+        0|[1-9]|[1-9][0-9]|1[0-9][0-9]|2[0-4][0-9]|25[0-5]) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+discover_radio_phy() {
+    radio=$1
+    names=$(radio_ifnames "$radio") || return 1
+    [ -n "$names" ] || { say "$radio has no interfaces to map"; return 1; }
+    mapped=''
+    for name in $names; do
+        candidate=$(phy_for_if "$name") || { say "cannot map $radio interface $name"; return 1; }
+        valid_phy_id "$candidate" || { say "$radio interface $name reported an invalid wiphy id"; return 1; }
+        if [ -n "$mapped" ] && [ "$mapped" != "$candidate" ]; then
+            say "$radio interfaces span more than one wiphy"
+            return 1
+        fi
+        mapped=$candidate
+    done
+    [ -n "$mapped" ] || return 1
+    printf '%s\n' "$mapped"
+}
+
+discover_phy_map() {
+    PHY0=$(discover_radio_phy "$RADIO0") || return 1
+    PHY1=$(discover_radio_phy "$RADIO1") || return 1
+    [ "$PHY0" != "$PHY1" ] || { say 'radio0 and radio1 map to the same wiphy'; return 1; }
+}
+
+write_phy_map() {
+    valid_phy_id "$PHY0" && valid_phy_id "$PHY1" && [ "$PHY0" != "$PHY1" ] || return 1
+    [ ! -e "$STATE_DIR/radio0.phy" ] && [ ! -L "$STATE_DIR/radio0.phy" ] || return 1
+    [ ! -e "$STATE_DIR/radio1.phy" ] && [ ! -L "$STATE_DIR/radio1.phy" ] || return 1
+    (set -C; printf '%s\n' "$PHY0" > "$STATE_DIR/radio0.phy") 2>/dev/null || return 1
+    if ! (set -C; printf '%s\n' "$PHY1" > "$STATE_DIR/radio1.phy") 2>/dev/null; then
+        rm -f "$STATE_DIR/radio0.phy"
+        return 1
+    fi
+    chmod 600 "$STATE_DIR/radio0.phy" "$STATE_DIR/radio1.phy"
+}
+
+load_phy_map() {
+    [ -f "$STATE_DIR/radio0.phy" ] && [ ! -L "$STATE_DIR/radio0.phy" ] || { say 'radio0 wiphy receipt is missing or invalid'; return 1; }
+    [ -f "$STATE_DIR/radio1.phy" ] && [ ! -L "$STATE_DIR/radio1.phy" ] || { say 'radio1 wiphy receipt is missing or invalid'; return 1; }
+    PHY0=$(cat "$STATE_DIR/radio0.phy") || return 1
+    PHY1=$(cat "$STATE_DIR/radio1.phy") || return 1
+    valid_phy_id "$PHY0" && valid_phy_id "$PHY1" && [ "$PHY0" != "$PHY1" ] || {
+        PHY0=''
+        PHY1=''
+        say 'saved radio wiphy mapping is malformed'
+        return 1
+    }
+}
+
 radio_signature() {
     radio=$1
     up=$(radio_field "$radio" up) || return 1
@@ -207,7 +264,7 @@ assert_config_unchanged() {
 assert_radio1_unchanged() {
     now=$(radio_signature "$RADIO1") || return 1
     before=$(cat "$STATE_DIR/radio1.signature" 2>/dev/null) || return 1
-    [ "$now" = "$before" ] || { say 'radio1/phy7 signature changed'; return 1; }
+    [ "$now" = "$before" ] || { say "radio1/phy$PHY1 signature changed"; return 1; }
 }
 
 active_token() { cat "$ACTIVE" 2>/dev/null || true; }
@@ -301,7 +358,7 @@ remove_owned_monitor() {
     [ -n "$fields" ] || { rm -f "$STATE_DIR/monitor.identity"; return 0; }
     phy=$(phy_for_if "$MON") || { say 'refusing to remove iw111mon with unknown phy'; return 1; }
     type=$(printf '%s\n' "$fields" | awk -F '\t' '{print $3}')
-    [ "$phy" = "$PHY0" ] && [ "$type" = monitor ] || { say 'refusing to remove unowned/non-phy6 iw111mon'; return 1; }
+    [ "$phy" = "$PHY0" ] && [ "$type" = monitor ] || { say "refusing to remove iw111mon outside run wiphy phy$PHY0"; return 1; }
     if [ -r "$STATE_DIR/monitor.identity" ]; then
         [ "$fields" = "$(cat "$STATE_DIR/monitor.identity")" ] || { say 'iw111mon ifindex/wdev changed; refusing deletion'; return 1; }
     fi
@@ -327,14 +384,48 @@ verify_radio0_restored() {
         printf '%s\n' "$details" | grep -Eq 'HT Mode:[[:space:]]*[A-Z0-9]*20([[:space:]]|$)' || continue
         found=1
     done
-    [ "$found" -eq 1 ] || { say 'radio0 AP channel 6 / 20 MHz not verified'; return 1; }
+    [ "$found" -eq 1 ] || { say "radio0 AP on phy$PHY0 channel 6 / 20 MHz not verified"; return 1; }
+}
+
+record_first_radio0_up_failure() {
+    _record_rc=$1
+    _record_stderr=$2
+    _record_path="$STATE_DIR/restore-radio0-up.first-failure"
+    if [ -e "$_record_path" ] || [ -L "$_record_path" ]; then
+        [ -f "$_record_path" ] && [ ! -L "$_record_path" ] || return 1
+        return 0
+    fi
+    (set -C; { printf 'exit_code=%s\n' "$_record_rc"; cat "$_record_stderr"; } > "$_record_path") 2>/dev/null || return 1
+    chmod 600 "$_record_path"
 }
 
 restore_runtime() {
     [ "$(active_token)" = "$RUN_TOKEN" ] || { say 'this run no longer owns the active guard'; return 1; }
     terminate_echo || return 1
     remove_owned_monitor || return 1
-    ubus call network.wireless up '{"device":"radio0"}' >/dev/null || { say 'ubus failed to bring radio0 up'; return 1; }
+    _restore_up_attempt=0
+    _restore_up_succeeded=0
+    while [ "$_restore_up_attempt" -lt 3 ]; do
+        _restore_up_attempt=$((_restore_up_attempt + 1))
+        _restore_up_stderr="$STATE_DIR/restore-radio0-up.$$.stderr"
+        if ubus call network.wireless up '{"device":"radio0"}' >/dev/null 2>"$_restore_up_stderr"; then
+            cat "$_restore_up_stderr" >&2
+            rm -f "$_restore_up_stderr"
+            _restore_up_succeeded=1
+            break
+        else
+            _restore_up_status=$?
+            cat "$_restore_up_stderr" >&2
+            if [ "$_restore_up_attempt" -eq 1 ] &&
+               ! record_first_radio0_up_failure "$_restore_up_status" "$_restore_up_stderr"; then
+                say 'could not record first radio0-up failure; watchdog remains armed'
+                return 1
+            fi
+            rm -f "$_restore_up_stderr"
+            if [ "$_restore_up_attempt" -lt 3 ]; then sleep 1; fi
+        fi
+    done
+    [ "$_restore_up_succeeded" -eq 1 ] || { say 'ubus failed to bring radio0 up after 3 attempts'; return 1; }
     count=0
     while [ "$count" -lt 12 ]; do
         if verify_radio0_restored && assert_radio1_unchanged && assert_config_unchanged; then
@@ -381,13 +472,14 @@ restore_action() {
         return 0
     fi
     [ "$owner" = "$RUN_TOKEN" ] || die 'state owner token mismatch; refusing restore'
+    load_phy_map || die 'cannot restore without the verified run radio/wiphy mapping'
     state=$(cat "$STATE_DIR/state" 2>/dev/null || true)
     if [ "$state" = restored ] ||
        { [ -z "$active" ] && { [ "$state" = aborted-before-change ] ||
           { [ "$state" = preparing ] && [ "$(cat "$STATE_DIR/monitor-create-pending" 2>/dev/null || true)" != 1 ]; }; }; }; then
         [ ! -e "$ACTIVE" ] && [ ! -L "$ACTIVE" ] || die 'another run owns the active guard; refusing idempotent restore'
         verify_radio0_restored || die 'recorded restore state no longer matches radio0 AP ch6/20MHz'
-        assert_radio1_unchanged || die 'recorded restore state no longer matches radio1/phy7'
+        assert_radio1_unchanged || die 'recorded restore state no longer matches radio1'
         assert_config_unchanged || die 'recorded restore state no longer matches protected config hashes'
         printf '{"schema":"%s","event":"RESTORED","idempotent":true,"radio0":"verified read-only","radio1":"unchanged","config_sha256":"unchanged","guard":"already stopped"}\n' "$SCHEMA"
         return 0
@@ -398,7 +490,7 @@ restore_action() {
     if ! restore_runtime; then release_lock; die 'restore failed; watchdog/state left armed for recovery'; fi
     if ! cancel_guard_after_verified_restore; then release_lock; die 'restore verified but watchdog cancellation unconfirmed; state left for recovery'; fi
     release_lock
-    printf '{"schema":"%s","event":"RESTORED","radio0":"phy6 AP ch6/20MHz verified","radio1":"unchanged","config_sha256":"unchanged","guard":"cancelled after verification"}\n' "$SCHEMA"
+    printf '{"schema":"%s","event":"RESTORED","radio0":"phy%s AP ch6/20MHz verified","radio1":"phy%s unchanged","config_sha256":"unchanged","guard":"cancelled after verification"}\n' "$SCHEMA" "$PHY0" "$PHY1"
 }
 
 write_config_baseline() {
@@ -442,12 +534,13 @@ prepare_action() {
     [ -x "$STATE_DIR/$ECHO_NAME" ] || die 'verified echo110 binary is missing from the run directory'
     echo_sha=$(sha256sum "$STATE_DIR/$ECHO_NAME" | awk '{print $1}')
     [ "$echo_sha" = "$ECHO_SHA256" ] || die 'echo110 SHA256 mismatch'
-    assert_radio_map "$RADIO0" "$PHY0" || die 'radio0 is not exclusively mapped to phy6'
-    assert_radio_map "$RADIO1" "$PHY1" || die 'radio1 is not exclusively mapped to phy7'
+    discover_phy_map || die 'could not establish a unique live radio0/radio1 wiphy mapping'
+    assert_radio_map "$RADIO0" "$PHY0" || die 'radio0 live wiphy mapping is inconsistent'
+    assert_radio_map "$RADIO1" "$PHY1" || die 'radio1 live wiphy mapping is inconsistent'
     [ "$(radio_field "$RADIO0" up)" = true ] || die 'radio0 is not currently up'
     [ "$(radio_field "$RADIO0" disabled)" = false ] || die 'radio0 is disabled'
     [ "$(radio_field "$RADIO1" up)" = true ] || die 'radio1 is not currently up'
-    verify_radio0_restored || die 'radio0 is not currently AP ch6/20MHz; refusing a non-baseline switch'
+    verify_radio0_restored || die "radio0 on phy$PHY0 is not currently AP ch6/20MHz; refusing a non-baseline switch"
 
     [ ! -e "$ACTIVE" ] && [ ! -L "$ACTIVE" ] || die 'another Test111 run/guard is still active; do not replace its token'
     acquire_lock 1 || die 'another Test111 run holds the remote lock'
@@ -456,8 +549,12 @@ prepare_action() {
     assert_radio_map "$RADIO1" "$PHY1" || die 'radio1 mapping changed during preflight'
     [ "$(radio_field "$RADIO0" up)" = true ] || die 'radio0 stopped during preflight'
     [ "$(radio_field "$RADIO1" up)" = true ] || die 'radio1 stopped during preflight'
+    write_phy_map || die 'could not bind live radio/wiphy mapping to this run token'
+    load_phy_map || die 'saved radio/wiphy mapping did not verify'
+    assert_radio_map "$RADIO0" "$PHY0" || die 'radio0 mapping changed before guard start'
+    assert_radio_map "$RADIO1" "$PHY1" || die 'radio1 mapping changed before guard start'
     write_config_baseline || die 'could not snapshot protected config hashes'
-    write_radio1_baseline || die 'could not snapshot radio1/phy7 state'
+    write_radio1_baseline || die 'could not snapshot radio1 wiphy state'
     (set -C; printf '%s\n' "$RUN_TOKEN" > "$ACTIVE") 2>/dev/null || die 'could not claim active run token'
     printf '%s\n' "$RUN_TOKEN" > "$STATE_DIR/owner"
     printf '%s\n' preparing > "$STATE_DIR/state"
@@ -476,12 +573,12 @@ prepare_action() {
     PREPARE_IN_PROGRESS=1
 
     # iw111mon is the reserved Test111 interface. Existing instances are replaced
-    # only when they are actually monitor-type interfaces on the verified phy6.
+    # only when they are actually monitor-type interfaces on this run's verified wiphy.
     old_fields=$(info_fields "$MON" 2>/dev/null || true)
     if [ -n "$old_fields" ]; then
         old_phy=$(phy_for_if "$MON") || die 'existing iw111mon has unknown phy'
         old_type=$(printf '%s\n' "$old_fields" | awk -F '\t' '{print $3}')
-        [ "$old_phy" = "$PHY0" ] && [ "$old_type" = monitor ] || die 'existing iw111mon is not an owned phy6 monitor'
+        [ "$old_phy" = "$PHY0" ] && [ "$old_type" = monitor ] || die "existing iw111mon is not an owned phy$PHY0 monitor"
         iw dev "$MON" del || die 'could not remove existing owned iw111mon'
         iw dev "$MON" info >/dev/null 2>&1 && die 'existing iw111mon remained after delete'
     fi
@@ -492,27 +589,27 @@ prepare_action() {
     [ "$(radio_field "$RADIO0" up 2>/dev/null || true)" = false ] || die 'radio0 down not confirmed'
     assert_radio1_unchanged || die 'radio1 changed during radio0 stop'
 
-    # Re-read all phy6 interfaces after AP stop; any UP non-monitor is a hard stop.
+    # Re-read all interfaces on the run's wiphy after AP stop; any UP non-monitor is a hard stop.
     for name in $(phy_ifnames "$PHY0"); do
-        fields=$(info_fields "$name") || die "cannot read phy6 interface $name after radio0 down"
+        fields=$(info_fields "$name") || die "cannot read phy$PHY0 interface $name after radio0 down"
         type=$(printf '%s\n' "$fields" | awk -F '\t' '{print $3}')
-        if [ "$type" != monitor ] && iface_is_up "$name"; then die "phy6 still has UP non-monitor interface $name"; fi
+        if [ "$type" != monitor ] && iface_is_up "$name"; then die "phy$PHY0 still has UP non-monitor interface $name"; fi
     done
 
     printf '%s\n' 1 > "$STATE_DIR/monitor-create-pending"
-    iw phy "phy$PHY0" interface add "$MON" type monitor >/dev/null || die 'could not create phy6 monitor'
+    iw phy "phy$PHY0" interface add "$MON" type monitor >/dev/null || die "could not create monitor on phy$PHY0"
     ip link set dev "$MON" up >/dev/null || die 'could not set monitor UP'
     iw dev "$MON" set channel 6 >/dev/null || die 'could not tune monitor to channel 6'
     fields=$(info_fields "$MON") || die 'could not re-read monitor ifindex/wdev'
     phy=$(phy_for_if "$MON") || die 'new monitor has no phy mapping'
     type=$(printf '%s\n' "$fields" | awk -F '\t' '{print $3}')
-    [ "$phy" = "$PHY0" ] && [ "$type" = monitor ] || die 'new monitor identity is not phy6 monitor'
+    [ "$phy" = "$PHY0" ] && [ "$type" = monitor ] || die "new monitor identity is not phy$PHY0 monitor"
     printf '%s\n' "$fields" > "$STATE_DIR/monitor.identity"
     chmod 600 "$STATE_DIR/monitor.identity"
     for name in $(phy_ifnames "$PHY0"); do
-        fields_check=$(info_fields "$name") || die "cannot inspect phy6 interface $name"
+        fields_check=$(info_fields "$name") || die "cannot inspect phy$PHY0 interface $name"
         type_check=$(printf '%s\n' "$fields_check" | awk -F '\t' '{print $3}')
-        if [ "$name" != "$MON" ] && [ "$type_check" != monitor ] && iface_is_up "$name"; then die "phy6 has UP non-monitor interface $name"; fi
+        if [ "$name" != "$MON" ] && [ "$type_check" != monitor ] && iface_is_up "$name"; then die "phy$PHY0 has UP non-monitor interface $name"; fi
     done
     details=$(iwinfo "$MON" info 2>/dev/null) || die 'iwinfo cannot read new monitor frequency'
     printf '%s\n' "$details" | grep -Eq 'Channel:[[:space:]]*6[[:space:]]*\(2\.437[[:space:]]+GHz\)' || die 'monitor is not on 2437 MHz'
@@ -522,13 +619,14 @@ prepare_action() {
     release_lock
     PREPARE_IN_PROGRESS=0
     PREPARE_SUCCEEDED=1
-    printf '{"schema":"%s","event":"PREPARED","run_token":"%s","radio0":"down","monitor":"phy6 iw111mon","ifindex":%s,"wdev":"%s","frequency_mhz":2437,"echo_sha256":"%s","watchdog":"ready before radio0 down","rf_action":false}\n' \
-        "$SCHEMA" "$RUN_TOKEN" "$(printf '%s\n' "$fields" | awk -F '\t' '{print $1}')" "$(printf '%s\n' "$fields" | awk -F '\t' '{print $2}')" "$ECHO_SHA256"
+    printf '{"schema":"%s","event":"PREPARED","run_token":"%s","radio0_phy":"%s","radio1_phy":"%s","radio0":"down","monitor":"phy%s iw111mon","ifindex":%s,"wdev":"%s","frequency_mhz":2437,"echo_sha256":"%s","watchdog":"ready before radio0 down","rf_action":false}\n' \
+        "$SCHEMA" "$RUN_TOKEN" "$PHY0" "$PHY1" "$PHY0" "$(printf '%s\n' "$fields" | awk -F '\t' '{print $1}')" "$(printf '%s\n' "$fields" | awk -F '\t' '{print $2}')" "$ECHO_SHA256"
 }
 
 run_action() {
     validate_state_path
     validate_owner
+    load_phy_map || die 'cannot run without the verified run radio/wiphy mapping'
     [ "$(cat "$STATE_DIR/state" 2>/dev/null || true)" = prepared ] || die 'run requires completed prepare'
     [ "$(active_token)" = "$RUN_TOKEN" ] || die 'run token no longer owns active guard'
     read -r ready_token ready_pid ready_uptime < "$STATE_DIR/guard.ready" || die 'watchdog uptime receipt missing'
@@ -548,9 +646,9 @@ run_action() {
     [ ! -e "$STATE_DIR/echo.pid" ] || die 'echo already launched for this run token'
     fields=$(info_fields "$MON") || die 'monitor disappeared before echo launch'
     [ "$fields" = "$(cat "$STATE_DIR/monitor.identity" 2>/dev/null || true)" ] || die 'monitor ifindex/wdev changed before echo launch'
-    [ "$(phy_for_if "$MON")" = "$PHY0" ] || die 'monitor no longer maps to phy6'
+    [ "$(phy_for_if "$MON")" = "$PHY0" ] || die "monitor no longer maps to phy$PHY0"
     type=$(printf '%s\n' "$fields" | awk -F '\t' '{print $3}')
-    [ "$type" = monitor ] && iface_is_up "$MON" || die 'monitor is not UP/type monitor on phy6'
+    [ "$type" = monitor ] && iface_is_up "$MON" || die "monitor is not UP/type monitor on phy$PHY0"
     # iwinfo issues a live interface query and is a cheap frequency preflight.
     details=$(iwinfo "$MON" info 2>/dev/null) || die 'iwinfo frequency preflight failed'
     printf '%s\n' "$details" | grep -Eq 'Channel:[[:space:]]*6[[:space:]]*\(2\.437[[:space:]]+GHz\)' || die 'monitor frequency is not 2437 MHz'
@@ -576,6 +674,7 @@ run_action() {
 watchdog_action() {
     validate_state_path
     validate_owner
+    load_phy_map || exit 3
     trap '' HUP INT
     trap '[ -e "$STATE_DIR/cancel" ] && exit 0' TERM
     [ "$(active_token)" = "$RUN_TOKEN" ] || exit 2

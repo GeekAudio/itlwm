@@ -9458,9 +9458,10 @@ static int exerciseDirectedDataTx(P2PProbeRun *probe)
             if (!sessionEnded) {
                 const uint64_t waitEndUs =
                     p2pProbeMonotonicNanoseconds() / 1000ULL + 350000ULL;
+                bool endWaitSatisfied = false;
                 while ((p2pProbeMonotonicNanoseconds() / 1000ULL) < waitEndUs) {
                     const int readError = readRocState(probe, &event);
-                    if(!readError)
+                    if(!readError && !event.snapshot.endSeen)
                         drainDirectedDataRxOutsideMainGate(probe,event);
                     if (readError)
                         return recordFailure(readError,
@@ -9472,6 +9473,8 @@ static int exerciseDirectedDataTx(P2PProbeRun *probe)
                                              kDirectedDataQuarantined);
                     probe->directedDataCompletionObserved =
                         data.completionObserved;
+                    if (data.state == TahoeP2PDirectedDataState::kQuarantined)
+                        return recordFailure(EIO, kDirectedDataQuarantined);
                     if (event.snapshot.outcomeUnknown)
                         return recordFailure(EIO, kDirectedDataQuarantined);
                     if (event.snapshot.endSeen) {
@@ -9480,14 +9483,26 @@ static int exerciseDirectedDataTx(P2PProbeRun *probe)
                         if (!sessionEnded)
                             return recordFailure(EPROTO,
                                                  kDirectedDataQuarantined);
-                        if (data.doorbellIssued && !data.completionObserved)
-                            return recordFailure(ETIMEDOUT,
+                        if (!data.doorbellIssued || data.completionObserved) {
+                            endWaitSatisfied =
+                                p2pProbeMonotonicNanoseconds() / 1000ULL <
+                                waitEndUs;
+                            break;
+                        }
+                        // END closes RX and submission in readRocState, but
+                        // is not a TX completion. Keep this exact live slot
+                        // until its TX_RSP arrives within the existing budget.
+                        // Do not renew ROC, submit again, or release its DMA.
+                        if (data.state != TahoeP2PDirectedDataState::kInFlight ||
+                            !data.completionArmed || !data.mbufHeldByRing)
+                            return recordFailure(EIO,
                                                  kDirectedDataQuarantined);
-                        break;
                     }
                     IOSleep(2);
                 }
-                if (!sessionEnded)
+                // A response first observed after the deadline cannot turn
+                // an exhausted wait into success via the final snapshot.
+                if (!endWaitSatisfied)
                     return recordFailure(ETIMEDOUT,
                                          kDirectedDataQuarantined);
             }
@@ -9496,6 +9511,8 @@ static int exerciseDirectedDataTx(P2PProbeRun *probe)
             const bool finalDataValid = iwx_tahoe_p2p_directed_data_snapshot(
                 owner, &owner->nativeP2pDirectedDataTx_, &finalData);
             if (!finalDataValid)
+                return recordFailure(EIO, kDirectedDataQuarantined);
+            if (finalData.state == TahoeP2PDirectedDataState::kQuarantined)
                 return recordFailure(EIO, kDirectedDataQuarantined);
             probe->directedDataCompletionObserved =
                 finalData.completionObserved;

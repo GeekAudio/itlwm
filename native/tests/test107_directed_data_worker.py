@@ -112,8 +112,11 @@ assert remove < drained
 assert "iwx_tahoe_p2p_directed_data_never_armed(" in worker
 assert "iwx_tahoe_p2p_tvqm_abort_idle_after_end(" in worker
 assert "&owner->nativeP2pTxQueue_, sessionEnded, neverArmed," in worker
-assert "if (data.doorbellIssued && !data.completionObserved)" in worker
-assert worker.count("if (data.doorbellIssued && !data.completionObserved)") == 1
+assert "if (finalData.doorbellIssued && !finalData.completionObserved)" in worker
+assert "if (!endWaitSatisfied)" in worker
+assert "if (!data.doorbellIssued || data.completionObserved)" in worker
+assert "if (data.state == TahoeP2PDirectedDataState::kQuarantined)" in worker
+assert "if (finalData.state == TahoeP2PDirectedDataState::kQuarantined)" in worker
 
 # Stage 8 requires successful local firmware completion and complete cleanup.
 # Completion is explicitly not presented as a peer ACK.

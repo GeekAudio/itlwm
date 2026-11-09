@@ -19,11 +19,14 @@ DEFINITIONS = SOURCE.rsplit('\nmain "$@"', 1)[0]
 
 def run_restore_mock(*, token: str, active: Optional[str], state: str = "prepared",
                      terminate_ok: bool = True, ap_ok: bool = True,
-                     owner_written: bool = True) -> subprocess.CompletedProcess[str]:
+                     owner_written: bool = True,
+                     up_failures: int = 0) -> subprocess.CompletedProcess[str]:
     temp = tempfile.TemporaryDirectory()
     root = Path(temp.name)
     state_dir = root / "state"
     state_dir.mkdir(mode=0o700)
+    (state_dir / "radio0.phy").write_text("0\n")
+    (state_dir / "radio1.phy").write_text("1\n")
     if owner_written:
         (state_dir / "owner").write_text(token + "\n")
     (state_dir / "state").write_text(state + "\n")
@@ -42,7 +45,19 @@ validate_owner() {{ :; }}
 event() {{ printf '%s\\n' "$1" >> "$LOG"; }}
 terminate_echo() {{ event terminate; return {0 if terminate_ok else 1}; }}
 remove_owned_monitor() {{ event remove-monitor; return 0; }}
-ubus() {{ event "ubus $*"; return 0; }}
+mock_ubus_failures={up_failures}
+mock_ubus_calls=0
+ubus() {{
+    event "ubus $*"
+    if [ "$1" = call ] && [ "$2" = network.wireless ] && [ "$3" = up ]; then
+        mock_ubus_calls=$((mock_ubus_calls + 1))
+        if [ "$mock_ubus_calls" -le "$mock_ubus_failures" ]; then
+            printf 'Command failed: Not found\\n' >&2
+            return 1
+        fi
+    fi
+    return 0
+}}
 verify_radio0_restored() {{ event verify-radio0; return {0 if ap_ok else 1}; }}
 assert_radio1_unchanged() {{ event verify-radio1; return 0; }}
 assert_config_unchanged() {{ event verify-config; return 0; }}
@@ -75,6 +90,82 @@ def make_mock_watchdog_proc(state_dir: Path, pid: str, token: str,
 
 
 class MonitorWindowTests(unittest.TestCase):
+    def test_echo_hash_matches_test124_peer_candidate(self):
+        digest_line = next(line for line in SOURCE.splitlines()
+                           if line.startswith("ECHO_SHA256="))
+        self.assertEqual(
+            digest_line.split("=", 1)[1].strip("'\""),
+            "72f50bb507b708157207f8f1520470ed2066eaf5caf6ad0752e89d60a1fec9a3",
+        )
+
+    def test_live_radio_mapping_discovers_router_wiphy_zero_and_one(self):
+        script = DEFINITIONS + r"""
+radio_ifnames() { case "$1" in radio0) printf 'wlan0\n' ;; radio1) printf 'wlan1\n' ;; *) return 1 ;; esac; }
+iw() { printf '%s\n' 'phy#0' ' Interface wlan0' 'phy#1' ' Interface wlan1'; }
+discover_phy_map || exit 1
+printf 'MAP=%s,%s\n' "$PHY0" "$PHY1"
+"""
+        result = subprocess.run(["/bin/sh"], input=script, text=True,
+                                capture_output=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("MAP=0,1", result.stdout)
+
+    def test_live_radio_mapping_rejects_ambiguous_or_shared_wiphys(self):
+        cases = (
+            ("radio0) printf 'wlan0 wlan0aux\\n'", "'phy#0' ' Interface wlan0' 'phy#2' ' Interface wlan0aux' 'phy#1' ' Interface wlan1'"),
+            ("radio0) printf 'wlan0\\n'", "'phy#0' ' Interface wlan0' ' Interface wlan1'"),
+            ("radio0) printf '\\n'", "'phy#0' ' Interface wlan0' 'phy#1' ' Interface wlan1'"),
+        )
+        for case_arm, iw_rows in cases:
+            with self.subTest(case_arm=case_arm):
+                script = DEFINITIONS + f"""
+radio_ifnames() {{ case \"$1\" in {case_arm} ;; radio1) printf 'wlan1\\n' ;; *) return 1 ;; esac; }}
+iw() {{ printf '%s\\n' {iw_rows}; }}
+discover_phy_map
+"""
+                result = subprocess.run(["/bin/sh"], input=script, text=True,
+                                        capture_output=True, check=False)
+                self.assertNotEqual(result.returncode, 0, result.stderr)
+
+    def test_run_token_wiphy_mapping_persists_and_is_reloaded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = Path(tmp) / "state"
+            state.mkdir(mode=0o700)
+            script = DEFINITIONS + f"""
+STATE_DIR={shlex.quote(str(state))}
+PHY0=0
+PHY1=1
+write_phy_map || exit 1
+PHY0=''
+PHY1=''
+load_phy_map || exit 2
+printf 'MAP=%s,%s\\n' "$PHY0" "$PHY1"
+"""
+            result = subprocess.run(["/bin/sh"], input=script, text=True,
+                                    capture_output=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("MAP=0,1", result.stdout)
+            self.assertEqual((state / "radio0.phy").stat().st_mode & 0o777, 0o600)
+            self.assertEqual((state / "radio1.phy").stat().st_mode & 0o777, 0o600)
+
+    def test_run_token_wiphy_mapping_rejects_missing_and_corrupt_receipts(self):
+        for radio0_value, radio1_value in ((None, None), ("0", "0"), ("06", "1"), ("256", "1")):
+            with self.subTest(radio0_value=radio0_value, radio1_value=radio1_value):
+                with tempfile.TemporaryDirectory() as tmp:
+                    state = Path(tmp) / "state"
+                    state.mkdir(mode=0o700)
+                    if radio0_value is not None:
+                        (state / "radio0.phy").write_text(radio0_value + "\n")
+                    if radio1_value is not None:
+                        (state / "radio1.phy").write_text(radio1_value + "\n")
+                    script = DEFINITIONS + f"""
+STATE_DIR={shlex.quote(str(state))}
+load_phy_map
+"""
+                    result = subprocess.run(["/bin/sh"], input=script, text=True,
+                                            capture_output=True, check=False)
+                    self.assertNotEqual(result.returncode, 0, result.stderr)
+
     def test_state_directory_metadata_uses_strict_numeric_ls_fields(self):
         token = uuid.uuid4().hex
         state_dir = Path("/tmp") / f"iw111echo-{token}"
@@ -110,6 +201,8 @@ validate_state_path
             active = root / "active"
             active.write_text(token + "\n")
             (state_dir / "owner").write_text(token + "\n")
+            (state_dir / "radio0.phy").write_text("0\n")
+            (state_dir / "radio1.phy").write_text("1\n")
             script = DEFINITIONS + f"""
 RUN_TOKEN={shlex.quote(token)}
 STATE_DIR={shlex.quote(str(state_dir))}
@@ -303,6 +396,41 @@ on_exit
         self.assertIn("FINAL_ACTIVE=", result.stdout)
         self.assertIn("FINAL_STATE=restored", result.stdout)
         self.assertFalse(result._test_active.exists())
+
+    def test_transient_radio0_up_failure_is_recorded_then_retried_and_verified(self):
+        token = uuid.uuid4().hex
+        result = run_restore_mock(token=token, active=token, up_failures=1)
+        self.addCleanup(result._test_tempdir.cleanup)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        events = result._test_log.read_text().splitlines()
+        up_event = 'ubus call network.wireless up {"device":"radio0"}'
+        self.assertEqual(events, [
+            "terminate", "remove-monitor", up_event, up_event,
+            "verify-radio0", "verify-radio1", "verify-config", "cancel-guard",
+        ])
+        receipt = result._test_state.parent / "restore-radio0-up.first-failure"
+        self.assertEqual(receipt.read_bytes(), b"exit_code=1\nCommand failed: Not found\n")
+        self.assertEqual(receipt.stat().st_mode & 0o777, 0o600)
+        self.assertEqual(result.stderr, "Command failed: Not found\n")
+        self.assertIn('"event":"RESTORED"', result.stdout)
+        self.assertFalse(result._test_active.exists())
+
+    def test_radio0_up_retry_exhaustion_keeps_guard_and_preserves_first_failure(self):
+        token = uuid.uuid4().hex
+        result = run_restore_mock(token=token, active=token, up_failures=3)
+        self.addCleanup(result._test_tempdir.cleanup)
+        self.assertNotEqual(result.returncode, 0)
+        events = result._test_log.read_text().splitlines()
+        up_event = 'ubus call network.wireless up {"device":"radio0"}'
+        self.assertEqual(events, ["terminate", "remove-monitor", up_event, up_event, up_event])
+        receipt = result._test_state.parent / "restore-radio0-up.first-failure"
+        self.assertEqual(receipt.read_bytes(), b"exit_code=1\nCommand failed: Not found\n")
+        self.assertEqual(result.stderr.count("Command failed: Not found\n"), 3)
+        self.assertIn("ubus failed to bring radio0 up after 3 attempts", result.stderr)
+        self.assertNotIn("cancel-guard", result.stderr + result.stdout)
+        self.assertEqual(result._test_active.read_text().strip(), token)
+        self.assertEqual(result._test_state.read_text().strip(), "prepared")
+        self.assertNotIn('"event":"RESTORED"', result.stdout)
 
     def test_old_token_cannot_touch_new_run_and_restored_retry_is_read_only(self):
         old_token, new_token = uuid.uuid4().hex, uuid.uuid4().hex
