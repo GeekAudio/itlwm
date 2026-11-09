@@ -10236,14 +10236,14 @@ static int exerciseDirectedDataTx(P2PProbeRun *probe)
                     p2pProbeMonotonicNanoseconds() / 1000ULL + 350000ULL;
                 bool endWaitSatisfied = false;
                 while ((p2pProbeMonotonicNanoseconds() / 1000ULL) < waitEndUs) {
-                    if (!sessionEnded) {
-                        const int readError = readRocState(probe, &event);
-                        if(!readError && !event.snapshot.endSeen)
-                            drainDirectedDataRxOutsideMainGate(probe,event);
-                        if (readError)
-                            return recordFailure(readError,
-                                                 kDirectedDataQuarantined);
-                    }
+                    // END stops new input, not owner/epoch validation while
+                    // waiting for the exact outstanding TX completion.
+                    const int readError = readRocState(probe, &event);
+                    if (!readError && !event.snapshot.endSeen)
+                        drainDirectedDataRxOutsideMainGate(probe, event);
+                    if (readError)
+                        return recordFailure(readError,
+                                             kDirectedDataQuarantined);
                     const int syncError = syncDirectedDataOriginProofs(
                         probe, &originProofTracker, &event);
                     if (syncError && originProofFailure == 0)

@@ -2537,13 +2537,18 @@ static bool directedDataAllDoorbellsCompleted(
 {
     if (!context)
         return false;
+    bool anyDoorbell = false;
     for (uint8_t slot = 0; slot < context->packetCount; ++slot) {
         const auto &packet = context->packets[slot];
-        if (packet.doorbellIssued &&
-            (!packet.completionObserved || !packet.resourcesAbsent))
+        if (!packet.doorbellIssued)
+            continue;
+        anyDoorbell = true;
+        if (!packet.completionObserved || !packet.resourcesAbsent)
             return false;
     }
-    return true;
+    // A no-doorbell run is proved by the separate unsubmitted/cancel path.
+    // Never let the empty set of submitted packets satisfy completion.
+    return anyDoorbell;
 }
 
 static bool directedDataHasDoorbellHistory(
@@ -2562,6 +2567,141 @@ struct DirectedDataGateCheck {
     TahoeP2PDirectedDataContext *context;
     bool valid;
 };
+
+
+static void directedDataRecordUnsubmittedSlot(
+    TahoeP2PDirectedDataContext *context,
+    TahoeP2PDirectedDataReason reason)
+{
+    if (!context || context->currentSlot >= context->packetCount ||
+        context->packets[context->currentSlot].doorbellIssued ||
+        context->state == TahoeP2PDirectedDataState::kQuarantined)
+        return;
+    auto &packet = context->packets[context->currentSlot];
+    packet.resourcesAbsent = true;
+    packet.permitIssued = false;
+    packet.sequenceReserved = false;
+    context->sequenceReservationValid = false;
+    context->permitIssued = false;
+    context->permit = {};
+    context->completionObserved = directedDataHasDoorbellHistory(context) &&
+        directedDataAllDoorbellsCompleted(context);
+    // A canceled second packet cannot inherit the first packet's successful
+    // frame-attempt result. Keep this a clean failure, never an exchange pass.
+    context->frameAttemptSucceeded = false;
+    context->reason = reason;
+    context->state = context->completionObserved ?
+        TahoeP2PDirectedDataState::kCompleted :
+        TahoeP2PDirectedDataState::kClosed;
+}
+
+struct DirectedDataUnsubmittedNextSlotEvidence {
+    bool originInactive;
+    bool queueCurrent;
+    bool ringAndQueueDrained;
+};
+
+static bool directedDataRetireUnsubmittedNextSlot(
+    TahoeP2PDirectedDataContext *context,
+    const DirectedDataUnsubmittedNextSlotEvidence &evidence)
+{
+    if (!context || context->packetCount != 2 || context->currentSlot != 1 ||
+        !context->ticketBound || !context->originClosed ||
+        !evidence.originInactive || !evidence.queueCurrent ||
+        !evidence.ringAndQueueDrained || context->mbufHeldByRing ||
+        context->state == TahoeP2PDirectedDataState::kQuarantined ||
+        (context->state != TahoeP2PDirectedDataState::kTicketBound &&
+         context->state != TahoeP2PDirectedDataState::kPermitIssued &&
+         context->state != TahoeP2PDirectedDataState::kClosed))
+        return false;
+    auto &first = context->packets[0];
+    auto &second = context->packets[1];
+    const auto completion = context->completion.snapshot();
+    if (!first.identityBound || !first.doorbellIssued ||
+        !first.completionObserved || !first.resourcesAbsent ||
+        second.doorbellIssued || !directedDataHasDoorbellHistory(context) ||
+        !directedDataAllDoorbellsCompleted(context) ||
+        (completion.armed && !completion.completed))
+        return false;
+
+    // The origin ticket is already inactive and the queue/ring snapshot was
+    // checked under its lock. Slot one never reached a doorbell, so its local
+    // permit and sequence reservation can now be retired without guessing at
+    // DMA ownership.
+    second.resourcesAbsent = true;
+    second.permitIssued = false;
+    second.sequenceReserved = false;
+    context->sequenceReservationValid = false;
+    context->permitIssued = false;
+    context->permit = {};
+    context->completionObserved = true;
+    context->frameAttemptSucceeded = false;
+    context->state = TahoeP2PDirectedDataState::kCompleted;
+    return true;
+}
+
+static bool directedDataRetireUnsubmittedNextSlotOnMainGate(
+    ItlIwx *owner, TahoeP2PDirectedDataContext *context,
+    bool originInactive)
+{
+    if (!owner || !context || !owner->tahoeP2pOnMainGate() ||
+        !originInactive || context->packetCount != 2 ||
+        context->currentSlot != 1 ||
+        (context->state != TahoeP2PDirectedDataState::kTicketBound &&
+         context->state != TahoeP2PDirectedDataState::kPermitIssued &&
+         context->state != TahoeP2PDirectedDataState::kClosed))
+        return false;
+
+    auto *queueLease = &owner->nativeP2pTxQueue_;
+    struct iwx_tx_ring *ring = nullptr;
+    IOInterruptState interruptState = 0;
+    if (context->queueId == IWX_INVALID_QUEUE ||
+        context->queueId >= nitems(owner->com.txq) ||
+        context->queueId != queueLease->queueId ||
+        !iwx_tahoe_p2p_tvqm_lock_completion(&owner->com, queueLease,
+            context->queueId, &ring, &interruptState))
+        return false;
+
+    const IntelP2PTx::QueueSnapshot lifecycle =
+        queueLease->lifecycle.snapshot();
+    bool queueCurrent = queueLease->state == TahoeP2PResourceState::kActive &&
+        queueLease->generation == context->binding.generation &&
+        queueLease->allocationSerial == context->queueAllocationSerial &&
+        queueLease->stationRole == TahoeP2PStationRole::kDirectedPeerLink &&
+        queueLease->firmwareTid == 0 &&
+        queueLease->stationId == context->stationId &&
+        queueLease->everDoorbelled && !queueLease->submissionBusy &&
+        !queueLease->unsubmittedAbortInProgress &&
+        !queueLease->idleAbortAfterEndInProgress &&
+        queueLease->pendingRing == nullptr &&
+        lifecycle.state == IntelP2PTx::QueueState::kActive &&
+        lifecycle.generation == context->binding.generation &&
+        lifecycle.queueId == context->queueId &&
+        lifecycle.stationId == context->stationId &&
+        lifecycle.outstandingTx == 0 && lifecycle.completionObserved &&
+        lifecycle.ringMustRemainOwned;
+    bool ringAndQueueDrained = queueCurrent && ring &&
+        ring == &owner->com.txq[context->queueId] &&
+        ring->qid == context->queueId && ring->desc &&
+        ring->ring_count >= 8 &&
+        ring->ring_count <= IWX_TFD_QUEUE_SIZE_MAX &&
+        (ring->ring_count & (ring->ring_count - 1)) == 0 &&
+        ring->ring_count == context->ringSize && ring->queued == 0 &&
+        ring->cur < ring->ring_count && ring->tail < ring->ring_count &&
+        ring->cur == ring->tail;
+    for (uint32_t index = 0; ringAndQueueDrained &&
+         index < ring->ring_count; ++index) {
+        if (ring->data[index].m || ring->data[index].in ||
+            le16toh(ring->desc[index].num_tbs) != 0)
+            ringAndQueueDrained = false;
+    }
+    iwx_tahoe_p2p_tvqm_unlock(queueLease, interruptState);
+
+    const DirectedDataUnsubmittedNextSlotEvidence evidence{
+        originInactive, queueCurrent, ringAndQueueDrained};
+    return directedDataRetireUnsubmittedNextSlot(context, evidence);
+}
+
 
 static bool directedDataMainGateCheck(ItlIwx *owner,
     TahoeP2PDirectedDataContext *context)
@@ -2757,7 +2897,7 @@ static bool directedDataCanClearMayOwnResource(
     const auto completion = context->completion.snapshot();
     if (completion.armed && !completion.completed)
         return false;
-    const bool notSubmitted = !context->doorbellIssued &&
+    const bool notSubmitted = !directedDataHasDoorbellHistory(context) &&
         (!completion.armed || completion.completed);
     const bool completed = directedDataHasDoorbellHistory(context) &&
         directedDataAllDoorbellsCompleted(context) &&
@@ -2825,7 +2965,8 @@ static bool directedDataCanSubmitSlot(
         packet.resourcesAbsent)
         return false;
     if (context->currentSlot == 0)
-        return !context->doorbellIssued && !queueLease->everDoorbelled &&
+        return !directedDataHasDoorbellHistory(context) &&
+            !queueLease->everDoorbelled &&
             !queueLease->lifecycle.snapshot().completionObserved;
     return directedDataPriorSlotProofComplete(context, queueLease);
 }
@@ -2839,13 +2980,7 @@ static int directedDataFailBeforeDoorbell(
     if (context && context->currentSlot < context->packetCount &&
         !context->packets[context->currentSlot].doorbellIssued &&
         context->state != TahoeP2PDirectedDataState::kQuarantined) {
-        context->packets[context->currentSlot].resourcesAbsent = true;
-        context->reason = reason;
-        context->state = context->doorbellIssued ?
-            TahoeP2PDirectedDataState::kCompleted :
-            TahoeP2PDirectedDataState::kClosed;
-        context->permitIssued = false;
-        context->permit.valid = false;
+        directedDataRecordUnsubmittedSlot(context, reason);
     }
     return error;
 }
@@ -2889,7 +3024,7 @@ int iwx_tahoe_p2p_directed_data_arm(
         !sc->sc_p2p.phy_leased ||
         (context->state != TahoeP2PDirectedDataState::kIdle &&
          context->state != TahoeP2PDirectedDataState::kClosed) ||
-        context->doorbellIssued || context->mbufHeldByRing ||
+        directedDataHasDoorbellHistory(context) || context->mbufHeldByRing ||
         (context->completion.snapshot().armed &&
          !context->completion.snapshot().completed))
         return EINVAL;
@@ -3103,7 +3238,9 @@ static IOReturn directedDataReserveSequencesAction(
         context->packetToken = 0;
         context->permit = {};
         context->permitIssued = false;
-        context->completionObserved = false;
+        // completionObserved is run-level history: slot zero completed and
+        // must remain represented until slot one actually rings the doorbell.
+        // Snapshot/cleanup derive this from every immutable slot record.
         context->frameAttemptSucceeded = false;
         context->firmwareStatus = 0xffff;
     }
@@ -3668,6 +3805,8 @@ static int directedDataTxSubmitOnMainGate(
             context->mbufHeldByRing = false;
             return cancelError;
         }
+        directedDataRecordUnsubmittedSlot(context,
+            TahoeP2PDirectedDataReason::kCompletionFailure);
         return result;
     };
 
@@ -3696,19 +3835,8 @@ static int directedDataTxSubmitOnMainGate(
             context->reason = TahoeP2PDirectedDataReason::kDrainMismatch;
             return queueCancelError;
         }
-        packet->resourcesAbsent = true;
-        packet->permitIssued = false;
-        context->permitIssued = false;
-        context->permit.valid = false;
-        context->sequenceReservationValid = false;
         context->mbufHeldByRing = false;
-        context->completionObserved = directedDataAllDoorbellsCompleted(
-            context);
-        context->frameAttemptSucceeded = false;
-        context->reason = reason;
-        context->state = context->completionObserved ?
-            TahoeP2PDirectedDataState::kCompleted :
-            TahoeP2PDirectedDataState::kClosed;
+        directedDataRecordUnsubmittedSlot(context, reason);
         return result;
     };
 
@@ -3879,6 +4007,9 @@ static int directedDataTxSubmitOnMainGate(
     packet->expectedNextSsn = context->expectedNextSsn;
     directedDataSetMayOwnResource(context, true);
     context->doorbellIssued = true;
+    // A newly submitted packet makes the run-level all-doorbells-complete
+    // proof false until this exact slot's TX_RSP retires its DMA resources.
+    context->completionObserved = false;
     context->mbufHeldByRing = true;
     packet->doorbellIssued = true;
     packet->doorbellUs = finalSubmitUs;
@@ -4168,7 +4299,8 @@ bool iwx_tahoe_p2p_directed_data_tx_response(
     currentPacket.frameAttemptSucceeded = completion.frameAttemptSucceeded;
     currentPacket.resourcesAbsent = true;
     currentPacket.originCompletionRecorded = false;
-    context->completionObserved = directedDataAllDoorbellsCompleted(context);
+    context->completionObserved = directedDataHasDoorbellHistory(context) &&
+        directedDataAllDoorbellsCompleted(context);
     context->frameAttemptSucceeded = context->completionObserved &&
         completion.frameAttemptSucceeded &&
         (context->currentSlot == 0 ||
@@ -4194,7 +4326,7 @@ bool iwx_tahoe_p2p_directed_data_reject_ba(
         queueLease->allocationSerial == context->queueAllocationSerial &&
         queueLease->stationRole == TahoeP2PStationRole::kDirectedPeerLink &&
         queueLease->firmwareTid == 0;
-    if (!currentAllocation && !context->doorbellIssued)
+    if (!currentAllocation && !directedDataHasDoorbellHistory(context))
         return false;
     iwx_tahoe_p2p_directed_data_quarantine(context,
         TahoeP2PDirectedDataReason::kResponseForeign);
@@ -4282,14 +4414,31 @@ static IOReturn directedDataCommitCloseAction(
     if (commit->reason != TahoeP2PDirectedDataReason::kNone &&
         context->reason == TahoeP2PDirectedDataReason::kNone)
         context->reason = commit->reason;
-    if (context->doorbellIssued &&
-        (!context->completionObserved || context->mbufHeldByRing)) {
+    const bool anyDoorbell = directedDataHasDoorbellHistory(context);
+    const bool allDoorbellsCompleted =
+        directedDataAllDoorbellsCompleted(context);
+    const bool unsubmittedNextSlotCandidate = anyDoorbell &&
+        allDoorbellsCompleted && context->packetCount == 2 &&
+        context->currentSlot == 1 && !context->packets[1].doorbellIssued &&
+        (context->state == TahoeP2PDirectedDataState::kTicketBound ||
+         context->state == TahoeP2PDirectedDataState::kPermitIssued ||
+         context->state == TahoeP2PDirectedDataState::kClosed);
+    if (unsubmittedNextSlotCandidate &&
+        !directedDataRetireUnsubmittedNextSlotOnMainGate(
+            owner, context, commit->originInactive)) {
+        iwx_tahoe_p2p_directed_data_quarantine(context,
+            TahoeP2PDirectedDataReason::kDrainMismatch);
+        commit->result = EBUSY;
+        return kIOReturnSuccess;
+    }
+    if (anyDoorbell && (!allDoorbellsCompleted ||
+        !context->completionObserved || context->mbufHeldByRing)) {
         iwx_tahoe_p2p_directed_data_quarantine(context,
             TahoeP2PDirectedDataReason::kDoorbellUnknown);
         commit->result = EBUSY;
         return kIOReturnSuccess;
     }
-    if (!context->doorbellIssued &&
+    if (!anyDoorbell &&
         context->state != TahoeP2PDirectedDataState::kQuarantined)
         context->state = TahoeP2PDirectedDataState::kClosed;
     directedDataMarkCompletedClosed(context);
@@ -4446,7 +4595,9 @@ static IOReturn directedDataHardStopFinalizeAction(
             finalize->requiredStopProofs ||
         (context->ticketBound && !context->originClosed) ||
         (!finalize->queueReleased && (context->mbufHeldByRing ||
-         (context->doorbellIssued && !context->completionObserved)))) {
+         (directedDataHasDoorbellHistory(context) &&
+          (!context->completionObserved ||
+           !directedDataAllDoorbellsCompleted(context)))))) {
         finalize->result = EBUSY;
         return kIOReturnSuccess;
     }
@@ -4547,8 +4698,9 @@ static bool directedDataCaptureSnapshot(
     value.completionArmed = completion.armed;
     value.sequenceReservationValid = context->sequenceReservationValid;
     value.permitIssued = context->permitIssued;
-    value.doorbellIssued = context->doorbellIssued;
-    value.completionObserved = context->completionObserved;
+    value.doorbellIssued = directedDataHasDoorbellHistory(context);
+    value.completionObserved = value.doorbellIssued &&
+        directedDataAllDoorbellsCompleted(context);
     value.frameAttemptSucceeded = context->frameAttemptSucceeded;
     value.mbufHeldByRing = context->mbufHeldByRing;
     value.hardStopDrained = context->hardStopDrained;

@@ -21951,15 +21951,18 @@ iwx_rx_pkt(struct iwx_softc *sc, struct iwx_rx_data *data,
             // observations only. Malformed envelopes and BA stay aggregate.
             using namespace TahoeP2PDirectedDataTxWitness;
             const uint32_t required = kQueue | kSsn | kFrameCount;
+            const uint16_t ringSize = nativeP2pDirectedDataTx_.ringSize;
             if (directedWitness.command == IWX_TX_CMD &&
                 (directedWitness.presence & required) == required &&
-                directedWitness.frameCount == 1) {
+                directedWitness.frameCount == 1 && ringSize >= 8 &&
+                ringSize <= IWX_TFD_QUEUE_SIZE_MAX &&
+                (ringSize & (ringSize - 1)) == 0) {
                 auto packetWitness =
                     iwx_tahoe_p2p_directed_data_tx_witness_for_descriptor(
                         &nativeP2pDirectedDataTx_,
                         uint16_t(directedWitness.queue),
                         uint16_t((directedWitness.ssn - 1) &
-                                 (IWX_TX_RING_COUNT - 1)));
+                                 (ringSize - 1)));
                 if (packetWitness)
                     packetWitness->remember(false, directedWitness);
             }
