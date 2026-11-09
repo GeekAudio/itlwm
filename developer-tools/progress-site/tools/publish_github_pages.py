@@ -181,7 +181,7 @@ def snapshot_site(*, refresh: bool = True) -> tuple[dict[str, bytes], dict]:
         raise PublishError("Generated data.js is not the expected safe projection")
     data = json.loads(js[len(prefix):].rstrip().removesuffix(";"))
     candidate = data.get("runningCandidate")
-    if not isinstance(candidate, str) or not re.fullmatch(r"25G332-Test\d{3}", candidate):
+    if not isinstance(candidate, str) or not re.fullmatch(r"(?:25G332|25G416)-Test\d{3}", candidate):
         raise PublishError("The current local milestone snapshot has no approved Test candidate")
     candidate_label = candidate.rsplit("-", 1)[-1]
     if candidate_label not in data.get("validationLabel", ""):

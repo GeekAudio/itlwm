@@ -11,7 +11,7 @@
 - 原生 `awdl0` 已有生命周期和 BSD 数据桥。AWDL 同步回调仍有占位返回，peer 表是观察器，shared-window 是离线区间计算器；持续调度尚未成为可运行服务。
 - OpenWrt 的 monitor 接收程序排除本机 outgoing 副本后匹配了本轮请求并提交一次回复；原来的 awdl0 绑定 socket 收到一个匹配标记。延迟刷新后的同代驱动收据记录 Captured / Decoded / Delivered 各 1、`ifnet_input` 返回 0。即时快照计数尚未刷新，不能据此否认后续收据，也不能拿延迟快照替换原始失败记录。
 - helper 仍以 exit 2 / wait_cleanup / ETIMEDOUT 结束，发送 completion、firmware attempt 和 cleanup ACK 未证明；原始 radio ACK、peer receipt、over-air 标志保持 false。路由器第一次恢复失败，随后 watchdog 恢复并通过幂等只读核验。iPhone 互通、持续收发和 AirDrop 文件收件仍未验收。
-- [Test125 候选](../test125/README.md) 修复 END 早于发送完成时过早判失败，以及路由器恢复缺少有界重试的问题；当前仅离线构建，未部署。
+- [Test125 候选](../test125/README.md) 修复 END 早于发送完成时过早判失败，以及路由器恢复缺少有界重试的问题；已按用户确认部署并读回，等待重启验收。
 
 ## 四层职责
 

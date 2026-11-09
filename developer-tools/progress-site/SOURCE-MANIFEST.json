@@ -20,27 +20,27 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "d217b1b8eb39b4360fe55c3fdcdc4eff3a1ad5c9e19a54bd97fd0c930c2876a5"
+      "sha256": "9325847b941aa51f0861b0ab0c115a1c3cf40e51ee772c4e5a2bf1e98028d2dc"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "9115ab18112d65698ecc663281a6506b1ef6b7032118a2c9f5aeecee88d533f1"
+      "sha256": "4f6cf69bfbdf89f5abfb52546e728d32d93331251f5a27b28342bd834d289bd1"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "367ca8300de2850e4542daa54d141bca8f01dbc8ad1e8811401db0b02b68e433"
+      "sha256": "daa0513c20ad987e6255e2a28dddea62af5a09732e4edec021fec47212948df6"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "367ca8300de2850e4542daa54d141bca8f01dbc8ad1e8811401db0b02b68e433"
+      "sha256": "daa0513c20ad987e6255e2a28dddea62af5a09732e4edec021fec47212948df6"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "60f19e5e01282c6210a4335f4f3a89df435607cd23a131a0562542c55a8b452c"
+      "sha256": "18e12bb9a038678b93d992c046ccd7f35b8320c15df0598d43bd023e33488dfa"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
@@ -65,7 +65,7 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/publish_github_pages.py",
       "snapshot_path": "tools/publish_github_pages.py",
-      "sha256": "adcc28e9fe0fb3da262692c22510ab72e46e8528b07ed1e798f053826623df9e"
+      "sha256": "3ae5bd2cf1f5b8b978521a194fd6c05120bdb6996af7325e67745202835fa115"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/tools/refresh_data.py",
@@ -85,11 +85,11 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-09T10:53:36.156770+08:00",
-  "runtime_scope": "最近完整证据来自Test122内核与Test123工具；实际系统25G416部署前加载Test100。Test124已写入EFI并读回，运行与回包仍待重启验收，不增加40项实测通过数。",
-  "running_candidate": "25G332-Test100",
-  "next_candidate": "25G416-Test124",
-  "website_delivery": "Test124部署状态与开发总时间线快照；实测计数保持5通过、5部分、0未通过、30未覆盖。",
-  "deployment_state": "test124_deployed_waiting_reboot",
-  "site_preparation": "Public-safe deployment update; configuration unchanged; minimal backup retained; runtime and native roundtrip pending."
+  "updated_at": "2026-11-09T12:36:30+08:00",
+  "runtime_scope": "25G416-Test124频道6受控单包实测为当前运行记录：9通过、5部分、1未通过、25未覆盖。固件发送完成、资源清理、radio ACK、正式peer receipt、空口交付与AirDrop未证明；25G416-Test125已部署并读回，尚未重启或进行RF验收。",
+  "running_candidate": "25G416-Test124",
+  "next_candidate": "25G416-Test125",
+  "website_delivery": "Test124受控单包运行结果与Test125部署读回状态的public-safe进度快照；Test124计数保持9通过、5部分、1未通过、25未覆盖。",
+  "deployment_state": "test125_deployed_waiting_reboot",
+  "site_preparation": "Test124 runtime partial; Test125 deployed and read back, reboot verification pending. No device addresses, packet nonce, run token, private path, or deployment hash included."
 }
