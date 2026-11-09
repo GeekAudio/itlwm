@@ -46,6 +46,7 @@ TEST125_BUILD_ID = "25G416-Test125"
 TEST126_BUILD_ID = "25G416-Test126"
 TEST127_BUILD_ID = "25G416-Test127"
 TEST129_BUILD_ID = "25G416-Test129"
+TEST130_BUILD_ID = "25G416-Test130"
 COORDINATOR_SCHEMAS = {
     BUILD_ID: "test111-local-coordinator/v1",
     TEST112_BUILD_ID: "test112-local-coordinator/v1",
@@ -58,6 +59,7 @@ COORDINATOR_SCHEMAS = {
     TEST126_BUILD_ID: "test126-local-coordinator/v1",
     TEST127_BUILD_ID: "test127-local-coordinator/v1",
     TEST129_BUILD_ID: "test129-local-coordinator/v1",
+    TEST130_BUILD_ID: "test130-local-coordinator/v1",
 }
 BUNDLE_ID = "org.geekaudio.AirportItlwm"
 REMOTE_SCRIPT_NAME = "monitor_window111.sh"
@@ -182,7 +184,12 @@ def validate_config(config: dict[str, Any], *, build_id: str = BUILD_ID) -> tupl
     if not isinstance(identity_raw, dict):
         raise CoordinatorError("identity must be an object")
     try:
-        identity = normalize_identity(identity_raw)
+        if build_id == TEST130_BUILD_ID:
+            identity = _ready_module.normalize_two_packet(identity_raw)
+            identity["nonce"] = identity["nonces"][0]
+            identity["nonce2"] = identity["nonces"][1]
+        else:
+            identity = normalize_identity(identity_raw)
     except (KeyError, TypeError, ValueError) as error:
         raise CoordinatorError("invalid peer identity fields") from error
     token = identity["run_token"]
@@ -213,8 +220,10 @@ def validate_config(config: dict[str, Any], *, build_id: str = BUILD_ID) -> tupl
     normalized["remote_script_path_resolved"] = str(paths["remote_script_source"][0])
     normalized["peer_binary_path_resolved"] = str(paths["peer_binary"][0])
     normalized["helper_source_path_resolved"] = str(paths["helper_source"][0])
-    normalized["remote_script_remote_path"] = remote_dir + "/" + REMOTE_SCRIPT_NAME
-    normalized["peer_binary_remote_path"] = remote_dir + "/" + REMOTE_PEER_NAME
+    script_name = "monitor_window130.sh" if build_id == TEST130_BUILD_ID else REMOTE_SCRIPT_NAME
+    peer_name = "openwrt_echo130" if build_id == TEST130_BUILD_ID else REMOTE_PEER_NAME
+    normalized["remote_script_remote_path"] = remote_dir + "/" + script_name
+    normalized["peer_binary_remote_path"] = remote_dir + "/" + peer_name
 
     verified: dict[str, str] = {}
     for name, (path, expected_hash) in paths.items():
@@ -242,6 +251,7 @@ def make_plan(config: dict[str, Any], *, build_id: str = BUILD_ID) -> dict[str, 
         "helper_sha256": hashes["helper"],
         "automatic_retry": False,
         "airdrop_proven": False,
+        "packet_count": 2 if build_id == TEST130_BUILD_ID else 1,
     }
 
 
@@ -493,7 +503,7 @@ def _colon_mac(compact: str) -> str:
 
 def _peer_remote_args(config: dict[str, Any]) -> list[str]:
     identity = config["identity"]
-    return [config["remote_script_remote_path"], "--run", "--state-dir", config["remote_dir"],
+    args = [config["remote_script_remote_path"], "--run", "--state-dir", config["remote_dir"],
             "--echo-binary", config["peer_binary_remote_path"],
             "--local-mac", _colon_mac(identity["local_mac"]),
             "--peer-mac", _colon_mac(identity["peer_mac"]),
@@ -501,6 +511,9 @@ def _peer_remote_args(config: dict[str, Any]) -> list[str]:
             "--peer-ipv6", identity["peer_ipv6"],
             "--nonce", identity["nonce"],
             "--run-token", identity["run_token"]]
+    if config.get("expected_build") == TEST130_BUILD_ID:
+        args[-2:-2] = ["--packet-count", "2", "--nonce-2", identity["nonce2"]]
+    return args
 
 
 class LivePeerView:
@@ -590,7 +603,7 @@ def _helper_argv(config: dict[str, Any], ready_path: Path) -> list[str]:
     identity = config["identity"]
     mac = identity["peer_mac"]
     peer_mac = ":".join(mac[index:index + 2] for index in range(0, 12, 2))
-    return [config["helper_path_resolved"],
+    args = [config["helper_path_resolved"],
             "--expect-build", config["expected_build"],
             "--expect-uuid", config["expected_uuid"],
             "--peer-mac", peer_mac,
@@ -598,8 +611,11 @@ def _helper_argv(config: dict[str, Any], ready_path: Path) -> list[str]:
             "--nonce", identity["nonce"],
             "--run-token", identity["run_token"],
             "--peer-ipv6", identity["peer_ipv6"],
-            "--peer-ready-file", str(ready_path),
-            "--run"]
+            "--peer-ready-file", str(ready_path)]
+    if config.get("expected_build") == TEST130_BUILD_ID:
+        args += ["--nonce-2", identity["nonce2"]]
+    args += ["--run"]
+    return args
 
 
 def _parse_json_lines(raw: bytes) -> list[dict[str, Any]]:
@@ -738,7 +754,9 @@ def execute_run(config: dict[str, Any], deps: Any = RealDeps, *,
         launched = deps.monotonic()
         result["rf_window_attempted"] = True
         peer = deps.start_peer(normalized, directory)
-        receipt = deps.capture_ready(peer.ready_process, launched, identity, ready_path)
+        capture = (_ready_module.capture_ready_two_packet
+                   if build_id == TEST130_BUILD_ID else deps.capture_ready)
+        receipt = capture(peer.ready_process, launched, identity, ready_path)
         if not ready_path.exists() or ready_path.is_symlink():
             raise CoordinatorError("live READY receipt was not created")
         ready_info = ready_path.stat()

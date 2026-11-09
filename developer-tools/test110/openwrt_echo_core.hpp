@@ -11,6 +11,18 @@ struct Contract {
     uint8_t mac[6], peerMac[6]; // Mac awdl0, then controlled router peer
     uint8_t ip[16], peerIp[16], nonce[8];
 };
+// Test130's bounded two-packet contract. It deliberately keeps the single
+// packet Test110 contract intact so historical callers stay on wire v1.
+struct TwoPacketContract {
+    uint8_t mac[6], peerMac[6];
+    uint8_t ip[16], peerIp[16];
+    uint8_t nonces[2][8];
+};
+struct PacketMatch {
+    unsigned slot;
+    uint16_t wifiSequenceNumber;
+    uint16_t awdlSequenceNumber;
+};
 inline uint16_t be16(const uint8_t *p) { return uint16_t(p[0] << 8 | p[1]); }
 inline uint16_t le16(const uint8_t *p) { return uint16_t(p[0] | p[1] << 8); }
 inline uint32_t le32(const uint8_t *p) {
@@ -57,7 +69,8 @@ inline bool stripRadiotap(const uint8_t *b,size_t n,const uint8_t **mpdu,size_t 
     *mpdu=b+h; *length=body; return true;
 }
 
-inline bool requestMatches(const uint8_t *mpdu,size_t n,const Contract &c) {
+inline bool requestMatches(const uint8_t *mpdu,size_t n,const Contract &c,
+                           PacketMatch *match) {
     NativeAwdlData::DecodedFrame frame{};
     if (NativeAwdlData::decodeIpv6DataMpdu(mpdu,n,&frame)!=NativeAwdlData::Status::Ok ||
         frame.packetCount!=1 || frame.amsdu || frame.qosData) return false;
@@ -72,10 +85,20 @@ inline bool requestMatches(const uint8_t *mpdu,size_t n,const Contract &c) {
         memcmp(ip+8,c.ip,16) || memcmp(ip+24,multicastIp,16) ||
         be16(ip+40)!=49153 || be16(ip+42)!=49152 || be16(ip+44)!=16 ||
         !be16(ip+46) || memcmp(ip+48,c.nonce,8) || udpChecksum(ip)!=0) return false;
+    if(match) {
+        match->slot=0;
+        match->wifiSequenceNumber=frame.wifiSequenceNumber;
+        match->awdlSequenceNumber=packet.awdlSequenceNumber;
+    }
     return true;
 }
 
-inline bool reply(const Contract &c,uint8_t *out,size_t capacity,size_t *written) {
+inline bool requestMatches(const uint8_t *mpdu,size_t n,const Contract &c) {
+    return requestMatches(mpdu,n,c,nullptr);
+}
+
+inline bool replyWithSequence(const Contract &c,uint16_t sequence,
+                              uint8_t *out,size_t capacity,size_t *written) {
     if (!out || !written || capacity<106) return false;
     uint8_t ip[56]{}; ip[0]=0x60; ip[5]=16; ip[6]=17; ip[7]=1;
     memcpy(ip+8,c.peerIp,16); memcpy(ip+24,c.ip,16);
@@ -84,12 +107,56 @@ inline bool reply(const Contract &c,uint8_t *out,size_t capacity,size_t *written
     uint16_t sum=udpChecksum(ip); set16(ip+46,sum ? sum : 0xffff);
     NativeAwdlData::EncodeInput input{};
     memcpy(input.destinationAddress,c.mac,6); memcpy(input.sourceAddress,c.peerMac,6);
-    input.wifiSequenceNumber=0x110; input.awdlSequenceNumber=0x110;
+    input.wifiSequenceNumber=sequence; input.awdlSequenceNumber=sequence;
     input.ipv6Packet=ip; input.ipv6Length=sizeof(ip);
     size_t body=0;
     if (NativeAwdlData::encodeIpv6DataMpdu(&input,out+10,capacity-10,&body)!=NativeAwdlData::Status::Ok) return false;
     const uint8_t rt[10]={0,0,10,0,0,0x80,0,0,0x18,0};
     memcpy(out,rt,10); *written=body+10; return true;
+}
+
+inline bool reply(const Contract &c,uint8_t *out,size_t capacity,size_t *written) {
+    return replyWithSequence(c,0x110,out,capacity,written);
+}
+
+inline Contract packetContract(const TwoPacketContract &c,unsigned slot) {
+    Contract result{};
+    memcpy(result.mac,c.mac,6); memcpy(result.peerMac,c.peerMac,6);
+    memcpy(result.ip,c.ip,16); memcpy(result.peerIp,c.peerIp,16);
+    if(slot<2) memcpy(result.nonce,c.nonces[slot],8);
+    return result;
+}
+
+inline bool distinctTwoPacketNonces(const TwoPacketContract &c) {
+    return memcmp(c.nonces[0],c.nonces[1],8)!=0;
+}
+
+inline bool requestMatches(const uint8_t *mpdu,size_t n,
+                           const TwoPacketContract &c,PacketMatch *match) {
+    if(!match || !distinctTwoPacketNonces(c)) return false;
+    unsigned found=2;
+    for(unsigned slot=0;slot<2;++slot) {
+        const Contract packet=packetContract(c,slot);
+        PacketMatch candidate{};
+        if(requestMatches(mpdu,n,packet,&candidate)) {
+            if(found!=2) return false;
+            found=slot;
+            match->wifiSequenceNumber=candidate.wifiSequenceNumber;
+            match->awdlSequenceNumber=candidate.awdlSequenceNumber;
+        }
+    }
+    if(found==2) return false;
+    match->slot=found;
+    return true;
+}
+
+inline bool reply(const TwoPacketContract &c,unsigned slot,
+                  uint8_t *out,size_t capacity,size_t *written) {
+    if(slot>=2 || !distinctTwoPacketNonces(c)) return false;
+    // Distinct per-packet 802.11 and AWDL sequence numbers; never replay the
+    // first packet's 0x110 sequence for packet two.
+    return replyWithSequence(packetContract(c,slot),
+                             uint16_t(0x110+slot),out,capacity,written);
 }
 }
 #endif

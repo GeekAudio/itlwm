@@ -191,17 +191,21 @@ static bool currentNl80211Frequency(uint32_t ifindex,const char *ifname,
 }
 
 int main(int argc,char **argv) {
-    const char *values[8]{};
-    const char *names[8]={"--interface","--local-mac","--peer-mac","--local-ipv6","--peer-ipv6","--nonce","--run-token","--window-ms"};
+    const char *values[10]{};
+    const char *names[10]={"--interface","--local-mac","--peer-mac","--local-ipv6","--peer-ipv6","--nonce","--run-token","--window-ms","--packet-count","--nonce-2"};
     bool run=false;
     for(int i=1;i<argc;++i) {
         if(!strcmp(argv[i],"--run")) { if(run) return 2; run=true; continue; }
-        int key=-1; for(int j=0;j<8;++j) if(!strcmp(argv[i],names[j])) key=j;
+        int key=-1; for(int j=0;j<10;++j) if(!strcmp(argv[i],names[j])) key=j;
         if(key<0||values[key]||i+1>=argc) return 2;
         values[key]=argv[++i];
     }
     for(int i=0;i<7;++i) if(!values[i]) return 2;
     if(values[7]&&strcmp(values[7],"16000")) return 2;
+    const bool twoPacket = values[8] || values[9];
+    if(twoPacket) {
+        if(!values[8]||strcmp(values[8],"2")||!values[9]) return 2;
+    }
     if(!*values[0]||strlen(values[0])>=IFNAMSIZ) return 2;
     for(const char *p=values[0];*p;++p) if(!((*p>='a'&&*p<='z')||(*p>='A'&&*p<='Z')||(*p>='0'&&*p<='9')||*p=='_'||*p=='-'||*p=='.')) return 2;
     Test110Echo::Contract c{}; uint8_t token[16];
@@ -210,7 +214,20 @@ int main(int argc,char **argv) {
         !hex(values[5],c.nonce,8)||!Test110Channel::nonceUsable(c.nonce)||
         !hex(values[6],token,16)||!ll(c.ip)||!ll(c.peerIp)||
         !mac(c.mac)||!mac(c.peerMac)||!memcmp(c.mac,c.peerMac,6)||!memcmp(c.ip,c.peerIp,16)) return 2;
-    if(!run) { puts("{\"schema\":\"test110-openwrt-echo-peer/v1\",\"event\":\"PLAN\",\"rf_action\":false,\"channel\":6,\"window_ms\":16000,\"max_replies\":1}"); return 0; }
+    Test110Echo::TwoPacketContract two{};
+    memcpy(two.mac,c.mac,6); memcpy(two.peerMac,c.peerMac,6);
+    memcpy(two.ip,c.ip,16); memcpy(two.peerIp,c.peerIp,16);
+    memcpy(two.nonces[0],c.nonce,8);
+    if(twoPacket && (!hex(values[9],two.nonces[1],8)||
+                     !Test110Channel::nonceUsable(two.nonces[1])||
+                     !Test110Echo::distinctTwoPacketNonces(two))) return 2;
+    if(!run) {
+        if(twoPacket)
+            puts("{\"schema\":\"test130-openwrt-echo-peer/v1\",\"event\":\"PLAN\",\"rf_action\":false,\"channel\":6,\"window_ms\":16000,\"packet_count\":2,\"max_replies\":2,\"automatic_retry\":false}");
+        else
+            puts("{\"schema\":\"test110-openwrt-echo-peer/v1\",\"event\":\"PLAN\",\"rf_action\":false,\"channel\":6,\"window_ms\":16000,\"max_replies\":1}");
+        return 0;
+    }
     if(geteuid()!=0) return 3;
     const unsigned index=if_nametoindex(values[0]); if(!index) return 4;
     int fd=socket(AF_PACKET,SOCK_RAW,htons(ETH_P_ALL)); if(fd<0) return 4;
@@ -229,8 +246,74 @@ int main(int argc,char **argv) {
     const uint64_t deadline=begin+16000000000ULL;
     // Private stdout: these exact identities allow the coordinator to hash the
     // live READY contract rather than constructing a synthetic readiness file.
-    printf("{\"schema\":\"test110-openwrt-echo-peer/v1\",\"event\":\"READY\",\"run_token\":\"%s\",\"nonce\":\"%s\",\"local_mac\":\"%s\",\"peer_mac\":\"%s\",\"local_ipv6\":\"%s\",\"peer_ipv6\":\"%s\",\"channel\":6,\"window_ms\":16000,\"request_source_port\":49153,\"request_destination_port\":49152,\"reply_source_port\":49152,\"reply_destination_port\":49153,\"hop_limit\":1,\"payload_bytes\":8,\"echo_mode\":\"exact-request-payload-once\",\"ifindex\":%u,\"monotonic_start_ns\":%llu,\"monotonic_deadline_ns\":%llu,\"token_bytes_hex\":\"",values[6],values[5],values[1],values[2],values[3],values[4],index,(unsigned long long)begin,(unsigned long long)deadline);
-    hexprint(token,16); puts("\"}"); fflush(stdout);
+    if(twoPacket) {
+        printf("{\"schema\":\"test130-openwrt-echo-peer/v1\",\"event\":\"READY\",\"run_token\":\"%s\",\"packet_count\":2,\"local_mac\":\"%s\",\"peer_mac\":\"%s\",\"local_ipv6\":\"%s\",\"peer_ipv6\":\"%s\",\"channel\":6,\"window_ms\":16000,\"request_source_port\":49153,\"request_destination_port\":49152,\"reply_source_port\":49152,\"reply_destination_port\":49153,\"hop_limit\":1,\"payload_bytes\":8,\"echo_mode\":\"ordered-exact-payload-once-per-packet\",\"ifindex\":%u,\"monotonic_start_ns\":%llu,\"monotonic_deadline_ns\":%llu,\"token_bytes_hex\":\"",values[6],values[1],values[2],values[3],values[4],index,(unsigned long long)begin,(unsigned long long)deadline);
+        hexprint(token,16);
+        printf("\",\"packets\":[{\"slot\":0,\"nonce\":\"%s\",\"run_token\":\"%s\",\"local_mac\":\"%s\",\"peer_mac\":\"%s\",\"local_ipv6\":\"%s\",\"peer_ipv6\":\"%s\",\"reply_wifi_sequence\":272,\"reply_awdl_sequence\":272},{\"slot\":1,\"nonce\":\"%s\",\"run_token\":\"%s\",\"local_mac\":\"%s\",\"peer_mac\":\"%s\",\"local_ipv6\":\"%s\",\"peer_ipv6\":\"%s\",\"reply_wifi_sequence\":273,\"reply_awdl_sequence\":273}]}\n",values[5],values[6],values[1],values[2],values[3],values[4],values[9],values[6],values[1],values[2],values[3],values[4]);
+    } else {
+        printf("{\"schema\":\"test110-openwrt-echo-peer/v1\",\"event\":\"READY\",\"run_token\":\"%s\",\"nonce\":\"%s\",\"local_mac\":\"%s\",\"peer_mac\":\"%s\",\"local_ipv6\":\"%s\",\"peer_ipv6\":\"%s\",\"channel\":6,\"window_ms\":16000,\"request_source_port\":49153,\"request_destination_port\":49152,\"reply_source_port\":49152,\"reply_destination_port\":49153,\"hop_limit\":1,\"payload_bytes\":8,\"echo_mode\":\"exact-request-payload-once\",\"ifindex\":%u,\"monotonic_start_ns\":%llu,\"monotonic_deadline_ns\":%llu,\"token_bytes_hex\":\"",values[6],values[5],values[1],values[2],values[3],values[4],index,(unsigned long long)begin,(unsigned long long)deadline);
+        hexprint(token,16); puts("\"}");
+    }
+    fflush(stdout);
+    if(twoPacket) {
+        struct PerPacket {
+            unsigned matches=0, duplicates=0, outOfOrder=0;
+            bool attempt=false, sent=false, validationBlocked=false;
+            uint16_t requestWifi=0, requestAwdl=0;
+            uint64_t requestNs=0, attemptNs=0, completeNs=0;
+        } perPacket[2];
+        unsigned observed=0;
+        while(!stopped && observed<4096) {
+            if(perPacket[0].attempt && !perPacket[0].sent) break;
+            if(perPacket[0].sent && perPacket[1].sent) break;
+            const uint64_t now=nowNs(); if(!now||now>=deadline) break;
+            int wait=int((deadline-now+999999)/1000000); if(wait>100) wait=100;
+            pollfd p{fd,POLLIN,0}; int r=poll(&p,1,wait);
+            if(r<0) { if(errno==EINTR) continue; break; }
+            if(!r) continue;
+            if(!(p.revents&POLLIN)) break;
+            uint8_t frame[4096]; sockaddr_ll source{}; iovec iov{frame,sizeof(frame)};
+            msghdr msg{}; msg.msg_name=&source; msg.msg_namelen=sizeof(source); msg.msg_iov=&iov; msg.msg_iovlen=1;
+            ssize_t n=recvmsg(fd,&msg,MSG_DONTWAIT|MSG_TRUNC);
+            if(n<0) { if(errno==EAGAIN||errno==EINTR) continue; break; }
+            ++observed;
+            if(n>ssize_t(sizeof(frame))||(msg.msg_flags&MSG_TRUNC)||source.sll_pkttype==PACKET_OUTGOING||source.sll_ifindex!=int(index)) continue;
+            const uint8_t *mpdu=nullptr; size_t length=0;
+            if(!Test110Echo::stripRadiotap(frame,size_t(n),&mpdu,&length)) continue;
+            Test110Echo::PacketMatch match{};
+            if(!Test110Echo::requestMatches(mpdu,length,two,&match)||match.slot>=2) continue;
+            auto &e=perPacket[match.slot];
+            ++e.matches;
+            if(e.matches>1) { ++e.duplicates; continue; }
+            e.requestWifi=match.wifiSequenceNumber; e.requestAwdl=match.awdlSequenceNumber;
+            e.requestNs=nowNs();
+            // Enforce ordered exchanges at the peer too. A premature packet 2
+            // is recorded but never receives a response or a later retry.
+            if(match.slot==1 && !perPacket[0].sent) { ++e.outOfOrder; continue; }
+            uint8_t response[106]; size_t bytes=0;
+            uint32_t sendFrequency=0,sendOffset=0;
+            if(!currentNl80211Frequency(index,values[0],&sendFrequency,&sendOffset)||
+               sendFrequency!=Test110Channel::kChannel6FrequencyMhz||sendOffset!=0||
+               !Test110Echo::reply(two,match.slot,response,sizeof(response),&bytes)||
+               stopped||nowNs()>=deadline) {
+                e.validationBlocked=true;
+                break;
+            }
+            // Exactly one local send attempt per packet, with no EINTR/EAGAIN retry.
+            e.attempt=true; e.attemptNs=nowNs();
+            e.sent=sendto(fd,response,bytes,MSG_DONTWAIT,reinterpret_cast<sockaddr*>(&address),sizeof(address))==ssize_t(bytes);
+            e.completeNs=nowNs();
+        }
+        close(fd);
+        auto emitPacket=[&](unsigned slot,const char *nonce) {
+            const auto &e=perPacket[slot];
+            printf("{\"slot\":%u,\"nonce\":\"%s\",\"run_token\":\"%s\",\"local_mac\":\"%s\",\"peer_mac\":\"%s\",\"local_ipv6\":\"%s\",\"peer_ipv6\":\"%s\",\"matched_requests\":%u,\"duplicate_requests\":%u,\"out_of_order_matches\":%u,\"request_wifi_sequence\":%u,\"request_awdl_sequence\":%u,\"request_monotonic_ns\":%llu,\"reply_validation_blocked\":%s,\"reply_attempted\":%s,\"reply_attempt_monotonic_ns\":%llu,\"reply_result\":\"%s\",\"reply_complete_monotonic_ns\":%llu,\"reply_wifi_sequence\":%u,\"reply_awdl_sequence\":%u}",slot,nonce,values[6],values[1],values[2],values[3],values[4],e.matches,e.duplicates,e.outOfOrder,e.requestWifi,e.requestAwdl,(unsigned long long)e.requestNs,e.validationBlocked?"true":"false",e.attempt?"true":"false",(unsigned long long)e.attemptNs,e.sent?"local_send_succeeded":e.attempt?"local_send_failed":e.validationBlocked?"blocked_before_local_send":"not_attempted",(unsigned long long)e.completeNs,0x110+slot,0x110+slot);
+        };
+        printf("{\"schema\":\"test130-openwrt-echo-peer/v1\",\"event\":\"RESULT\",\"run_token\":\"%s\",\"packet_count\":2,\"observed_frames\":%u,\"packets\":[",values[6],observed);
+        emitPacket(0,values[5]); printf(","); emitPacket(1,values[9]);
+        printf("],\"automatic_retry\":false,\"over_air_delivery_proven\":false,\"airdrop_proven\":false,\"stopped\":%s}\n",stopped?"true":"false");
+        return stopped?7:(perPacket[0].sent&&perPacket[1].sent)?0:(perPacket[0].matches||perPacket[1].matches)?5:6;
+    }
     unsigned observed=0; bool matched=false,sent=false;
     while(!stopped && observed<4096) {
         const uint64_t now=nowNs(); if(!now||now>=deadline) break;
