@@ -15,7 +15,7 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
       "snapshot_path": "dist/assets/site.js",
-      "sha256": "cd577911508c2315e1b942864f7f5e9a9b83487b299a3edb2ee39d01da8a0c80"
+      "sha256": "d81ffe7e13029a487bf09ea62150702334ce207d345061df70a55a968eab1819"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
@@ -25,22 +25,22 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "9c7eb504c4e27d8e216774a9d8f640dc787d121dd0efaa9a3235e00a84db88b3"
+      "sha256": "ebef9e6e407ff39d15d218005f5d4fefd1fb356d9e50a25ccdaf93841a6ea6fe"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "6206df2e6578653729e76eb54e82b7cee99c9c83825bd5e444c3caf9eb8da723"
+      "sha256": "e64bea0f036f89c0d39784875f1f9daf878b90c81269e7d4bff2b6443f5b6f09"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "6206df2e6578653729e76eb54e82b7cee99c9c83825bd5e444c3caf9eb8da723"
+      "sha256": "e64bea0f036f89c0d39784875f1f9daf878b90c81269e7d4bff2b6443f5b6f09"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "2be03a33e526dc8fb5aa3178015338748ee7207837567e3c7b4a1ad5b8ad4938"
+      "sha256": "c694370d08be6c43d9bb63bc2ef2486a9de16ad30c4567059f7fdf0f8309ac69"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
