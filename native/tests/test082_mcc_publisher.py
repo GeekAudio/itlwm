@@ -68,6 +68,27 @@ HARNESS = r"""
 #include <string>
 #include <unordered_map>
 
+struct OSObject {};
+using IOReturn = int;
+constexpr IOReturn kIOReturnSuccess = 0, kIOReturnNotReady = -1;
+
+struct IOCommandGate {
+    using Action = IOReturn (*)(OSObject *, void *, void *, void *, void *);
+    bool &mainGate;
+    bool available = true;
+
+    IOReturn attemptAction(Action action, void *owner, void *controller)
+    {
+        assert(!mainGate);
+        if (!available)
+            return kIOReturnNotReady;
+        mainGate = true;
+        const IOReturn result = action(nullptr, owner, controller, nullptr, nullptr);
+        mainGate = false;
+        return result;
+    }
+};
+
 struct IOEthernetController {
     std::unordered_map<std::string, uint64_t> properties;
     unsigned writes = 0;
@@ -144,10 +165,12 @@ struct ItlIwx {
     iwx_softc com;
     IOEthernetController controller;
     bool mainGate = true;
+    IOCommandGate gate {mainGate};
     bool lifecycleAvailable = true;
     unsigned releases = 0, lifecycleDepth = 0;
 
     bool tahoeP2pOnMainGate() const { return mainGate; }
+    IOCommandGate *tahoeP2pCommandGate() { return &gate; }
     bool tahoeTryLifecycleFence()
     {
         if (!lifecycleAvailable) return false;
@@ -234,10 +257,39 @@ static void testChangedContentPublishesAndFailureRetries()
     assert(value(owner, "NativeMCCLastError") == 18);
 }
 
+static void testWatchdogRetriesBusyGateAndPreservesResponseGeneration()
+{
+    ItlIwx owner {};
+    owner.com.sc_generation = 3;
+    owner.com.sc_native_mcc_response_present = 1;
+    owner.com.sc_native_mcc_response_firmware_generation = 3;
+    owner.com.sc_native_mcc_applied_firmware_generation = 3;
+    owner.tahoePublishMccSnapshot(&owner.controller);
+    const unsigned writes = owner.controller.writes;
+
+    owner.mainGate = false;
+    owner.com.sc_generation = 5;
+    owner.gate.available = false;
+    owner.tahoePublishMccSnapshot(&owner.controller);
+    assert(owner.controller.writes == writes);
+    owner.gate.available = true;
+    owner.lifecycleAvailable = false;
+    owner.tahoePublishMccSnapshot(&owner.controller);
+    assert(owner.controller.writes == writes);
+
+    owner.lifecycleAvailable = true;
+    owner.tahoePublishMccSnapshot(&owner.controller);
+    assert(!owner.mainGate && owner.lifecycleDepth == 0);
+    assert(value(owner, "NativeMCCSourceGeneration") == 5);
+    assert(value(owner, "NativeMCCResponseFirmwareGeneration") == 3);
+    assert(value(owner, "NativeMCCAppliedFirmwareGeneration") == 3);
+}
+
 int main()
 {
     testInitialZeroGenerationSnapshotAndDeduplication();
     testChangedContentPublishesAndFailureRetries();
+    testWatchdogRetriesBusyGateAndPreservesResponseGeneration();
     return 0;
 }
 """
@@ -258,7 +310,7 @@ def main() -> None:
         result = subprocess.run([str(binary)], text=True, capture_output=True)
         if result.returncode:
             raise AssertionError(result.stdout + result.stderr)
-    print("PASS: production MCC publisher deduplicates unchanged content, emits generation-zero no-notice snapshot, and retries failed property batches without committing fingerprint/revision")
+    print("PASS: MCC publisher retries gate, lifecycle and property contention and preserves response generation")
 
 if __name__ == "__main__":
     main()

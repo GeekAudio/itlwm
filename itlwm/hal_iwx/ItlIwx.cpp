@@ -14400,12 +14400,29 @@ static uint32_t iwx_mcc_profile_149_index(const struct iwx_softc *sc)
 
 void ItlIwx::tahoePublishMccSnapshot(IOEthernetController *controller)
 {
-    struct iwx_softc *sc = &com;
-    if (!controller || !tahoeP2pOnMainGate())
+    if (!controller)
         return;
+    if (!tahoeP2pOnMainGate()) {
+        // The watchdog has its own workloop. A busy main gate can be retried
+        // on the next tick without waiting here or taking the lifecycle lock.
+        if (auto *gate = tahoeP2pCommandGate()) {
+            const auto publish = [](OSObject *, void *ownerArg,
+                void *controllerArg, void *, void *) -> IOReturn {
+                auto *owner = static_cast<ItlIwx *>(ownerArg);
+                if (!owner || !owner->tahoeP2pOnMainGate())
+                    return kIOReturnNotReady;
+                owner->tahoePublishMccSnapshot(
+                    static_cast<IOEthernetController *>(controllerArg));
+                return kIOReturnSuccess;
+            };
+            (void)gate->attemptAction(publish, this, controller);
+        }
+        return;
+    }
     if (!tahoeTryLifecycleFence())
         return; // init/stop/command work owns the numeric snapshot fields
 
+    struct iwx_softc *sc = &com;
     const uint32_t revision = sc->sc_native_mcc_snapshot_revision;
     if ((revision & 1U) != 0 || revision > UINT32_MAX - 2U) {
         tahoeReleaseLifecycleFence(false);
