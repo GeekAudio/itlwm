@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <meta name="description" content="IntelWirelessNative 项目的本轮实测、40 项验收与下一步计划。">
-  <meta name="iw-site-version" content="92cbd5f70f6fb17fdb4fb7f4d4101dc406b66b85225cf7345e5934976654bb86">
+  <meta name="iw-site-version" content="bded139e863afb142985d7809dfe55fc206bb27d45daff05af1920aaf8eba7f7">
   <script>
 /* Check the live manifest on each visit, including back/forward restoration. */
 (function () {
@@ -454,6 +454,323 @@ button:disabled { cursor: default; }
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
 }
 
+/* Evidence-first round overview: keep the complete audit table available on demand. */
+.progress-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  align-items: stretch;
+  gap: 8px;
+  margin: 0 0 14px;
+}
+.progress-summary > span {
+  display: flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 8px;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: var(--surface);
+}
+.progress-summary .count { font-size: 22px; }
+.progress-summary .not_covered { background: var(--surface-soft); }
+.progress-summary .not_covered .count { color: var(--faint); font-size: 16px; font-weight: 620; }
+.progress-summary .not_covered .label { color: var(--faint); }
+.scope-note {
+  margin: 0;
+  padding: 11px 13px;
+  border-left: 3px solid var(--line-strong);
+  border-radius: 0 9px 9px 0;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.stage-highlights { margin-top: 27px; }
+.stage-highlights-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 12px;
+}
+.stage-highlights-copy h3 { margin: 0; color: var(--ink); font-size: 15px; font-weight: 700; }
+.stage-highlights-copy p { margin: 5px 0 0; color: var(--muted); font-size: 12px; line-height: 1.55; }
+.stage-highlights-count { flex: 0 0 auto; color: var(--faint); font-size: 11px; font-variant-numeric: tabular-nums; }
+.stage-evidence-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.stage-evidence-card {
+  display: grid;
+  min-width: 0;
+  align-content: start;
+  gap: 8px;
+  padding: 14px;
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  background: var(--surface);
+}
+.stage-evidence-kicker { color: var(--faint); font-size: 10px; font-weight: 650; letter-spacing: .04em; }
+.stage-evidence-card h4 { margin: -3px 0 0; color: var(--ink); font-size: 14px; font-weight: 680; line-height: 1.4; }
+.stage-evidence-status { display: flex; flex-wrap: wrap; gap: 5px; min-height: 23px; }
+.stage-evidence-status .pill { width: fit-content; }
+.stage-evidence-card p {
+  display: -webkit-box;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.65;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+}
+.stage-evidence-count { color: var(--faint); font-size: 10px; font-variant-numeric: tabular-nums; }
+.stage-evidence-link { color: var(--blue); font-size: 11px; font-weight: 650; }
+.stage-evidence-link:hover { text-decoration: underline; }
+.not-tested-note, .empty-evidence { margin: 12px 0 0; color: var(--faint); font-size: 11px; line-height: 1.6; }
+.acceptance-details { margin-top: 17px; overflow: hidden; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.acceptance-toggle {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 14px 16px;
+  list-style: none;
+  cursor: pointer;
+}
+.acceptance-toggle::-webkit-details-marker { display: none; }
+.acceptance-toggle:hover { background: var(--surface-soft); }
+.acceptance-toggle:focus-visible { outline: 2px solid var(--blue); outline-offset: -3px; }
+.acceptance-toggle::after { flex: 0 0 auto; color: var(--blue); content: "+"; font-size: 20px; font-weight: 450; line-height: 1; }
+.acceptance-details[open] > .acceptance-toggle { border-bottom: 1px solid var(--line); }
+.acceptance-details[open] > .acceptance-toggle::after { content: "−"; }
+.acceptance-toggle-copy { display: grid; min-width: 0; gap: 4px; }
+.acceptance-toggle-copy strong { color: var(--ink); font-size: 13px; font-weight: 700; }
+.acceptance-toggle-copy span { color: var(--muted); font-size: 11px; line-height: 1.5; }
+.acceptance-toggle-count { flex: 0 0 auto; padding: 4px 8px; border-radius: 99px; background: var(--surface-soft); color: var(--faint); font-size: 10px; }
+.matrix-note { margin: 0; padding: 11px 15px 0; color: var(--faint); font-size: 11px; line-height: 1.6; }
+.acceptance-details-body { padding: 0 14px 14px; }
+.matrix-cell[data-result="not_covered"] { border-color: #e4e9ec; background: #f7f9fa; color: var(--faint); }
+.matrix-cell[data-result="not_covered"] .cell-status { color: var(--faint); font-weight: 550; }
+@media (max-width: 900px) {
+  .stage-evidence-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 600px) {
+  .progress-summary { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+  .progress-summary > span { padding: 8px 9px; }
+  .progress-summary .count { font-size: 20px; }
+  .progress-summary .not_covered .count { font-size: 15px; }
+  .stage-highlights { margin-top: 22px; }
+  .stage-highlights-heading { align-items: flex-start; flex-direction: column; gap: 6px; }
+  .stage-evidence-grid { grid-template-columns: 1fr; }
+  .acceptance-toggle { align-items: flex-start; padding: 12px; }
+  .acceptance-toggle-count { display: none; }
+  .acceptance-details-body { padding: 0 9px 10px; }
+  .matrix-note { padding: 10px 10px 0; }
+}
+
+
+/* Reading order: current state, latest evidence, next action, detailed verification. */
+.current-phase-label {
+  display: inline-flex;
+  width: fit-content;
+  max-width: 100%;
+  margin: 0 0 10px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-blue);
+  color: var(--blue-deep);
+  font-size: 12px;
+  font-weight: 680;
+  line-height: 1.4;
+}
+.focus-area {
+  display: block;
+  margin: 0 0 22px;
+}
+.focus-section-heading {
+  margin: 0 0 12px;
+}
+.focus-section-heading h2,
+.recent-progress-heading h2 {
+  margin: 0;
+  color: var(--ink);
+  font-size: clamp(18px, 2.4vw, 21px);
+  line-height: 1.35;
+  letter-spacing: -.02em;
+}
+.focus-section-heading p {
+  margin: 5px 0 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.6;
+}
+.focus-cards-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+.recent-progress {
+  display: grid;
+  gap: 14px;
+}
+.recent-progress-heading {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+.recent-progress-heading .section-eyebrow {
+  margin-bottom: 5px;
+}
+.recent-progress-heading .section-description {
+  margin: 4px 0 0;
+}
+.recent-progress-lead {
+  margin: 0;
+  color: var(--ink);
+  font-size: 15px;
+  font-weight: 640;
+  line-height: 1.65;
+}
+.recent-facts-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+}
+.recent-fact-card {
+  min-width: 0;
+  padding: 12px 13px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-soft);
+}
+.recent-fact-card h3 {
+  margin: 0 0 5px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1.45;
+}
+.recent-fact-card p {
+  margin: 0;
+  color: var(--ink);
+  font-size: 12px;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+.recent-blocker,
+.next-blocker {
+  min-width: 0;
+  padding: 14px 16px;
+  border: 1px solid #eadfca;
+  border-left: 3px solid #bd8e3f;
+  border-radius: 10px;
+  background: #fcf8ef;
+}
+.recent-blocker h3,
+.next-blocker h3 {
+  margin: 7px 0 4px;
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 690;
+  line-height: 1.45;
+}
+.recent-blocker p,
+.next-blocker p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.65;
+}
+.recent-record-details {
+  border-top: 1px solid var(--line);
+  padding-top: 10px;
+}
+.recent-record-details > summary {
+  width: fit-content;
+  color: var(--blue);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 670;
+  line-height: 1.5;
+}
+.recent-record-body {
+  padding: 8px 0 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.7;
+}
+.recent-record-summary { margin: 0 0 10px; }
+.recent-record-body h3 {
+  margin: 12px 0 4px;
+  color: var(--ink);
+  font-size: 12px;
+}
+.recent-evidence-list {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding-left: 19px;
+}
+.recent-evidence-list li { padding-left: 2px; }
+.next-candidate-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px 10px;
+  padding: 13px 14px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--surface-blue);
+}
+.next-candidate-card > strong {
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.next-candidate-card > p {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.65;
+}
+.next-action-card {
+  margin-top: 10px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--blue);
+  border-radius: 10px;
+  background: var(--surface-soft);
+}
+.next-action-label {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--blue-deep);
+  font-size: 11px;
+  font-weight: 720;
+}
+.next-action-card p {
+  margin: 0;
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.7;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 760px) {
+  .focus-cards-grid,
+  .recent-facts-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 560px) {
+  .focus-cards-grid,
+  .recent-facts-grid { grid-template-columns: 1fr; }
+  .next-candidate-card { grid-template-columns: 1fr; }
+  .next-candidate-card > p { grid-column: auto; }
+}
 </style>
 </head>
 <body>
@@ -543,7 +860,7 @@ window.TEST_RECORDS = [{"id":"record-test127-runtime","version":"25G416-Test127"
         stage.checkpoints.some((point, offset) => point.id !== `${index + 1}-${offset + 1}`)) ||
       !evidenceMatches ||
       checkpoints.some(point => !Object.hasOwn(labels, point.current_result))) {
-    const message = "本轮验收数据尚未与运行版本对齐，暂不显示通过率。请稍后重新检查页面更新。";
+    const message = "本轮验收数据尚未与运行版本对齐，详细结果暂不可用。请稍后重新检查页面。";
     $("#current-summary").textContent = message;
     const title = node("h2", "", "验收数据待同步");
     title.id = "acceptance-title";
@@ -565,19 +882,24 @@ window.TEST_RECORDS = [{"id":"record-test127-runtime","version":"25G416-Test127"
   };
 
   function renderBrief() {
-    $("#current-summary").textContent = workflow?.headline || data.currentRuntimeLabel;
+    $("#current-summary").textContent = workflow?.headline || data.currentRuntimeLabel || "等待新的实机结果。";
+    const phase = node("p", "current-phase-label", workflow?.phaseLabel || `${running} · 当前实测阶段`);
+    $("#current-summary").before(phase);
+
     const panel = $("#version-panel");
+    panel.replaceChildren();
     const current = node("div", "version-item");
-    current.append(node("span", "label", "最近完整诊断"), node("strong", "version-code", running), pill("已有实测记录", "success"));
+    current.append(node("span", "label", "最近有据的实测"), node("strong", "version-code", running),
+      pill("已有实测记录", "neutral"));
     panel.append(current);
     if (data.nextCandidate && data.nextCandidate !== data.runningCandidate) {
       const candidate = node("div", "version-item");
-      candidate.append(node("span", "label", "下一版"), node("strong", "version-code", next));
-      const deployed = data.nextCandidateRole === "deployed_not_boot_verified";
-      candidate.append(pill(deployed ? "已部署 · 待启动验收" : "待实机验收", "warning"));
-      candidate.append(node("p", "muted", data.nextCandidateState));
+      candidate.append(node("span", "label", "下一候选版本"), node("strong", "version-code", next));
+      candidate.append(pill("下一候选", "neutral"));
+      candidate.append(node("p", "muted", data.nextCandidateState || data.nextCandidateSummary || "状态待确认。"));
       panel.append(candidate);
     }
+
     const date = new Date(data.updatedAt);
     const time = $("#updated-at");
     time.dateTime = data.updatedAt;
@@ -585,18 +907,29 @@ window.TEST_RECORDS = [{"id":"record-test127-runtime","version":"25G416-Test127"
       timeZone: "Asia/Shanghai", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", hour12: false
     }).format(date) + " UTC+8";
 
-    const cards = [
-      { stage: 1, title: "Wi-Fi 日常连接", tag: "稳定性验证" },
-      { stage: 4, title: "AWDL 真实数据", tag: "数据通路验证" },
-      { stage: 8, title: "原生 AirDrop", tag: "端到端验收" }
-    ];
-    cards.forEach((item, index) => {
-      const stage = stageById(item.stage);
-      const card = node("article", "focus-card" + (index === 1 ? " is-blocked" : ""));
-      card.append(node("span", "card-index", `0${index + 1}`), pill(item.tag, index === 1 ? "warning" : "neutral"));
-      card.append(node("h3", "", item.title), node("p", "", workflowStep(item.stage)?.detail || stage.current_summary));
-      card.append(link("查看实测依据 ↗", `#stage-${stage.stage}`, "card-next"));
-      $("#focus-area").append(card);
+    const focus = $("#focus-area");
+    focus.replaceChildren();
+    const focusHeading = node("div", "focus-section-heading");
+    const focusTitle = node("h2", "", "验证路线");
+    focusTitle.id = "focus-heading";
+    focus.setAttribute("aria-labelledby", focusTitle.id);
+    focusHeading.append(focusTitle, node("p", "", "从当前主要卡点，逐步走向系统原生 AirDrop 端到端验收。"));
+    focus.append(focusHeading);
+    const routeGrid = node("div", "focus-cards-grid");
+    focus.append(routeGrid);
+
+    const primary = workflow?.primaryStage || 5;
+    const routeStages = [primary, primary === 5 ? 4 : 5, 8].filter((stage, index, all) => all.indexOf(stage) === index);
+    const routeLabels = ["当前主要卡点", "数据通路依据", "最终验收"];
+    routeStages.forEach((stageId, index) => {
+      const stage = stageById(stageId);
+      if (!stage) return;
+      const title = workflowStep(stageId)?.title || stageNames[stageId] || stage.name;
+      const card = node("article", "focus-card" + (index === 0 ? " is-blocked" : ""));
+      card.append(node("span", "card-index", `0${index + 1}`), pill(routeLabels[index] || "验证阶段", index === 0 ? "warning" : "neutral"));
+      card.append(node("h3", "", title), node("p", "", workflowStep(stageId)?.detail || stage.current_summary || stage.name));
+      card.append(link("查看逐项证据 ↗", `#stage-${stage.stage}`, "card-next"));
+      routeGrid.append(card);
     });
   }
 
@@ -613,6 +946,7 @@ window.TEST_RECORDS = [{"id":"record-test127-runtime","version":"25G416-Test127"
   };
   const stageNames = { 1: "原生 Wi-Fi", 2: "P2P 资源", 3: "频道与时序", 4: "AWDL 接收", 5: "AWDL 发送", 6: "原生 awdl0", 7: "IPv6 与发现", 8: "双向 AirDrop" };
   let activeButton = null;
+  let matrixDetails = null;
   const detail = node("section", "evidence-panel");
   detail.id = "matrix-detail";
   detail.hidden = true;
@@ -622,6 +956,7 @@ window.TEST_RECORDS = [{"id":"record-test127-runtime","version":"25G416-Test127"
   function showDetail(stage, checkpoint, trigger, scroll = true) {
     if (activeButton) activeButton.setAttribute("aria-pressed", "false");
     activeButton = trigger;
+    if (matrixDetails) matrixDetails.open = true;
     trigger?.setAttribute("aria-pressed", "true");
     detail.replaceChildren();
     const heading = node("div", "detail-heading");
@@ -653,33 +988,70 @@ window.TEST_RECORDS = [{"id":"record-test127-runtime","version":"25G416-Test127"
   function renderAcceptance() {
     const overview = $("#progress-overview");
     const heading = node("div", "section-heading");
-    const title = node("h2", "", `${running} · 最近保存的验收`);
+    const title = node("h2", "", `${running} · 本轮实测结果`);
     title.id = "acceptance-title";
     heading.append(title);
-    const total = node("div", "count-total");
-    total.append(node("strong", "", String(counts.passed)), node("span", "", " / 40 项通过"));
-    heading.append(total);
-    overview.replaceChildren(node("div", "section-eyebrow", "CURRENT VERIFICATION"), heading);
+    overview.replaceChildren(node("div", "section-eyebrow", "CURRENT TEST ROUND"), heading);
+
     const summary = node("div", "progress-summary");
     Object.entries(labels).forEach(([key, label]) => {
       const stat = node("span", key);
       stat.append(node("strong", "count", String(counts[key])), node("span", "label", label));
       summary.append(stat);
     });
-    const track = node("div", "progress-track");
-    const percent = counts.passed / checkpoints.length * 100;
-    track.setAttribute("role", "progressbar");
-    track.setAttribute("aria-label", `${running} 本轮验收通过率`);
-    track.setAttribute("aria-valuemin", "0");
-    track.setAttribute("aria-valuemax", "100");
-    track.setAttribute("aria-valuenow", String(percent));
-    track.setAttribute("aria-valuetext", `${counts.passed} / 40 项通过，${percent}%，另有 ${counts.partial} 项部分通过`);
-    const complete = node("span", "progress-fill");
-    complete.style.width = `${percent}%`;
-    const partial = node("span", "partial-fill");
-    partial.style.width = `${counts.partial / checkpoints.length * 100}%`;
-    track.append(complete, partial);
-    overview.append(summary, track, node("p", "scope-note", `本轮通过率 ${percent}%。未覆盖表示本轮没测，不代表退步；这不是项目完成率。点击任一项目查看依据。`));
+    const evidenceCount = checkpoints.length - counts.not_covered;
+    overview.append(summary, node("p", "scope-note",
+      `这是 ${running} 这一轮的 40 项固定检查，不是项目完成度。本轮有 ${evidenceCount} 项取得直接结果：${counts.passed} 项通过、${counts.partial} 项部分通过、${counts.regressed} 项未通过。未覆盖表示本轮没有直接证据，不等于失败；历史记录单独保留。`));
+
+    const evidenceStages = stages.filter(stage =>
+      stage.checkpoints.some(point => point.current_result !== "not_covered"));
+    const highlights = node("section", "stage-highlights");
+    highlights.setAttribute("aria-labelledby", "stage-evidence-heading");
+    const highlightsHeader = node("div", "stage-highlights-heading");
+    const headingCopy = node("div", "stage-highlights-copy");
+    const evidenceHeading = node("h3", "", "本轮有直接结果的阶段");
+    evidenceHeading.id = "stage-evidence-heading";
+    headingCopy.append(evidenceHeading, node("p", "", "只显示本轮取得结果的阶段；其他检查仍保留在完整验收表中。"));
+    highlightsHeader.append(headingCopy, node("span", "stage-highlights-count", `${evidenceStages.length} / ${stages.length} 个阶段`));
+    highlights.append(highlightsHeader);
+    const grid = node("div", "stage-evidence-grid");
+    evidenceStages.forEach(stage => {
+      const stageCounts = Object.fromEntries(Object.keys(labels).map(result =>
+        [result, stage.checkpoints.filter(point => point.current_result === result).length]));
+      const resultCount = stageCounts.passed + stageCounts.partial + stageCounts.regressed;
+      const tone = stageCounts.regressed ? "warning" : stageCounts.partial ? "warning" : "success";
+      const card = node("article", "stage-evidence-card");
+      card.append(node("span", "stage-evidence-kicker", `阶段 ${String(stage.stage).padStart(2, "0")}`));
+      card.append(node("h4", "", stageNames[stage.stage] || stage.name));
+      const badges = node("div", "stage-evidence-status");
+      [["passed", "success"], ["partial", "warning"], ["regressed", "warning"]].forEach(([key, badgeTone]) => {
+        if (stageCounts[key]) badges.append(pill(`${stageCounts[key]} ${labels[key]}`, badgeTone));
+      });
+      card.append(badges, node("p", "", stage.current_summary || stage.evidence || stage.name));
+      card.append(node("span", "stage-evidence-count", `${resultCount} / 5 项有本轮结果`));
+      card.append(link("查看本阶段依据 ↗", `#stage-${stage.stage}`, "stage-evidence-link"));
+      card.dataset.tone = tone;
+      grid.append(card);
+    });
+    if (!evidenceStages.length) {
+      grid.append(node("p", "empty-evidence", "本轮尚未取得可计入的直接结果。完整检查项和既往证据仍保留在下方。"));
+    }
+    highlights.append(grid);
+    const quietStages = stages.length - evidenceStages.length;
+    if (quietStages > 0) {
+      highlights.append(node("p", "not-tested-note", `另有 ${quietStages} 个阶段本轮没有新结果；它们不代表失败，可在完整表中逐项查看。`));
+    }
+    overview.append(highlights);
+
+    matrixDetails = node("details", "acceptance-details");
+    matrixDetails.id = "acceptance-details";
+    const toggle = node("summary", "acceptance-toggle");
+    const toggleCopy = node("span", "acceptance-toggle-copy");
+    toggleCopy.append(node("strong", "", `展开全部 ${checkpoints.length} 项验收细节`),
+      node("span", "", "查看逐项状态、技术证据与仍待验证内容"));
+    toggle.append(toggleCopy, node("span", "acceptance-toggle-count", `${counts.not_covered} 项本轮未覆盖`));
+    matrixDetails.append(toggle, node("p", "matrix-note",
+      "未覆盖以中性灰色显示，表示本轮没有直接证据，不等于失败。点击任一检查项可查看本轮依据与待验证内容。"));
 
     const table = node("table", "acceptance-matrix");
     table.append(node("caption", "sr-only", `${running} 本轮 8 阶段、40 项固定验收`));
@@ -703,8 +1075,8 @@ window.TEST_RECORDS = [{"id":"record-test127-runtime","version":"25G416-Test127"
       button.setAttribute("aria-pressed", "false");
       button.setAttribute("aria-controls", "matrix-detail");
       button.append(node("span", "", `${String(stage.stage).padStart(2, "0")}  ${stageNames[stage.stage] || stage.name}`));
-      const passed = stage.checkpoints.filter(point => point.current_result === "passed").length;
-      button.append(node("small", "", `${passed} / 5 通过 · 查看阶段`));
+      const evidenceCount = stage.checkpoints.filter(point => point.current_result !== "not_covered").length;
+      button.append(node("small", "", `${evidenceCount} / 5 有本轮结果 · 查看阶段`));
       button.addEventListener("click", () => showDetail(stage, null, button));
       th.append(button);
       row.append(th);
@@ -730,30 +1102,101 @@ window.TEST_RECORDS = [{"id":"record-test127-runtime","version":"25G416-Test127"
     scroll.setAttribute("aria-label", "验收表，小屏可左右滚动");
     scroll.tabIndex = 0;
     scroll.append(table);
-    $("#matrix-content").replaceChildren(node("p", "matrix-scroll-hint", "左右滑动查看全部检查项 →"), scroll, detail);
+    const detailsBody = node("div", "acceptance-details-body");
+    detailsBody.append(node("p", "matrix-scroll-hint", "左右滑动查看全部检查项 →"), scroll, detail);
+    matrixDetails.append(detailsBody);
+    $("#matrix-content").replaceChildren(matrixDetails);
+  }
+
+  function renderRecent() {
+    const section = node("section", "section-card recent-progress");
+    section.id = "recent-progress";
+    section.setAttribute("aria-labelledby", "recent-progress-title");
+    const record = records[0] || null;
+    const header = node("div", "recent-progress-heading");
+    const copy = node("div");
+    copy.append(node("p", "section-eyebrow", "LATEST TEST RECORD"));
+    const title = node("h2", "", "最近实测进展");
+    title.id = "recent-progress-title";
+    copy.append(title, node("p", "section-description", record ? `${record.version} · ${record.date || "日期待确认"}` : `${running} · 本轮结果`));
+    header.append(copy, pill(record?.tone === "success" ? "验证完成" : "仍有未闭环", record?.tone === "success" ? "success" : "neutral"));
+    section.append(header);
+
+    const lead = node("p", "recent-progress-lead", record?.short_summary || workflow?.headline || data.currentRuntimeLabel || "等待新的实测记录。");
+    section.append(lead);
+
+    const factSource = workflow?.facts || [];
+    const preferredLabels = ["请求与返回", "接收交付", "首个未闭环步骤", "新完成记录", "下一版部署"];
+    let featured = factSource.filter(fact => preferredLabels.includes(fact.label)).slice(0, 4);
+    if (!featured.length && record?.evidence?.length) {
+      const evidence = record.evidence;
+      featured = evidence.slice(0, Math.min(3, evidence.length)).map((value, index) => ({ label: `本轮证据 ${index + 1}`, value }));
+      if (evidence.length > 3) featured.push({ label: "尚未闭环", value: evidence[evidence.length - 1] });
+    }
+    const grid = node("div", "recent-facts-grid");
+    featured.forEach(fact => {
+      const card = node("article", "recent-fact-card");
+      card.append(node("h3", "", fact.label), node("p", "", fact.value));
+      grid.append(card);
+    });
+    if (featured.length) section.append(grid);
+
+    const blockerTitle = workflow?.alert?.title || record?.blockers?.[0] || "";
+    const blockerText = workflow?.alert?.detail || record?.blockers?.[0] || "";
+    if (blockerTitle || blockerText) {
+      const blocker = node("aside", "recent-blocker");
+      blocker.append(pill("当前主要卡点", "warning"));
+      if (blockerTitle) blocker.append(node("h3", "", blockerTitle));
+      if (blockerText && blockerText !== blockerTitle) blocker.append(node("p", "", blockerText));
+      section.append(blocker);
+    }
+
+    const details = node("details", "recent-record-details");
+    const detailSummary = node("summary", "", "展开完整技术记录与边界");
+    details.append(detailSummary);
+    const body = node("div", "recent-record-body");
+    if (record?.summary) body.append(node("p", "recent-record-summary", record.summary));
+    const evidence = record?.evidence || factSource.map(fact => `${fact.label}：${fact.value}`);
+    if (evidence.length) {
+      body.append(node("h3", "", "本轮观测"));
+      const list = node("ul", "recent-evidence-list");
+      evidence.forEach(item => list.append(node("li", "", item)));
+      body.append(list);
+    }
+    if (record?.blockers?.length) {
+      body.append(node("h3", "", "仍待验证"));
+      const list = node("ul", "recent-evidence-list");
+      record.blockers.forEach(item => list.append(node("li", "", item)));
+      body.append(list);
+    }
+    if (record?.next?.length) {
+      body.append(node("h3", "", "记录中的下一步"));
+      const list = node("ul", "recent-evidence-list");
+      record.next.forEach(item => list.append(node("li", "", item)));
+      body.append(list);
+    }
+    details.append(body);
+    section.append(details);
+    return section;
   }
 
   function renderNext() {
     const host = $("#next-content");
-    const intro = node("div", "next-intro");
-    intro.append(pill(data.nextCandidate ? next : running, "neutral"), node("h3", "", "先闭合真实单包，再接持续服务。"));
-    intro.append(node("p", "", data.nextCandidateSummary || workflow?.nextAction));
-    const list = node("ol", "next-list");
-    const tasks = [
-      { title: "联网与快速切换", text: stageById(1).pending },
-      { title: "定位真实回包的第一处阻塞", text: stageById(4).pending },
-      { title: "数据通路通过后，再验收 AirDrop", text: stageById(8).acceptance }
-    ];
-    tasks.forEach((task, index) => {
-      const li = node("li");
-      const content = node("div");
-      content.append(node("h4", "", task.title), node("p", "", task.text));
-      li.append(node("span", "step-number", `0${index + 1}`), content);
-      list.append(li);
-    });
-    const extra = node("details", "extra-evidence");
-    extra.append(node("summary", "", "查看本轮采集范围"), node("p", "", data.evidenceScopeLabel));
-    host.replaceChildren(intro, list, extra);
+    const candidate = node("div", "next-candidate-card");
+    const candidateVersion = data.nextCandidate ? next : running;
+    candidate.append(pill(candidateVersion, "neutral"), node("strong", "", data.nextCandidateState || "当前状态待核实"));
+    if (data.nextCandidateSummary) candidate.append(node("p", "", data.nextCandidateSummary));
+
+    const alert = workflow?.alert;
+    const blocker = node("aside", "next-blocker");
+    blocker.append(pill("主要卡点", "warning"));
+    blocker.append(node("h3", "", alert?.title || "当前待验证项"));
+    blocker.append(node("p", "", alert?.detail || records[0]?.blockers?.[0] || "等待最新实测记录确认。"));
+
+    const action = node("div", "next-action-card");
+    action.append(node("span", "next-action-label", "下一步"));
+    action.append(node("p", "", workflow?.nextAction || data.nextCandidateSummary || "等待下一轮验证计划。"));
+    host.replaceChildren(candidate, blocker, action);
   }
 
   function navigateHash() {
@@ -772,12 +1215,14 @@ window.TEST_RECORDS = [{"id":"record-test127-runtime","version":"25G416-Test127"
     }
   }
   renderBrief();
-  renderAcceptance();
+  const recentProgress = renderRecent();
   renderNext();
+  renderAcceptance();
+  const main = $("#overview").parentElement;
+  main.append($("#overview"), recentProgress, $("#next-step"), $("#focus-area"), $("#acceptance-matrix"));
   window.addEventListener("hashchange", navigateHash);
   navigateHash();
 })();
-
 </script>
 </body>
 </html>
