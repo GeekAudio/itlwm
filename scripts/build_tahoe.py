@@ -36,6 +36,15 @@ def unresolved_project_symbols(undefined: str) -> list[str]:
 
 
 def receive149_profile_errors(args):
+    if getattr(args, 'native_awdl_qm_normal_priority', False):
+        required = ('native_awdl_resident_data', 'native_awdl_discovery_experiment',
+                    'native_awdl_tx_evidence', 'p2p_manual_trigger')
+        excluded = ('native_awdl_rx149_observation_only', 'native_awdl_rx149_data_input',
+                    'native_awdl_directed_prepare', 'native_awdl_directed_data_tx',
+                    'native_awdl_reply_shadow', 'native_awdl_multicast_admission')
+        if (not all(getattr(args, name, False) for name in required) or
+                any(getattr(args, name, False) for name in excluded)):
+            return ['QM normal priority requires manual resident discovery and excludes RX149, directed and admission-only profiles']
     if getattr(args, 'native_awdl_multicast_admission', False):
         required = ('p2p_tx_probe', 'p2p_manual_trigger', 'native_awdl_resident_data')
         excluded = ('p2p_awdl_psf_observation_only', 'p2p_awdl_mif_followup',
@@ -106,6 +115,8 @@ def resident_build_flags(args):
         flags += ' -DITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332=1'
     if getattr(args, 'native_awdl_discovery_rx_input', False):
         flags += ' -DITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332=1'
+    if getattr(args, 'native_awdl_qm_normal_priority', False):
+        flags += ' -DITL_NATIVE_AWDL_QM_NORMAL_PRIORITY_25G332=1'
     if args.native_awdl_rx149_observation_only:
         flags += ' -DITL_NATIVE_AWDL_RX149_OBSERVATION_25G332=1'
     if getattr(args, 'native_awdl_rx149_data_input', False):
@@ -140,6 +151,8 @@ def apply_artifact_profile(personality, args):
         'NativeAwdlDiscoveryMifCurrentSlotEnabled': bool(args.native_awdl_discovery_mif_current_slot),
         'NativeAwdlDiscoveryCurrentAwFallbackEnabled': bool(args.native_awdl_discovery_current_aw_fallback),
         'NativeAwdlDiscoveryRxInputEnabled': bool(getattr(args, 'native_awdl_discovery_rx_input', False)),
+        # Build identity only; this property is not a runtime arm or selector.
+        'NativeAwdlQmNormalPriorityCompiled': bool(getattr(args, 'native_awdl_qm_normal_priority', False)),
         'NativeP2PRx149ObservationOnly': bool(args.native_awdl_rx149_observation_only),
         'NativeP2PRx149DataInputExperiment': bool(getattr(args, 'native_awdl_rx149_data_input', False)),
         'NativeRxPreOwnerObservation': bool(getattr(args, 'native_rx_preowner_observation', False)),
@@ -198,6 +211,8 @@ def main():
                         help='Test066: use a same-peer MIF current-slot estimate and bounded early MIF preparation')
     parser.add_argument('--native-awdl-discovery-rx-input', action='store_true',
                         help='Bound native QM replies to the selected live peer, query doorbell and ROC; separate from RX149/nonce diagnostics')
+    parser.add_argument('--native-awdl-qm-normal-priority', action='store_true',
+                        help='Opt-in B comparison: clear HIGH_PRI only for an eligible real QM query in its current window; default A retains flags 7')
     parser.add_argument('--native-awdl-discovery-current-aw-fallback', action='store_true',
                         help='Test077: try the current AW only after the original next-AW planner reports an empty conservative window')
     parser.add_argument('--native-awdl-rx149-observation-only', action='store_true',
@@ -330,6 +345,7 @@ def main():
                           'native_awdl_discovery_experiment': args.native_awdl_discovery_experiment,
                           'native_awdl_discovery_mif_current_slot': args.native_awdl_discovery_mif_current_slot,
                           'native_awdl_discovery_rx_input': args.native_awdl_discovery_rx_input,
+                          'native_awdl_qm_normal_priority': args.native_awdl_qm_normal_priority,
                           'native_awdl_discovery_current_aw_fallback': args.native_awdl_discovery_current_aw_fallback,
                           'native_awdl_rx149_observation_only': args.native_awdl_rx149_observation_only,
                           'native_awdl_rx149_data_input': args.native_awdl_rx149_data_input,

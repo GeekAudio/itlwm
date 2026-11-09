@@ -29,6 +29,20 @@
 #include <sys/errno.h>
 #include <string.h>
 
+// Independent offline A/B candidate: default A is the existing flags 7 path.
+#ifndef ITL_NATIVE_AWDL_QM_NORMAL_PRIORITY_25G332
+#define ITL_NATIVE_AWDL_QM_NORMAL_PRIORITY_25G332 0
+#endif
+#if ITL_NATIVE_AWDL_QM_NORMAL_PRIORITY_25G332
+#if !defined(ITL_NATIVE_AWDL_RESIDENT_25G332) || \
+    !defined(ITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332) || \
+    defined(ITL_NATIVE_AWDL_RX149_OBSERVATION_25G332) || \
+    ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332 || \
+    ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
+#error "QM priority candidate requires the discovery data profile without RX149 or admission-only"
+#endif
+#endif
+
 namespace {
 
 #if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
@@ -1499,7 +1513,13 @@ int iwx_tahoe_p2p_action_tx_submit(
     deviceCommand->hdr.idx = static_cast<uint8_t>(index);
 
     const uint32_t txFlags = IWX_TX_FLAGS_CMD_RATE |
-        IWX_TX_FLAGS_ENCRYPT_DIS | IWX_TX_FLAGS_HIGH_PRI;
+        IWX_TX_FLAGS_ENCRYPT_DIS |
+#if ITL_NATIVE_AWDL_QM_NORMAL_PRIORITY_25G332
+        ((qmWireSnapshotCandidate && estimatedWindowValid &&
+          ipv6DestinationIsAirdropMdns) ? 0u : IWX_TX_FLAGS_HIGH_PRI);
+#else
+        IWX_TX_FLAGS_HIGH_PRI;
+#endif
     // 22000 TX_CMD v9 uses FLAGS v3. The older FLG_ACK bit is not part of
     // this ABI (that bit is RTS in newer variants); do not transplant it.
     // Firmware uses this field to find the MAC header in the TX payload.

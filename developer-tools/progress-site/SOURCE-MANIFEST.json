@@ -25,22 +25,22 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "dde675b9ae90659e89d2c9100209842584827451d38e97984fd283ad39fe7aff"
+      "sha256": "b93c241391413ba649e65befadb410f5ae384344c13e64420ecb3a40f72fe9c5"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "9f8a7162e9258e2012fc6a06c357dea0bd7cbdf9ab1f91cdbfc3ba4d8e4ae836"
+      "sha256": "a2bc3bfdb9904e197021851e2399494c36eb2af02031abbed6b8dcd594aeac1c"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "9f8a7162e9258e2012fc6a06c357dea0bd7cbdf9ab1f91cdbfc3ba4d8e4ae836"
+      "sha256": "a2bc3bfdb9904e197021851e2399494c36eb2af02031abbed6b8dcd594aeac1c"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "4ba0e4644dec0192a2ed5ce2a1bf85ba9d67141321c2bb0b6fa1454aaf3fe4b1"
+      "sha256": "53563fdf6c48f5780527886f3a193cd877381d3bf50eb606bf658b143c5b646d"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
@@ -90,11 +90,11 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-10T01:23:01+08:00",
+  "updated_at": "2026-11-10T01:49:25+08:00",
   "runtime_scope": "Test134资源准入与撤销实测通过；5通过、5部分、30未覆盖。本轮不发数据帧，不能计作mDNS或AirDrop成功。",
   "running_candidate": "25G416-Test134",
-  "next_candidate": null,
-  "website_delivery": "Test134本轮实测与开发总时间线同步；Test132双包证据保留为历史。",
-  "deployment_state": "test134_multicast_admission_cleanup_proven",
-  "site_preparation": "Runtime admission and exact cleanup proven; native mDNS and AirDrop unverified. Startup ALIVE timeout remains unresolved."
+  "next_candidate": "25G416-Test135",
+  "website_delivery": "Test135 已部署待重启；当前实测保持 Test134，开发总时间线同步。",
+  "deployment_state": "test135_deployed_waiting_reboot_disarmed",
+  "site_preparation": "Discovery RX baseline A deployed, flags7 retained, priority B off; runtime pending. Startup ALIVE timeout unresolved."
 }
