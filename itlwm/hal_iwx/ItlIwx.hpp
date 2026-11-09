@@ -144,6 +144,7 @@
 #include "../../native/iwx_tx_watchdog.hpp"
 #include "../../native/iwx_output_kick.hpp"
 #include "../../native/iwx_sta_auth_trace.h"
+#include "../../native/tahoe_p2p_mac_ack.hpp"
 
 #ifdef AIRPORT_TAHOE
 #include "../../native/intel_p2p_rx_router.hpp"
@@ -1067,6 +1068,8 @@ public:
     int iwx_p2p_mac_context_add(struct iwx_softc *);
     int iwx_p2p_mac_context_modify(struct iwx_softc *);
     int iwx_p2p_mac_context_remove(struct iwx_softc *);
+    int iwx_p2p_mac_context_remove_with_ack(
+        struct iwx_softc *, TahoeP2PMacContextAckReceipt *);
     int iwx_p2p_phy_lease(struct iwx_softc *, uint8_t *);
     int iwx_p2p_phy_release(struct iwx_softc *);
     int iwx_p2p_binding_add(struct iwx_softc *);

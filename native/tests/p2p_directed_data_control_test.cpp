@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "../p2p_directed_data_control.hpp"
+#include "../p2p_directed_complete_cleanup.hpp"
+#include "../awdl_directed_origin_tx.hpp"
 #include <assert.h>
 
 using namespace NativeP2PDirectedDataControl;
@@ -532,6 +534,150 @@ static void testNoDoorbellProofReportsUnknownAndOwnershipBits()
          kNoDoorbellRejectCompletionArmed));
 }
 
+static void testDirectedCompleteCleanupRequiresCurrentProofAndOuterRemove()
+{
+    using namespace NativeP2PDirectedCompleteCleanup;
+    InnerProof inner{};
+    inner.mainGate = true;
+    inner.ownerCurrent = true;
+    inner.contextGenerationMatches = true;
+    inner.powerGenerationMatches = true;
+    inner.stationGenerationMatches = true;
+    inner.firmwareGenerationMatches = true;
+    inner.p2pFirmwareGenerationMatches = true;
+    inner.canonicalEnd = true;
+    inner.rocTokenMatches = true;
+    inner.rocComplete = true;
+    inner.bindingAbsent = true;
+    inner.phyUnleased = true;
+    inner.originalChannelRestored = true;
+    inner.stationQueueDataAbsent = true;
+    inner.originTicketMatches = true;
+    inner.originNoPendingPackets = true;
+    inner.originTerminalAccepted = true;
+    assert(innerProofComplete(inner));
+
+    auto stale = inner;
+    stale.contextGenerationMatches = false;
+    assert(!innerProofComplete(stale));
+    stale = inner;
+    stale.ownerCurrent = false;
+    assert(!innerProofComplete(stale));
+    stale = inner;
+    stale.stationQueueDataAbsent = false;
+    assert(!innerProofComplete(stale));
+    stale = inner;
+    stale.rocComplete = false;
+    stale.rocTokenMatches = false;
+    assert(!innerProofComplete(stale));
+
+    OuterProof outer{true, true, true, true};
+    assert(outerProofComplete(outer));
+    outer.removeResultZero = false;
+    assert(!outerProofComplete(outer));
+    outer.removeResultZero = true;
+    outer.matchingRemoveResponse = false;
+    assert(!outerProofComplete(outer));
+    outer.matchingRemoveResponse = true;
+    outer.outerResourcesAbsent = false;
+    assert(!outerProofComplete(outer));
+}
+
+static void testRealOriginLedgerSpentCloseFeedsCompleteCleanupProof()
+{
+    using namespace NativeAwdlDirectedOriginTx;
+    using namespace NativeP2PDirectedCompleteCleanup;
+
+    const uint8_t ownMac[6] = {0x02, 0x11, 0x22, 0x33, 0x44, 0x55};
+    const uint8_t peerMac[6] = {0x02, 0xaa, 0xbb, 0xcc, 0xdd, 0xee};
+    const uint8_t linkLocal[16] = {
+        0xfe, 0x80, 0, 0, 0, 0, 0, 0,
+        0x00, 0x11, 0x22, 0xff, 0xfe, 0x33, 0x44, 0x55};
+    OpenRequest request{};
+    request.ownerSerial = 700;
+    request.runSerial = 900;
+    request.rocStartUs = 1000000;
+    request.deadlineUs = 1050000;
+    request.epochs = {21, 22, 23, 21};
+    request.rocChannelIndex = kRocChannelIndex;
+    memcpy(request.sourceIPv6, linkLocal, sizeof(linkLocal));
+    memcpy(request.peerMac, peerMac, sizeof(peerMac));
+    const uint8_t nonce[kNonceLength] =
+        {0x10, 0x21, 0x32, 0x43, 0x54, 0x65, 0x76, 0x87};
+    memcpy(request.nonce, nonce, sizeof(nonce));
+
+    Ledger ledger;
+    Ticket ticket{};
+    assert(ledger.open(request, request.rocStartUs,
+                       request.epochs.power, 44, 7, ownMac, linkLocal,
+                       &ticket));
+    assert(ledger.acceptsOutput(ticket, request.rocStartUs + 1,
+                                true, request.epochs.power, 44));
+    assert(ledger.beginPop(ticket, request.rocStartUs + 2,
+                           true, request.epochs.power, 44));
+    assert(ledger.finishPop(ticket, request.rocStartUs + 3,
+                            true, request.epochs.power, 44, true));
+    // Production close succeeds for Spent but leaves its terminal state
+    // unchanged; requiring Closed would reject valid transmit completion.
+    assert(ledger.close(ticket, request.rocStartUs + 4));
+    const Snapshot spent = ledger.snapshot(request.rocStartUs + 5, true);
+    assert(spent.state == State::Spent && spent.packetSpent);
+    assert(!spent.packetQueued && !spent.packetPopping);
+
+    const auto originProof = evaluateOriginProof(
+        spent, ticket, request.ownerSerial, request.runSerial,
+        true, false, true, false);
+    assert(originProof.ticketMatches && originProof.noPendingPackets &&
+           originProof.terminalAccepted);
+
+    InnerProof inner{};
+    inner.mainGate = inner.ownerCurrent = true;
+    inner.contextGenerationMatches = inner.powerGenerationMatches = true;
+    inner.stationGenerationMatches = inner.firmwareGenerationMatches = true;
+    inner.p2pFirmwareGenerationMatches = inner.canonicalEnd = true;
+    inner.rocTokenMatches = inner.rocComplete = true;
+    inner.bindingAbsent = inner.phyUnleased = true;
+    inner.originalChannelRestored = inner.stationQueueDataAbsent = true;
+    inner.originTicketMatches = originProof.ticketMatches;
+    inner.originNoPendingPackets = originProof.noPendingPackets;
+    inner.originTerminalAccepted = originProof.terminalAccepted;
+    assert(innerProofComplete(inner));
+
+    auto rejectOrigin = [&](const Snapshot &snapshot, const Ticket &candidate,
+                            bool originClosed, bool ticketBound,
+                            bool halComplete, bool noDoorbell) {
+        const auto proof = evaluateOriginProof(snapshot, candidate,
+            request.ownerSerial, request.runSerial, originClosed, ticketBound,
+            halComplete, noDoorbell);
+        auto changed = inner;
+        changed.originTicketMatches = proof.ticketMatches;
+        changed.originNoPendingPackets = proof.noPendingPackets;
+        changed.originTerminalAccepted = proof.terminalAccepted;
+        assert(!innerProofComplete(changed));
+    };
+
+    rejectOrigin(spent, ticket, false, false, true, false);
+    rejectOrigin(spent, ticket, true, true, true, false);
+    rejectOrigin(spent, ticket, true, false, false, false);
+    auto staleTicket = ticket;
+    ++staleTicket.runSerial;
+    rejectOrigin(spent, staleTicket, true, false, true, false);
+    auto active = spent;
+    active.state = State::Popping;
+    active.packetSpent = false;
+    active.packetPopping = true;
+    rejectOrigin(active, ticket, true, false, true, false);
+    auto expired = spent;
+    expired.state = State::Expired;
+    expired.packetSpent = false;
+    rejectOrigin(expired, ticket, true, false, true, false);
+    const auto expiredProof = evaluateOriginProof(
+        expired, ticket, request.ownerSerial, request.runSerial,
+        true, false, false, true);
+    assert(expiredProof.ticketMatches && expiredProof.noPendingPackets &&
+           expiredProof.terminalAccepted);
+}
+
 int main()
 {
     testGateSamplesTimeAfterQueueDelay();
@@ -546,4 +692,6 @@ int main()
     testReadyRequiresSameOwnerLeaseAndCurrentRocMirror();
     testReadyProducerUsesCanonicalPostStartBinding();
     testNoDoorbellProofReportsUnknownAndOwnershipBits();
+    testDirectedCompleteCleanupRequiresCurrentProofAndOuterRemove();
+    testRealOriginLedgerSpentCloseFeedsCompleteCleanupProof();
 }

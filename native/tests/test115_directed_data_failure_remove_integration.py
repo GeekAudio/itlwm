@@ -60,7 +60,8 @@ def assignment_string(path: Path, name: str) -> str:
 def extend_stop_shim(shim: str) -> str:
     shim = shim.replace(
         "#include <string>",
-        '#include <string>\n#include "native/p2p_hal_probe.hpp"',
+        '#include <string>\n#include "native/p2p_hal_probe.hpp"\n'
+        '#include "native/tahoe_p2p_mac_ack.hpp"',
         1,
     )
     shim = shim.replace(
@@ -95,6 +96,9 @@ def extend_stop_shim(shim: str) -> str:
         "    bool bindingAbsent = true, phyUnleased = true, rocIdle = true;\n"
         "    bool changeEpochAfterCleanup = false, addAcknowledged = false;\n"
         "    uint32_t contextGeneration = 11, powerGeneration = 7;\n"
+        "    uint32_t scGeneration = 7;\n"
+        "    bool directedDataSessionSubmitReached = false;\n"
+        "    TahoeP2PMacContextAckReceipt directedDataMacRemoveAck{};\n"
         "    uint32_t stationGeneration = 19, p2pFirmwareGeneration = 0;\n"
         "    uint8_t address[6] = {2, 1, 2, 3, 4, 5};\n"
         "};",
@@ -124,6 +128,8 @@ def extend_stop_shim(shim: str) -> str:
         "    int iwx_p2p_mac_context_apply(iwx_softc *, uint32_t);\n"
         "    int iwx_p2p_mac_context_add(iwx_softc *);\n"
         "    int iwx_p2p_mac_context_remove(iwx_softc *);\n"
+        "    int iwx_p2p_mac_context_remove_with_ack(\n"
+        "        iwx_softc *, TahoeP2PMacContextAckReceipt *);\n"
         "    int iwx_send_cmd_pdu(iwx_softc *, uint32_t, uint32_t, uint16_t, const void *);\n"
         "    static NativeP2PProbe::BlockedReason tahoeP2pRevalidate(void *, uint32_t, uint32_t);\n"
         "    static int tahoeP2pConfigure(void *);\n"
@@ -187,9 +193,11 @@ assert "cleanup_before_session:" not in not_ready_end
 assert "directedDataHasNoDoorbell(owner,&noDoorbellCheck)" in started_cleanup
 assert "iwx_tahoe_p2p_tvqm_abort_idle_after_end(" in started_cleanup
 assert "owner->tahoeP2pRocCleanup(" in started_cleanup
-assert "directedDataInnerResourcesAbsent(owner)" in started_cleanup
+assert "directedDataCheckInnerCleanup(probe)" in started_cleanup
+assert "probe->directedDataInnerCleanupProven = true;" in started_cleanup
+assert "probe->directedDataCleanupAck = false;" in started_cleanup
+assert "deferDirectedDataTerminal(owner, probe," in started_cleanup
 assert "probe->directedDataFailureCleaned = true;" in started_cleanup
-assert "probe->directedDataCleanupAck = true;" in started_cleanup
 assert "(run->directedDataOnly && run->directedDataFailureCleaned)" in recovery_entry
 for field in (
     "proof->ownerMatches", "proof->contextGenerationMatches",
@@ -207,6 +215,9 @@ assert "p.directedDataNoDoorbell" in controller_recovery
 assert "p.directedDataTicketClosed" in controller_recovery
 assert "p.directedDataQueueDrained" in controller_recovery
 assert "p.directedDataResourcesAbsent" in controller_recovery
+assert "run->owner->iwx_p2p_mac_context_remove_with_ack(" in remove_callback
+assert "receipt.expectedP2PEpoch = run->contextGeneration;" in remove_callback
+assert "receipt.expectedDriverGeneration = run->scGeneration;" in remove_callback
 assert "return run->owner->iwx_p2p_mac_context_remove(&run->owner->com);" in remove_callback
 assert "return remove(opaque);" in tahoe_remove
 assert "state == IWX_P2P_RESOURCE_UNKNOWN" in mac_apply
@@ -225,7 +236,8 @@ shim = extend_stop_shim(base_stop_shim)
 production_removal = "\n\n".join((
     configure_callback,
     add_callback,
-    remove_callback,
+    "#define ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332 1\n" +
+    remove_callback + "\n#undef ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332",
     tahoe_configure,
     tahoe_add,
     tahoe_remove,
@@ -301,6 +313,20 @@ int ItlIwx::iwx_send_cmd_pdu(
 }
 
 """ + production_removal + r"""
+
+int ItlIwx::iwx_p2p_mac_context_remove_with_ack(
+    iwx_softc *sc, TahoeP2PMacContextAckReceipt *receipt) {
+    assert(sc == &com && receipt);
+    assert(receipt->expectedP2PEpoch == 11);
+    assert(receipt->expectedDriverGeneration == 7);
+    const int result = iwx_p2p_mac_context_remove(sc);
+    receipt->schemaVersion = TahoeP2PMacContextAckPolicy::kSchemaVersion;
+    receipt->transportResult = result;
+    receipt->accepted = result == 0 ? 1u : 0u;
+    receipt->rejectReason = result == 0 ?
+        TAHOE_P2P_MAC_ACK_REJECT_NONE : TAHOE_P2P_MAC_ACK_REJECT_TRANSPORT;
+    return result;
+}
 
 bool ItlIwx::tahoeP2pPublishLease(void *opaque, bool mayExist) {
     auto run = static_cast<P2PProbeRun *>(opaque);
@@ -384,7 +410,7 @@ bool ItlIwx::tahoeP2pExerciseRecovery(
 """ + "\n#define ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332 1\n" + \
     class_methods + "\n#undef ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332\n" + r"""
 
-static int runCase(P2PProbeRun run, bool legacyOps, int removeAck = 0) {
+static int runCase(P2PProbeRun &run, bool legacyOps, int removeAck = 0) {
     ItlIwx owner;
     run.owner = &owner;
     owner.com.sc_generation = static_cast<int>(run.powerGeneration);
@@ -421,6 +447,11 @@ static int runCase(P2PProbeRun run, bool legacyOps, int removeAck = 0) {
         assert(result == NativeP2PProbe::RunResult::kExerciseFailedCleaned);
         assert(snapshot.exerciseRecoveryProofAccepted == 1);
         assert(snapshot.removeResult == 0);
+        assert(run.directedDataMacRemoveAck.accepted == 1);
+        assert(run.directedDataMacRemoveAck.expectedP2PEpoch ==
+               run.contextGeneration);
+        assert(run.directedDataMacRemoveAck.expectedDriverGeneration ==
+               run.scGeneration);
         assert(owner.com.sc_p2p.mac_state == IWX_P2P_RESOURCE_ABSENT);
         assert(!owner.publishedLease);
         assert(!owner.nativeP2pResourcesRetained());
@@ -488,6 +519,8 @@ int main() {
     removeFailure.directedDataOnly = true;
     assert(runCase(removeFailure, false, EIO) ==
            static_cast<int>(NativeP2PProbe::RunResult::kQuarantined));
+    assert(removeFailure.directedDataMacRemoveAck.accepted == 0);
+    assert(removeFailure.directedDataMacRemoveAck.transportResult == EIO);
 
     // A live owner/power/station epoch change after cleanup invalidates the
     // captured proof before REMOVE and leaves stop blocked.
@@ -528,16 +561,27 @@ with tempfile.TemporaryDirectory(prefix="test115-directed-remove-") as tmp:
 ordinary_prefix = r"""
 #include <cassert>
 #include <cstdint>
+#include <cerrno>
 #include "native/p2p_hal_probe.hpp"
 #define ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332 0
 constexpr int kOSBooleanTrue = 1;
+struct Owner;
 struct P2PProbeRun {
+    Owner *owner = nullptr;
     bool rx149ObservationOnly = false;
     bool directedPrepareOnly = false;
     bool txProbeEnabled = false;
 };
 struct Controller { uint32_t getProperty(const char *) const { return 0; } };
 struct Owner {
+    int com = 0;
+    unsigned removeCalls = 0;
+    bool nativeP2pCommandAllowed() const { return true; }
+    int iwx_p2p_mac_context_remove(int *sc) {
+        assert(sc == &com);
+        ++removeCalls;
+        return 0;
+    }
     Controller controller;
     Controller *getController() { return &controller; }
     NativeP2PProbe::Controller nativeP2pProbe_{};
@@ -555,6 +599,7 @@ static bool tahoeP2pExerciseRecovery(void *, int32_t,
     return true;
 }
 Owner globalOwner;
+""" + remove_callback + r"""
 static NativeP2PProbe::Operations ordinaryOperations(P2PProbeRun &run) {
     Owner *owner = &globalOwner;
 """
@@ -562,6 +607,9 @@ ordinary_main = r"""
     return operations;
 }
 int main() {
+    P2PProbeRun legacy{};
+    legacy.owner = &globalOwner;
+    assert(remove(&legacy) == 0 && globalOwner.removeCalls == 1);
     P2PProbeRun rx149{};
     rx149.rx149ObservationOnly = true;
     auto rxOps = ordinaryOperations(rx149);

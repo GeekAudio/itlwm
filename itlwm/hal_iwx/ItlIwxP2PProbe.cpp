@@ -16,6 +16,7 @@
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
 #include "../../native/awdl_native_bsd_data_25G332.hpp"
 #include "../../native/p2p_directed_data_control.hpp"
+#include "../../native/p2p_directed_complete_cleanup.hpp"
 #endif
 #if defined(ITL_NATIVE_AWDL_LIFECYCLE_25G332)
 #include "../../native/awdl_native_lifecycle_25G332.hpp"
@@ -224,6 +225,11 @@ struct P2PProbeRun {
     bool directedDataSubmitCalled;
     bool directedDataCompletionObserved;
     bool directedDataCleanupAck;
+    bool directedDataTerminalPending;
+    bool directedDataInnerCleanupProven;
+    uint32_t directedDataPendingTerminalStage;
+    int32_t directedDataPendingTerminalResult;
+    TahoeP2PMacContextAckReceipt directedDataMacRemoveAck;
     uint64_t directedDataPacketToken;
     uint64_t directedDataDeadlineUs;
     uint64_t directedDataEndStartUs;
@@ -6176,6 +6182,19 @@ static int remove(void *opaque)
     auto run = static_cast<P2PProbeRun *>(opaque);
     if (!run || !run->owner || !run->owner->nativeP2pCommandAllowed())
         return EBUSY;
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    if (run->directedDataOnly) {
+        auto &receipt = run->directedDataMacRemoveAck;
+        receipt = {};
+        receipt.schemaVersion = 1;
+        receipt.expectedP2PEpoch = run->contextGeneration;
+        receipt.expectedRocToken = run->directedDataSessionSubmitReached ?
+            run->contextGeneration : 0u;
+        receipt.expectedDriverGeneration = run->scGeneration;
+        return run->owner->iwx_p2p_mac_context_remove_with_ack(
+            &run->owner->com, &receipt);
+    }
+#endif
     return run->owner->iwx_p2p_mac_context_remove(&run->owner->com);
 }
 
@@ -8013,6 +8032,13 @@ static void publishDirectedDataState(ItlIwx *owner, P2PProbeRun *probe,
     if (stage == kDirectedDataPreparing)
         controller->removeProperty("NativeP2PDirectedDataTxWitness");
 
+    if (stage == kDirectedDataPreparing) {
+        (void)controller->setProperty(
+            "NativeP2PDirectedDataCleanupAck", uint32_t(0), 32);
+        (void)controller->setProperty(
+            "NativeP2PDirectedDataResourcesAbsent", uint32_t(0), 32);
+    }
+
     if (NativeP2PDirectedDataControl::publicationForStage(stage) ==
         NativeP2PDirectedDataControl::Publication::FastStateOnly) {
         if (stage == kDirectedDataReady) {
@@ -8056,7 +8082,6 @@ static void publishDirectedDataState(ItlIwx *owner, P2PProbeRun *probe,
             payload->release();
         }
     }
-    controller->setProperty("NativeP2PDirectedDataStage", stage, 32);
     controller->setProperty("NativeP2PDirectedDataResult",
                             static_cast<uint32_t>(result), 32);
     controller->setProperty("NativeP2PDirectedDataStationAck",
@@ -8134,6 +8159,82 @@ static void publishDirectedDataState(ItlIwx *owner, P2PProbeRun *probe,
         static_cast<uint32_t>(probe->directedDataNoDoorbellGateResult), 32);
     controller->setProperty("NativeP2PDirectedDataNoDoorbellObservedUs",
         probe->directedDataNoDoorbellObservedUs, 64);
+    const auto &ack = probe->directedDataMacRemoveAck;
+    controller->setProperty("NativeP2PDirectedDataMacRemoveAckSchemaVersion",
+        ack.schemaVersion, 32);
+    controller->setProperty("NativeP2PDirectedDataMacRemoveAckAccepted",
+        ack.accepted, 32);
+    controller->setProperty("NativeP2PDirectedDataMacRemoveAckRejectReason",
+        ack.rejectReason, 32);
+    controller->setProperty("NativeP2PDirectedDataMacRemoveTransportResult",
+        static_cast<uint32_t>(ack.transportResult), 32);
+    controller->setProperty("NativeP2PDirectedDataMacRemoveExpectedP2PEpoch",
+        ack.expectedP2PEpoch, 32);
+    controller->setProperty("NativeP2PDirectedDataMacRemoveObservedP2PEpoch",
+        ack.observedP2PEpoch, 32);
+    controller->setProperty("NativeP2PDirectedDataMacRemoveExpectedRocToken",
+        ack.expectedRocToken, 32);
+    controller->setProperty("NativeP2PDirectedDataMacRemoveObservedRocToken",
+        ack.observedRocToken, 32);
+    controller->setProperty("NativeP2PDirectedDataMacRemoveObservedP2PFirmwareGeneration",
+        ack.observedP2PFirmwareGeneration, 32);
+    controller->setProperty("NativeP2PDirectedDataMacRemoveExpectedDriverGeneration",
+        ack.expectedDriverGeneration, 32);
+    controller->setProperty("NativeP2PDirectedDataMacRemoveDriverGeneration",
+        ack.driverGeneration, 32);
+    controller->setProperty("NativeP2PDirectedDataMacRemoveObservedDriverGeneration",
+        ack.observedDriverGeneration, 32);
+    controller->setProperty("NativeP2PDirectedDataMacRemoveSubmitState",
+        ack.submitState, 32);
+    controller->setProperty("NativeP2PDirectedDataMacRemoveSubmitCommandId",
+        ack.submitCommandId, 32);
+    controller->setProperty("NativeP2PDirectedDataMacRemoveSubmitCommandGroup",
+        ack.submitCommandGroup, 32);
+    controller->setProperty("NativeP2PDirectedDataMacRemoveSubmitQueueId",
+        ack.submitQueueId, 32);
+    controller->setProperty("NativeP2PDirectedDataMacRemoveSubmitQueueIndex",
+        ack.submitQueueIndex, 32);
+    controller->setProperty("NativeP2PDirectedDataMacRemoveResponseCommand",
+        ack.responseCommand, 32);
+    controller->setProperty("NativeP2PDirectedDataMacRemoveResponseGroup",
+        ack.responseGroup, 32);
+    controller->setProperty("NativeP2PDirectedDataMacRemoveResponseQueueId",
+        ack.responseQueueId, 32);
+    controller->setProperty("NativeP2PDirectedDataMacRemoveResponseQueueIndex",
+        ack.responseQueueIndex, 32);
+    controller->setProperty("NativeP2PDirectedDataMacRemovePacketLength",
+        ack.packetLength, 32);
+    controller->setProperty("NativeP2PDirectedDataMacRemovePayloadLength",
+        ack.payloadLength, 32);
+    controller->setProperty("NativeP2PDirectedDataMacRemoveResponsePresent",
+        ack.responsePresent, 32);
+    // Commit terminal state only after every proof/result field is visible.
+    controller->setProperty("NativeP2PDirectedDataStage", stage, 32);
+}
+
+static void deferDirectedDataTerminal(
+    ItlIwx *owner, P2PProbeRun *probe, uint32_t terminalStage, int result)
+{
+    if (!owner || !probe)
+        return;
+    probe->directedDataTerminalPending = true;
+    probe->directedDataPendingTerminalStage = terminalStage;
+    probe->directedDataPendingTerminalResult = result;
+    probe->directedDataCleanupAck = false;
+    if (auto *controller = owner->tahoeP2pController()) {
+        // Keep the last progress stage below terminal (8+). Test coordinators
+        // wait for the outer controller result before accepting terminal
+        // cleanup, so publish neither stage 8/9 nor cleanup proof here.
+        (void)controller->setProperty(
+            "NativeP2PDirectedDataReady", uint32_t(0), 32);
+        (void)controller->setProperty(
+            "NativeP2PDirectedDataResult",
+            static_cast<uint32_t>(result), 32);
+        (void)controller->setProperty(
+            "NativeP2PDirectedDataCleanupAck", uint32_t(0), 32);
+        (void)controller->setProperty(
+            "NativeP2PDirectedDataResourcesAbsent", uint32_t(0), 32);
+    }
 }
 
 struct DirectedDataMccWitness {
@@ -8746,6 +8847,171 @@ static bool directedDataInnerResourcesAbsent(ItlIwx *owner)
         !sc.sc_p2p.phy_leased;
 }
 
+static bool directedDataCanonicalCompleteResourcesAbsent(
+    ItlIwx *owner, P2PProbeRun *probe)
+{
+    if (!owner || !probe || !owner->tahoeP2pOnMainGate())
+        return false;
+
+    const auto hal = owner->nativeP2pProbe_.snapshot();
+    const auto session = owner->nativeP2pRocEvents_.snapshot();
+    TahoeP2PDirectedDataSnapshot data{};
+    NativeAwdlDirectedOriginTx::Snapshot origin{};
+    const bool dataValid = iwx_tahoe_p2p_directed_data_snapshot(
+        owner, &owner->nativeP2pDirectedDataTx_, &data);
+    NativeAwdlBSD::snapshotDirectedOriginTx(&origin);
+    const auto &sc = owner->com;
+    const auto &roc = sc.sc_p2p_roc;
+    const auto &binding = probe->directedDataBinding;
+
+    const bool ownerCurrent = owner->nativeP2pBusy() && !probe->canceled &&
+        __atomic_load_n(&owner->nativeP2pCancelRequested_,
+                        __ATOMIC_ACQUIRE) == 0 &&
+        __atomic_load_n(&owner->nativeP2pProbeOwner_, __ATOMIC_ACQUIRE) ==
+            reinterpret_cast<void *>(probe->workerThread) &&
+        owner->nativeP2pProbeGeneration_ == probe->contextGeneration;
+    const bool generationsMatch =
+        hal.contextGeneration == probe->contextGeneration &&
+        hal.powerGeneration == probe->powerGeneration &&
+        hal.stationGeneration == probe->stationGeneration &&
+        uint32_t(sc.sc_generation) == probe->scGeneration &&
+        __atomic_load_n(&sc.sc_tx_rate_generation, __ATOMIC_ACQUIRE) ==
+            probe->stationGeneration &&
+        sc.sc_p2p.fw_generation == probe->p2pFirmwareGeneration &&
+        probe->p2pFirmwareGeneration == probe->scGeneration &&
+        binding.epochs.context == probe->contextGeneration &&
+        binding.epochs.power == probe->powerGeneration &&
+        binding.epochs.station == probe->stationGeneration &&
+        binding.epochs.roc == probe->contextGeneration &&
+        binding.p2pFirmwareGeneration == probe->p2pFirmwareGeneration;
+    const bool canonicalEnd = probe->directedDataCanonicalEnd &&
+        session.commandReturned && session.commandResult == 0 &&
+        session.configuration ==
+            IWX_SESSION_PROTECT_CONF_P2P_GO_NEGOTIATION &&
+        session.generation == probe->contextGeneration &&
+        session.startSeen && session.startStatus == 1 &&
+        session.endSeen && session.endStatus == 1 &&
+        session.cleanupAllowed && session.observedScheduledPair &&
+        !session.outcomeUnknown &&
+        session.startObservedMonotonicUs == probe->directedDataEndStartUs &&
+        session.endObservedMonotonicUs == probe->directedDataEndObservedUs;
+    const bool rocTokenMatches = roc.token == probe->contextGeneration &&
+        roc.fw_generation == probe->p2pFirmwareGeneration &&
+        roc.session_conf_id ==
+            IWX_SESSION_PROTECT_CONF_P2P_GO_NEGOTIATION &&
+        roc.session_submit_seen == 1;
+    const bool originalChannelRestored = roc.phy_id < IWX_NUM_PHY_CTX &&
+        roc.original_phy_channel != nullptr &&
+        sc.sc_phyctxt[roc.phy_id].channel == roc.original_phy_channel;
+    const bool noDoorbell = dataValid && !data.doorbellIssued &&
+        !data.mbufHeldByRing && !data.completionArmed &&
+        !data.completionObserved;
+    const auto originProof =
+        NativeP2PDirectedCompleteCleanup::evaluateOriginProof(
+            origin, probe->directedDataOriginTicket,
+            binding.ownerSerial, binding.runSerial,
+            dataValid && data.originClosed && !probe->directedDataTicketBound,
+            data.originTicketBound, data.completionObserved, noDoorbell);
+    const bool dmaRetired = dataValid && !data.mbufHeldByRing &&
+        data.ownerSerial == binding.ownerSerial &&
+        data.runSerial == binding.runSerial &&
+        data.generation == binding.generation &&
+        data.p2pFirmwareGeneration == binding.p2pFirmwareGeneration &&
+        (data.state == TahoeP2PDirectedDataState::kIdle ||
+         data.state == TahoeP2PDirectedDataState::kClosed) &&
+        (data.doorbellIssued ? data.completionObserved : noDoorbell);
+
+    NativeP2PDirectedCompleteCleanup::InnerProof proof{};
+    proof.mainGate = true;
+    proof.ownerCurrent = ownerCurrent;
+    proof.contextGenerationMatches =
+        hal.contextGeneration == probe->contextGeneration &&
+        owner->nativeP2pProbeGeneration_ == probe->contextGeneration;
+    proof.powerGenerationMatches = hal.powerGeneration ==
+        probe->powerGeneration;
+    proof.stationGenerationMatches = hal.stationGeneration ==
+            probe->stationGeneration &&
+        __atomic_load_n(&sc.sc_tx_rate_generation, __ATOMIC_ACQUIRE) ==
+            probe->stationGeneration;
+    proof.firmwareGenerationMatches =
+        uint32_t(sc.sc_generation) == probe->scGeneration;
+    proof.p2pFirmwareGenerationMatches = generationsMatch;
+    proof.canonicalEnd = canonicalEnd;
+    proof.rocTokenMatches = rocTokenMatches;
+    proof.rocComplete = roc.phase == IWX_P2P_ROC_COMPLETE;
+    proof.bindingAbsent = sc.sc_p2p.binding_state ==
+        IWX_P2P_RESOURCE_ABSENT;
+    proof.phyUnleased = !sc.sc_p2p.phy_leased;
+    proof.originalChannelRestored = originalChannelRestored;
+    proof.stationQueueDataAbsent =
+        directedDataStationQueueDataAbsent(owner) && dmaRetired;
+    proof.originTicketMatches = originProof.ticketMatches;
+    proof.originNoPendingPackets = originProof.noPendingPackets;
+    proof.originTerminalAccepted = originProof.terminalAccepted;
+    return NativeP2PDirectedCompleteCleanup::innerProofComplete(proof);
+}
+
+struct DirectedDataInnerCleanupCheck {
+    P2PProbeRun *probe;
+    bool resourcesAbsent;
+};
+
+static IOReturn directedDataInnerCleanupCheckAction(
+    OSObject *, void *contextArg, void *, void *, void *)
+{
+    auto check = static_cast<DirectedDataInnerCleanupCheck *>(contextArg);
+    if (!check || !check->probe || !check->probe->owner ||
+        !check->probe->owner->tahoeP2pOnMainGate())
+        return kIOReturnBadArgument;
+    check->resourcesAbsent = check->probe->directedDataSessionSubmitReached ?
+        directedDataCanonicalCompleteResourcesAbsent(
+            check->probe->owner, check->probe) :
+        directedDataInnerResourcesAbsent(check->probe->owner);
+    return kIOReturnSuccess;
+}
+
+static bool directedDataCheckInnerCleanup(P2PProbeRun *probe)
+{
+    if (!probe || !probe->owner)
+        return false;
+    auto *gate = probe->owner->tahoeP2pCommandGate();
+    if (!gate)
+        return false;
+    DirectedDataInnerCleanupCheck check{probe, false};
+    return gate->runAction(directedDataInnerCleanupCheckAction, &check) ==
+            kIOReturnSuccess && check.resourcesAbsent;
+}
+
+static bool directedDataFinalResourcesAbsent(
+    ItlIwx *owner, P2PProbeRun *probe)
+{
+    if (!owner || !probe || !owner->tahoeP2pOnMainGate())
+        return false;
+    const auto &sc = owner->com;
+    const auto outer = owner->nativeP2pProbe_.snapshot();
+    if (!owner->nativeP2pBusy() || probe->canceled ||
+        __atomic_load_n(&owner->nativeP2pCancelRequested_, __ATOMIC_ACQUIRE) ||
+        __atomic_load_n(&owner->nativeP2pProbeOwner_, __ATOMIC_ACQUIRE) !=
+            reinterpret_cast<void *>(probe->workerThread) ||
+        owner->nativeP2pProbeGeneration_ != probe->contextGeneration ||
+        outer.contextGeneration != probe->contextGeneration ||
+        outer.powerGeneration != probe->powerGeneration ||
+        outer.stationGeneration != probe->stationGeneration ||
+        uint32_t(sc.sc_generation) != probe->scGeneration ||
+        sc.sc_p2p.fw_generation != probe->p2pFirmwareGeneration ||
+        probe->p2pFirmwareGeneration != probe->scGeneration ||
+        __atomic_load_n(&sc.sc_tx_rate_generation, __ATOMIC_ACQUIRE) !=
+            probe->stationGeneration)
+        return false;
+    const bool innerAbsent = probe->directedDataSessionSubmitReached ?
+        directedDataCanonicalCompleteResourcesAbsent(owner, probe) :
+        directedDataInnerResourcesAbsent(owner);
+    return innerAbsent &&
+        sc.sc_p2p.mac_state == IWX_P2P_RESOURCE_ABSENT &&
+        sc.sc_p2p.binding_state == IWX_P2P_RESOURCE_ABSENT &&
+        !sc.sc_p2p.phy_leased;
+}
+
 struct DirectedDataNoDoorbellCheck {
     uint32_t rejectMask;
     int32_t gateResult;
@@ -8953,13 +9219,19 @@ static int exerciseDirectedDataTx(P2PProbeRun *probe)
                 owner, &owner->nativeP2pDirectedDataTx_,
                 TahoeP2PDirectedDataReason::kOwnerClosed);
         }
-        const bool absent = directedDataInnerResourcesAbsent(owner);
+        const bool absent = directedDataCheckInnerCleanup(probe);
         const auto disposition = directedDataFailureDisposition(error, absent);
         probe->directedDataResult = disposition.dataResult;
-        probe->directedDataCleanupAck = disposition.cleanupAck;
-        publishDirectedDataState(owner, probe,
-            disposition.stage, disposition.dataResult,
-            disposition.resourcesAbsent, disposition.cleanupAck);
+        probe->directedDataInnerCleanupProven = absent;
+        if (absent) {
+            probe->directedDataFailureCleaned = true;
+            deferDirectedDataTerminal(owner, probe,
+                kDirectedDataFailedCleaned, disposition.dataResult);
+        } else {
+            probe->directedDataCleanupAck = false;
+            publishDirectedDataState(owner, probe,
+                kDirectedDataQuarantined, disposition.dataResult, false, false);
+        }
         return disposition.workerResult;
     };
 
@@ -9083,16 +9355,17 @@ static int exerciseDirectedDataTx(P2PProbeRun *probe)
                                  kDirectedDataQuarantined);
         rocPrepared = false;
 
-        const bool resourcesAbsent = directedDataInnerResourcesAbsent(owner);
+        const bool resourcesAbsent = directedDataCheckInnerCleanup(probe);
         if (!resourcesAbsent || !directedDataHasNoDoorbell(owner))
             return recordFailure(EBUSY, kDirectedDataQuarantined);
         probe->directedDataFailureCleaned = true;
-        probe->directedDataCleanupAck = true;
+        probe->directedDataInnerCleanupProven = true;
+        probe->directedDataCleanupAck = false;
         probe->directedDataResult = error;
         // Preserve the original exercise error so the outer P2P controller
         // asks for a distinct directed-data cleanup proof before MAC REMOVE.
-        publishDirectedDataState(owner, probe, kDirectedDataFailedCleaned,
-                                 error, true, true);
+        deferDirectedDataTerminal(owner, probe,
+                                  kDirectedDataFailedCleaned, error);
         return error;
     };
 
@@ -9525,6 +9798,17 @@ static int exerciseDirectedDataTx(P2PProbeRun *probe)
                 probe->directedDataSubmitResult == 0 &&
                 !finalData.doorbellIssued)
                 return recordFailure(EPROTO, kDirectedDataQuarantined);
+            // Freeze the normal success path's canonical END before any
+            // ticket/resource closure. The failure-only lambda has its own
+            // identical stamp; it cannot stand in for this path.
+            if (!sessionEnded || !directedDataSessionEndConfirmed(
+                    event.snapshot, probe->contextGeneration))
+                return recordFailure(EPROTO, kDirectedDataQuarantined);
+            probe->directedDataCanonicalEnd = true;
+            probe->directedDataEndStartUs =
+                event.snapshot.startObservedMonotonicUs;
+            probe->directedDataEndObservedUs =
+                event.snapshot.endObservedMonotonicUs;
             if (probe->directedDataSubmitCalled &&
                 !finalData.doorbellIssued) {
                 DirectedDataNoDoorbellCheck noDoorbellCheck{};
@@ -9624,12 +9908,16 @@ static int exerciseDirectedDataTx(P2PProbeRun *probe)
                         EIO : 0)) :
                 (preSubmitFailure != 0 ? preSubmitFailure : ETIMEDOUT);
             probe->directedDataResult = failure;
-            probe->directedDataCleanupAck = directedDataInnerResourcesAbsent(owner);
-            if (!probe->directedDataCleanupAck)
+            probe->directedDataInnerCleanupProven =
+                directedDataCheckInnerCleanup(probe);
+            if (!probe->directedDataInnerCleanupProven)
                 return recordFailure(EBUSY, kDirectedDataQuarantined);
-            publishDirectedDataState(owner, probe, failure == 0 ?
+            probe->directedDataCleanupAck = false;
+            if (failure != 0)
+                probe->directedDataFailureCleaned = true;
+            deferDirectedDataTerminal(owner, probe, failure == 0 ?
                 kDirectedDataComplete : kDirectedDataFailedCleaned,
-                failure, true, true);
+                failure);
             return 0;
         }
     }
@@ -9710,12 +9998,18 @@ cleanup_before_session:
         rocPrepared = false;
     }
     probe->directedDataResult = failure ? failure : EIO;
-    safeCleanup = directedDataInnerResourcesAbsent(owner);
-    probe->directedDataCleanupAck = safeCleanup;
-    publishDirectedDataState(owner,
-        probe,
-        safeCleanup ? kDirectedDataFailedCleaned : kDirectedDataQuarantined,
-        probe->directedDataResult, safeCleanup, safeCleanup);
+    safeCleanup = directedDataCheckInnerCleanup(probe);
+    probe->directedDataInnerCleanupProven = safeCleanup;
+    probe->directedDataCleanupAck = false;
+    if (safeCleanup) {
+        probe->directedDataFailureCleaned = true;
+        deferDirectedDataTerminal(owner, probe,
+                                  kDirectedDataFailedCleaned,
+                                  probe->directedDataResult);
+    } else {
+        publishDirectedDataState(owner, probe, kDirectedDataQuarantined,
+                                 probe->directedDataResult, false, false);
+    }
     return safeCleanup ? 0 : (probe->directedDataResult ?
         probe->directedDataResult : EBUSY);
 }
@@ -11292,7 +11586,15 @@ IOReturn ItlIwx::tahoeP2pExerciseRecoveryAction(
             !data.mbufHeldByRing && !data.completionArmed &&
             !data.completionObserved &&
             directedDataHasNoDoorbell(owner);
-        const bool resourcesAbsent = directedDataInnerResourcesAbsent(owner);
+        const bool completeRestore =
+            directedDataCanonicalCompleteResourcesAbsent(owner, run);
+        const bool resourcesAbsent = run->directedDataSessionSubmitReached ?
+            completeRestore : directedDataInnerResourcesAbsent(owner);
+        const bool fullyRestored =
+            sc->sc_p2p.binding_state == IWX_P2P_RESOURCE_ABSENT &&
+            !sc->sc_p2p.phy_leased &&
+            (sc->sc_p2p_roc.phase == IWX_P2P_ROC_IDLE ||
+             completeRestore);
 
         proof->directedDataRecovery = true;
         proof->snapshotValid = dataValid;
@@ -11325,15 +11627,14 @@ IOReturn ItlIwx::tahoeP2pExerciseRecoveryAction(
             owner->nativeP2pTxQueue_.retainedRing == nullptr &&
             owner->nativeP2pTxQueue_.queueId == IWX_INVALID_QUEUE;
         proof->directedDataResourcesAbsent = resourcesAbsent &&
-            run->directedDataCleanupAck && run->directedDataFailureCleaned;
-        proof->fullyRestored = sc->sc_p2p_roc.phase == IWX_P2P_ROC_IDLE &&
-            sc->sc_p2p.binding_state == IWX_P2P_RESOURCE_ABSENT &&
-            !sc->sc_p2p.phy_leased;
+            run->directedDataInnerCleanupProven &&
+            run->directedDataFailureCleaned;
+        proof->fullyRestored = fullyRestored;
         proof->bindingAbsent = sc->sc_p2p.binding_state ==
             IWX_P2P_RESOURCE_ABSENT;
         proof->phyUnleased = !sc->sc_p2p.phy_leased;
         proof->rocIdle = sc->sc_p2p_roc.phase == IWX_P2P_ROC_IDLE;
-        proof->restoreComplete = proof->fullyRestored;
+        proof->restoreComplete = proof->fullyRestored && completeRestore;
         proof->sessionProtectionSubmitReached =
             run->directedDataSessionSubmitReached;
         proof->sessionOutcomeUnknown = session.outcomeUnknown ||
@@ -11341,7 +11642,8 @@ IOReturn ItlIwx::tahoeP2pExerciseRecoveryAction(
         proof->txResourcesPresent = !proof->directedDataQueueDrained ||
             !proof->directedDataResourcesAbsent ||
             (dataValid && (data.mbufHeldByRing || data.doorbellIssued));
-        proof->cleanupErrno = proof->directedDataResourcesAbsent ? 0 : EBUSY;
+        proof->cleanupErrno = proof->directedDataResourcesAbsent &&
+            proof->fullyRestored ? 0 : EBUSY;
         proof->attemptSerial = run->contextGeneration;
         proof->snapshotRevision = 2;
         action->snapshotRead = true;
@@ -12411,6 +12713,84 @@ IOReturn ItlIwx::tahoeP2pFinishAction(OSObject *, void *contextArg,
     }
     if (run->canceled)
         owner->nativeP2pProbe_.cancelQueued();
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
+    if (run->directedDataOnly && owner->tahoeP2pOnMainGate()) {
+        auto *controller = owner->tahoeP2pController();
+        if (run->directedDataTerminalPending) {
+            const auto outer = owner->nativeP2pProbe_.snapshot();
+            if (controller) {
+                controller->setProperty("NativeP2PProbeAttempted", outer.attempted, 32);
+                controller->setProperty("NativeP2PProbeRemoveResult",
+                    uint32_t(outer.removeResult), 32);
+                controller->setProperty("NativeP2PProbeResourceMayExist",
+                    outer.resourceMayExist, 32);
+                controller->setProperty("NativeP2PProbeContextGeneration",
+                    outer.contextGeneration, 32);
+                controller->setProperty("NativeP2PProbePowerGeneration",
+                    outer.powerGeneration, 32);
+                controller->setProperty("NativeP2PProbeStationGeneration",
+                    outer.stationGeneration, 32);
+                controller->setProperty("NativeP2PProbeState", outer.state, 32);
+            }
+            const bool terminalStateMatches =
+                run->directedDataPendingTerminalStage ==
+                    kDirectedDataComplete ?
+                    outer.state == NativeP2PProbe::kComplete :
+                    (outer.state == NativeP2PProbe::kComplete ||
+                     (outer.state == NativeP2PProbe::kExerciseFailedCleaned &&
+                      outer.exerciseRecoveryProofAccepted != 0));
+            const bool outerRemoveComplete = terminalStateMatches &&
+                outer.removeResult == 0 && outer.resourceMayExist == 0;
+            const bool finalResourcesAbsent =
+                directedDataFinalResourcesAbsent(owner, run);
+            NativeP2PDirectedCompleteCleanup::OuterProof proof{};
+            proof.matchingRemoveResponse =
+                run->directedDataMacRemoveAck.accepted == 1 &&
+                run->directedDataMacRemoveAck.expectedP2PEpoch ==
+                    run->contextGeneration &&
+                run->directedDataMacRemoveAck.expectedDriverGeneration ==
+                    run->scGeneration &&
+                run->directedDataMacRemoveAck.expectedRocToken ==
+                    (run->directedDataSessionSubmitReached ?
+                        run->contextGeneration : 0u);
+            proof.removeResultZero = outer.removeResult == 0;
+            proof.outerResourcesAbsent = outerRemoveComplete;
+            proof.finalResourcesAbsent = finalResourcesAbsent;
+            if (NativeP2PDirectedCompleteCleanup::outerProofComplete(proof)) {
+                run->directedDataCleanupAck = true;
+                run->directedDataInnerCleanupProven = true;
+                run->directedDataResult =
+                    run->directedDataPendingTerminalResult;
+                publishDirectedDataState(owner, run,
+                    run->directedDataPendingTerminalStage,
+                    run->directedDataPendingTerminalResult, true, true);
+            } else {
+                const int failure = outer.removeResult > 0 ?
+                    outer.removeResult : EBUSY;
+                NativeP2PDirectedDataControl::captureFirstFailure(
+                    &run->directedDataFirstFailure,
+                    NativeP2PDirectedDataControl::FailureSite::Other,
+                    failure, p2pProbeMonotonicNanoseconds() / 1000ULL);
+                run->directedDataResult = failure;
+                run->directedDataCleanupAck = false;
+                publishDirectedDataState(owner, run,
+                    kDirectedDataQuarantined, failure, false, false);
+            }
+            run->directedDataTerminalPending = false;
+        } else if (controller) {
+            uint64_t stage = kDirectedDataQuarantined;
+            uint64_t result = EBUSY;
+            (void)directedDataValue(controller,
+                "NativeP2PDirectedDataStage", &stage);
+            (void)directedDataValue(controller,
+                "NativeP2PDirectedDataResult", &result);
+            run->directedDataCleanupAck = false;
+            publishDirectedDataState(owner, run,
+                static_cast<uint32_t>(stage), static_cast<int>(result),
+                false, false);
+        }
+    }
+#endif
     if ((run->directedPrepareOnly || run->canceled
 #if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332
          || run->directedDataOnly

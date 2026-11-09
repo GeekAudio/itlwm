@@ -11335,6 +11335,129 @@ iwx_p2p_mac_context_remove(struct iwx_softc *sc)
 }
 
 int ItlIwx::
+iwx_p2p_mac_context_remove_with_ack(
+    struct iwx_softc *sc, TahoeP2PMacContextAckReceipt *receipt)
+{
+    if (receipt == nullptr)
+        return EINVAL;
+
+    const uint32_t expectedP2PEpoch = receipt->expectedP2PEpoch;
+    const uint32_t expectedRocToken = receipt->expectedRocToken;
+    const uint32_t expectedDriverGeneration =
+        receipt->expectedDriverGeneration;
+    memset(receipt, 0, sizeof(*receipt));
+    receipt->schemaVersion = TahoeP2PMacContextAckPolicy::kSchemaVersion;
+    receipt->expectedP2PEpoch = expectedP2PEpoch;
+    receipt->expectedRocToken = expectedRocToken;
+    receipt->expectedDriverGeneration = expectedDriverGeneration;
+    if (sc == nullptr || sc != &com) {
+        receipt->rejectReason |= TAHOE_P2P_MAC_ACK_REJECT_SUBMIT_STATE;
+        return EINVAL;
+    }
+    if (!nativeP2pCommandAllowed()) {
+        receipt->rejectReason |= TAHOE_P2P_MAC_ACK_REJECT_SUBMIT_STATE;
+        return EBUSY;
+    }
+    if (!sc->sc_p2p.initialized ||
+        sc->sc_p2p.fw_generation != static_cast<uint32_t>(sc->sc_generation) ||
+        sc->sc_p2p.mac_state != IWX_P2P_RESOURCE_ACTIVE ||
+        sc->sc_p2p.binding_state != IWX_P2P_RESOURCE_ABSENT) {
+        receipt->rejectReason |= TAHOE_P2P_MAC_ACK_REJECT_SUBMIT_STATE;
+        return EBUSY;
+    }
+
+    const uint32_t currentDriverGeneration = static_cast<uint32_t>(
+        __atomic_load_n(&sc->sc_generation, __ATOMIC_ACQUIRE));
+    receipt->observedP2PEpoch = __atomic_load_n(
+        &nativeP2pProbeGeneration_, __ATOMIC_ACQUIRE);
+    receipt->observedRocToken = __atomic_load_n(
+        &sc->sc_p2p_roc.token, __ATOMIC_ACQUIRE);
+    receipt->observedP2PFirmwareGeneration = sc->sc_p2p.fw_generation;
+    if (expectedDriverGeneration == 0 ||
+        currentDriverGeneration != expectedDriverGeneration ||
+        sc->sc_p2p.fw_generation != expectedDriverGeneration) {
+        receipt->rejectReason |=
+            TAHOE_P2P_MAC_ACK_REJECT_DRIVER_GENERATION;
+        return ESTALE;
+    }
+    if (expectedP2PEpoch == 0 ||
+        receipt->observedP2PEpoch != expectedP2PEpoch ||
+        receipt->observedRocToken != expectedRocToken) {
+        receipt->rejectReason |= TAHOE_P2P_MAC_ACK_REJECT_P2P_EPOCH;
+        return ESTALE;
+    }
+
+    const int contractError = iwx_p2p_check_fw_contract(this, sc);
+    if (contractError) {
+        receipt->rejectReason |= TAHOE_P2P_MAC_ACK_REJECT_SUBMIT_COMMAND;
+        return contractError;
+    }
+
+    struct iwx_mac_ctx_cmd contextCommand;
+    iwx_p2p_fill_mac_context(&sc->sc_p2p,
+        IWX_FW_CTXT_ACTION_REMOVE, &contextCommand);
+    struct iwx_rx_packet *response = nullptr;
+    struct iwx_host_cmd hostCommand = {
+        .id = IWX_MAC_CONTEXT_CMD,
+        .len = { sizeof(contextCommand), },
+        .data = { &contextCommand, },
+        .flags = IWX_CMD_WANT_RESP,
+        .resp_pkt_len = sizeof(struct iwx_rx_packet) +
+                        sizeof(struct iwx_cmd_response),
+    };
+    IwxStaAuthSubmitReceipt submitReceipt{};
+
+    /* From this point submission may reach firmware; keep ownership UNKNOWN
+     * unless the exact correlated empty command response is accepted. */
+    sc->sc_p2p.mac_state = IWX_P2P_RESOURCE_UNKNOWN;
+    sc->sc_p2p.uncertain_kind = IWX_P2P_UNCERTAIN_MAC_CONTEXT;
+    sc->sc_p2p.uncertain_action = IWX_FW_CTXT_ACTION_REMOVE;
+    const int sendError = iwx_send_cmd(sc, &hostCommand, &submitReceipt);
+
+    receipt->transportResult = sendError;
+    receipt->driverGeneration = submitReceipt.driver_generation;
+    receipt->submitState = submitReceipt.state;
+    receipt->submitCommandId = iwx_cmd_opcode(submitReceipt.command_id);
+    receipt->submitCommandGroup = iwx_cmd_groupid(submitReceipt.command_id);
+    receipt->submitQueueId = submitReceipt.queue_id;
+    receipt->submitQueueIndex = submitReceipt.queue_index;
+    receipt->observedDriverGeneration = static_cast<uint32_t>(
+        __atomic_load_n(&sc->sc_generation, __ATOMIC_ACQUIRE));
+    receipt->observedP2PEpoch = __atomic_load_n(
+        &nativeP2pProbeGeneration_, __ATOMIC_ACQUIRE);
+    receipt->observedRocToken = __atomic_load_n(
+        &sc->sc_p2p_roc.token, __ATOMIC_ACQUIRE);
+    receipt->observedP2PFirmwareGeneration = sc->sc_p2p.fw_generation;
+
+    response = hostCommand.resp_pkt;
+    if (response != nullptr) {
+        const uint32_t packetLength = iwx_rx_packet_len(response);
+        receipt->responsePresent = 1;
+        receipt->responseCommand = response->hdr.cmd;
+        receipt->responseGroup = response->hdr.group_id;
+        receipt->responseQueueId = response->hdr.qid;
+        receipt->responseQueueIndex = response->hdr.idx;
+        receipt->packetLength = packetLength;
+        receipt->payloadLength = packetLength >= sizeof(response->hdr) ?
+            packetLength - sizeof(response->hdr) : UINT32_MAX;
+    }
+
+    const bool ackAccepted = TahoeP2PMacContextAckPolicy::evaluate(receipt);
+    if (hostCommand.resp_pkt != nullptr)
+        iwx_free_resp(sc, &hostCommand);
+
+    if (sendError != 0)
+        return sendError;
+    if (!ackAccepted)
+        return EIO;
+
+    sc->sc_p2p.mac_state = IWX_P2P_RESOURCE_ABSENT;
+    sc->sc_p2p.uncertain_kind = IWX_P2P_UNCERTAIN_NONE;
+    sc->sc_p2p.uncertain_action = 0;
+    return 0;
+}
+
+int ItlIwx::
 iwx_p2p_phy_lease(struct iwx_softc *sc, uint8_t *slot_id)
 {
     if (sc == NULL || slot_id == NULL || sc != &com)

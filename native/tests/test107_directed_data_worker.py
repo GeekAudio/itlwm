@@ -82,7 +82,7 @@ roc_action = extract(SOURCE, "IOReturn ItlIwx::tahoeP2pRocEventAction(")
 roc_action_flat = " ".join(roc_action.split())
 failure_path = extract(
     worker, "auto recordFailure = [&](int error, uint32_t stage) {")
-assert "directedDataInnerResourcesAbsent(owner)" in failure_path
+assert "directedDataCheckInnerCleanup(probe)" in failure_path
 assert "directedDataFailureDisposition(error, absent)" in failure_path
 assert "return disposition.workerResult;" in failure_path
 assert "kDirectedDataQuarantined" in SOURCE
@@ -121,8 +121,12 @@ assert "if (finalData.state == TahoeP2PDirectedDataState::kQuarantined)" in work
 # Stage 8 requires successful local firmware completion and complete cleanup.
 # Completion is explicitly not presented as a peer ACK.
 assert "!finalData.completionObserved || !finalData.frameAttemptSucceeded" in worker_flat
-assert "probe->directedDataCleanupAck = directedDataInnerResourcesAbsent(owner);" in worker
-assert "if (!probe->directedDataCleanupAck)" in worker
+assert "probe->directedDataInnerCleanupProven =" in worker
+assert "if (!probe->directedDataInnerCleanupProven)" in worker
+assert "deferDirectedDataTerminal(owner, probe, failure == 0 ?" in worker
+finish = extract(SOURCE, "IOReturn ItlIwx::tahoeP2pFinishAction(")
+assert "NativeP2PDirectedCompleteCleanup::outerProofComplete(proof)" in finish
+assert "directedDataFinalResourcesAbsent(owner, run)" in finish
 assert "nativeP2pDirectedDataTx_.completion.snapshot()" not in worker
 assert "nativeP2pDirectedDataTx_.state" not in worker
 assert "owner, &owner->nativeP2pDirectedDataTx_, &finalData" in worker_flat
