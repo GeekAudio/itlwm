@@ -20,27 +20,27 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "7b4c81726580433b9b8d59f230b86229090b921ec26a3ff9a3b47be8271569be"
+      "sha256": "e7be74fc33e17ed0dfaf867fe19e02abbcd304a639f7e051a8ce52cd853b4bef"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "a7397717c81c1d7341e2f3c1257c02220d6995e6015664a62632a7cfaca7f64b"
+      "sha256": "13e90d5644974c9c04745cbe7f586adf9413389080f1ca526de13d19f07c336b"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "2f8f56e671eb734bd30cfa822d50925df47a76bc04739ac2128449a67d224b3b"
+      "sha256": "9e3a2a4ee72390605f938b58aa520843eb536457aa3dc53f41af649fcdeef6cc"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "2f8f56e671eb734bd30cfa822d50925df47a76bc04739ac2128449a67d224b3b"
+      "sha256": "9e3a2a4ee72390605f938b58aa520843eb536457aa3dc53f41af649fcdeef6cc"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "9cdcb11a298e00a1deab855a2eb097359d851bb2bc8c43cda3c990e350dabd0e"
+      "sha256": "154c64f3c8cb94a7478be7edaa7ae53b8717a626e8d91e85b5a833c5e9ce0433"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
@@ -85,11 +85,11 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-09T19:52:58+08:00",
-  "runtime_scope": "精确TX_RSP、匹配UDP回包、原生ifnet交付及外层MAC移除均取得同轮证据。新增通过完整资源回收，共11项直接通过、4项部分通过、25项未覆盖。持续AWDL和AirDrop仍未验收。",
-  "running_candidate": "25G416-Test129",
+  "updated_at": "2026-11-09T20:28:56+08:00",
+  "runtime_scope": "Test130启动、频道6接收窗口及未发包路径安全回收有证据；6项直接通过、34项未覆盖。工具在首包前退出，双包收发和AirDrop尚未验证。",
+  "running_candidate": "25G416-Test130",
   "next_candidate": "25G416-Test130",
-  "website_delivery": "Test130已部署，等待同一窗口内两包交换验证；Test129当前实测计数保持不变。",
-  "deployment_state": "test130_deployed_waiting_reboot",
-  "site_preparation": "Current Test129 runtime evidence; Test130 candidate deployment and total timeline updated without adding runtime passes."
+  "website_delivery": "当前Test130实测与工具修补已同步；修补待新启动复验，驱动和EFI未改变。",
+  "deployment_state": "test130_helper_fixed_waiting_fresh_boot",
+  "site_preparation": "Current Test130 runtime evidence and helper-only publication wait fix; no new data-path passes."
 }
