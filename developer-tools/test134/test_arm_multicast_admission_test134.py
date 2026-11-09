@@ -63,7 +63,13 @@ class ArmMulticastAdmissionCliTests(unittest.TestCase):
         report = json.loads(result.stdout)
         self.assertEqual(report["status"], "self_test_passed")
         self.assertIn("prepare_abort_changes_allowed", report["cases"])
+        self.assertIn("missing_legacy_counters_use_explicit_gate", report["cases"])
+        self.assertIn("present_invalid_legacy_counter_rejected", report["cases"])
+        self.assertIn("missing_serial_is_not_terminal", report["cases"])
+        self.assertIn("nonzero_legacy_counter_blocks_success", report["cases"])
+        self.assertIn("failed_operation_cleanup", report["cases"])
         self.assertIn("missing_is_unknown", report["cases"])
+        self.assertIn("ack_identity_mismatch", report["cases"])
         self.assertEqual(report["queue_serial_round_trip"], (1 << 63) | 9)
         self.assertFalse(report["hardware_actions"])
 

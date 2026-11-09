@@ -156,6 +156,20 @@ private func number(_ service: io_service_t, _ key: String) -> Int64? {
     return value.int64Value
 }
 
+private func legacyCounterProblems(_ values: [String: Any]) -> [String] {
+    var problems: [String] = []
+    for key in zeroTxCounters {
+        guard let rawValue = values[key], !(rawValue is NSNull) else { continue }
+        guard let value = rawValue as? NSNumber,
+              CFGetTypeID(value) != CFBooleanGetTypeID() else {
+            problems.append(key + "_invalid_type")
+            continue
+        }
+        if value.int64Value != 0 { problems.append(key) }
+    }
+    return problems
+}
+
 private func flag(_ service: io_service_t, _ key: String) -> Bool? {
     guard let value = cfProperty(service, key) else { return nil }
     let object = value as CFTypeRef
@@ -229,9 +243,11 @@ private func currentIdentityProblems(_ service: io_service_t,
     for key in disabledFlags where flag(service, key) != false {
         problems.append(key)
     }
-    for key in zeroTxCounters where number(service, key) != 0 {
-        problems.append(key)
-    }
+    let legacyCounterValues = Dictionary(uniqueKeysWithValues:
+        zeroTxCounters.compactMap { key in
+            cfProperty(service, key).map { (key, $0) }
+        })
+    problems.append(contentsOf: legacyCounterProblems(legacyCounterValues))
     for key in admissionKeys where number(service, key) == nil {
         problems.append(key + "_missing")
     }
@@ -274,18 +290,27 @@ private func sessionSubmitted(_ values: [String: Any]) -> Bool? {
     return observed != 0 || started != 0 || ended != 0
 }
 
-private func noDataDoorbell(_ values: [String: Any]) -> Bool? {
+private func dataDoorbellObserved(_ values: [String: Any]) -> Bool? {
     var observed = false
+    var missing = false
     for key in zeroTxCounters {
-        guard let value = values[key] as? Int64 else { return nil }
+        guard let value = values[key] as? Int64 else {
+            missing = true
+            continue
+        }
         if value != 0 { observed = true }
     }
-    return !observed
+    if observed { return true }
+    return missing ? nil : false
+}
+
+private func noDataDoorbell(_ values: [String: Any]) -> Bool? {
+    dataDoorbellObserved(values).map { !$0 }
 }
 
 private func noDataDoorbellInWindow(_ initial: [String: Any],
                                     _ final: [String: Any]) -> Bool? {
-    guard noDataDoorbell(initial) == true else { return nil }
+    guard dataDoorbellObserved(initial) == false else { return nil }
     return noDataDoorbell(final)
 }
 
@@ -306,14 +331,15 @@ private func terminalSnapshot(_ values: [String: Any]) -> Bool {
           let probeState = values["NativeP2PProbeState"] as? Int64,
           probeTerminalStates.contains(probeState) else { return false }
     if stage == Int64(quarantineStage) { return true }
-    return admissionKeys.allSatisfy { values[$0] is Int64 } &&
+    return admissionKeys.filter { !allocationSerialKeys.contains($0) }
+            .allSatisfy { values[$0] is Int64 } &&
+        allocationSerialKeys.allSatisfy { unsigned64Value(values[$0]) != nil } &&
         [macRemoveAckKey, prepareWitnessValidKey, prepareRocTokenKey,
          rocAbortAckKey].allSatisfy { values[$0] is Int64 } &&
         macAckIdentityKeys.allSatisfy { values[$0] is Int64 } &&
         ["NativeP2PProbeResourceMayExist", "NativeP2PProbeRemoveResult",
          "NativeP2PProbeContextGeneration", "NativeP2PProbePowerGeneration"]
             .allSatisfy { values[$0] is Int64 } &&
-        zeroTxCounters.allSatisfy { values[$0] is Int64 } &&
         rocSessionKeys.allSatisfy { values[$0] is Int64 }
 }
 
@@ -348,6 +374,8 @@ private func admissionProof(_ values: [String: Any],
     let rocUnchanged = rocSessionUnchanged(initial, values)
     let noSession = sessionSubmitted(values) == false && rocUnchanged
     let noDoorbell = noDataDoorbellInWindow(initial, values)
+    let noDoorbellContradiction = dataDoorbellObserved(initial) != true &&
+        dataDoorbellObserved(values) != true
     let rocAbsent: Bool? = rocUnchanged ? sessionSubmitted(values).map { !$0 } : nil
     let loadedMatches = values["loaded_uuid_matches"] as? Bool == true &&
         values["NativeTestBuild"] as? String == expectedBuild
@@ -365,9 +393,11 @@ private func admissionProof(_ values: [String: Any],
     let success = commonCleanup && probeState == 7 && operation == 0 && stationAck == 1 &&
         queueAck == 1 && neverDoorbelled == 1 && exactGeneration &&
         (stationSerial ?? 0) != 0 && (queueSerial ?? 0) != 0 && loadedMatches &&
-        noDoorbell == true
-    let cleanFailure = commonCleanup && probeState == 10 &&
-        operation != nil && operation != 0 && noDoorbell == true
+        noDoorbell != false && noDoorbellContradiction
+    let cleanFailure = commonCleanup && (probeState == 7 || probeState == 10) &&
+        operation != nil && operation != 0 && exactGeneration &&
+        neverDoorbelled == 1 && loadedMatches && noDoorbell != false &&
+        noDoorbellContradiction
     let status: String
     if success {
         status = "admission_and_cleanup_proven"
@@ -471,14 +501,59 @@ private func runProofSelfTests() -> Never {
           success["data_doorbell_issued"] as? Bool == false,
           success["roc_absent"] as? Bool == true,
           success["queue_serial"] as? UInt64 == ((UInt64(1) << 63) | 9),
-          success["roc_session_indicators_unchanged"] as? Bool == true else {
+          success["roc_session_indicators_unchanged"] as? Bool == true,
+          terminalSnapshot(fixture.final) else {
         emit(["schema": 1, "status": "self_test_failed", "case": "prepare_abort_changes_allowed"])
+        exit(1)
+    }
+
+    var missingLegacyCountersInitial = fixture.initial
+    var missingLegacyCountersFinal = fixture.final
+    for key in zeroTxCounters {
+        missingLegacyCountersInitial[key] = NSNull()
+        missingLegacyCountersFinal[key] = NSNull()
+    }
+    let profileWithoutLegacyCounters = admissionProof(
+        missingLegacyCountersFinal, initial: missingLegacyCountersInitial,
+        expectedBuild: expectedCandidate, expectedUUID: expectedUUID)
+    guard profileWithoutLegacyCounters["status"] as? String == "admission_and_cleanup_proven",
+          profileWithoutLegacyCounters["data_doorbell_issued"] is NSNull,
+          terminalSnapshot(missingLegacyCountersFinal) else {
+        emit(["schema": 1, "status": "self_test_failed",
+              "case": "missing_legacy_counters_use_explicit_gate"])
+        exit(1)
+    }
+
+    let invalidLegacyCounter = legacyCounterProblems([
+        zeroTxCounters[0]: NSNumber(value: true),
+    ])
+    guard invalidLegacyCounter == [zeroTxCounters[0] + "_invalid_type"] else {
+        emit(["schema": 1, "status": "self_test_failed",
+              "case": "present_invalid_legacy_counter_rejected"])
+        exit(1)
+    }
+
+    var missingSerial = fixture.final
+    missingSerial.removeValue(forKey: admissionKeys[10])
+    guard !terminalSnapshot(missingSerial) else {
+        emit(["schema": 1, "status": "self_test_failed",
+              "case": "missing_serial_is_not_terminal"])
+        exit(1)
+    }
+
+    var counterConflict = fixture.final
+    counterConflict[zeroTxCounters[0]] = Int64(1)
+    let conflict = admissionProof(counterConflict, initial: fixture.initial,
+        expectedBuild: expectedCandidate, expectedUUID: expectedUUID)
+    guard conflict["status"] as? String != "admission_and_cleanup_proven" else {
+        emit(["schema": 1, "status": "self_test_failed",
+              "case": "nonzero_legacy_counter_blocks_success"])
         exit(1)
     }
 
     var cleanFailure = fixture.final
     cleanFailure[admissionKeys[1]] = Int64(5)
-    cleanFailure["NativeP2PProbeState"] = Int64(10)
+    cleanFailure["NativeP2PProbeState"] = Int64(7)
     let failure = admissionProof(cleanFailure, initial: fixture.initial,
         expectedBuild: expectedCandidate, expectedUUID: expectedUUID)
     guard failure["status"] as? String == "clean_failure" else {
@@ -510,6 +585,10 @@ private func runProofSelfTests() -> Never {
 
     emit(["schema": 1, "status": "self_test_passed",
           "cases": ["prepare_abort_changes_allowed", "failed_operation_cleanup",
+                    "missing_legacy_counters_use_explicit_gate",
+                    "present_invalid_legacy_counter_rejected",
+                    "missing_serial_is_not_terminal",
+                    "nonzero_legacy_counter_blocks_success",
                     "missing_is_unknown", "ack_identity_mismatch"],
           "queue_serial_round_trip": success["queue_serial"] as Any? ?? NSNull(),
           "hardware_actions": false])
