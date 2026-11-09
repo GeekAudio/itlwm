@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light">
   <meta name="description" content="IntelWirelessNative 项目的本轮实测、40 项验收与下一步计划。">
-  <meta name="iw-site-version" content="75ec85c7f15b6e8cc31fb2ec4ce1070ec73eda8af6e406feb26712e6e8b05af8">
+  <meta name="iw-site-version" content="92720402e79ee2747cc637043e23cc261e3be798d519d675a33cb2e36500422c">
   <script>
 /* Check the live manifest on each visit, including back/forward restoration. */
 (function () {
@@ -835,7 +835,7 @@ window.PROGRESS_DATA = {"updatedAt":"2026-11-10T01:23:01+08:00","runningCandidat
 
 </script>
 <script>
-window.TEST_RECORDS = [{"id":"record-test132-runtime","version":"25G416-Test132","label":"Test132：原生双包回传及清理确认","tone":"warning","date":"2026-11-09","state":"13项通过 · 7项部分 · 20项未覆盖","short_summary":"两包原生收发已打通，下一步进入服务发现。","summary":"受控双包已完成原生发送、精确回包与安全释放。原工具因纳秒/微秒混用过早返回失败；同轮后续快照确认完成。AirDrop文件传输尚未验证。","evidence":["Test132身份匹配；开机ALIVE超时，保存初始现场后一次开启恢复Ready与awdl0。","本轮P2P MAC上下文AddResult=0，同代次创建并在收尾移除。","独立定向队列安装确认，descriptor0/1与SSN1/2各自完成。","最终CleanupAck=1、ResourcesAbsent=1、MAC_REMOVE匹配确认、外层ResourceMayExist=0，reset未增加。","频道6有界ROC START成功，两包绑定同一context/power/station/ROC代次。","canonical END已接纳，随后终态Closed与完整释放。","两个精确标记的AWDL数据回包均被捕获解码，capture与input都在同一接收deadline之前。","两个原生UDP各8字节进入无线队列，两个TX_RSP均status1并各自退休描述符。","一次开启恢复后，awdl0在本轮诊断前后保持UP与链路本地地址。","两次原生内核输出分别进入slot0/1，第二次在第一包发送完成及回包交付之后。","两包精确回执均captured/delivered/valid，ifindex15；原始socket记录也匹配两个nonce。","awdl0已自动获得IPv6链路本地地址并进入RUNNING。","应用两次IPv6 UDP输出各8字节，两个匹配回包均进入本次绑定socket。"],"blockers":["开机ALIVE等待超时仍复现。","原helper提前结束的问题已修复，修正后的工具本轮未重跑无线。","动态邻居、Bonjour与iPhone AirDrop尚未完成。"],"next":["终态等待单位已修正并通过离线回归；下一步以真实iPhone的PSF/MIF建立动态对端和有效窗口，接通原生mDNS查询与回复。"],"provenance":{"driverCandidate":"25G416-Test132","driverSourceCommit":"70650c29a66df50234f2527bb765a7c40384c06b","driverUuid":"6193AFDF-1731-3F33-84B4-4AC0821634AF","toolRound":"Test132","toolSourceCommit":"88b493f","sources":[{"label":"本轮驱动源码","url":"https://github.com/GeekAudio/itlwm/commit/70650c29a66df50234f2527bb765a7c40384c06b"}]}}];
+window.TEST_RECORDS = [{"id":"record-test134-runtime","version":"25G416-Test134","label":"Test134：组播资源准入与安全撤销通过","tone":"warning","date":"2026-11-10","state":"5项通过 · 5项部分 · 30项未覆盖","short_summary":"资源申请与释放闭环通过；真实数据发送尚未测试。","summary":"独立MULTICAST站点与TID0未安装队列获固件确认；本轮没有提交数据帧，不能替代真实mDNS或AirDrop验收。","evidence":["Test134加载身份匹配；初始ALIVE等待超时，助手一次开启后Ready与awdl0恢复。","组播站点创建与队列配置均取得固件确认；队列未安装到生产发送环。","终态Stage6、操作及清理结果均为0，资源缺失和旧lease未变得到确认。","ROC撤销与外层MAC移除回执精确匹配；诊断前后复位计数7→7。","awdl0在诊断前后保持UP/RUNNING与IPv6链路本地地址。","本资源NeverDoorbelled为1；缺失的旧版全局计数保留未知，不当作零。"],"blockers":["首次ALIVE启动等待超时仍复现；一次开启恢复不等于根因已修复。","本轮未提交会话或数据帧，没有无线发送、对端回包、mDNS及AirDrop证明。"],"next":["复核真实QM发送参数和资源选择，再安排有界mDNS收发；新候选尚未部署，本轮无需重启。"],"provenance":{"driverCandidate":"25G416-Test134","driverSourceCommit":"38437a7ebb7d6156db511bacd151fb05d8cb2b9f","driverUuid":"52A37FEE-7506-3E22-97BF-FBA9E8975203","toolRound":"Test134","toolSourceCommit":"68e8f2521b86a6904f183ca6954ae434dc31a101","sources":[{"label":"本轮驱动源码","url":"https://github.com/GeekAudio/itlwm/commit/38437a7ebb7d6156db511bacd151fb05d8cb2b9f"},{"label":"本轮收据工具修正","url":"https://github.com/GeekAudio/itlwm/commit/68e8f2521b86a6904f183ca6954ae434dc31a101"}]}}];
 
 </script>
 <script>
@@ -866,16 +866,32 @@ window.TEST_RECORDS = [{"id":"record-test132-runtime","version":"25G416-Test132"
     recordId: "record-test129-runtime",
     validationLabel: "Test129 实机验证"
   });
-  const evidenceMatches = records.length === 1 && records[0].version === data?.runningCandidate &&
-    data?.runningCandidate === lineageScope.driverCandidate &&
-    data?.validationLabel === lineageScope.validationLabel &&
-    records[0].id === lineageScope.recordId &&
-    records[0].provenance?.driverCandidate === lineageScope.driverCandidate &&
-    records[0].provenance?.driverSourceCommit === lineageScope.driverCommit &&
-    records[0].provenance?.driverUuid === lineageScope.driverUuid &&
-    records[0].provenance?.toolRound === lineageScope.toolRound &&
-    records[0].provenance?.toolSourceCommit === lineageScope.toolCommit &&
-    /Test129/.test(records[0].state || "");
+  const currentRecord = records.length === 1 && records[0] && typeof records[0] === "object" ? records[0] : null;
+  const currentProvenance = currentRecord?.provenance;
+  const currentTestRound = typeof data?.runningCandidate === "string"
+    ? data.runningCandidate.match(/(Test\d+)$/)?.[1]
+    : null;
+  const validationTestRound = typeof data?.validationLabel === "string"
+    ? data.validationLabel.match(/\b(Test\d+)\b/)?.[1]
+    : null;
+  const validCommit = value => typeof value === "string" && /^[0-9a-f]{7,40}$/i.test(value);
+  const validUuid = value => typeof value === "string" &&
+    /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(value);
+  const evidenceMatches = Boolean(currentTestRound && currentRecord && currentProvenance &&
+    currentRecord.version === data.runningCandidate &&
+    typeof currentRecord.id === "string" && currentRecord.id.length > 0 &&
+    typeof currentRecord.label === "string" && currentRecord.label.length > 0 &&
+    typeof currentRecord.state === "string" && currentRecord.state.length > 0 &&
+    typeof currentRecord.summary === "string" && currentRecord.summary.length > 0 &&
+    validationTestRound === currentTestRound &&
+    currentProvenance.driverCandidate === data.runningCandidate &&
+    validCommit(currentProvenance.driverSourceCommit) &&
+    validUuid(currentProvenance.driverUuid) &&
+    currentProvenance.toolRound === currentTestRound &&
+    validCommit(currentProvenance.toolSourceCommit) &&
+    Array.isArray(currentProvenance.sources) && currentProvenance.sources.length > 0 &&
+    currentProvenance.sources.every(source => typeof source?.label === "string" &&
+      source.label.length > 0 && typeof source.url === "string" && /^https?:\/\//.test(source.url)));
   if (stages.length !== 8 || checkpoints.length !== 40 ||
       stages.some((stage, index) => stage.stage !== index + 1 || stage.checkpoints?.length !== 5 ||
         stage.checkpoints.some((point, offset) => point.id !== `${index + 1}-${offset + 1}`)) ||
@@ -1003,12 +1019,16 @@ window.TEST_RECORDS = [{"id":"record-test132-runtime","version":"25G416-Test132"
     },
     classify(sourceData, point, sourceRecords) {
       if (point.current_result !== "not_covered") {
+        const exactLegacyEvidence = this.aligned(sourceData, sourceRecords) &&
+          this.exactTxCompletion(sourceData, sourceRecords);
         return {
           kind: "direct",
           status: labels[point.current_result] || "已有直接状态",
           rawStatus: point.current_result,
           source: point.current_detail || "当前逐项状态记录",
-          relations: this.relations.filter(rule => rule.from === point.id || rule.to === point.id)
+          relations: exactLegacyEvidence
+            ? this.relations.filter(rule => rule.from === point.id || rule.to === point.id)
+            : []
         };
       }
       if (!this.aligned(sourceData, sourceRecords) ||
@@ -1121,8 +1141,11 @@ window.TEST_RECORDS = [{"id":"record-test132-runtime","version":"25G416-Test132"
 
 
   function appendLineageDetails(body, checkpoint, lineage) {
-    const relevant = lineage?.relations || evidenceModel.relations.filter(rule =>
-      rule.from === checkpoint.id || rule.to === checkpoint.id);
+    const exactLegacyEvidence = evidenceModel.aligned(data, records) &&
+      evidenceModel.exactTxCompletion(data, records);
+    const relevant = lineage?.relations || (exactLegacyEvidence
+      ? evidenceModel.relations.filter(rule => rule.from === checkpoint.id || rule.to === checkpoint.id)
+      : []);
     if (relevant.length) {
       body.append(node("span", "detail-label", "源码调用与同轮依赖"));
       relevant.forEach(rule => {
@@ -1146,7 +1169,7 @@ window.TEST_RECORDS = [{"id":"record-test132-runtime","version":"25G416-Test132"
         body.append(card);
       });
     }
-    const exclusion = evidenceModel.exclusions[checkpoint.id];
+    const exclusion = exactLegacyEvidence ? evidenceModel.exclusions[checkpoint.id] : null;
     if (exclusion) {
       body.append(node("span", "detail-label", "未推导的边界"));
       body.append(node("p", "lineage-scope", exclusion.text));
@@ -1381,7 +1404,13 @@ window.TEST_RECORDS = [{"id":"record-test132-runtime","version":"25G416-Test132"
     if (!featured.length && record?.evidence?.length) {
       const evidence = record.evidence;
       featured = evidence.slice(0, Math.min(3, evidence.length)).map((value, index) => ({ label: `本轮证据 ${index + 1}`, value }));
-      if (evidence.length > 3) featured.push({ label: "尚未闭环", value: evidence[evidence.length - 1] });
+      if (evidence.length > 3) {
+        if (record.blockers?.length) {
+          featured.push({ label: "尚未闭环", value: record.blockers[0] });
+        } else {
+          featured.push({ label: "补充证据", value: evidence[evidence.length - 1] });
+        }
+      }
     }
     const grid = node("div", "recent-facts-grid");
     featured.forEach(fact => {
@@ -1412,7 +1441,7 @@ window.TEST_RECORDS = [{"id":"record-test132-runtime","version":"25G416-Test132"
       body.append(node("p", "recent-record-summary",
         `驱动：${provenance.driverCandidate} · source_commit ${provenance.driverSourceCommit} · Mach-O UUID ${provenance.driverUuid}`));
       body.append(node("p", "recent-record-summary",
-        `对端工具：${provenance.toolRound} · source_commit ${provenance.toolSourceCommit}（本轮实机驱动与工具分别绑定上方记录的 Test129 来源）`));
+        `对端工具：${provenance.toolRound} · source_commit ${provenance.toolSourceCommit}（本轮实机驱动与工具来源分别绑定到上方记录）`));
       const links = node("div", "lineage-links");
       (provenance.sources || []).forEach(source => {
         const anchor = link(source.label + " ↗", source.url, "lineage-source-link");

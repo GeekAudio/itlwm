@@ -25,16 +25,32 @@
     recordId: "record-test129-runtime",
     validationLabel: "Test129 实机验证"
   });
-  const evidenceMatches = records.length === 1 && records[0].version === data?.runningCandidate &&
-    data?.runningCandidate === lineageScope.driverCandidate &&
-    data?.validationLabel === lineageScope.validationLabel &&
-    records[0].id === lineageScope.recordId &&
-    records[0].provenance?.driverCandidate === lineageScope.driverCandidate &&
-    records[0].provenance?.driverSourceCommit === lineageScope.driverCommit &&
-    records[0].provenance?.driverUuid === lineageScope.driverUuid &&
-    records[0].provenance?.toolRound === lineageScope.toolRound &&
-    records[0].provenance?.toolSourceCommit === lineageScope.toolCommit &&
-    /Test129/.test(records[0].state || "");
+  const currentRecord = records.length === 1 && records[0] && typeof records[0] === "object" ? records[0] : null;
+  const currentProvenance = currentRecord?.provenance;
+  const currentTestRound = typeof data?.runningCandidate === "string"
+    ? data.runningCandidate.match(/(Test\d+)$/)?.[1]
+    : null;
+  const validationTestRound = typeof data?.validationLabel === "string"
+    ? data.validationLabel.match(/\b(Test\d+)\b/)?.[1]
+    : null;
+  const validCommit = value => typeof value === "string" && /^[0-9a-f]{7,40}$/i.test(value);
+  const validUuid = value => typeof value === "string" &&
+    /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(value);
+  const evidenceMatches = Boolean(currentTestRound && currentRecord && currentProvenance &&
+    currentRecord.version === data.runningCandidate &&
+    typeof currentRecord.id === "string" && currentRecord.id.length > 0 &&
+    typeof currentRecord.label === "string" && currentRecord.label.length > 0 &&
+    typeof currentRecord.state === "string" && currentRecord.state.length > 0 &&
+    typeof currentRecord.summary === "string" && currentRecord.summary.length > 0 &&
+    validationTestRound === currentTestRound &&
+    currentProvenance.driverCandidate === data.runningCandidate &&
+    validCommit(currentProvenance.driverSourceCommit) &&
+    validUuid(currentProvenance.driverUuid) &&
+    currentProvenance.toolRound === currentTestRound &&
+    validCommit(currentProvenance.toolSourceCommit) &&
+    Array.isArray(currentProvenance.sources) && currentProvenance.sources.length > 0 &&
+    currentProvenance.sources.every(source => typeof source?.label === "string" &&
+      source.label.length > 0 && typeof source.url === "string" && /^https?:\/\//.test(source.url)));
   if (stages.length !== 8 || checkpoints.length !== 40 ||
       stages.some((stage, index) => stage.stage !== index + 1 || stage.checkpoints?.length !== 5 ||
         stage.checkpoints.some((point, offset) => point.id !== `${index + 1}-${offset + 1}`)) ||
@@ -162,12 +178,16 @@
     },
     classify(sourceData, point, sourceRecords) {
       if (point.current_result !== "not_covered") {
+        const exactLegacyEvidence = this.aligned(sourceData, sourceRecords) &&
+          this.exactTxCompletion(sourceData, sourceRecords);
         return {
           kind: "direct",
           status: labels[point.current_result] || "已有直接状态",
           rawStatus: point.current_result,
           source: point.current_detail || "当前逐项状态记录",
-          relations: this.relations.filter(rule => rule.from === point.id || rule.to === point.id)
+          relations: exactLegacyEvidence
+            ? this.relations.filter(rule => rule.from === point.id || rule.to === point.id)
+            : []
         };
       }
       if (!this.aligned(sourceData, sourceRecords) ||
@@ -280,8 +300,11 @@
 
 
   function appendLineageDetails(body, checkpoint, lineage) {
-    const relevant = lineage?.relations || evidenceModel.relations.filter(rule =>
-      rule.from === checkpoint.id || rule.to === checkpoint.id);
+    const exactLegacyEvidence = evidenceModel.aligned(data, records) &&
+      evidenceModel.exactTxCompletion(data, records);
+    const relevant = lineage?.relations || (exactLegacyEvidence
+      ? evidenceModel.relations.filter(rule => rule.from === checkpoint.id || rule.to === checkpoint.id)
+      : []);
     if (relevant.length) {
       body.append(node("span", "detail-label", "源码调用与同轮依赖"));
       relevant.forEach(rule => {
@@ -305,7 +328,7 @@
         body.append(card);
       });
     }
-    const exclusion = evidenceModel.exclusions[checkpoint.id];
+    const exclusion = exactLegacyEvidence ? evidenceModel.exclusions[checkpoint.id] : null;
     if (exclusion) {
       body.append(node("span", "detail-label", "未推导的边界"));
       body.append(node("p", "lineage-scope", exclusion.text));
@@ -540,7 +563,13 @@
     if (!featured.length && record?.evidence?.length) {
       const evidence = record.evidence;
       featured = evidence.slice(0, Math.min(3, evidence.length)).map((value, index) => ({ label: `本轮证据 ${index + 1}`, value }));
-      if (evidence.length > 3) featured.push({ label: "尚未闭环", value: evidence[evidence.length - 1] });
+      if (evidence.length > 3) {
+        if (record.blockers?.length) {
+          featured.push({ label: "尚未闭环", value: record.blockers[0] });
+        } else {
+          featured.push({ label: "补充证据", value: evidence[evidence.length - 1] });
+        }
+      }
     }
     const grid = node("div", "recent-facts-grid");
     featured.forEach(fact => {
@@ -571,7 +600,7 @@
       body.append(node("p", "recent-record-summary",
         `驱动：${provenance.driverCandidate} · source_commit ${provenance.driverSourceCommit} · Mach-O UUID ${provenance.driverUuid}`));
       body.append(node("p", "recent-record-summary",
-        `对端工具：${provenance.toolRound} · source_commit ${provenance.toolSourceCommit}（本轮实机驱动与工具分别绑定上方记录的 Test129 来源）`));
+        `对端工具：${provenance.toolRound} · source_commit ${provenance.toolSourceCommit}（本轮实机驱动与工具来源分别绑定到上方记录）`));
       const links = node("div", "lineage-links");
       (provenance.sources || []).forEach(source => {
         const anchor = link(source.label + " ↗", source.url, "lineage-source-link");
