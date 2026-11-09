@@ -20,27 +20,27 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "8ba3eea24475e56b4c04f95fb51db6ed451c9db043f4b07ae35cc0f6dcab6fbf"
+      "sha256": "33810c966c256264b91f24d7d1971cc761bf8a626d191f091d1ad554384e3d8a"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "61a2efa9a62e39a0fb834f2e96abd35810b85faddfcdec8cd27b7dea4873d8ec"
+      "sha256": "f8501199daaf06617c202e7f4167bd19ac864afd883afca781831659de28a5c4"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "bafabd6c1157dea6acd1ad3e163ae7147aa26f9ed50847db1ee4f6147430b942"
+      "sha256": "2c107f43e34ac2cc1f0e543d4b526b1140a47fbeb94075e494103218bfe623c2"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "bafabd6c1157dea6acd1ad3e163ae7147aa26f9ed50847db1ee4f6147430b942"
+      "sha256": "2c107f43e34ac2cc1f0e543d4b526b1140a47fbeb94075e494103218bfe623c2"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "f8aea1edecef8194b0f45d8b46ecdd1703874917c58df769f5d27a36bb3b54f2"
+      "sha256": "8c34933c089933cec4be3370c8d97fe569b33668adaedf2283c00768bad1f45a"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
@@ -90,8 +90,8 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-10T02:56:44+08:00",
-  "runtime_scope": "Test135：10项通过、8项部分、22项未覆盖。控制帧本地完成与清理通过；真实QM及原生RX未完成。",
+  "updated_at": "2026-11-10T03:01:38+08:00",
+  "runtime_scope": "Test135：9项通过、9项部分、22项未覆盖。控制帧本地完成及外层MAC/ROC撤销通过；独立站点及数据队列完整释放仍部分，真实QM和原生RX未完成。",
   "running_candidate": "25G416-Test135",
   "next_candidate": null,
   "website_delivery": "同步Test135本轮实测与工具修正；下一次重启仍使用同一驱动，无需写EFI。",
