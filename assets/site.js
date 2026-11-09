@@ -48,7 +48,7 @@
     $("#current-summary").textContent = workflow?.headline || data.currentRuntimeLabel;
     const panel = $("#version-panel");
     const current = node("div", "version-item");
-    current.append(node("span", "label", "本轮实测"), node("strong", "version-code", running), pill("已有实测记录", "success"));
+    current.append(node("span", "label", "最近完整诊断"), node("strong", "version-code", running), pill("已有实测记录", "success"));
     panel.append(current);
     if (data.nextCandidate && data.nextCandidate !== data.runningCandidate) {
       const candidate = node("div", "version-item");
@@ -133,7 +133,7 @@
   function renderAcceptance() {
     const overview = $("#progress-overview");
     const heading = node("div", "section-heading");
-    const title = node("h2", "", `${running} · 本轮验收`);
+    const title = node("h2", "", `${running} · 最近保存的验收`);
     title.id = "acceptance-title";
     heading.append(title);
     const total = node("div", "count-total");
@@ -216,7 +216,7 @@
   function renderNext() {
     const host = $("#next-content");
     const intro = node("div", "next-intro");
-    intro.append(pill(data.nextCandidate ? next : running, "neutral"), node("h3", "", "先让连接稳定，再闭合数据通路。"));
+    intro.append(pill(data.nextCandidate ? next : running, "neutral"), node("h3", "", "先闭合真实单包，再接持续服务。"));
     intro.append(node("p", "", data.nextCandidateSummary || workflow?.nextAction));
     const list = node("ol", "next-list");
     const tasks = [
