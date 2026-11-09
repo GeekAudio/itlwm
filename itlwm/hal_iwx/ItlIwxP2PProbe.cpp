@@ -12650,7 +12650,7 @@ void ItlIwx::tahoeP2pTapSessionEvent(struct iwx_softc *sc,
     const bool canonicalEnd = !before.endSeen && after.endSeen;
 #if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
     if (canonicalStart && reducerReturnedTrue && after.startStatus == 1 &&
-        after.configuration == IWX_SESSION_PROTECT_CONF_P2P_DEVICE_DISCOV &&
+        after.configuration == IWX_SESSION_PROTECT_CONF_P2P_GO_NEGOTIATION &&
         after.startObservedMonotonicUs != 0) {
         if (nativeDiscoveryRxWindowPublishedOnce_ &&
             nativeDiscoveryRxWindow_.reset()) {
@@ -12661,9 +12661,10 @@ void ItlIwx::tahoeP2pTapSessionEvent(struct iwx_softc *sc,
             epochs.contextGeneration, epochs.powerGeneration,
             epochs.stationGeneration, epochs.rocGeneration
         };
-        (void)nativeDiscoveryRxWindow_.begin(windowEpochs,
+        if (nativeDiscoveryRxWindow_.begin(windowEpochs,
             uint32_t(sc->sc_generation), after.startObservedMonotonicUs,
-            tahoeDiscoveryRxBridgeCounters());
+            tahoeDiscoveryRxBridgeCounters()))
+            nativeDiscoveryRxWindowConfiguration_ = after.configuration;
     }
     if (canonicalEnd) {
         const NativeAwdlDiscoveryRxWindow::Epochs windowEpochs {
@@ -12671,6 +12672,7 @@ void ItlIwx::tahoeP2pTapSessionEvent(struct iwx_softc *sc,
             epochs.stationGeneration, epochs.rocGeneration
         };
         if (reducerReturnedTrue && after.endStatus == 1 &&
+            after.configuration == nativeDiscoveryRxWindowConfiguration_ &&
             after.endObservedMonotonicUs != 0) {
             (void)nativeDiscoveryRxWindow_.close(windowEpochs,
                 uint32_t(sc->sc_generation), after.endObservedMonotonicUs,
@@ -12869,7 +12871,9 @@ bool ItlIwx::tahoeDiscoveryRxWindowEpochs(
     if (!NativeAwdlDiscoveryRxWindow::validEpochs(current) ||
         !NativeAwdlDiscoveryRxWindow::sameEpochs(bound, current) ||
         session.generation != bound.roc ||
-        session.configuration != IWX_SESSION_PROTECT_CONF_P2P_DEVICE_DISCOV ||
+        nativeDiscoveryRxWindowConfiguration_ !=
+            IWX_SESSION_PROTECT_CONF_P2P_GO_NEGOTIATION ||
+        session.configuration != nativeDiscoveryRxWindowConfiguration_ ||
         !session.startSeen || session.startStatus != 1) {
         nativeDiscoveryRxWindow_.invalidate(
             NativeAwdlDiscoveryRxWindow::CloseReason::EpochMismatch,
@@ -12954,6 +12958,8 @@ void ItlIwx::tahoeDiscoveryRxWindowPublish(
 
     set32("NativeAwdlDiscoveryRxWindowPublished", 0);
     set32("NativeAwdlDiscoveryRxWindowSnapshotBegin", writingVersion);
+    set32("NativeAwdlDiscoveryRxWindowRocConfiguration",
+          nativeDiscoveryRxWindowConfiguration_);
     set32("NativeAwdlDiscoveryRxWindowSchemaVersion",
           nativeDiscoveryRxWindowSnapshot_.schemaVersion);
     set32("NativeAwdlDiscoveryRxWindowValid",

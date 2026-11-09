@@ -598,6 +598,7 @@ public:
     NativeAwdlDiscoveryRxWindow::Snapshot nativeDiscoveryRxWindowSnapshot_ {};
     uint64_t nativeDiscoveryRxWindowWords_[
         NativeAwdlDiscoveryRxWindow::kMaxWireWordCount] {};
+    uint32_t nativeDiscoveryRxWindowConfiguration_ {0};
     uint32_t nativeDiscoveryRxWindowSnapshotVersion_ {0};
     uint32_t nativeDiscoveryRxWindowPublishVersion_ {0};
     bool nativeDiscoveryRxWindowPublishedOnce_ {false};
