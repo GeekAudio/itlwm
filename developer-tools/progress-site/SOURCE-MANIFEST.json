@@ -20,27 +20,27 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "6cdc8b064e25c2a4694cf5eeb3653865b2c1f2d6d377cdaaa16876d8090716d1"
+      "sha256": "8ba3eea24475e56b4c04f95fb51db6ed451c9db043f4b07ae35cc0f6dcab6fbf"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "b93c241391413ba649e65befadb410f5ae384344c13e64420ecb3a40f72fe9c5"
+      "sha256": "61a2efa9a62e39a0fb834f2e96abd35810b85faddfcdec8cd27b7dea4873d8ec"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "a2bc3bfdb9904e197021851e2399494c36eb2af02031abbed6b8dcd594aeac1c"
+      "sha256": "bafabd6c1157dea6acd1ad3e163ae7147aa26f9ed50847db1ee4f6147430b942"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "a2bc3bfdb9904e197021851e2399494c36eb2af02031abbed6b8dcd594aeac1c"
+      "sha256": "bafabd6c1157dea6acd1ad3e163ae7147aa26f9ed50847db1ee4f6147430b942"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "53563fdf6c48f5780527886f3a193cd877381d3bf50eb606bf658b143c5b646d"
+      "sha256": "f8aea1edecef8194b0f45d8b46ecdd1703874917c58df769f5d27a36bb3b54f2"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
@@ -90,11 +90,11 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-10T01:49:25+08:00",
-  "runtime_scope": "Test134资源准入与撤销实测通过；5通过、5部分、30未覆盖。本轮不发数据帧，不能计作mDNS或AirDrop成功。",
-  "running_candidate": "25G416-Test134",
-  "next_candidate": "25G416-Test135",
-  "website_delivery": "Test135 已部署待重启；当前实测保持 Test134，开发总时间线同步。",
-  "deployment_state": "test135_deployed_waiting_reboot_disarmed",
-  "site_preparation": "Discovery RX baseline A deployed, flags7 retained, priority B off; runtime pending. Startup ALIVE timeout unresolved."
+  "updated_at": "2026-11-10T02:56:44+08:00",
+  "runtime_scope": "Test135：10项通过、8项部分、22项未覆盖。控制帧本地完成与清理通过；真实QM及原生RX未完成。",
+  "running_candidate": "25G416-Test135",
+  "next_candidate": null,
+  "website_delivery": "同步Test135本轮实测与工具修正；下一次重启仍使用同一驱动，无需写EFI。",
+  "deployment_state": "test135_runtime_tool_awdl_flag_fixed",
+  "site_preparation": "Original ARM used P2P-only helper. Corrected helper requests P2P plus AWDL; radio validation pending. Separate no-ARM browse added four local expired IPv6 packets; no firmware data submission."
 }
