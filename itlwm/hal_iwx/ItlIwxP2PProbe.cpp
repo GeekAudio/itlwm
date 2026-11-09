@@ -8041,40 +8041,58 @@ static bool directedDataPacket1PreSendReady(
     if (!probe || !event || !probe->directedDataOnly ||
         probe->directedDataArm.packetCount != 2 ||
         !probe->directedDataReady || !probe->directedDataTicketBound ||
-        !probe->directedDataOriginTicket.ticketSerial ||
-        data.packetCount != 2 || !data.originWindowBound ||
-        !data.originTicketBound || data.originClosed ||
-        data.ticketSerial != probe->directedDataOriginTicket.ticketSerial ||
-        data.ownerSerial != probe->directedDataBinding.ownerSerial ||
-        data.runSerial != probe->directedDataBinding.runSerial ||
-        data.deadlineUs != probe->directedDataBinding.deadlineUs ||
-        data.rocToken != probe->directedDataBinding.rocToken ||
-        nowUs < probe->directedDataBinding.rocStartUs ||
-        nowUs >= probe->directedDataBinding.deadlineUs ||
-        probe->directedDataBinding.rocStartUs > UINT64_MAX - 100000ULL ||
-        probe->directedDataBinding.deadlineUs !=
-            probe->directedDataBinding.rocStartUs + 100000ULL)
+        !probe->directedDataOriginTicket.ticketSerial || data.packetCount != 2 ||
+        data.state != TahoeP2PDirectedDataState::kCompleted ||
+        !data.originWindowBound || !data.originTicketBound || data.originClosed)
         return false;
 
+    const auto &arm = probe->directedDataBinding;
+    const auto &ticket = probe->directedDataOriginTicket;
     const auto &session = event->snapshot;
     const auto &lease = event->directedDataRxLease;
     const auto &first = data.packets[0];
     const auto &second = data.packets[1];
     const auto &originFirst = origin.packets[0];
     const auto &originSecond = origin.packets[1];
+    const uint64_t startUs = session.startObservedMonotonicUs;
+    const uint64_t deadlineUs = data.deadlineUs;
+    if (!startUs || startUs > UINT64_MAX -
+            NativeAwdlDirectedOriginTx::kMaximumWindowUs)
+        return false;
+
+    // The arm copy predates ROC START and intentionally retains zero window
+    // fields. Prove the canonical window from the HAL snapshot, the observed
+    // session START, the live RX lease, and the exact BSD origin ticket.
+    const bool armIdentityCurrent = arm.ownerSerial && arm.runSerial &&
+        NativeAwdlDirectedOriginTx::validEpochs(arm.epochs) &&
+        arm.epochs.context == probe->contextGeneration &&
+        arm.epochs.power == probe->powerGeneration &&
+        arm.epochs.station == probe->stationGeneration &&
+        arm.epochs.roc == probe->contextGeneration &&
+        arm.generation == arm.epochs.power &&
+        arm.p2pFirmwareGeneration &&
+        arm.p2pFirmwareGeneration == probe->p2pFirmwareGeneration &&
+        data.ownerSerial == arm.ownerSerial && data.runSerial == arm.runSerial &&
+        data.generation == arm.generation &&
+        data.p2pFirmwareGeneration == arm.p2pFirmwareGeneration &&
+        IwxMccRefreshPolicy::sameDirectedDataWitness(data.mcc, arm.mcc) &&
+        IwxMccRefreshPolicy::sameDirectedDataWitness(
+            data.mcc, probe->directedDataPreflightMcc);
     const bool sessionCurrent =
         session.generation == probe->contextGeneration &&
         session.configuration == IWX_SESSION_PROTECT_CONF_P2P_GO_NEGOTIATION &&
         session.commandReturned && session.commandResult == 0 &&
         session.startSeen && session.startStatus == 1 &&
-        session.startObservedMonotonicUs ==
-            probe->directedDataBinding.rocStartUs &&
         !session.endSeen && !session.outcomeUnknown;
-    const NativeP2PDirectedDataRxInput::Epochs bindingEpochs{
-        probe->directedDataBinding.epochs.context,
-        probe->directedDataBinding.epochs.power,
-        probe->directedDataBinding.epochs.station,
-        probe->directedDataBinding.epochs.roc};
+    const NativeP2PDirectedDataRxInput::Epochs leaseEpochs{
+        arm.epochs.context, arm.epochs.power, arm.epochs.station,
+        arm.epochs.roc};
+    const bool windowCurrent = sessionCurrent && data.rocToken &&
+        data.rocToken == session.generation &&
+        data.rocToken == arm.epochs.roc &&
+        deadlineUs == startUs +
+            NativeAwdlDirectedOriginTx::kMaximumWindowUs &&
+        nowUs >= startUs && nowUs < deadlineUs;
     const bool leaseCurrent = lease.compiled && lease.runtimeEnabled &&
         lease.profileEnabled && lease.profileSelected &&
         lease.ownerCurrent && lease.epochsMatch && lease.tokenMatches &&
@@ -8082,26 +8100,40 @@ static bool directedDataPacket1PreSendReady(
         lease.goNegotiationConfiguration && lease.channel6Roc &&
         lease.startSeen && lease.startSucceeded && !lease.endSeen &&
         !lease.outcomeUnknown && lease.mccCurrent &&
-        lease.ownerSerial == probe->directedDataBinding.ownerSerial &&
-        NativeP2PDirectedDataRxInput::sameEpochs(lease.epochs,
-                                                  bindingEpochs) &&
-        lease.startUs == probe->directedDataBinding.rocStartUs &&
-        lease.deadlineUs == probe->directedDataBinding.deadlineUs &&
+        lease.ownerSerial == arm.ownerSerial &&
+        NativeP2PDirectedDataRxInput::sameEpochs(lease.epochs, leaseEpochs) &&
+        lease.startUs == startUs && lease.deadlineUs == deadlineUs &&
+        lease.nowUs >= startUs && lease.nowUs <= nowUs &&
         lease.nowUs < lease.deadlineUs;
+    const bool ticketCurrent = ticket.ticketSerial &&
+        ticket.ticketSerial == data.ticketSerial &&
+        ticket.ticketSerial == origin.ticketSerial &&
+        ticket.ownerSerial == arm.ownerSerial &&
+        ticket.ownerSerial == origin.ownerSerial &&
+        ticket.runSerial == arm.runSerial &&
+        ticket.runSerial == origin.runSerial &&
+        ticket.interfaceIncarnation &&
+        ticket.interfaceIncarnation == data.interfaceIncarnation &&
+        ticket.interfaceIncarnation == origin.interfaceIncarnation &&
+        ticket.ifindex && ticket.ifindex == data.ifindex &&
+        ticket.ifindex == origin.ifindex &&
+        ticket.rocStartUs == startUs && origin.rocStartUs == startUs &&
+        ticket.deadlineUs == deadlineUs && origin.deadlineUs == deadlineUs &&
+        NativeAwdlDirectedOriginTx::sameEpochs(ticket.epochs, arm.epochs) &&
+        NativeAwdlDirectedOriginTx::sameEpochs(origin.epochs, arm.epochs);
+    if (!armIdentityCurrent || !windowCurrent || !leaseCurrent ||
+        !ticketCurrent)
+        return false;
+
     const bool originCurrent = origin.ticketPresent &&
         origin.state == NativeAwdlDirectedOriginTx::State::OpenNext &&
         origin.packetCount == 2 &&
-        origin.ticketSerial == probe->directedDataOriginTicket.ticketSerial &&
-        origin.ownerSerial == probe->directedDataBinding.ownerSerial &&
-        origin.runSerial == probe->directedDataBinding.runSerial &&
-        origin.interfaceIncarnation ==
-            probe->directedDataOriginTicket.interfaceIncarnation &&
-        origin.ifindex == probe->directedDataOriginTicket.ifindex &&
-        origin.rocStartUs == probe->directedDataBinding.rocStartUs &&
-        origin.deadlineUs == probe->directedDataBinding.deadlineUs &&
-        NativeAwdlDirectedOriginTx::sameEpochs(
-            origin.epochs, probe->directedDataBinding.epochs);
+        !origin.packetQueued && !origin.packetPopping &&
+        origin.ticketSerial == ticket.ticketSerial &&
+        origin.ownerSerial == arm.ownerSerial &&
+        origin.runSerial == arm.runSerial;
     const bool firstProof = first.identityBound && first.doorbellIssued &&
+        first.sequenceReserved &&
         first.completionObserved && first.frameAttemptSucceeded &&
         first.exactReplyCaptured && first.exactReplyDelivered &&
         first.originDoorbellRecorded && first.originCompletionRecorded &&
@@ -8111,13 +8143,28 @@ static bool directedDataPacket1PreSendReady(
         originFirst.txSucceeded && originFirst.exactReplyValid &&
         originFirst.replyCaptured && originFirst.replyDelivered &&
         originFirst.packetSerial == first.packetToken &&
-        originFirst.slot == 0;
+        first.slot == 0 && originFirst.slot == 0 &&
+        first.doorbellUs >= startUs && first.doorbellUs < deadlineUs &&
+        first.txResponseUs >= first.doorbellUs &&
+        first.txResponseUs < deadlineUs && first.txResponseUs <= nowUs &&
+        first.exactReplyCaptureUs >= first.doorbellUs &&
+        first.exactReplyCaptureUs <= first.exactReplyInputUs &&
+        first.exactReplyInputUs < deadlineUs &&
+        first.exactReplyInputUs <= nowUs &&
+        originFirst.doorbellUs == first.doorbellUs &&
+        originFirst.txResponseUs == first.txResponseUs &&
+        originFirst.replyCaptureUs == first.exactReplyCaptureUs &&
+        originFirst.replyInputUs == first.exactReplyInputUs;
     const bool secondUnused = !second.doorbellIssued &&
         !second.identityBound && !second.permitIssued &&
-        !second.completionObserved && !originSecond.packetQueued &&
+        !second.sequenceReserved && second.packetToken == 0 &&
+        !second.completionObserved && !second.frameAttemptSucceeded &&
+        !second.exactReplyCaptured && !second.exactReplyDelivered &&
+        !second.originDoorbellRecorded && !second.originCompletionRecorded &&
+        data.currentSlot == 0 &&
+        !originSecond.packetQueued &&
         !originSecond.packetPopping && !originSecond.doorbellObserved &&
-        !originSecond.txResponseObserved && !origin.packetQueued &&
-        !origin.packetPopping;
+        !originSecond.txResponseObserved && !originSecond.packetSpent;
     return sessionCurrent && leaseCurrent && originCurrent && firstProof &&
         secondUnused;
 }
