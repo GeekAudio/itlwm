@@ -20,27 +20,27 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "33810c966c256264b91f24d7d1971cc761bf8a626d191f091d1ad554384e3d8a"
+      "sha256": "feed24891238afd4a2367643a778de516f3adc47362b89e2082c10690af6bb03"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "f8501199daaf06617c202e7f4167bd19ac864afd883afca781831659de28a5c4"
+      "sha256": "1338a827ba0d300bde44b65f16695bf329fb3d497c80fac528fbdcecd80d50d5"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "2c107f43e34ac2cc1f0e543d4b526b1140a47fbeb94075e494103218bfe623c2"
+      "sha256": "efd8ff413f96dcd191e6a233cc65dfbb30079c4233bf205c7375678e5770f189"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "2c107f43e34ac2cc1f0e543d4b526b1140a47fbeb94075e494103218bfe623c2"
+      "sha256": "efd8ff413f96dcd191e6a233cc65dfbb30079c4233bf205c7375678e5770f189"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "8c34933c089933cec4be3370c8d97fe569b33668adaedf2283c00768bad1f45a"
+      "sha256": "b537b0632224bf4119da838969eb4ee779544ce88e866a6f2d369a8cef7cec79"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
@@ -90,11 +90,11 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-10T03:01:38+08:00",
-  "runtime_scope": "Test135：9项通过、9项部分、22项未覆盖。控制帧本地完成及外层MAC/ROC撤销通过；独立站点及数据队列完整释放仍部分，真实QM和原生RX未完成。",
+  "updated_at": "2026-11-10T03:15:06+08:00",
+  "runtime_scope": "Test135修正查询新启动：16项通过、7项部分、17项未覆盖。真实QM固件完成及PSF/MIF接纳通过；原生数据RX与服务应答0。",
   "running_candidate": "25G416-Test135",
   "next_candidate": null,
-  "website_delivery": "同步Test135本轮实测与工具修正；下一次重启仍使用同一驱动，无需写EFI。",
-  "deployment_state": "test135_runtime_tool_awdl_flag_fixed",
-  "site_preparation": "Original ARM used P2P-only helper. Corrected helper requests P2P plus AWDL; radio validation pending. Separate no-ARM browse added four local expired IPv6 packets; no firmware data submission."
+  "website_delivery": "本轮实测及开发时间线同步；驱动与EFI未改，当前无需重启。",
+  "deployment_state": "test135_corrected_qm_tx_completed_rx_missing",
+  "site_preparation": "Corrected P2P plus AWDL helper drove one strict system target QM through descriptor/doorbell and a matching local TX_RSP. No peer ACK/native data RX. Pending-counter fail-closed guard built and boundary-checked offline."
 }
