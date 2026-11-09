@@ -20,27 +20,27 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "b0d4b92ecdd35a892cdd99cce5cc89d20f682f7d6cc527410c474cc2e12dffff"
+      "sha256": "07118ad114d2925fe44ab786e861f4d363283e054f6e497c79171961de63e864"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "4edbbcb85c1adc550529470691cdf91cfaacfc94282258a505e6b8518df66cb2"
+      "sha256": "ee51c72a68a00f2f610ae0996be24610396456fc4f594d909e99b77e42c74aa3"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "d01edb6e74d29315e18b656595e8f6710c78449e0f360c152000abab68ee6435"
+      "sha256": "17dd85c600180e2267e1c3343ac5362dc8d0fcb256bcec3293388fa3e4b73d34"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "d01edb6e74d29315e18b656595e8f6710c78449e0f360c152000abab68ee6435"
+      "sha256": "17dd85c600180e2267e1c3343ac5362dc8d0fcb256bcec3293388fa3e4b73d34"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "b039dc8efa0afe956257a8ba1fefb1876644919c1c9597b7976882a9a23708b5"
+      "sha256": "b287eb35ff2634835f4ae06284fcb1b7b98df8e479fbf8e30f8518bf828cce60"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
@@ -85,11 +85,11 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-09T21:03:02.220122",
-  "runtime_scope": "Test130首包原生UDP往返成功，第二包未放行；11项直接通过、4项部分、25项未覆盖。独立无线ACK与AirDrop未证明。",
-  "running_candidate": "25G416-Test130",
-  "next_candidate": "25G416-Test131",
-  "website_delivery": "Test130首包实测与Test131部署已同步；等待重启验证第二包。",
-  "deployment_state": "test131_deployed_waiting_reboot",
-  "site_preparation": "Test130 first packet runtime evidence separated from deployed Test131; AirDrop unproven."
+  "updated_at": "2026-11-09T21:34:04+08:00",
+  "runtime_scope": "Test131首包到达受控对端；成功TX_RSP因Retry位误拒绝，Intel回包与释放未通过。6项通过、4项部分、2项未通过、28项未覆盖。",
+  "running_candidate": "25G416-Test131",
+  "next_candidate": "25G416-Test132",
+  "website_delivery": "Test131实测已记录，Test132已部署待重启。",
+  "deployment_state": "test132_deployed_waiting_reboot",
+  "site_preparation": "Test131 first return blocked by exact frame-control mismatch; retained resources, no AirDrop proof."
 }
