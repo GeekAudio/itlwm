@@ -20,27 +20,27 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "a863f4e0995f3d707ca0f52bbcb795a372bd558a2155cc0cbd256ad71c264b1b"
+      "sha256": "a9e5577445cda41fd97e2d4e03d17a058ada91d547e43408383b072f34860e5c"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "53026103c0332ea4ebd40a913f70ef1d306a592f9428725e497958cb69f65d03"
+      "sha256": "2fd184d0401b445b7f33d0ae08ca989b6686dbb9edac7b896eb45b3392216a3f"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "932248a19234e9be413a33e11bf769c28b7277e935de84e0ef86e53f17ab2c91"
+      "sha256": "57465cabe38c4956c447861b4828521c807a5e680900dad9849ae8b8bd281275"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "932248a19234e9be413a33e11bf769c28b7277e935de84e0ef86e53f17ab2c91"
+      "sha256": "57465cabe38c4956c447861b4828521c807a5e680900dad9849ae8b8bd281275"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "c200534c18747b9721ee0ccfd6e68beea3836852c410c6a88bb987baede5823b"
+      "sha256": "4fd24859b4e9a68f8b0a9b9177f5420b94016b7709146bfcaedab31a50997627"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
@@ -85,11 +85,11 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-09T13:37:20+08:00",
+  "updated_at": "2026-11-09T13:55:15+08:00",
   "runtime_scope": "本轮越过Test125的驻留前许可阻塞。原生UDP提交8字节，驱动触发一次门铃；对端匹配本轮请求，Mac在100 ms租约内捕获、解码并交付1个匹配返回。350 ms完成等待耗尽后进入隔离，未取得精确TX completion和完整资源回收证明。受控单包不等于持续AWDL或AirDrop。",
   "running_candidate": "25G416-Test126",
-  "next_candidate": "25G416-Test126",
-  "website_delivery": "Test126实测单包回包及完成/清理阻塞已更新；没有下一候选部署。",
-  "deployment_state": "test126_runtime_return_observed_completion_blocked",
-  "site_preparation": "Test125 current runtime; Test126 deployed and read back, not boot verified. No private runtime metadata published."
+  "next_candidate": "25G416-Test127",
+  "website_delivery": "Test126实测保持；Test127已部署并读回，等待重启。",
+  "deployment_state": "test127_deployed_waiting_reboot",
+  "site_preparation": "Test126 runtime evidence retained; Test127 deployed and read back, not boot verified. No private runtime metadata published."
 }
