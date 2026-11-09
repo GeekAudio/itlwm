@@ -15,9 +15,10 @@
   const stages = data?.milestones || [];
   const checkpoints = stages.flatMap(stage => stage.checkpoints || []);
   const records = window.TEST_RECORDS || [];
+  const candidateVersion = shortVersion(data?.runningCandidate);
   const evidenceMatches = records.length === 1 && records[0].version === data?.runningCandidate &&
-    records[0].state === data?.validationLabel &&
-    shortVersion(data?.validationLabel) === shortVersion(data?.runningCandidate);
+    shortVersion(records[0].state) === candidateVersion &&
+    shortVersion(data?.validationLabel) === candidateVersion;
   if (stages.length !== 8 || checkpoints.length !== 40 ||
       stages.some((stage, index) => stage.stage !== index + 1 || stage.checkpoints?.length !== 5 ||
         stage.checkpoints.some((point, offset) => point.id !== `${index + 1}-${offset + 1}`)) ||
