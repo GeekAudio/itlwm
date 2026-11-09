@@ -16,15 +16,18 @@ def sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def main() -> None:
+def main(*, build_id: str = BUILD_ID, private_dir: Path = PRIVATE_DIR) -> None:
     os.umask(0o077)
-    output_dir = PRIVATE_DIR / "tools"
+    if build_id not in ("25G416-Test124", "25G416-Test125"):
+        raise ValueError("unsupported helper profile")
+    label = build_id.rsplit("-", 1)[1].lower()
+    output_dir = private_dir / "tools"
     output_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     build_dir = output_dir / "objects"
     build_dir.mkdir(exist_ok=True, mode=0o700)
     sources = {name: sha(REPO_ROOT / name) for name in HELPER_SOURCES}
-    binary = output_dir / "arm_directed_data124"
-    staged = output_dir / "arm_directed_data124.building"
+    binary = output_dir / f"arm_directed_data{label[4:]}"
+    staged = output_dir / f"arm_directed_data{label[4:]}.building"
     commands = []
     for module, source in (
         ("IORegistryBooleanFlag107", HELPER_SOURCES[1]),
@@ -58,14 +61,14 @@ def main() -> None:
     compiler = subprocess.run(["xcrun", "swiftc", "--version"], capture_output=True,
                               text=True, check=True).stdout.strip()
     receipt = {
-        "schema": "test124-mode4-helper-build/v1", "candidate": BUILD_ID,
+        "schema": f"{label}-mode4-helper-build/v1", "candidate": build_id,
         "status": "built_offline", "installed": False, "rf_tested": False,
         "binary_path": str(binary), "binary_sha256": sha(binary),
         "source_path": HELPER_SOURCES[0], "source_sha256": sources[HELPER_SOURCES[0]],
         "source_hashes": sources, "commands": commands, "compiler": compiler,
         "builder_sha256": sha(Path(__file__)), "build_log_sha256": sha(log_path),
     }
-    receipt_path = output_dir / "test124-helper-build-private.json"
+    receipt_path = output_dir / f"{label}-helper-build-private.json"
     receipt_path.write_text(json.dumps(receipt, ensure_ascii=False, indent=2) + "\n")
     receipt_path.chmod(0o600)
     print(json.dumps({"status": "built_offline", "receipt": str(receipt_path),
