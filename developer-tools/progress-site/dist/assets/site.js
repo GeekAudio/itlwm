@@ -17,13 +17,13 @@
   const records = window.TEST_RECORDS || [];
   const candidateVersion = shortVersion(data?.runningCandidate);
   const lineageScope = Object.freeze({
-    driverCandidate: "25G416-Test127",
-    driverCommit: "d667e9edeaf06c14bc798016d2c2f80f835f294c",
-    driverUuid: "18194CEB-037B-3447-9B6A-4EE5809DEFCD",
-    toolRound: "Test128",
-    toolCommit: "1196bfa7b01cb3d0dc0ce06ec95096021292fcc5",
-    recordId: "record-test127-runtime-test128-tool-campaign",
-    validationLabel: "Test127 驱动 · Test128 对照实测"
+    driverCandidate: "25G416-Test129",
+    driverCommit: "3341851cb74a63dec6389ca2cbbc2e43f27bd3ef",
+    driverUuid: "061332A5-6890-3A74-B36D-2469895CA8FD",
+    toolRound: "Test129",
+    toolCommit: "5b055872b056b219e190425c3b315e0f851787c1",
+    recordId: "record-test129-runtime",
+    validationLabel: "Test129 实机验证"
   });
   const evidenceMatches = records.length === 1 && records[0].version === data?.runningCandidate &&
     data?.runningCandidate === lineageScope.driverCandidate &&
@@ -34,7 +34,7 @@
     records[0].provenance?.driverUuid === lineageScope.driverUuid &&
     records[0].provenance?.toolRound === lineageScope.toolRound &&
     records[0].provenance?.toolSourceCommit === lineageScope.toolCommit &&
-    /Test128/.test(records[0].state || "");
+    /Test129/.test(records[0].state || "");
   if (stages.length !== 8 || checkpoints.length !== 40 ||
       stages.some((stage, index) => stage.stage !== index + 1 || stage.checkpoints?.length !== 5 ||
         stage.checkpoints.some((point, offset) => point.id !== `${index + 1}-${offset + 1}`)) ||
@@ -63,42 +63,41 @@
       {
         from: "2-1", to: "5-3", mode: "necessary-prerequisite",
         title: "P2P MAC 上下文 ACK 是本次数据发送的必要前置",
-        proof: "Probe::add() 仅在 iwx_p2p_mac_context_add() 返回 0 时置 addAcknowledged；MAC_CONTEXT_CMD 的同步命令完成是这版固件唯一可用的 ACK。随后 directed-data gate 要求 addAcknowledged 为真、MAC 状态为 ACTIVE。Test128 同一 Test127 驱动、本轮同一数据 descriptor 的成功 TX completion，因而间接验证本次 2-1 前置成立。",
-        scope: "本轮仅限 queue 4 / station 3 / descriptor 0 的这一次 directed-data 发送。该命令 ACK 只代表固件命令完成，不代表空口就绪、独立广播站点或资源回收。",
+        proof: "Probe::add() 仅在 iwx_p2p_mac_context_add() 返回 0 时置 addAcknowledged；MAC_CONTEXT_CMD 的同步命令完成是固件提供的命令回执。Test129 的 directed-data gate 还要求 addAcknowledged、MAC ACTIVE、binding ACTIVE、PHY lease 及同代未结束 ROC。此次同一 descriptor 的成功 TX completion 间接确认这条必要前置路径已通过。",
+        scope: "本轮仅限 Test129 queue 4 / station 3 / descriptor 0 的这次 directed-data 发送；该命令回执不代表独立广播站点、无线 ACK 或 AirDrop。2-1 保留间接验证，不改直接通过数。",
         sources: [
-          { label: "MAC_CONTEXT_CMD 同步完成为唯一 ACK", url: "https://github.com/GeekAudio/itlwm/blob/d667e9edeaf06c14bc798016d2c2f80f835f294c/itlwm/hal_iwx/ItlIwx.cpp#L11263-L11324" },
-          { label: "Probe 将命令返回值绑定 addAcknowledged", url: "https://github.com/GeekAudio/itlwm/blob/d667e9edeaf06c14bc798016d2c2f80f835f294c/itlwm/hal_iwx/ItlIwxP2PProbe.cpp#L6164-L6171" },
-          { label: "数据准入要求 addAcknowledged 与 MAC ACTIVE", url: "https://github.com/GeekAudio/itlwm/blob/d667e9edeaf06c14bc798016d2c2f80f835f294c/itlwm/hal_iwx/ItlIwxP2PProbe.cpp#L7223-L7241" },
-          { label: "Test127 代码与实测边界", url: "https://github.com/GeekAudio/itlwm/blob/d667e9edeaf06c14bc798016d2c2f80f835f294c/developer-tools/test127/README.md#L3-L15" },
-          { label: "Test128 明确复用 Test127 驱动", url: "https://github.com/GeekAudio/itlwm/blob/1196bfa7b01cb3d0dc0ce06ec95096021292fcc5/developer-tools/test128/README.md#L1-L11" },
-          { label: "Test128 receipt 绑定 candidate 与 UUID", url: "https://github.com/GeekAudio/itlwm/blob/1196bfa7b01cb3d0dc0ce06ec95096021292fcc5/developer-tools/test128/coordinate_peer_test128.py#L24-L60" }
+          { label: "MAC_CONTEXT_CMD 的同步命令回执", url: "https://github.com/GeekAudio/itlwm/blob/3341851cb74a63dec6389ca2cbbc2e43f27bd3ef/itlwm/hal_iwx/ItlIwx.cpp#L11267-L11323" },
+          { label: "Probe 将 ADD 返回值记录为 addAcknowledged", url: "https://github.com/GeekAudio/itlwm/blob/3341851cb74a63dec6389ca2cbbc2e43f27bd3ef/itlwm/hal_iwx/ItlIwxP2PProbe.cpp#L6170-L6177" },
+          { label: "数据门检查 ADD、MAC、binding、PHY 与 ROC", url: "https://github.com/GeekAudio/itlwm/blob/3341851cb74a63dec6389ca2cbbc2e43f27bd3ef/itlwm/hal_iwx/ItlIwxP2PProbe.cpp#L7220-L7259" },
+          { label: "Test129 验收范围与运行边界", url: "https://github.com/GeekAudio/itlwm/blob/5b055872b056b219e190425c3b315e0f851787c1/developer-tools/test129/README.md#L1-L13" },
+          { label: "Test129 最终验收门与证据限制", url: "https://github.com/GeekAudio/itlwm/blob/5b055872b056b219e190425c3b315e0f851787c1/developer-tools/test129/coordinate_directed_test129.py#L349-L368" }
         ]
       },
       {
         from: "2-3", to: "5-3", mode: "necessary-prerequisite",
         title: "本次 P2P 发送队列的安装与活动租约是完成回执的必要前置",
-        proof: "Probe 为 directed peer link 安装 queue，并要求资源处于 ACTIVE、queueAllocationSerial 非零；permit 校验当前 queue/station lease 与本次 allocation identity 完全相同。doorbell witness 再绑定 run、queue、station 与 descriptor；匹配的 TX_RSP 经过 ring completion 后才将该上下文置为 kCompleted。因此本轮 completion 间接验证 queue 4 已安装并用于这一帧。",
-        scope: "仅确认 queue 4 / station 3 的 directed peer link 队列在本轮安装、活动并完成一次 TX；不外推到其他队列、广播站点、重复发送或更宽的“独立队列”验收范围。",
+        proof: "Probe 为 LINK/TID0 directed peer 安装 queue，并要求资源为 ACTIVE、allocation serial 有效；permit 比对 station/queue allocation identity、代次、ROC 与票据，doorbell witness 绑定 run、queue、station、descriptor 和时间。TX_RSP 仅在 allocation、队列槽和 descriptor 同时匹配后才完成 ring 回收。Test129 观察到同一 queue4/station3/descriptor0 的成功 TX_RSP，门铃至完成 27.934 ms，因而间接验证该 queue 前置在本次发送中成立。",
+        scope: "只确认 Test129 本轮 queue 4 / station 3 / descriptor 0 的 directed peer 队列被安装、授权并完成一次 TX；不外推到独立广播站点、冲突队列、旧 DMA 硬停或重复发送。2-3 保留间接验证，不改直接通过数。",
         sources: [
-          { label: "建立 LINK/TID0 peer station 并分配发送队列", url: "https://github.com/GeekAudio/itlwm/blob/d667e9edeaf06c14bc798016d2c2f80f835f294c/itlwm/hal_iwx/ItlIwxP2PProbe.cpp#L7840-L7905" },
-          { label: "数据准入要求当前活动 queue/station allocation", url: "https://github.com/GeekAudio/itlwm/blob/d667e9edeaf06c14bc798016d2c2f80f835f294c/itlwm/hal_iwx/ItlIwxP2PProbe.cpp#L8550-L8575" },
-          { label: "TX permit 核对 station / queue allocation identity", url: "https://github.com/GeekAudio/itlwm/blob/d667e9edeaf06c14bc798016d2c2f80f835f294c/itlwm/hal_iwx/ItlIwxP2PAction.cpp#L2675-L2702" },
-          { label: "doorbell 前绑定 run / queue / station / descriptor", url: "https://github.com/GeekAudio/itlwm/blob/d667e9edeaf06c14bc798016d2c2f80f835f294c/itlwm/hal_iwx/ItlIwxP2PAction.cpp#L3408-L3426" },
-          { label: "Witness 保存 allocation 与 descriptor 身份", url: "https://github.com/GeekAudio/itlwm/blob/d667e9edeaf06c14bc798016d2c2f80f835f294c/itlwm/hal_iwx/ItlIwxP2PDataTxWitness.hpp#L6-L123" },
-          { label: "RX 分派只把匹配 TX_RSP 标成完成", url: "https://github.com/GeekAudio/itlwm/blob/d667e9edeaf06c14bc798016d2c2f80f835f294c/itlwm/hal_iwx/ItlIwx.cpp#L22173-L22206" },
-          { label: "TX_RSP 成功状态与完成事实解码", url: "https://github.com/GeekAudio/itlwm/blob/d667e9edeaf06c14bc798016d2c2f80f835f294c/itlwm/hal_iwx/ItlIwx.cpp#L10085-L10174" },
-          { label: "ring 完成后置为 kCompleted", url: "https://github.com/GeekAudio/itlwm/blob/d667e9edeaf06c14bc798016d2c2f80f835f294c/itlwm/hal_iwx/ItlIwxP2PAction.cpp#L3606-L3628" },
-          { label: "Test128 本轮工具继续使用 Test127 驱动", url: "https://github.com/GeekAudio/itlwm/blob/1196bfa7b01cb3d0dc0ce06ec95096021292fcc5/developer-tools/test128/README.md#L1-L11" }
+          { label: "本轮安装 directed peer 与 TID0 queue", url: "https://github.com/GeekAudio/itlwm/blob/3341851cb74a63dec6389ca2cbbc2e43f27bd3ef/itlwm/hal_iwx/ItlIwxP2PProbe.cpp#L9420-L9464" },
+          { label: "queue allocator 校验 station 角色与 TID", url: "https://github.com/GeekAudio/itlwm/blob/3341851cb74a63dec6389ca2cbbc2e43f27bd3ef/itlwm/hal_iwx/ItlIwxP2PTx.cpp#L1541-L1567" },
+          { label: "数据门检查 ADD、MAC、binding、PHY 与 ROC", url: "https://github.com/GeekAudio/itlwm/blob/3341851cb74a63dec6389ca2cbbc2e43f27bd3ef/itlwm/hal_iwx/ItlIwxP2PProbe.cpp#L7220-L7259" },
+          { label: "TX permit 比对完整 station / queue allocation identity", url: "https://github.com/GeekAudio/itlwm/blob/3341851cb74a63dec6389ca2cbbc2e43f27bd3ef/itlwm/hal_iwx/ItlIwxP2PAction.cpp#L2672-L2703" },
+          { label: "当前票据与 ROC 通过后生成一次性 permit", url: "https://github.com/GeekAudio/itlwm/blob/3341851cb74a63dec6389ca2cbbc2e43f27bd3ef/itlwm/hal_iwx/ItlIwxP2PAction.cpp#L3061-L3127" },
+          { label: "doorbell witness 绑定 run、allocation、descriptor 与时间", url: "https://github.com/GeekAudio/itlwm/blob/3341851cb74a63dec6389ca2cbbc2e43f27bd3ef/itlwm/hal_iwx/ItlIwxP2PAction.cpp#L3384-L3426" },
+          { label: "TX_RSP 只完成匹配的队列、station 和 descriptor", url: "https://github.com/GeekAudio/itlwm/blob/3341851cb74a63dec6389ca2cbbc2e43f27bd3ef/itlwm/hal_iwx/ItlIwxP2PAction.cpp#L3492-L3631" },
+          { label: "RX handler 将匹配 TX_RSP 交给 directed completion", url: "https://github.com/GeekAudio/itlwm/blob/3341851cb74a63dec6389ca2cbbc2e43f27bd3ef/itlwm/hal_iwx/ItlIwx.cpp#L22279-L22335" },
+          { label: "Test129 本轮使用的工具与候选版本", url: "https://github.com/GeekAudio/itlwm/blob/5b055872b056b219e190425c3b315e0f851787c1/developer-tools/test129/README.md#L1-L13" }
         ]
       },
       {
         from: "6-4", to: "5-3", mode: "necessary-prerequisite",
         title: "本次内核输出进入 driver queue 是成功 TX completion 的必要前置",
-        proof: "本轮记录将 awdl0 上的 8-byte UDP、96-byte MPDU、queue 4 doorbell 与同一 descriptor 的 completion 绑定。6-4 已有本轮直接记录；这里仅展示它在源码路径上是 5-3 的前置，不重复计作间接状态。",
+        proof: "Test129记录将 awdl0 上的 8-byte UDP、96-byte MPDU、queue 4 doorbell 与同一 descriptor completion 绑定；门铃在 ROC START 后16.673 ms，TX_RSP 在44.607 ms到达，间隔27.934 ms。6-4已有本轮直接记录；这里仅展示它在源码路径上是5-3的前置，不重复计作间接状态。",
         scope: "本轮只限这次单帧，不证明 radio ACK、AirDrop 或重复发送。",
         sources: [
-          { label: "同一 descriptor 发出 doorbell", url: "https://github.com/GeekAudio/itlwm/blob/d667e9edeaf06c14bc798016d2c2f80f835f294c/itlwm/hal_iwx/ItlIwxP2PAction.cpp#L3408-L3426" },
-          { label: "匹配 TX_RSP 的 descriptor 完成处理", url: "https://github.com/GeekAudio/itlwm/blob/d667e9edeaf06c14bc798016d2c2f80f835f294c/itlwm/hal_iwx/ItlIwxP2PAction.cpp#L3492-L3628" }
+          { label: "同一 descriptor 发出 doorbell 并记录单帧 witness", url: "https://github.com/GeekAudio/itlwm/blob/3341851cb74a63dec6389ca2cbbc2e43f27bd3ef/itlwm/hal_iwx/ItlIwxP2PAction.cpp#L3384-L3426" },
+          { label: "匹配 TX_RSP 并清除同一 ring descriptor", url: "https://github.com/GeekAudio/itlwm/blob/3341851cb74a63dec6389ca2cbbc2e43f27bd3ef/itlwm/hal_iwx/ItlIwxP2PAction.cpp#L3492-L3631" }
         ]
       },
       {
@@ -107,22 +106,22 @@
         proof: "directed-data gate 要求本轮 ROC command 已成功返回、START 已观察到且状态为成功、session 尚未 END。3-1 的频道 6 START/驻留已有独立直接记录；此源码关系不把 5-3 当成频道验收的唯一证据。",
         scope: "本轮不由此推导精确频道、驻留时长、END 或多频道调度；3-1 保持直接实测分类。",
         sources: [
-          { label: "数据准入要求当前 ROC session START", url: "https://github.com/GeekAudio/itlwm/blob/d667e9edeaf06c14bc798016d2c2f80f835f294c/itlwm/hal_iwx/ItlIwxP2PProbe.cpp#L7233-L7241" }
+          { label: "数据门要求本轮 ROC 成功 START、未 END 且代次匹配", url: "https://github.com/GeekAudio/itlwm/blob/3341851cb74a63dec6389ca2cbbc2e43f27bd3ef/itlwm/hal_iwx/ItlIwxP2PProbe.cpp#L7242-L7259" }
         ]
       }
     ],
     exclusions: {
       "2-2": {
         text: "本次队列角色是 directed peer link；它不能证明独立广播站点已创建。",
-        source: { label: "队列角色为 directed peer link", url: "https://github.com/GeekAudio/itlwm/blob/d667e9edeaf06c14bc798016d2c2f80f835f294c/itlwm/hal_iwx/ItlIwxP2PAction.cpp#L3641-L3644" }
+        source: { label: "queue release 只接受绑定的 directed peer link", url: "https://github.com/GeekAudio/itlwm/blob/3341851cb74a63dec6389ca2cbbc2e43f27bd3ef/itlwm/hal_iwx/ItlIwxP2PAction.cpp#L3641-L3644" }
       },
       "2-4": {
-        text: "发送完成不等于资源已释放。本轮清理返回 EBUSY，完整回收仍为未通过；finalize 仍要求 stop proofs、queue release 与 ring ownership 条件。",
-        source: { label: "hard-stop finalize 的 EBUSY 安全门", url: "https://github.com/GeekAudio/itlwm/blob/d667e9edeaf06c14bc798016d2c2f80f835f294c/itlwm/hal_iwx/ItlIwxP2PAction.cpp#L3885-L3899" }
+        text: "发送完成本身不等于资源已释放；Test129另取得同代 MAC_CONTEXT REMOVE 空回执、外层移除结果0及最终 ResourcesAbsent=1，2-4据此通过。只覆盖本轮无冲突的单次回收，不证明冲突队列或旧 DMA 硬停（2-5）。",
+        source: { label: "最终状态要求匹配 REMOVE 回执与内外资源全空", url: "https://github.com/GeekAudio/itlwm/blob/3341851cb74a63dec6389ca2cbbc2e43f27bd3ef/itlwm/hal_iwx/ItlIwxP2PProbe.cpp#L12717-L12778" }
       },
       "5-4": {
-        text: "TX_RSP 的成功状态不证明 802.11 radio ACK。Test128 只确认 active-monitor 能力与配置条件，未抓到独立 ACK 帧；本项继续保留部分通过。",
-        source: { label: "Test128 active monitor 的证据边界", url: "https://github.com/GeekAudio/itlwm/blob/1196bfa7b01cb3d0dc0ce06ec95096021292fcc5/developer-tools/test128/README.md#L1-L11" }
+        text: "TX_RSP 成功、匹配 UDP 回包和 MAC REMOVE 命令回执都不等于独立 802.11 radio ACK。Test129 未证明独立 ACK 帧、正式 peer receipt 或 AirDrop，本项仍为部分通过。",
+        source: { label: "Test129 验收明确保留 radio ACK、peer receipt 与 AirDrop 为未证明", url: "https://github.com/GeekAudio/itlwm/blob/5b055872b056b219e190425c3b315e0f851787c1/developer-tools/test129/coordinate_directed_test129.py#L362-L368" }
       }
     },
     aligned(sourceData, sourceRecords) {
@@ -139,7 +138,7 @@
         provenance.driverUuid === this.scope.driverUuid &&
         provenance.toolRound === this.scope.toolRound &&
         provenance.toolSourceCommit === this.scope.toolCommit &&
-        /Test128/.test(record.state || "");
+        /Test129/.test(record.state || "");
     },
     exactTxCompletion(sourceData, sourceRecords) {
       if (!this.aligned(sourceData, sourceRecords))
@@ -155,11 +154,11 @@
         ...(Array.isArray(record.evidence) ? record.evidence : [])].join(" ");
       return detail.includes(identity) &&
         /TX completion\s*=\s*1/i.test(detail) &&
-        /帧状态报告成功/.test(detail) &&
+        /(?:帧|固件)状态报告成功/.test(detail) &&
         receipt.includes(identity) &&
         /TX completion被观察到/.test(receipt) &&
         /固件状态报告成功/.test(receipt) &&
-        /49\.364\s*ms/.test(receipt);
+        /27\.934\s*ms/.test(receipt);
     },
     classify(sourceData, point, sourceRecords) {
       if (point.current_result !== "not_covered") {
@@ -182,7 +181,7 @@
       return {
         kind: "derived",
         status: "间接验证通过",
-        source: "Test128 同一轮 5-3 TX completion · Test127 驱动",
+        source: "Test129 同一轮 5-3 TX completion · Test129 驱动",
         rule,
         relations: [rule]
       };
@@ -572,7 +571,7 @@
       body.append(node("p", "recent-record-summary",
         `驱动：${provenance.driverCandidate} · source_commit ${provenance.driverSourceCommit} · Mach-O UUID ${provenance.driverUuid}`));
       body.append(node("p", "recent-record-summary",
-        `对端工具：${provenance.toolRound} · source_commit ${provenance.toolSourceCommit}（此轮只更新工具，继续使用上述 Test127 驱动）`));
+        `对端工具：${provenance.toolRound} · source_commit ${provenance.toolSourceCommit}（本轮实机驱动与工具分别绑定上方记录的 Test129 来源）`));
       const links = node("div", "lineage-links");
       (provenance.sources || []).forEach(source => {
         const anchor = link(source.label + " ↗", source.url, "lineage-source-link");

@@ -10,7 +10,19 @@ Build the helper offline with:
 python3 developer-tools/test129/build_helper_test129.py
 ```
 
-The builder writes its binary and private source-hash receipt under `RuntimeTest129/research/preparation-private/tools`. The coordinator's default mode validates Test129 build, deployment, helper, Test128 monitor, and Test124 peer receipts and prints a no-action plan. Only `--run` dispatches the existing one-shot flow; this checkout work did not run it.
+The builder writes its binary and private source-hash receipt under `RuntimeTest129/research/preparation-private/tools`. The coordinator's default mode validates Test129 build, deployment, helper, Test128 monitor, and Test124 peer receipts and prints a no-action plan. Only `--run` dispatches the existing one-shot flow.
+
+## Runtime result — 2026-11-09
+
+One controlled exchange passed on `25G416-Test129`: an 8-byte UDP left native `awdl0`, its 96-byte MPDU received an exact successful TX_RSP, and the same socket received one matching reply in 31.809 ms. The queue 4 / station 3 / descriptor 0 completion arrived 27.934 ms after the doorbell, before canonical ROC END. The MAC REMOVE empty response matched command `0x28`, command-queue slot and current generations. Final state was `Stage=8 / Result=0 / CleanupAck=1 / ResourcesAbsent=1`, with outer state `7 / RemoveResult=0 / ResourceMayExist=0`. Independent source and firmware review agreed.
+
+The first router restore returned nonzero; this failure remains in the raw receipt. The watchdog restored the AP, then an idempotent restore verified success, unchanged network/wireless/firewall/DHCP hashes and no temporary locks. No RF retry was performed. Wi-Fi smoke and sleep tests were skipped. Independent 802.11 ACK capture, repeated exchanges, native service discovery and AirDrop remain unverified.
+
+## Next integration boundary
+
+The current production path admits one packet per armed run. A second packet needs a separate packet ticket under the same session, preserved first-packet TX/RX records, a fresh descriptor/sequence/SSN, and at most one DMA in flight. It must not be enabled by clearing the spent ticket or the queue's ever-doorbelled history.
+
+The current kernel RX filter checks peer and address ownership; exact UDP nonce matching is performed by the userspace helper. Therefore a kernel-validated reply identity is a prerequisite for admitting packet two. The minimal next candidate must bind each reply to its packet, peer, interface incarnation and session generations before extending the native output path. Both packets must fit the existing ROC window; END, expiry or an unknown completion closes admission. This is an integration plan, not an implemented or tested two-packet capability.
 
 The source lineage was checked before edits. At base commit `b708398c69baed74a824c5c728c26c420f051998`, SHA-256 values were:
 

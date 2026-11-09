@@ -15,32 +15,32 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/site.js",
       "snapshot_path": "dist/assets/site.js",
-      "sha256": "15fa33f6fe15d7cc6353efd8fb1f12a59b31bd6b248555af2ce159646230f87f"
+      "sha256": "c8f8d422a21ad6d1b575ff7fcf56f9a26399790d3b7086aadd905e6b38d8e4cd"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "5ac47eccc0a19d973be5e482011cf1d4be05e8d2a027bf19f5752754b6490fee"
+      "sha256": "2088dfbde87802ebd955649bca2f0c665f2f950ed585db17e4b4048042f4e496"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "5c4892b4004f6b327e7ad347aba2baa525fd3dfb97c5742f146505f0f9055c2b"
+      "sha256": "323dbf50253813511453cb984cf2738d227551e2c86c9e5f861782d1a81ee8b0"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "7d056413a533f181374c5f7bb9473e1c3c5fe3288b038871e3449984829c79c0"
+      "sha256": "cf4b3f480e1e8390dc7a41a7ed514d9a45f71e387b45315b664b7de0bcf5e0c8"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "7d056413a533f181374c5f7bb9473e1c3c5fe3288b038871e3449984829c79c0"
+      "sha256": "cf4b3f480e1e8390dc7a41a7ed514d9a45f71e387b45315b664b7de0bcf5e0c8"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "3e7328737724e2ae79d45c40e350c6e7a835f4c0faf3a3d1ca47f8a822858b47"
+      "sha256": "6669b58a35259435d2b6e1793cc7b73c897194ddc75ef712208128ce6d2a08d2"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
@@ -85,11 +85,11 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-09T17:54:09+08:00",
-  "runtime_scope": "当前仍运行Test127，Test128已证明一次发送完成和原生awdl0受控回包，安全释放未通过。Test129修复COMPLETE/IDLE判定冲突、正常END记录和已消费票据的收尾，并新增严格MAC移除回执；主配置构建、关键回归、独立固件复核和EFI读回完成。下一次启动验证真实清理结果；持续AWDL与AirDrop仍未打通。",
-  "running_candidate": "25G416-Test127",
-  "next_candidate": "25G416-Test129",
-  "website_delivery": "Test129已部署并读回，等待重启；保留f0b89d1依赖关系图和Test128实测。",
-  "deployment_state": "test129_deployed_waiting_reboot",
-  "site_preparation": "Preserved latest remote UI/provenance; deployment-only update, no new runtime pass."
+  "updated_at": "2026-11-09T18:20:58+08:00",
+  "runtime_scope": "精确TX_RSP、匹配UDP回包、原生ifnet交付及外层MAC移除均取得同轮证据。新增通过完整资源回收，共11项直接通过、4项部分通过、25项未覆盖。持续AWDL和AirDrop仍未验收。",
+  "running_candidate": "25G416-Test129",
+  "next_candidate": null,
+  "website_delivery": "Test129单次受控收发和完整清理已实测；保留现有依赖图并绑定本轮源码。",
+  "deployment_state": "test129_runtime_verified",
+  "site_preparation": "Current Test129 runtime evidence and project timeline; no new driver deployment."
 }
