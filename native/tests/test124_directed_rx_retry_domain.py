@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run production mode-4 retry-domain cases under the native bridge shims."""
+"""Run production mode-4 address/retry cases under the native bridge shims."""
 from pathlib import Path
 import subprocess
 import tempfile
@@ -43,22 +43,27 @@ def main() -> None:
             path = directory / header
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text('#include "awdl_bsd_bridge_shim.hpp"\n')
-        binary = directory / "directed-rx-retry-asan-ubsan"
-        run([
+        compiler = [
             "xcrun", "clang++", "-std=c++14", "-O1", "-g",
             "-Wall", "-Wextra", "-Werror", "-Wno-unused-function",
-            "-fsanitize=address,undefined", "-fno-omit-frame-pointer",
+            "-fno-omit-frame-pointer",
             *PROFILE, f"-I{directory}", "-Inative/tests", "-Inative",
             "native/awdl_native_bsd_data_25G332.cpp",
             "native/awdl_data_frame.cpp",
             "native/tests/awdl_directed_data_rx_test.cpp",
-            "-o", str(binary),
-        ])
-        for scenario in (9, 10, 11):
+        ]
+        binary = directory / "directed-rx-retry-asan-ubsan"
+        run([*compiler, "-fsanitize=address,undefined", "-o", str(binary)])
+        for scenario in range(9, 20):
             run([str(binary), str(scenario)])
+        concurrent = directory / "directed-rx-retry-tsan"
+        run([*compiler, "-fsanitize=thread", "-o", str(concurrent)])
+        run([str(concurrent), "19"])
     print(
-        "PASS: directed RX exact Retry identity, queue-full non-commit, "
-        "and owner/ifnet-incarnation isolation under ASan/UBSan; "
+        "PASS: 11 directed RX address/Retry cases under ASan/UBSan and "
+        "1 concurrent exact-Retry case under TSan, including valid ff02 "
+        "multicast, early address rejection, queue-full non-commit, "
+        "and owner/ifnet/TID isolation; "
         "no device, firmware, RF, or EFI access"
     )
 

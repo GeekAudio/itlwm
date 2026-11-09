@@ -2019,12 +2019,16 @@ CaptureResult captureDirectedDataRx(
        NativeAwdlData::decodeIpv6DataMpdu(
            bytes,length,&retryDecoded)!=NativeAwdlData::Status::Ok||
        retryDecoded.amsdu||retryDecoded.packetCount!=1||
-       (retryDecoded.destinationAddress[0]&1u)!=0||
-       memcmp(retryDecoded.sourceAddress,permit.peerMac,6)!=0||
-       memcmp(retryDecoded.destinationAddress,permit.localMac,6)!=0) {
+       !acceptsDirectedDataRx(retryDecoded.packets[0],
+                              permit.localMac,permit.peerMac)) {
         add(DirectedRxRejected);
         return CaptureResult::Rejected;
     }
+    // This early path must preserve the worker's address policy: peer-origin
+    // link-local unicast and correctly mapped ff02 multicast are both valid.
+    // Only unicast belongs to the directed Retry ledger. Reject other IPv6
+    // targets before consuming the MPDU so the caller retains its STA path.
+    const bool retryTracked=(retryDecoded.destinationAddress[0]&1u)==0;
     const uint8_t retryTid=retryDecoded.qosData?
         uint8_t(retryDecoded.qosControl&0x0fu):uint8_t(16);
     const uint16_t retrySequenceControl=uint16_t(bytes[22])|
@@ -2089,7 +2093,7 @@ CaptureResult captureDirectedDataRx(
     int retrySlot=-1;
     bool retryDuplicate=false;
     bool retryWindowFull=false;
-    if(captureAuthority) {
+    if(captureAuthority&&retryTracked) {
         retrySlot=findDirectedRxRetrySlotLocked(
             permit,interfaceIncarnation,retryDecoded.sourceAddress,
             retryDecoded.destinationAddress,retryTid,retrySequenceControl,
@@ -2129,10 +2133,11 @@ CaptureResult captureDirectedDataRx(
             directedRxReceipt.originalRxStatus=permit.originalRawStatus;
             directedRxReceipt.mpduLength=uint32_t(length);
             directedRxReceipt.ifnetInputResultPresent=0;
-            commitDirectedRxRetrySlotLocked(
-                size_t(retrySlot),permit,interfaceIncarnation,
-                retryDecoded.sourceAddress,retryDecoded.destinationAddress,
-                retryTid,retrySequenceControl);
+            if(retryTracked)
+                commitDirectedRxRetrySlotLocked(
+                    size_t(retrySlot),permit,interfaceIncarnation,
+                    retryDecoded.sourceAddress,retryDecoded.destinationAddress,
+                    retryTid,retrySequenceControl);
         } else {
             // A ring push failure must never leave a retry key for a packet
             // that was not copied into the bounded queue.

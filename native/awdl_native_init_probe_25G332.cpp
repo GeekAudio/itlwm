@@ -144,15 +144,10 @@ void observeOnce(IOService *controller, const uint8_t address[6])
         !controller->metaCast("IO80211Controller") ||
         controller->getProperty("NativeAwdlInitObservationOnly") != kOSBooleanTrue ||
         controller->getProperty("NativeP2PManualTrigger") != kOSBooleanTrue ||
-        !NativeWifi::verifyTahoeRuntime(true)) {
+        !NativeWifi::verifyTahoeAwdlRuntime()) {
         note(IdentityRejected);
         return;
     }
-    OSObject *buildObject = IORegistryEntry::getRegistryRoot()->copyProperty("OS Build Version");
-    auto build = OSDynamicCast(OSString, buildObject);
-    const bool exactBuild = build && build->isEqualTo("25G332");
-    if (buildObject) buildObject->release();
-    if (!exactBuild) { note(IdentityRejected); return; }
     const OSMetaClass *meta = ItlAwdlNativeInitGate25G332::metaClass;
     if (!meta || meta->getSuperClass() != ItlAwdlNativeConcreteGate25G332::metaClass ||
         meta->getSuperClass()->getSuperClass() != IO80211AWDLProtocol::metaClass ||

@@ -300,13 +300,11 @@ void observeOnce(IOService *controller,const uint8_t address[6]) {
     uint32_t expected=0;
     if(!__atomic_compare_exchange_n(&flags25,&expected,uint32_t(Attempted),false,__ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))return;
     phase(1);uint8_t any=0;if(address)for(unsigned i=0;i<6;++i)any|=address[i];
-    OSObject *buildObject=IORegistryEntry::getRegistryRoot()->copyProperty("OS Build Version");
-    auto build=OSDynamicCast(OSString,buildObject);const bool exact=build&&build->isEqualTo("25G332");if(buildObject)buildObject->release();
     bool resident=false;
 #if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
     resident=controller&&controller->getProperty("NativeAwdlResidentEnabled")==kOSBooleanTrue;
 #endif
-    if(!controller||!address||!any||(address[0]&1)||!exact||!NativeWifi::verifyTahoeRuntime(true)||
+    if(!controller||!address||!any||(address[0]&1)||!NativeWifi::verifyTahoeAwdlRuntime()||
        !controller->metaCast("IO80211Controller")||
        (!resident&&controller->getProperty("NativeAwdlLifecycleObservationOnly")!=kOSBooleanTrue)||
        controller->getProperty("NativeP2PManualTrigger")!=kOSBooleanTrue||getAwdl25(controller)) {

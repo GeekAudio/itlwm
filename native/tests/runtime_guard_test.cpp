@@ -15,10 +15,12 @@ namespace {
 struct RuntimeProfile {
     const char *build;
     const char *kernel;
+    bool awdl;
 };
 const RuntimeProfile Profiles[] = {
-    {"25G241", "Darwin Kernel Version 25.6.0: Tue Aug 18 17:46:40 PDT 2026; root:xnu-12377.161.15.700.19~2/RELEASE_X86_64"},
-    {"25G332", "Darwin Kernel Version 25.6.0: Mon Oct 12 00:33:09 PDT 2026; root:xnu-12377.161.15.701.48~2/RELEASE_X86_64"}
+    {"25G241", "Darwin Kernel Version 25.6.0: Tue Aug 18 17:46:40 PDT 2026; root:xnu-12377.161.15.700.19~2/RELEASE_X86_64", false},
+    {"25G332", "Darwin Kernel Version 25.6.0: Mon Oct 12 00:33:09 PDT 2026; root:xnu-12377.161.15.701.48~2/RELEASE_X86_64", true},
+    {"25G416", "Darwin Kernel Version 25.6.0: Fri Oct 30 17:30:02 PDT 2026; root:xnu-12377.161.15.702.13~1/RELEASE_X86_64", true}
 };
 unsigned checks = 0;
 class WrongType final : public OSObject {};
@@ -34,13 +36,14 @@ void wrong(IORegistryEntry &root, const char *key) {
     root.setProperty(key, value);
     value->release();
 }
-void expect(bool required, bool result) {
+void expect(bool required, bool result, bool awdlResult = false) {
     const auto retains = OSObject::retains;
     const auto releases = OSObject::releases;
     assert(NativeWifi::verifyTahoeRuntime(required) == result);
+    assert(NativeWifi::verifyTahoeAwdlRuntime() == awdlResult);
     assert(OSObject::retains - retains == OSObject::releases - releases);
     if (IORegistryEntry::root) assert(IORegistryEntry::root->propertyReferencesBalanced());
-    ++checks;
+    checks += 2;
 }
 }
 
@@ -53,11 +56,10 @@ int main() {
     put(*root, "OS Build Version", "25G241");
     expect(false, false); expect(true, false);
 
-    // Both exact build/kernel pairs are accepted. Early admission may see a
-    // missing build property, but strict checks require the complete pair.
+    // Ordinary Wi-Fi admits all three exact profiles. AWDL admits only its
+    // narrower explicit set, never a missing build property.
     for (size_t i = 0; i < sizeof(Profiles) / sizeof(Profiles[0]); ++i) {
         const RuntimeProfile &profile = Profiles[i];
-        const RuntimeProfile &other = Profiles[1 - i];
         put(*root, "IOKitBuildVersion", profile.kernel);
         put(*root, "OS Build Version", nullptr);
         expect(false, true);
@@ -66,21 +68,19 @@ int main() {
         assert(root->propertyReferencesBalanced());
 
         put(*root, "OS Build Version", profile.build);
-        expect(false, true);
-        expect(true, true);
+        expect(false, true, profile.awdl);
+        expect(true, true, profile.awdl);
 
-        // A recognized build with the other kernel, or vice versa, is not a
-        // supported profile. This also exercises both cross-pair directions.
-        put(*root, "OS Build Version", profile.build);
-        put(*root, "IOKitBuildVersion", other.kernel);
-        expect(false, false);
-        expect(true, false);
-        put(*root, "OS Build Version", other.build);
-        put(*root, "IOKitBuildVersion", profile.kernel);
-        expect(false, false);
-        expect(true, false);
+        // Test every wrong pairing, not only one neighboring profile.
+        for (size_t j = 0; j < sizeof(Profiles) / sizeof(Profiles[0]); ++j) {
+            if (j == i) continue;
+            put(*root, "OS Build Version", profile.build);
+            put(*root, "IOKitBuildVersion", Profiles[j].kernel);
+            expect(false, false);
+            expect(true, false);
+        }
 
-        for (const char *value : {"25G240", "25G241 ", "25g241", "25G332 ", "25G333", ""}) {
+        for (const char *value : {"25G240", "25G241 ", "25g241", "25G332 ", "25G333", "25G416 ", "25g416", "25G417", ""}) {
             put(*root, "OS Build Version", value);
             put(*root, "IOKitBuildVersion", profile.kernel);
             expect(false, false);

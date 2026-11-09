@@ -67,6 +67,22 @@ bool frame(uint8_t out[256],size_t *length,
         &input,out,256,length)==NativeAwdlData::Status::Ok;
 }
 
+bool addressedFrame(uint8_t out[256],size_t *length,
+                    const uint8_t destinationMac[6],
+                    const uint8_t sourceIp[16],const uint8_t destinationIp[16],
+                    uint16_t sequence=0x2ab) {
+    uint8_t ipv6[40]{};
+    ipv6[0]=0x60;ipv6[6]=59;ipv6[7]=1;
+    memcpy(ipv6+8,sourceIp,16);memcpy(ipv6+24,destinationIp,16);
+    NativeAwdlData::EncodeInput input{};
+    memcpy(input.sourceAddress,peerMac,6);
+    memcpy(input.destinationAddress,destinationMac,6);
+    input.wifiSequenceNumber=sequence;
+    input.ipv6Packet=ipv6;input.ipv6Length=sizeof(ipv6);
+    return NativeAwdlData::encodeIpv6DataMpdu(
+        &input,out,256,length)==NativeAwdlData::Status::Ok;
+}
+
 bool permitFor(const Input::Lease &current,const uint8_t *bytes,size_t length,
                Input::Permit *permit,bool protectedFrame=false,
                bool deaggregated=false,uint16_t channel=6) {
@@ -345,6 +361,123 @@ void caseRetryDomainOwnerAndIfnetIncarnation(FakeIf &dev) {
     assert(snapshot().value[DirectedRxPending]==1);
     assert(close());assertBalanced(dev);
 }
+
+void caseMulticastDoesNotEnterRetryLedger(FakeIf &dev) {
+    prepare(dev);
+    auto current=lease();assert(publishDirectedDataRxInputLease(current));
+    uint8_t sourceIp[16]{};linkLocal(sourceIp,peerMac);
+    uint8_t destinationIp[16]={0xff,0x02};destinationIp[15]=0xfb;
+    const uint8_t destinationMac[6]={0x33,0x33,0,0,0,0xfb};
+    uint8_t bytes[256]{};size_t length=0;
+    assert(addressedFrame(bytes,&length,destinationMac,sourceIp,destinationIp));
+    Input::Permit permit{};assert(permitFor(current,bytes,length,&permit));
+    assert(captureDirectedDataRx(bytes,length,false,current,permit,52)==
+           CaptureResult::Captured);
+    poll(true,52,&current);
+    assert(delivered==1);
+
+    // The earlier worker accepted this ff02::fb / 33:33::fb mapping. Its
+    // duplicate bit must not bring multicast into the new unicast ledger.
+    bytes[1]|=0x08;
+    assert(permitFor(current,bytes,length,&permit));
+    assert(captureDirectedDataRx(bytes,length,false,current,permit,52)==
+           CaptureResult::Captured);
+    poll(true,52,&current);
+    assert(delivered==2&&snapshot().value[DirectedRxDelivered]==2);
+
+    // A unicast with the same SC is independent from both multicast copies.
+    assert(frame(bytes,&length,peerMac,0x2ab));bytes[1]|=0x08;
+    assert(permitFor(current,bytes,length,&permit));
+    assert(captureDirectedDataRx(bytes,length,false,current,permit,52)==
+           CaptureResult::Captured);
+    assert(captureDirectedDataRx(bytes,length,false,current,permit,52)==
+           CaptureResult::Duplicate);
+    poll(true,52,&current);
+    assert(delivered==3);
+    assert(close());assertBalanced(dev);
+}
+
+void caseRejectedAddressLeavesNoRetryEntry(FakeIf &dev,int variant) {
+    prepare(dev);
+    auto current=lease();assert(publishDirectedDataRxInputLease(current));
+    uint8_t sourceIp[16]{};linkLocal(sourceIp,peerMac);
+    uint8_t destinationIp[16]{};linkLocal(destinationIp,ownMac);
+    uint8_t destinationMac[6]{};memcpy(destinationMac,ownMac,6);
+    if(variant==0||variant==1) {
+        memset(destinationIp,0,sizeof(destinationIp));
+        destinationIp[0]=0xff;destinationIp[1]=variant==1?0x05:0x02;
+        destinationIp[15]=0xfb;
+        const uint8_t groupMac[6]={0x33,0x33,0,0,0,0xfb};
+        memcpy(destinationMac,groupMac,6);
+        if(variant==0)destinationMac[5]=0xfc; // Wrong ff02 mapping.
+    } else if(variant==2) {
+        memcpy(destinationMac,otherMac,6);linkLocal(destinationIp,otherMac);
+    } else if(variant==3) {
+        // Correct DA alone must not consume a frame for a foreign IPv6 IID.
+        linkLocal(destinationIp,otherMac);
+    } else if(variant==4) {
+        sourceIp[0]=0x20;sourceIp[1]=0x01; // Non-link-local source.
+    } else {
+        assert(false);
+    }
+    uint8_t bytes[256]{};size_t length=0;
+    assert(addressedFrame(bytes,&length,destinationMac,sourceIp,destinationIp));
+    bytes[1]|=0x08;
+    Input::Permit permit{};assert(permitFor(current,bytes,length,&permit));
+    // Rejected means the early HAL route returns PassToSta; neither the
+    // bounded queue nor the Retry ledger may claim this rejected packet.
+    assert(captureDirectedDataRx(bytes,length,false,current,permit,52)==
+           CaptureResult::Rejected);
+    assert(snapshot().value[DirectedRxPending]==0);
+    poll(true,52,&current);assert(delivered==0);
+
+    assert(frame(bytes,&length,peerMac,0x2ab));bytes[1]|=0x08;
+    assert(permitFor(current,bytes,length,&permit));
+    assert(captureDirectedDataRx(bytes,length,false,current,permit,52)==
+           CaptureResult::Captured);
+    poll(true,52,&current);assert(delivered==1);
+    assert(close());assertBalanced(dev);
+}
+
+void caseSameSequenceDifferentTid(FakeIf &dev) {
+    prepare(dev);
+    auto current=lease();assert(publishDirectedDataRxInputLease(current));
+    uint8_t bytes[256]{};size_t length=0;
+    assert(frame(bytes,&length,peerMac,0x2ab));
+    memmove(bytes+26,bytes+24,length-24);length+=2;
+    bytes[0]|=0x80;bytes[1]|=0x08;bytes[24]=0;bytes[25]=0;
+    for(uint8_t tid=0;tid<2;++tid) {
+        bytes[24]=tid;
+        Input::Permit permit{};assert(permitFor(current,bytes,length,&permit));
+        assert(captureDirectedDataRx(bytes,length,false,current,permit,52)==
+               CaptureResult::Captured);
+        assert(captureDirectedDataRx(bytes,length,false,current,permit,52)==
+               CaptureResult::Duplicate);
+    }
+    poll(true,52,&current);assert(delivered==2);
+    assert(close());assertBalanced(dev);
+}
+
+void caseConcurrentExactRetry(FakeIf &dev) {
+    prepare(dev);
+    auto current=lease();assert(publishDirectedDataRxInputLease(current));
+    uint8_t bytes[256]{};size_t length=0;
+    assert(frame(bytes,&length,peerMac,0x2ab));bytes[1]|=0x08;
+    Input::Permit permit{};assert(permitFor(current,bytes,length,&permit));
+    CaptureResult first=CaptureResult::Rejected,second=CaptureResult::Rejected;
+    std::thread left([&]{
+        first=captureDirectedDataRx(bytes,length,false,current,permit,52);
+    });
+    std::thread right([&]{
+        second=captureDirectedDataRx(bytes,length,false,current,permit,52);
+    });
+    left.join();right.join();
+    assert((first==CaptureResult::Captured&&second==CaptureResult::Duplicate)||
+           (second==CaptureResult::Captured&&first==CaptureResult::Duplicate));
+    assert(snapshot().value[DirectedRxPending]==1);
+    poll(true,52,&current);assert(delivered==1);
+    assert(close());assertBalanced(dev);
+}
 }
 
 int main(int argc,char **argv) {
@@ -361,6 +494,14 @@ int main(int argc,char **argv) {
         case 9:caseRetryDomain(dev);break;
         case 10:caseQueueFullDoesNotCommitRetry(dev);break;
         case 11:caseRetryDomainOwnerAndIfnetIncarnation(dev);break;
+        case 12:caseMulticastDoesNotEnterRetryLedger(dev);break;
+        case 13:caseRejectedAddressLeavesNoRetryEntry(dev,0);break;
+        case 14:caseRejectedAddressLeavesNoRetryEntry(dev,1);break;
+        case 15:caseRejectedAddressLeavesNoRetryEntry(dev,2);break;
+        case 16:caseRejectedAddressLeavesNoRetryEntry(dev,3);break;
+        case 17:caseRejectedAddressLeavesNoRetryEntry(dev,4);break;
+        case 18:caseSameSequenceDifferentTid(dev);break;
+        case 19:caseConcurrentExactRetry(dev);break;
         default:assert(false);break;
     }
     return 0;
