@@ -543,8 +543,9 @@ func canonicalEqual130(_ object: [String: Any], _ key: String, _ expected: UInt6
 }
 func waitForTerminal130(maximumUs: UInt64 = 5_000_000) -> [String: Any] {
     let begin = DispatchTime.now().uptimeNanoseconds
+    let maximumNs = maximumUs > UInt64.max / 1_000 ? UInt64.max : maximumUs * 1_000
     var snapshot = properties130()
-    while DispatchTime.now().uptimeNanoseconds - begin < maximumUs {
+    while DispatchTime.now().uptimeNanoseconds - begin < maximumNs {
         let stage = number130(snapshot, "NativeP2PDirectedDataStage")
         let outer = number130(snapshot, "NativeP2PProbeState")
         if (stage == 8 || stage == 9 || stage == 10) && (outer ?? 0) >= 7 { return snapshot }

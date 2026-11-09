@@ -20,27 +20,27 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "07118ad114d2925fe44ab786e861f4d363283e054f6e497c79171961de63e864"
+      "sha256": "70e15c8ade6d7ad44d7c953f4d346e6fa0cedb22baa8437c53ce5504b6b8f07c"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "ee51c72a68a00f2f610ae0996be24610396456fc4f594d909e99b77e42c74aa3"
+      "sha256": "417545723636dcc9171ebd67dd3dd275244b64c4de34e45d53e59252340b2e4b"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "17dd85c600180e2267e1c3343ac5362dc8d0fcb256bcec3293388fa3e4b73d34"
+      "sha256": "5ad812209364b2dd8071b026541b9c1cc6017f2163fba94d4b7bf54ee644f590"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "17dd85c600180e2267e1c3343ac5362dc8d0fcb256bcec3293388fa3e4b73d34"
+      "sha256": "5ad812209364b2dd8071b026541b9c1cc6017f2163fba94d4b7bf54ee644f590"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "b287eb35ff2634835f4ae06284fcb1b7b98df8e479fbf8e30f8518bf828cce60"
+      "sha256": "2383250039d7d88da1107a17396e2fa3152a7d0b9b2d1492e52c74806b253dc4"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
@@ -85,11 +85,11 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-09T21:34:04+08:00",
-  "runtime_scope": "Test131首包到达受控对端；成功TX_RSP因Retry位误拒绝，Intel回包与释放未通过。6项通过、4项部分、2项未通过、28项未覆盖。",
-  "running_candidate": "25G416-Test131",
+  "updated_at": "2026-11-09T21:59:26+08:00",
+  "runtime_scope": "Test132同轮两包原生UDP/TX完成、精确ifnet回包及最终MAC移除/释放已确认；原始helper过早快照仍保留失败。13通过、7部分、20未覆盖。",
+  "running_candidate": "25G416-Test132",
   "next_candidate": "25G416-Test132",
-  "website_delivery": "Test131实测已记录，Test132已部署待重启。",
-  "deployment_state": "test132_deployed_waiting_reboot",
-  "site_preparation": "Test131 first return blocked by exact frame-control mismatch; retained resources, no AirDrop proof."
+  "website_delivery": "Test132实测结果；工具等待修正，无新驱动部署。",
+  "deployment_state": "test132_runtime_two_packet_confirmed",
+  "site_preparation": "Same-run late observation confirms two returns and cleanup; AirDrop remains unverified."
 }
