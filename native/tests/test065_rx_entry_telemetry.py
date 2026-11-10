@@ -64,7 +64,9 @@ def source_contracts():
     assert 'NativeAwdlData::isAwdlDataCandidate(' in rx_entry
     assert 'tahoe_awdl_rx_stage_counters_.record(' in rx_entry
     assert rx_entry.index('mbuf_adj(m, 2);') < rx_entry.index(
-        'TahoeAwdlRxStageCounters::classify(')
+        'rxStageKind = static_cast<uint8_t>(')
+    assert rx_entry.index('TahoeAwdlRxStageCounters::kDescriptor);') < rx_entry.index(
+        'const size_t statusEnd')
     assert 'NativeP2PRxEntrySnapshotBegin' in publisher_header
     assert 'NativeP2PRxEntrySnapshotEnd' in publisher_header
     assert 'NativeP2PRxEntryRocGeneration' in publisher
