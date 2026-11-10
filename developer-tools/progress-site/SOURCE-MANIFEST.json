@@ -20,27 +20,27 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "05f0729d41f856b60377f15051136b40253981d96797a2f8980c431e3514da1d"
+      "sha256": "1e1bdd1e987adfd56084c443200bcaf9b7de5c7ae0fd89ef120f0b7f10fd05b8"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "794597b1877fc972c766afb6e421275a0b6c79c3544104d5675530d35b91c2c5"
+      "sha256": "28aeadd3526b722fa5b7240b8e567769998e28df0a8f0a693582d19fdfe11ca0"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "95fc999aafb80807493737d44a6cbec5f3f52aa479310fa6f338729d42025a8d"
+      "sha256": "c29cac23a3d2c6694d2dc857d3c95c040ad4a56306bcb62944d0a4498ba5f111"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "95fc999aafb80807493737d44a6cbec5f3f52aa479310fa6f338729d42025a8d"
+      "sha256": "c29cac23a3d2c6694d2dc857d3c95c040ad4a56306bcb62944d0a4498ba5f111"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "68dffda22cb62e848b044e2e9bce9acf4ddd4d9cdb9be6f6023f7e286a180095"
+      "sha256": "b24136d11cfe037239499be3769ee93aa299f2a20464eedd9e13633f135daceb"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
@@ -91,10 +91,10 @@
     "credentials"
   ],
   "updated_at": "2026-11-10T10:00:59+08:00",
-  "runtime_scope": "Test137 \u5f53\u524d\u5b9e\u6d4b 16 \u9879\u901a\u8fc7\u30018 \u9879\u90e8\u5206\u300116 \u9879\u672a\u8986\u76d6\u3002\u771f\u5b9e QM \u672c\u5730\u5b8c\u6210\uff0cRX \u7a97\u53e3\u65e0\u6570\u636e\u5e27\u3002",
+  "runtime_scope": "Test137 当前实测 16 项通过、8 项部分、16 项未覆盖。真实 QM 本地完成，RX 窗口无数据帧。",
   "running_candidate": "25G416-Test137",
   "next_candidate": null,
-  "website_delivery": "\u540c\u6b65 Test137 \u5355\u6b21\u5b9e\u673a\u8bca\u65ad\u3001\u8fdf\u5230\u540c\u5305\u56de\u6267\u548c\u603b\u65f6\u95f4\u7ebf\u3002",
+  "website_delivery": "同步 Test137 单次实机诊断、迟到同包回执和总时间线。",
   "deployment_state": "test137_runtime_local_qm_completed_rx_window",
   "site_preparation": "One actual Test137 ARM. Matched local QM doorbell and completion inside the admitted transmit window. RX window 47 MPDUs, zero data. Current AW enabled but this query used legacy plan. A known-answer PTR was captured. Peer receipt and AirDrop remain unproved."
 }
