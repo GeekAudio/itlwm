@@ -4103,6 +4103,13 @@ static void bindDiscoveryRxAfterDoorbell(P2PProbeRun *run)
         }
     }
     if (!found) return;
+    const NativeAwdlDiscoveryRxWindow::Epochs responseEpochs{
+        run->contextGeneration, run->powerGeneration,
+        run->stationGeneration, session.generation};
+    (void)owner->nativeDiscoveryRxWindow_.markQueryResponseWindow(
+        responseEpochs, uint32_t(owner->com.sc_generation),
+        query.doorbellIssuedUs,
+        NativeAwdlDiscoveryRxInput::kReceiveWindowUs);
     NativeAwdlDiscoveryRxInput::Lease lease{};
     auto &id=lease.identity;
     id.ownerSerial=owner->nativeAwdlRxEventOwnerSerial_;
@@ -13248,6 +13255,37 @@ void ItlIwx::tahoeDiscoveryRxWindowPublish(
     }
     set64("NativeAwdlDiscoveryRxWindowAwdlDataCandidateCount",
           nativeDiscoveryRxWindowSnapshot_.awdlDataCandidateCount);
+    set32("NativeAwdlDiscoveryRxWindowQueryResponseObserved",
+          nativeDiscoveryRxWindowSnapshot_.queryResponseObserved);
+    set32("NativeAwdlDiscoveryRxWindowQueryResponseComplete",
+          nativeDiscoveryRxWindowSnapshot_.queryResponseComplete);
+    set64("NativeAwdlDiscoveryRxWindowQueryDoorbellUs",
+          nativeDiscoveryRxWindowSnapshot_.queryDoorbellUs);
+    set64("NativeAwdlDiscoveryRxWindowQueryDeadlineUs",
+          nativeDiscoveryRxWindowSnapshot_.queryDeadlineUs);
+    set64("NativeAwdlDiscoveryRxWindowQueryFirstMpduEntryUs",
+          nativeDiscoveryRxWindowSnapshot_.queryFirstMpduEntryUs);
+    set64("NativeAwdlDiscoveryRxWindowQueryLastMpduEntryUs",
+          nativeDiscoveryRxWindowSnapshot_.queryLastMpduEntryUs);
+    set64("NativeAwdlDiscoveryRxWindowQueryMpduEntryCount",
+          nativeDiscoveryRxWindowSnapshot_.queryMpduEntryCount);
+    set64("NativeAwdlDiscoveryRxWindowQueryAwdlDataCandidateCount",
+          nativeDiscoveryRxWindowSnapshot_.queryAwdlDataCandidateCount);
+    set64("NativeAwdlDiscoveryRxWindowQueryCrcRejectedCount",
+          nativeDiscoveryRxWindowSnapshot_.queryCrcRejectedCount);
+    set64("NativeAwdlDiscoveryRxWindowQueryOverrunRejectedCount",
+          nativeDiscoveryRxWindowSnapshot_.queryOverrunRejectedCount);
+    set64("NativeAwdlDiscoveryRxWindowQueryDescriptorUnavailableCount",
+          nativeDiscoveryRxWindowSnapshot_.queryDescriptorUnavailableCount);
+    for (uint32_t i = 0; ok && i <
+         static_cast<uint32_t>(NativeAwdlDiscoveryRxWindow::FrameClass::Count);
+         ++i) {
+        char name[112];
+        snprintf(name, sizeof(name), "NativeAwdlDiscoveryRxWindowQuery%sCount",
+                 frameNames[i]);
+        set64(name,
+            nativeDiscoveryRxWindowSnapshot_.queryFrameClassCounts[i]);
+    }
     set64("NativeAwdlDiscoveryRxWindowLeaseQualifiedCount",
           nativeDiscoveryRxWindowSnapshot_.leaseQualifiedCount);
     set64("NativeAwdlDiscoveryRxWindowLeaseUnqualifiedCount",

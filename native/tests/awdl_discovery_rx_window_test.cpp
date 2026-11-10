@@ -137,6 +137,92 @@ static void eventOverflowPreservesCountsAndMarksTimelineIncomplete()
     assert(words[3] == kEventCapacity);
 }
 
+static void queryWindowCountsReceiveAfterDoorbellPastEventPrefixOverflow()
+{
+    Observer observer;
+    const Epochs epochs{11, 22, 33, 44};
+    assert(observer.begin(epochs, 55, 100,
+        counters(0, 0, 0, 0, 0, 0, 0, 0, 0)));
+
+    // Reproduce the live failure mode: descriptor events exhaust the legacy
+    // prefix before the TX query receives a doorbell timestamp.
+    for (uint32_t i = 0; i < kEventCapacity; ++i)
+        assert(observer.recordMpdu(epochs, 55, dataEvent(101 + i)) == i);
+
+    constexpr uint64_t doorbellUs = 200;
+    constexpr uint64_t responseWindowUs = 100000;
+    assert(observer.markQueryResponseWindow(epochs, 55, doorbellUs,
+                                             responseWindowUs));
+    MpduEvent data = dataEvent(doorbellUs + 1);
+    data.flags |= DescriptorPresent;
+    assert(observer.recordMpdu(epochs, 55, data) == UINT32_MAX);
+    MpduEvent management{};
+    management.monotonicUs = doorbellUs + 2;
+    management.frameClass = FrameClass::Management;
+    management.flags = DescriptorPresent | RawStatusPresent | CrcOk |
+        OverrunOk | LeaseQualified;
+    management.leaseState = 1;
+    assert(observer.recordMpdu(epochs, 55, management) == UINT32_MAX);
+
+    // The receive query stops at its bounded deadline even though the ROC
+    // remains active afterwards.
+    assert(observer.recordMpdu(epochs, 55,
+        dataEvent(doorbellUs + responseWindowUs + 1)) == UINT32_MAX);
+    assert(observer.close(epochs, 55, doorbellUs + responseWindowUs + 2,
+        counters(0, 0, 0, 0, 0, 0, 0, 0, 0)));
+
+    Snapshot snapshot{};
+    assert(observer.snapshot(&snapshot));
+    assert(snapshot.overflow == 1 && snapshot.eventCount == kEventCapacity);
+    assert(snapshot.queryResponseObserved == 1);
+    assert(snapshot.queryResponseComplete == 1);
+    assert(snapshot.queryDoorbellUs == doorbellUs);
+    assert(snapshot.queryDeadlineUs == doorbellUs + responseWindowUs);
+    assert(snapshot.queryMpduEntryCount == 2);
+    assert(snapshot.queryAwdlDataCandidateCount == 1);
+    assert(snapshot.queryFirstMpduEntryUs == doorbellUs + 1);
+    assert(snapshot.queryLastMpduEntryUs == doorbellUs + 2);
+    assert(snapshot.queryFrameClassCounts[
+        static_cast<uint32_t>(FrameClass::Data)] == 1);
+    assert(snapshot.queryFrameClassCounts[
+        static_cast<uint32_t>(FrameClass::Management)] == 1);
+    assert(snapshot.queryCrcRejectedCount == 0);
+    assert(snapshot.queryOverrunRejectedCount == 0);
+    assert(snapshot.queryDescriptorUnavailableCount == 0);
+
+    // The existing ADRXWIN1 wire format remains byte-for-byte shaped around
+    // its original 64-entry event prefix.
+    uint64_t words[kMaxWireWordCount]{};
+    assert(encode(snapshot, words, kMaxWireWordCount) == kMaxWireWordCount);
+    assert(words[0] == kWireMagic && words[1] == kSchemaVersion);
+    assert(words[3] == kEventCapacity);
+}
+
+static void queryWindowRequiresCurrentEpochAndFullResponseInterval()
+{
+    Observer staleObserver;
+    const Epochs epochs{1, 2, 3, 4};
+    assert(staleObserver.begin(epochs, 2, 100,
+        counters(0, 0, 0, 0, 0, 0, 0, 0, 0)));
+    assert(!staleObserver.markQueryResponseWindow(
+        Epochs{1, 2, 3, 5}, 2, 110, 100));
+    Snapshot stale{};
+    assert(staleObserver.snapshot(&stale));
+    assert(stale.state == State::Invalid);
+    assert(stale.queryResponseObserved == 0);
+
+    Observer shortObserver;
+    assert(shortObserver.begin(epochs, 2, 100,
+        counters(0, 0, 0, 0, 0, 0, 0, 0, 0)));
+    assert(shortObserver.markQueryResponseWindow(epochs, 2, 110, 100));
+    assert(shortObserver.close(epochs, 2, 209,
+        counters(0, 0, 0, 0, 0, 0, 0, 0, 0)));
+    Snapshot shortWindow{};
+    assert(shortObserver.snapshot(&shortWindow));
+    assert(shortWindow.queryResponseObserved == 1);
+    assert(shortWindow.queryResponseComplete == 0);
+}
+
 static void reversedCumulativeBridgeCounterInvalidates()
 {
     Observer observer;
@@ -171,6 +257,8 @@ int main()
     generationMismatchInvalidatesTheBoundWindow();
     reversedTimelineInvalidatesInsteadOfPublishingAValidWindow();
     eventOverflowPreservesCountsAndMarksTimelineIncomplete();
+    queryWindowCountsReceiveAfterDoorbellPastEventPrefixOverflow();
+    queryWindowRequiresCurrentEpochAndFullResponseInterval();
     reversedCumulativeBridgeCounterInvalidates();
     resetAllowsANewWindowOnlyAfterTerminalState();
     return 0;

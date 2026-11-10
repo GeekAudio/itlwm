@@ -454,6 +454,12 @@ public:
     uint64_t nativeFwDiagnosticTraceLastSampleNs_ {0};
     uint32_t nativeFwDiagnosticAliveGeneration_ {0};
     uint32_t nativeFwDiagnosticTlvGeneration_ {0};
+    uint32_t nativeFirstAliveTraceActive_ {0};
+    uint32_t nativeFirstAliveTraceEvents_ {0};
+    uint32_t nativeFirstAliveTraceCsr_ {0};
+    uint32_t nativeFirstAliveTraceFh_ {0};
+    uint32_t nativeFirstAliveTraceRxProgress_ {0};
+    uint64_t nativeFirstAliveTraceKickNs_ {0};
     uint32_t nativeFwDiagnosticExpectedLmacTable_[2] {};
     uint32_t nativeFwDiagnosticExpectedUmacTable_ {0};
     uint32_t nativeFwDiagnosticCaptureStatus_ {0};

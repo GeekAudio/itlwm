@@ -132,6 +132,18 @@ struct Snapshot {
     uint64_t routePassToStaCount;
     uint64_t routeQueuedForNativeCount;
     uint64_t routeDuplicateRetryCount;
+    uint32_t queryResponseObserved;
+    uint32_t queryResponseComplete;
+    uint64_t queryDoorbellUs;
+    uint64_t queryDeadlineUs;
+    uint64_t queryFirstMpduEntryUs;
+    uint64_t queryLastMpduEntryUs;
+    uint64_t queryMpduEntryCount;
+    uint64_t queryAwdlDataCandidateCount;
+    uint64_t queryCrcRejectedCount;
+    uint64_t queryOverrunRejectedCount;
+    uint64_t queryDescriptorUnavailableCount;
+    uint64_t queryFrameClassCounts[static_cast<uint32_t>(FrameClass::Count)];
     ServiceEvidence service[static_cast<uint32_t>(ServiceEvent::Count)];
     BridgeCounters bridgeBefore;
     BridgeCounters bridgeAfter;
@@ -236,10 +248,16 @@ public:
         descriptorUnavailableCount_(0), crcRejectedCount_(0),
         overrunRejectedCount_(0), channel149Count_(0),
         routePassToStaCount_(0), routeQueuedForNativeCount_(0),
-        routeDuplicateRetryCount_(0), overflow_(0), eventCount_(0),
+        routeDuplicateRetryCount_(0), queryDoorbellUs_(0), queryDeadlineUs_(0),
+        queryFirstMpduEntryUs_(0), queryLastMpduEntryUs_(0),
+        queryMpduEntryCount_(0), queryAwdlDataCandidateCount_(0),
+        queryCrcRejectedCount_(0), queryOverrunRejectedCount_(0),
+        queryDescriptorUnavailableCount_(0), overflow_(0), eventCount_(0),
         bridgeBefore_{}, bridgeAfter_{}, service_{}
     {
         zeroFrameCounts();
+        __builtin_memset(queryFrameClassCounts_, 0,
+                         sizeof(queryFrameClassCounts_));
         __builtin_memset(events_, 0, sizeof(events_));
     }
 
@@ -263,6 +281,13 @@ public:
         overrunRejectedCount_ = channel149Count_ = 0;
         routePassToStaCount_ = routeQueuedForNativeCount_ = 0;
         routeDuplicateRetryCount_ = 0;
+        queryDoorbellUs_ = queryDeadlineUs_ = 0;
+        queryFirstMpduEntryUs_ = queryLastMpduEntryUs_ = 0;
+        queryMpduEntryCount_ = queryAwdlDataCandidateCount_ = 0;
+        queryCrcRejectedCount_ = queryOverrunRejectedCount_ = 0;
+        queryDescriptorUnavailableCount_ = 0;
+        __builtin_memset(queryFrameClassCounts_, 0,
+                         sizeof(queryFrameClassCounts_));
         overflow_ = eventCount_ = 0;
         bridgeBefore_ = BridgeCounters{};
         bridgeAfter_ = BridgeCounters{};
@@ -295,6 +320,22 @@ public:
         if (!out || state_ != State::Active)
             return false;
         *out = epochs_;
+        return true;
+    }
+
+    // Called on the same main gate that serializes RX records, immediately
+    // after the accepted QM doorbell is joined to its TX trace row.
+    bool markQueryResponseWindow(const Epochs &epochs,
+                                 uint32_t driverGeneration,
+                                 uint64_t doorbellUs,
+                                 uint64_t responseWindowUs)
+    {
+        if (!responseWindowUs || queryDoorbellUs_ ||
+            doorbellUs > UINT64_MAX - responseWindowUs ||
+            !current(epochs, driverGeneration, doorbellUs))
+            return false;
+        queryDoorbellUs_ = doorbellUs;
+        queryDeadlineUs_ = doorbellUs + responseWindowUs;
         return true;
     }
 
@@ -342,6 +383,22 @@ public:
             saturatingIncrement(overrunRejectedCount_);
         if ((event.flags & ChannelPresent) && event.channel == 149)
             saturatingIncrement(channel149Count_);
+        if (queryDoorbellUs_ && event.monotonicUs >= queryDoorbellUs_ &&
+            event.monotonicUs <= queryDeadlineUs_) {
+            if (!queryFirstMpduEntryUs_)
+                queryFirstMpduEntryUs_ = event.monotonicUs;
+            queryLastMpduEntryUs_ = event.monotonicUs;
+            saturatingIncrement(queryMpduEntryCount_);
+            saturatingIncrement(queryFrameClassCounts_[frameClass]);
+            if (event.flags & AwdlDataCandidate)
+                saturatingIncrement(queryAwdlDataCandidateCount_);
+            if (!(event.flags & DescriptorPresent))
+                saturatingIncrement(queryDescriptorUnavailableCount_);
+            if ((event.flags & RawStatusPresent) && !(event.flags & CrcOk))
+                saturatingIncrement(queryCrcRejectedCount_);
+            if ((event.flags & RawStatusPresent) && !(event.flags & OverrunOk))
+                saturatingIncrement(queryOverrunRejectedCount_);
+        }
         if (!firstMpduEntryUs_)
             firstMpduEntryUs_ = event.monotonicUs;
         lastMpduEntryUs_ = event.monotonicUs;
@@ -450,6 +507,22 @@ public:
         out->routePassToStaCount = routePassToStaCount_;
         out->routeQueuedForNativeCount = routeQueuedForNativeCount_;
         out->routeDuplicateRetryCount = routeDuplicateRetryCount_;
+        out->queryResponseObserved = queryDoorbellUs_ != 0 ? 1u : 0u;
+        out->queryResponseComplete = state_ == State::Closed &&
+            queryDoorbellUs_ != 0 && endUs_ >= queryDeadlineUs_ ? 1u : 0u;
+        out->queryDoorbellUs = queryDoorbellUs_;
+        out->queryDeadlineUs = queryDeadlineUs_;
+        out->queryFirstMpduEntryUs = queryFirstMpduEntryUs_;
+        out->queryLastMpduEntryUs = queryLastMpduEntryUs_;
+        out->queryMpduEntryCount = queryMpduEntryCount_;
+        out->queryAwdlDataCandidateCount = queryAwdlDataCandidateCount_;
+        out->queryCrcRejectedCount = queryCrcRejectedCount_;
+        out->queryOverrunRejectedCount = queryOverrunRejectedCount_;
+        out->queryDescriptorUnavailableCount =
+            queryDescriptorUnavailableCount_;
+        for (uint32_t i = 0;
+             i < static_cast<uint32_t>(FrameClass::Count); ++i)
+            out->queryFrameClassCounts[i] = queryFrameClassCounts_[i];
         for (uint32_t i = 0;
              i < static_cast<uint32_t>(ServiceEvent::Count); ++i)
             out->service[i] = service_[i];
@@ -520,6 +593,16 @@ private:
     uint64_t routePassToStaCount_;
     uint64_t routeQueuedForNativeCount_;
     uint64_t routeDuplicateRetryCount_;
+    uint64_t queryDoorbellUs_;
+    uint64_t queryDeadlineUs_;
+    uint64_t queryFirstMpduEntryUs_;
+    uint64_t queryLastMpduEntryUs_;
+    uint64_t queryMpduEntryCount_;
+    uint64_t queryAwdlDataCandidateCount_;
+    uint64_t queryCrcRejectedCount_;
+    uint64_t queryOverrunRejectedCount_;
+    uint64_t queryDescriptorUnavailableCount_;
+    uint64_t queryFrameClassCounts_[static_cast<uint32_t>(FrameClass::Count)];
     uint32_t overflow_;
     uint32_t eventCount_;
     BridgeCounters bridgeBefore_;

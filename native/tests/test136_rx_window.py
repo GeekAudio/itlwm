@@ -36,12 +36,20 @@ def production_contract() -> None:
     publish = function_body(
         probe, "void ItlIwx::tahoeDiscoveryRxWindowPublish("
     )
+    bind_after_doorbell = function_body(
+        probe, "static void bindDiscoveryRxAfterDoorbell("
+    )
     assert "!tahoeP2pOnMainGate()" in publish
     assert "nativeP2PPublicationBusy(this)" in publish
     assert "OSData::withBytes(nativeDiscoveryRxWindowWords_" in publish
     assert '"NativeAwdlDiscoveryRxWindowEvents"' in publish
     assert '"NativeAwdlDiscoveryRxWindowPublished",' in publish
     assert "uint32_t(1), 32" in publish
+    assert "nativeDiscoveryRxWindowSnapshot_.queryResponseComplete" in publish
+    assert '"NativeAwdlDiscoveryRxWindowQueryAwdlDataCandidateCount"' in publish
+    assert "markQueryResponseWindow" in bind_after_doorbell
+    assert "query.doorbellIssuedUs" in bind_after_doorbell
+    assert "NativeAwdlDiscoveryRxInput::kReceiveWindowUs" in bind_after_doorbell
     for property_name in (
         "NativeAwdlDiscoveryRxWindowLeaseQualifiedCount",
         "NativeAwdlDiscoveryRxWindowLeaseUnqualifiedCount",
