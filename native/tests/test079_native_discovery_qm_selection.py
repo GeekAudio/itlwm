@@ -11,6 +11,7 @@ SOURCES = [
     ROOT / "native/awdl_native_bsd_data_25G332.hpp",
     ROOT / "native/awdl_native_bsd_data_25G332.cpp",
     ROOT / "native/awdl_bsd_packet_bridge.hpp",
+    ROOT / "native/awdl_qm_no_known_answer.hpp",
     ROOT / "native/awdl_data_frame.cpp",
     ROOT / "native/awdl_data_frame.hpp",
     ROOT / "native/tests/test064_kernel_shim.hpp",
@@ -48,6 +49,7 @@ def main():
         "generation_and_single_inflight_slot_gates_preserved",
         "close_blocks_claim_and_retires_queued_mbufs_once",
         "generation_transition_retires_old_queue_and_accepts_new_epoch",
+        "known_answer_rewrite_preserves_token_and_default_paths",
     ]
     with tempfile.TemporaryDirectory(prefix="test079-awdl-qm-queue-") as temp:
         build = Path(temp)
@@ -68,7 +70,7 @@ def main():
             "native/tests/awdl_native_discovery_qm_selection_test.cpp",
             "-o", str(binary),
         ])
-        for case in range(1, 8):
+        for case in range(1, len(checks) + 1):
             try:
                 run([str(binary), str(case)])
             except RuntimeError as error:

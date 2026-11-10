@@ -4,6 +4,7 @@
 #include "test064_kernel_shim.hpp"
 #include "../awdl_native_bsd_data_25G332.hpp"
 #include "../awdl_bsd_packet_bridge.hpp"
+#include "../awdl_data_tx_observation.hpp"
 #include <atomic>
 #include <assert.h>
 #include <stdint.h>
@@ -26,7 +27,7 @@ const uint8_t ownAddress[6]={2,1,2,3,4,5};
 
 enum class QueryKind : uint8_t {
     Airdrop, CompanionLink, Asquic, UnknownService, NonPtr, Qu,
-    BadChecksum
+    BadChecksum, AirdropKnownAnswer
 };
 
 void write16(uint8_t *bytes,uint16_t value) {
@@ -68,6 +69,16 @@ mbuf_t makeQuery(QueryKind kind) {
     dnsLength+=2;
     write16(dns+dnsLength,kind==QueryKind::Qu?0x8001:1);
     dnsLength+=2;
+
+    if(kind==QueryKind::AirdropKnownAnswer) {
+        write16(dns+6,1);
+        const uint8_t answer[]={
+            0xc0,12, 0,12, 0,1, 0,0,0,120, 0,7,
+            4,'t','e','s','t',0xc0,12,
+        };
+        memcpy(dns+dnsLength,answer,sizeof(answer));
+        dnsLength+=sizeof(answer);
+    }
 
     const size_t udpLength=8+dnsLength;
     const size_t ipv6Length=40+udpLength;
@@ -343,6 +354,34 @@ int main(int argc,char **argv) {
         ordinaryTx(72,1);
         assertClosedAndBalanced(device);
         return 0;
+    } else if(test==8) {
+        // The one-shot rewrite leaves the selected token intact and keeps
+        // ordinary data and default discovery byte-identical.
+        assert(enqueue(QueryKind::Airdrop));
+        assert(enqueue(QueryKind::AirdropKnownAnswer));
+        assert(enqueue(QueryKind::AirdropKnownAnswer));
+        assert(enqueue(QueryKind::AirdropKnownAnswer));
+        uint64_t token=99;bool consumed=false;
+        auto expected=peek();
+        assert(!nextDiscoveryTx(80,expected,&token,&consumed,true));
+        assert(consumed&&token==0&&snapshot().value[TxPending]==3);
+        for(unsigned mode=0;mode<3;++mode) {
+            expected=peek();
+            mbuf_t encoded=mode==2?nextTx(81+mode,&token):
+                nextDiscoveryTx(81+mode,expected,&token,&consumed,mode==0);
+            assert(encoded&&token==expected.token);
+            NativeAwdlData::DecodedFrame decoded{};
+            assert(NativeAwdlData::decodeIpv6DataMpdu(encoded->bytes,
+                encoded->total,&decoded)==NativeAwdlData::Status::Ok);
+            assert(decoded.packetCount==1);
+            const auto &packet=decoded.packets[0];
+            assert(packet.ipv6Length==(mode==0?85:104));
+            assert(packet.ipv6Packet[55]==(mode==0?0:1));
+            assert(NativeAwdlData::txObservationChecksumValid(
+                packet.ipv6Packet,packet.ipv6Packet+40,packet.ipv6Length-40));
+            assert(packet.awdlSequenceNumber==mode);
+            finish(token,encoded);
+        }
     } else {
         assert(false&&"unknown Test079 native discovery queue case");
     }

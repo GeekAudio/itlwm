@@ -273,6 +273,7 @@ struct PeerRuntime {
 struct ItlIwx {
     IOEthernetController *controller = nullptr;
     bool onMainGate = true;
+    bool rx149ArmSelected = false;
     PeerRuntime tahoe_awdl_peer_runtime_;
     Softc com{};
     RocEvents nativeP2pRocEvents_;
@@ -280,6 +281,13 @@ struct ItlIwx {
     IOEthernetController *tahoeP2pController() { return controller; }
     bool tahoeP2pOnMainGate() const { return onMainGate; }
 };
+static bool rx149ArmModeSelected(ItlIwx *owner) {
+    return owner && owner->rx149ArmSelected;
+}
+static bool rx149ObservationOnlyRequested(IOEthernetController *controller) {
+    return controller && controller->getProperty(
+        "NativeP2PRx149ObservationOnly") == kOSBooleanTrue;
+}
 struct PsfInputLite { uint8_t channelSlots[16]; };
 struct RocCandidate {
     uint64_t startObservedUs, hardDeadlineUs, sampleUs;
@@ -476,8 +484,9 @@ static void testActualExtractedTakeAndNoMifAdmission()
            !run.discoveryTarget.airtimeVerified &&
            run.discoveryTarget.experimentalOnly);
     assert(NativeAwdlBSD::peeks == 1 && NativeAwdlBSD::consumes == 1);
-    // 4 experiment booleans plus exactly seven immutable pre-ROC scalar reads.
-    assert(controller.propertyReads == 11);
+    // RX149 exclusion, 4 experiment booleans, and seven immutable pre-ROC
+    // scalar reads are consumed by the extracted production helper.
+    assert(controller.propertyReads == 12);
     assert(owner.tahoe_awdl_peer_runtime_.reads ==
            IntelAwdlPeerRuntime::kPeerCapacity + 1); // scan then recheck
     assert(!owner.tahoe_awdl_peer_runtime_.selected.hasMif);
@@ -504,6 +513,23 @@ static void testConsumedOrAttemptedRunCannotTakeHeadAgain()
     assert(NativeAwdlBSD::consumes == 1);
     assert(takeDiscoveryPacket(&run, runtimeEpochs(), 4, &token) == nullptr);
     assert(NativeAwdlBSD::peeks == 1 && NativeAwdlBSD::consumes == 1);
+}
+
+static void testRx149ProfileExcludesDiscoveryTake()
+{
+    P2PProbeRun run{}; ItlIwx owner{}; IOEthernetController controller;
+    setup(run, owner, controller);
+    controller.put("NativeP2PRx149ObservationOnly", kOSBooleanTrue);
+    uint64_t token = 0;
+    assert(takeDiscoveryPacket(&run, runtimeEpochs(), 4, &token) == nullptr);
+    assert(controller.propertyReads == 1);
+    assert(NativeAwdlBSD::peeks == 0 && NativeAwdlBSD::consumes == 0);
+
+    setup(run, owner, controller);
+    owner.rx149ArmSelected = true;
+    assert(takeDiscoveryPacket(&run, runtimeEpochs(), 4, &token) == nullptr);
+    assert(controller.propertyReads == 1);
+    assert(NativeAwdlBSD::peeks == 0 && NativeAwdlBSD::consumes == 0);
 }
 
 static void testStrictQmHeadAndPreAnchorStatus()
@@ -696,6 +722,7 @@ static void testWideValidPhyCorrection()
 int main() {
     testActualExtractedTakeAndNoMifAdmission();
     testConsumedOrAttemptedRunCannotTakeHeadAgain();
+    testRx149ProfileExcludesDiscoveryTake();
     testStrictQmHeadAndPreAnchorStatus();
     testExactSnapshotAndChannelRecheck();
     testCandidateTimeAndLeaseReserve();
@@ -852,7 +879,7 @@ static mbuf_t takeDiscoveryPacket(P2PProbeRun *run,
        "mdns.targetPtrInQuestionCount==mdns.questionCount" not in strict_compact or \
        "mdns.quQuestionMask==0" not in strict_compact:
         raise RuntimeError("strict QM admission must require all supported questions and no QU bit")
-    if "nextTxImpl(sequence,token,&expected,consumed)" not in dequeue_body:
+    if "nextTxImpl(sequence,token,&expected,consumed,omitKnownAnswer)" not in dequeue_body:
         raise RuntimeError("discovery dequeue must pass the selected snapshot to the production worker")
     for required in (
         "for(size_toffset=0;offset<tx.count;++offset)",
