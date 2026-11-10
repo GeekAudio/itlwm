@@ -254,6 +254,6 @@ int main()
 {
     testSuccessfulStrip();
     testStrictBoundariesAndNoMutation();
-    puts("Test138 QM Known Answer strip: success transform and 18 fail-closed boundaries passed");
+    puts("Test138 QM Known Answer strip: success transform and 19 fail-closed boundaries passed");
     return 0;
 }

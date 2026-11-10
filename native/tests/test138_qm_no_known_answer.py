@@ -25,7 +25,7 @@ def main():
 
     print(json.dumps({
         "test": "Test138 bounded AirDrop QM Known Answer transform",
-        "host_cases": 19,
+        "host_cases": 20,
         "asan_ubsan": {"passed": True},
         "source_sha256": {
             str(path.relative_to(ROOT)): sha256(path.read_bytes()).hexdigest()
