@@ -20,27 +20,27 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "296de87e1792b1f14ffea605405f65ff322a87fe964f6395dc5f5a22f3f873b3"
+      "sha256": "bee1abc3beb6f7669ae046d9df109585cbe57228ddd08192599919cf36025406"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "0aea368436c971d6653ec7e40f68d781890887045c7922227d1125026c0c92b0"
+      "sha256": "7492c1505dc5ddd37221e8536c23ac3914561b30242181640a2e344a3ec3365b"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "92f33de798c45dea89c81d1fe3c1c291c02f3de988dcc20b658895dcedc3003a"
+      "sha256": "201312a9e776e2cfbc18ee490562e06d16647711cc95fda4e56b1834309e36fe"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "92f33de798c45dea89c81d1fe3c1c291c02f3de988dcc20b658895dcedc3003a"
+      "sha256": "201312a9e776e2cfbc18ee490562e06d16647711cc95fda4e56b1834309e36fe"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "560b74751dcbd96e27098f38d9026035f73400ef723e42eb5a6431433ca441a3"
+      "sha256": "96b6326377da035192cd06c6d1209baa5f0cc140f8d7f6854596b13d9a548d59"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
@@ -90,11 +90,11 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-10T04:28:13+08:00",
-  "runtime_scope": "Test135当前实测：16项通过、7项部分、17项未覆盖。补取迟到QM摘要并对齐同包；Test136尚未实机运行。",
-  "running_candidate": "25G416-Test135",
-  "next_candidate": "25G416-Test136",
-  "website_delivery": "Test136已部署待重启；里程碑和开发总时间线同步，保留Test135实测口径。",
-  "deployment_state": "test136_deployed_waiting_reboot_disarmed",
-  "site_preparation": "Test136 raw QM command/MPDU and scoped RX-window observation; 104 production configurations, 12 producer-consumer regressions and independent offline review passed. Minimal Test135/config backup preserved; config unchanged. Internet smoke and sleep skipped. Peer return and AirDrop remain unproved."
+  "updated_at": "2026-11-10T09:18:03+08:00",
+  "runtime_scope": "Test136 当前实测 15 项通过、9 项部分、16 项未覆盖。真实 QM 在窗口规划停止，原生回包待验证。",
+  "running_candidate": "25G416-Test136",
+  "next_candidate": null,
+  "website_delivery": "更新 Test136 本轮实测和总时间线。当前 AW 回放与实机验收分列。",
+  "deployment_state": "test136_runtime_qm_window_blocked",
+  "site_preparation": "Test136 loaded; one bounded system QM run reached legacy status 26. Production planner replay reproduced a 912 us gap and a counterfactual current-AW window with 4992 us remaining. RX-window publication missing. No actual QM firmware submission or peer reply shown."
 }
