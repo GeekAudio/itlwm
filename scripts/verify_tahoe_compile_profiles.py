@@ -7,10 +7,12 @@ import subprocess
 
 UNITS = ('ItlIwx.cpp', 'ItlIwxP2PProbe.cpp', 'ItlIwxP2PRoc.cpp',
          'ItlIwxP2PRx.cpp', 'ItlIwxP2PTx.cpp', 'ItlIwxP2PAction.cpp', 'AirportItlwmV2.cpp',
-         'awdl_native_bsd_data_25G332.cpp')
+         'awdl_native_bsd_data_25G332.cpp', 'awdl_native_lifecycle_25G332.cpp')
 PROFILES = {
     'ordinary_wifi': (),
+    'lifecycle': ('LIFECYCLE',),
     'resident': ('LIFECYCLE', 'RESIDENT'),
+    'system': ('LIFECYCLE', 'RESIDENT', 'SYSTEM'),
     'multicast_admission': ('LIFECYCLE', 'RESIDENT', 'MULTICAST_ADMISSION'),
     'discovery': ('LIFECYCLE', 'RESIDENT', 'TX_EVIDENCE', 'DISCOVERY_EXPERIMENT'),
     'discovery_rx_input': ('LIFECYCLE', 'RESIDENT', 'TX_EVIDENCE', 'DISCOVERY_EXPERIMENT', 'DISCOVERY_RX_INPUT'),

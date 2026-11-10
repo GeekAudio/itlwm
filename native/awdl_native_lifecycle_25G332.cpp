@@ -563,7 +563,9 @@ void observeOnce(IOService *controller,const uint8_t address[6]) {
     resident=controller&&controller->getProperty("NativeAwdlResidentEnabled")==kOSBooleanTrue;
 #endif
     const bool systemResident=resident&&systemProfileEnabled(controller);
+#if defined(ITL_NATIVE_AWDL_LIFECYCLE_25G332) && defined(ITL_NATIVE_AWDL_SYSTEM_25G332)
     if(systemResident)latchSystemController(controller);
+#endif
     if(!controller||!address||!any||(address[0]&1)||!NativeWifi::verifyTahoeAwdlRuntime()||
        !controller->metaCast("IO80211Controller")||
        (!resident&&controller->getProperty("NativeAwdlLifecycleObservationOnly")!=kOSBooleanTrue)||

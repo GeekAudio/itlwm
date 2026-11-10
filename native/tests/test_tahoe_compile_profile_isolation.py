@@ -15,7 +15,7 @@ class ProfileIsolation(unittest.TestCase):
    return subprocess.CompletedProcess(command,0,'','')
   with tempfile.TemporaryDirectory() as tmp:
    tmp=Path(tmp);log=tmp/'build.log';out=tmp/'report.json'
-   log.write_text('\n'.join('/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang -DITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332=1 -DITL_NATIVE_AWDL_RESIDENT_25G332=1 -DITL_NATIVE_AWDL_REPLY_SHADOW_25G332=1 -c /source/'+unit+' -o /output.o' for unit in profiles.UNITS))
+   log.write_text('\n'.join('/Applications/Xcode.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang -DITL_NATIVE_RX_PREOWNER_OBSERVATION_25G332=1 -DITL_NATIVE_AWDL_RESIDENT_25G332=1 -DITL_NATIVE_AWDL_REPLY_SHADOW_25G332=1 -DITL_NATIVE_AWDL_SYSTEM_25G332=1 -c /source/'+unit+' -o /output.o' for unit in profiles.UNITS))
    with patch.object(profiles.subprocess,'run',side_effect=compile_command): profiles.verify(ROOT,log,out)
   self.assertEqual(len(commands),len(profiles.UNITS)*len(profiles.PROFILES))
   for offset in range(0,len(commands),len(profiles.PROFILES)):
@@ -25,6 +25,7 @@ class ProfileIsolation(unittest.TestCase):
     self.assertEqual(count,1 if profile=='rx149_preowner' else 0)
     shadow_count=command.count('-DITL_NATIVE_AWDL_REPLY_SHADOW_25G332=1')
     self.assertEqual(shadow_count,1 if profile=='rx149_reply_shadow' else 0)
+    self.assertEqual(command.count('-DITL_NATIVE_AWDL_SYSTEM_25G332=1'),1 if profile=='system' else 0)
     if profile=='ordinary_wifi':self.assertFalse(any(x.startswith('-DITL_NATIVE_AWDL_') for x in command))
     self.assertIn('-fsyntax-only',command);self.assertNotIn('-c',command);self.assertNotIn('-o',command)
  def test_rx_correlation_irq_hook_is_preowner_profile_only(self):
