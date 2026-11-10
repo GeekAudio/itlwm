@@ -26,6 +26,7 @@
 #include "awdl_native_bsd_data_25G332.hpp"
 #include "awdl_bsd_packet_bridge.hpp"
 #include "awdl_data_tx_observation.hpp"
+#include "awdl_qm_no_known_answer.hpp"
 #include "rx149_input_gate_state.hpp"
 #include <IOKit/IOLib.h>
 #include <IOKit/IOLocks.h>
@@ -3550,10 +3551,12 @@ void captureRx149Diagnostics(Rx149CaptureDiagnostics::Wire *out) {
 }
 namespace {
 mbuf_t nextTxImpl(uint16_t sequence,uint64_t *token,
-                  const DiscoveryTxSnapshot *expected,bool *consumed) {
+                  const DiscoveryTxSnapshot *expected,bool *consumed,
+                  bool omitKnownAnswer=false) {
 #if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
     (void)sequence;
     (void)expected;
+    (void)omitKnownAnswer;
     if(token)*token=0;
     if(consumed)*consumed=false;
     return nullptr;
@@ -3644,6 +3647,12 @@ mbuf_t nextTxImpl(uint16_t sequence,uint64_t *token,
             valid=item.discoveryEligible&&snapshotMatches(item,*expected)&&
                 item.discoveryClass==static_cast<uint8_t>(mdns.queryClass)&&
                 isStrictContinuityQm(observation);
+            // Only the MIF-current experiment can request this rewrite.
+            // Work on the private Ethernet copy; the original mbuf and
+            // queue selection, identity, and ownership stay unchanged.
+            if(valid&&omitKnownAnswer)
+                valid=NativeAwdlData::stripAirdropQmKnownAnswer(
+                    ethernet+14,&view.length);
             // A radio-generation/close transition after dequeue consumes this
             // token safely but must not submit an out-of-epoch MPDU.
             irq=IOSimpleLockLockDisableInterrupt(lock);
@@ -3712,11 +3721,11 @@ bool peekDiscoveryTx(uint32_t expectedPowerGeneration,
 }
 mbuf_t nextDiscoveryTx(uint16_t sequence,
                        const DiscoveryTxSnapshot &expected,
-                       uint64_t *token,bool *consumed) {
+                       uint64_t *token,bool *consumed,bool omitKnownAnswer) {
     if(token)*token=0;
     if(consumed)*consumed=false;
     if(!token||!consumed)return nullptr;
-    return nextTxImpl(sequence,token,&expected,consumed);
+    return nextTxImpl(sequence,token,&expected,consumed,omitKnownAnswer);
 }
 void submitted(uint64_t token,int result) {
     if(!bridgeLock()||!token)return;auto irq=IOSimpleLockLockDisableInterrupt(lock);

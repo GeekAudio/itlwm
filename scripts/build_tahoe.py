@@ -117,6 +117,8 @@ def resident_build_flags(args):
         flags += ' -DITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332=1'
     if getattr(args, 'native_awdl_qm_normal_priority', False):
         flags += ' -DITL_NATIVE_AWDL_QM_NORMAL_PRIORITY_25G332=1'
+    if getattr(args, 'native_awdl_qm_no_known_answer', False):
+        flags += ' -DITL_NATIVE_AWDL_QM_NO_KNOWN_ANSWER_25G332=1'
     if args.native_awdl_rx149_observation_only:
         flags += ' -DITL_NATIVE_AWDL_RX149_OBSERVATION_25G332=1'
     if getattr(args, 'native_awdl_rx149_data_input', False):
@@ -153,6 +155,7 @@ def apply_artifact_profile(personality, args):
         'NativeAwdlDiscoveryRxInputEnabled': bool(getattr(args, 'native_awdl_discovery_rx_input', False)),
         # Build identity only; this property is not a runtime arm or selector.
         'NativeAwdlQmNormalPriorityCompiled': bool(getattr(args, 'native_awdl_qm_normal_priority', False)),
+        'NativeAwdlQmNoKnownAnswerCompiled': bool(getattr(args, 'native_awdl_qm_no_known_answer', False)),
         'NativeP2PRx149ObservationOnly': bool(args.native_awdl_rx149_observation_only),
         'NativeP2PRx149DataInputExperiment': bool(getattr(args, 'native_awdl_rx149_data_input', False)),
         'NativeRxPreOwnerObservation': bool(getattr(args, 'native_rx_preowner_observation', False)),
@@ -213,6 +216,8 @@ def main():
                         help='Bound native QM replies to the selected live peer, query doorbell and ROC; separate from RX149/nonce diagnostics')
     parser.add_argument('--native-awdl-qm-normal-priority', action='store_true',
                         help='Opt-in B comparison: clear HIGH_PRI only for an eligible real QM query in its current window; default A retains flags 7')
+    parser.add_argument('--native-awdl-qm-no-known-answer', action='store_true',
+                        help='Opt-in MIF-current AirDrop QM comparison with the Known Answer omitted')
     parser.add_argument('--native-awdl-discovery-current-aw-fallback', action='store_true',
                         help='Test077: try the current AW only after the original next-AW planner reports an empty conservative window')
     parser.add_argument('--native-awdl-rx149-observation-only', action='store_true',
@@ -232,6 +237,11 @@ def main():
     args = parser.parse_args()
     for error in receive149_profile_errors(args):
         parser.error(error)
+    if args.native_awdl_qm_no_known_answer and not (
+            args.native_awdl_discovery_mif_current_slot and
+            args.native_awdl_discovery_rx_input and
+            not args.native_awdl_qm_normal_priority):
+        parser.error('No-Known-Answer comparison requires MIF-current discovery RX and normal A transmit flags')
     if args.native_awdl_discovery_current_aw_fallback and not args.native_awdl_discovery_mif_current_slot:
         parser.error('Current-AW fallback requires the manual MIF current-slot discovery profile')
     if args.native_awdl_discovery_mif_current_slot and not args.native_awdl_discovery_experiment:
@@ -346,6 +356,7 @@ def main():
                           'native_awdl_discovery_mif_current_slot': args.native_awdl_discovery_mif_current_slot,
                           'native_awdl_discovery_rx_input': args.native_awdl_discovery_rx_input,
                           'native_awdl_qm_normal_priority': args.native_awdl_qm_normal_priority,
+                          'native_awdl_qm_no_known_answer': args.native_awdl_qm_no_known_answer,
                           'native_awdl_discovery_current_aw_fallback': args.native_awdl_discovery_current_aw_fallback,
                           'native_awdl_rx149_observation_only': args.native_awdl_rx149_observation_only,
                           'native_awdl_rx149_data_input': args.native_awdl_rx149_data_input,

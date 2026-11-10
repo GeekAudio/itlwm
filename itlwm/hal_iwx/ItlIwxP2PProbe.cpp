@@ -5106,8 +5106,13 @@ static mbuf_t takeDiscoveryPacketMifCurrent(P2PProbeRun *run,
     run->discoveryWindowClosed = true;
     const auto before = NativeAwdlBSD::snapshot();
     bool consumed = false;
+#if defined(ITL_NATIVE_AWDL_QM_NO_KNOWN_ANSWER_25G332)
+    mbuf_t packet = NativeAwdlBSD::nextDiscoveryTx(
+        sequence, head, token, &consumed, true);
+#else
     mbuf_t packet = NativeAwdlBSD::nextDiscoveryTx(
         sequence, head, token, &consumed);
+#endif
     if (consumed) {
         run->discoveryConsumed = true;
         run->discoveryPacketToken = head.token;

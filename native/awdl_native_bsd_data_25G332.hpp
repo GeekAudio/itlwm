@@ -279,7 +279,8 @@ bool peekDiscoveryTx(uint32_t expectedPowerGeneration,
 // A non-null returned mbuf is the encoded MPDU and consumed is true.
 mbuf_t nextDiscoveryTx(uint16_t wifiSequence,
                        const DiscoveryTxSnapshot &expected,
-                       uint64_t *token,bool *consumed);
+                       uint64_t *token,bool *consumed,
+                       bool omitKnownAnswer=false);
 void submitted(uint64_t token,int result);
 void completed(uint64_t token,bool success);
 void cancelQueued();
