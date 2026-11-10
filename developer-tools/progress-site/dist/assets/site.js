@@ -12,8 +12,7 @@
   const shortVersion = value => String(value || "待确认").match(/Test\d+/)?.[0] || String(value || "待确认");
   const labels = { passed: "通过", partial: "部分通过", regressed: "未通过", not_covered: "未覆盖" };
   const symbols = { passed: "✓", partial: "−", regressed: "!", not_covered: "·" };
-  const stages = data?.milestones || [];
-  const checkpoints = stages.flatMap(stage => stage.checkpoints || []);
+  const sourceStages = data?.milestones || [];
   const records = window.TEST_RECORDS || [];
   const candidateVersion = shortVersion(data?.runningCandidate);
   const lineageScope = Object.freeze({
@@ -36,6 +35,26 @@
   const validCommit = value => typeof value === "string" && /^[0-9a-f]{7,40}$/i.test(value);
   const validUuid = value => typeof value === "string" &&
     /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(value);
+  const qualifiesNativeAirDrop = (record, point) => {
+    const evidence = record?.nativeAirDrop;
+    const receipt = evidence?.checkpoints?.[point.id];
+    return evidence?.version === 1 && evidence.mode === "system-menu" &&
+      evidence.captureDisabled === true && evidence.onlyEndpoints === true &&
+      receipt?.verdict === point.current_result && typeof receipt.sha256 === "string" &&
+      /^[0-9a-f]{64}$/i.test(receipt.sha256);
+  };
+  const airdropEvidencePending = "本轮尚无符合 v1 验收要求的原生 AirDrop 记录。";
+  const stages = sourceStages.map(stage => {
+    if (stage.stage !== 8 || !Array.isArray(stage.checkpoints)) return stage;
+    let withheld = false;
+    const checkpoints = stage.checkpoints.map(point => {
+      if (point.current_result === "not_covered" || qualifiesNativeAirDrop(currentRecord, point)) return point;
+      withheld = true;
+      return { ...point, current_result: "not_covered", current_detail: airdropEvidencePending };
+    });
+    return withheld ? { ...stage, checkpoints, current_summary: airdropEvidencePending } : stage;
+  });
+  const checkpoints = stages.flatMap(stage => stage.checkpoints || []);
   const evidenceMatches = Boolean(currentTestRound && currentRecord && currentProvenance &&
     currentRecord.version === data.runningCandidate &&
     typeof currentRecord.id === "string" && currentRecord.id.length > 0 &&
@@ -177,6 +196,9 @@
         /27\.934\s*ms/.test(receipt);
     },
     classify(sourceData, point, sourceRecords) {
+      if (/^8-[1-5]$/.test(point.id) &&
+          !qualifiesNativeAirDrop(sourceRecords?.[0], point))
+        return { kind: "scope", status: airdropEvidencePending, relations: [] };
       if (point.current_result !== "not_covered") {
         const exactLegacyEvidence = this.aligned(sourceData, sourceRecords) &&
           this.exactTxCompletion(sourceData, sourceRecords);

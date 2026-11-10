@@ -139,6 +139,36 @@ test("current snapshot passes the gate and renders its 40-checkpoint core", () =
   assert.match(result.findById("recent-progress-title")?.textContent || "", /最近实测进展/);
 });
 
+test("stage 8 requires a matching native transfer receipt", () => {
+  const fixture = snapshot();
+  const point = fixture.data.milestones[7].checkpoints[0];
+  point.current_result = "passed";
+  point.current_detail = "CONTROLLED_RECEIPT_SENTINEL";
+  const evidence = {
+    version: 1, mode: "controlled", captureDisabled: true, onlyEndpoints: true,
+    checkpoints: { "8-1": { verdict: "passed", sha256: "a".repeat(64) } }
+  };
+  fixture.records[0].nativeAirDrop = evidence;
+  const controlled = render(fixture);
+  assert.equal(controlled.findById("check-8-1")?.dataset.result, "not_covered");
+  assert.equal(controlled.window.PROGRESS_EVIDENCE_MODEL.classify(
+    fixture.data, point, fixture.records
+  ).kind, "scope");
+  assert.doesNotMatch(controlled.all.map(element => element._text).join(" "), /CONTROLLED_RECEIPT_SENTINEL/);
+
+  evidence.mode = "system-menu";
+  evidence.captureDisabled = false;
+  assert.equal(render(fixture).findById("check-8-1")?.dataset.result, "not_covered");
+  evidence.captureDisabled = true;
+  evidence.onlyEndpoints = false;
+  assert.equal(render(fixture).findById("check-8-1")?.dataset.result, "not_covered");
+  evidence.onlyEndpoints = true;
+  evidence.checkpoints["8-1"].sha256 = "invalid";
+  assert.equal(render(fixture).findById("check-8-1")?.dataset.result, "not_covered");
+  evidence.checkpoints["8-1"].sha256 = "a".repeat(64);
+  assert.equal(render(fixture).findById("check-8-1")?.dataset.result, "passed");
+});
+
 test("matching Test132 provenance is accepted without inheriting Test129 indirect evidence", () => {
   const fixture = test132Fixture();
   const result = render(fixture);

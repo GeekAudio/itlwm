@@ -205,6 +205,21 @@ def snapshot_site(*, refresh: bool = True) -> tuple[dict[str, bytes], dict]:
         for milestone in stages.values()
     ):
         raise PublishError("Current evidence details are incomplete in stages 5 through 8")
+    native_airdrop = records[0].get("nativeAirDrop")
+    for point in stages[8].get("checkpoints", []):
+        if point.get("current_result") == "not_covered":
+            continue
+        if (not isinstance(native_airdrop, dict) or type(native_airdrop.get("version")) is not int
+                or native_airdrop["version"] != 1 or native_airdrop.get("mode") != "system-menu"
+                or native_airdrop.get("captureDisabled") is not True
+                or native_airdrop.get("onlyEndpoints") is not True):
+            raise PublishError("Stage 8 requires an independent system-menu AirDrop receipt")
+        receipts = native_airdrop.get("checkpoints")
+        receipt = receipts.get(point.get("id")) if isinstance(receipts, dict) else None
+        if (not isinstance(receipt, dict) or receipt.get("verdict") != point.get("current_result")
+                or not isinstance(receipt.get("sha256"), str)
+                or not re.fullmatch(r"[0-9a-fA-F]{64}", receipt["sha256"])):
+            raise PublishError("Stage 8 verdict is missing its matching evidence digest")
     next_candidate = data.get("nextCandidate")
     next_label = next_candidate.rsplit("-", 1)[-1] if isinstance(next_candidate, str) else ""
     if next_label and re.fullmatch(r"Test\d{3}", next_label) and "test" + next_label[4:] in str(data.get("deploymentState", "")).lower():
