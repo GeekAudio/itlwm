@@ -139,6 +139,7 @@ static int iwx_pmf_arm_key_timeout(struct iwx_softc *);
 #include <IOKit/IOInterruptController.h>
 #include <IOKit/IOCommandGate.h>
 #include <IOKit/network/IONetworkMedium.h>
+#include <kern/thread.h>
 #include <libkern/c++/OSData.h>
 #include <net/ethernet.h>
 
@@ -8428,6 +8429,9 @@ iwx_load_firmware(struct iwx_softc *sc)
                         "NativeFirstAliveTraceKickWorkloop", nativeFirstAliveTraceKickWorkloop_);
                     published = published && set32(
                         "NativeFirstAliveTraceTimeoutWorkloop", timeoutWorkloop);
+                    published = published && set64(
+                        "NativeFirstAliveTraceWorkloopTid", __atomic_load_n(
+                            &nativeFirstAliveTraceWorkloopTid_, __ATOMIC_ACQUIRE));
                     published = published && set32(
                         "NativeFirstAliveTraceSchema", 2);
                 }
@@ -23615,6 +23619,16 @@ iwx_intr(OSObject *object, IOInterruptEventSource* sender, int count)
             that->iwx_update_rx_desc(sc, &sc->rxq, i);
         IWX_WRITE(sc, IWX_RFH_Q0_FRBDCB_WIDX_TRG, 8);
 #ifdef AIRPORT_TAHOE
+        // The attach-time ALIVE action identifies the registered workloop
+        // thread for the next start. Retain only its numeric ID.
+        if (sc->sc_generation == 0 && sender == sc->sc_ih &&
+            that->rxInterruptWorkloop_ && that->rxInterruptWorkloop_->onThread()) {
+            uint64_t unset = 0;
+            (void)__atomic_compare_exchange_n(
+                &that->nativeFirstAliveTraceWorkloopTid_, &unset,
+                thread_tid(IOThreadSelf()), false,
+                __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+        }
         if (traceFirstAlive)
             __atomic_fetch_or(&that->nativeFirstAliveTraceEvents_,
                               kFirstAliveRxRestocked, __ATOMIC_RELAXED);
@@ -25296,6 +25310,9 @@ iwx_attach(struct iwx_softc *sc, struct pci_attach_args *pa)
         return false;
     }
     rxInterruptWorkloop_ = pa->workloop;
+#ifdef AIRPORT_TAHOE
+    __atomic_store_n(&nativeFirstAliveTraceWorkloopTid_, 0U, __ATOMIC_RELEASE);
+#endif
     if (rxInterruptWorkloop_ == nullptr ||
         rxInterruptWorkloop_->addEventSource(sc->sc_ih) != kIOReturnSuccess) {
         XYLog("%s: can't establish interrupt\n", DEVNAME(sc));

@@ -463,6 +463,7 @@ public:
     uint64_t nativeFirstAliveTraceKickNs_ {0};
     uint64_t nativeFirstAliveTraceFilterDoneNs_ {0};
     uint64_t nativeFirstAliveTraceActionNs_ {0};
+    uint64_t nativeFirstAliveTraceWorkloopTid_ {0};
     uint32_t nativeFwDiagnosticExpectedLmacTable_[2] {};
     uint32_t nativeFwDiagnosticExpectedUmacTable_ {0};
     uint32_t nativeFwDiagnosticCaptureStatus_ {0};
