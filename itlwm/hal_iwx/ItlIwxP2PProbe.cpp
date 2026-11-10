@@ -488,6 +488,139 @@ struct P2PProbeRun {
     NativeP2PProbe::BlockedReason blocked;
 };
 
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+enum DiscoveryRxTerminalPublishStatus : uint32_t {
+    kDiscoveryRxTerminalNotAttempted = 0,
+    kDiscoveryRxTerminalPublished = 1,
+    kDiscoveryRxTerminalTeardown = 2,
+    kDiscoveryRxTerminalBusy = 3,
+    kDiscoveryRxTerminalContextMismatch = 4,
+    kDiscoveryRxTerminalSnapshotUnavailable = 5,
+    kDiscoveryRxTerminalEncodeFailed = 6,
+    kDiscoveryRxTerminalFirstPropertyFailed = 7,
+    kDiscoveryRxTerminalBodyPropertyFailed = 8,
+    kDiscoveryRxTerminalEventsAllocationFailed = 9,
+    kDiscoveryRxTerminalEventsPropertyFailed = 10,
+    kDiscoveryRxTerminalCommitPropertyFailed = 11,
+    kDiscoveryRxTerminalNotMainGate = 12
+};
+
+static bool validDiscoveryRxTerminalEpochs(
+    const NativeAwdlDiscoveryRxWindow::Epochs &epochs)
+{
+    return NativeAwdlDiscoveryRxWindow::validEpochs(epochs);
+}
+
+static bool sameDiscoveryRxTerminalEpochs(
+    const NativeAwdlDiscoveryRxWindow::Epochs &left,
+    const NativeAwdlDiscoveryRxWindow::Epochs &right)
+{
+    return NativeAwdlDiscoveryRxWindow::sameEpochs(left, right);
+}
+
+static void resetDiscoveryRxTerminalForContext(
+    ItlIwx *owner, const NativeAwdlDiscoveryRxWindow::Epochs &epochs,
+    uint32_t driverGeneration)
+{
+    if (!owner || !validDiscoveryRxTerminalEpochs(epochs) ||
+        driverGeneration == 0)
+        return;
+    owner->nativeDiscoveryRxWindowTerminalEpochs_ = epochs;
+    owner->nativeDiscoveryRxWindowTerminalDriverGeneration_ =
+        driverGeneration;
+    owner->nativeDiscoveryRxWindowTerminalBeginResult_ = 0;
+    owner->nativeDiscoveryRxWindowTerminalCloseResult_ = 0;
+    owner->nativeDiscoveryRxWindowTerminalObserverState_ =
+        static_cast<uint32_t>(NativeAwdlDiscoveryRxWindow::State::Idle);
+    owner->nativeDiscoveryRxWindowTerminalPublishFirstStatus_ =
+        kDiscoveryRxTerminalNotAttempted;
+    owner->nativeDiscoveryRxWindowTerminalPublishStatus_ =
+        kDiscoveryRxTerminalNotAttempted;
+    owner->nativeDiscoveryRxWindowTerminalReceiptDirty_ = true;
+}
+
+static bool discoveryRxTerminalMatchesRun(
+    const ItlIwx *owner, const P2PProbeRun *run)
+{
+    if (!owner || !run || run->contextGeneration == 0 ||
+        run->powerGeneration == 0 || run->stationGeneration == 0 ||
+        run->scGeneration == 0)
+        return false;
+    const NativeAwdlDiscoveryRxWindow::Epochs runEpochs {
+        run->contextGeneration, run->powerGeneration,
+        run->stationGeneration, run->contextGeneration
+    };
+    return validDiscoveryRxTerminalEpochs(runEpochs) &&
+        owner->nativeDiscoveryRxWindowTerminalDriverGeneration_ ==
+            run->scGeneration &&
+        sameDiscoveryRxTerminalEpochs(
+            owner->nativeDiscoveryRxWindowTerminalEpochs_, runEpochs);
+}
+
+static void recordDiscoveryRxTerminalPublishStatus(
+    ItlIwx *owner, uint32_t status)
+{
+    if (!owner || !owner->tahoeP2pOnMainGate())
+        return;
+    if (owner->nativeDiscoveryRxWindowTerminalPublishFirstStatus_ ==
+        kDiscoveryRxTerminalNotAttempted) {
+        owner->nativeDiscoveryRxWindowTerminalPublishFirstStatus_ = status;
+        owner->nativeDiscoveryRxWindowTerminalReceiptDirty_ = true;
+    }
+    if (owner->nativeDiscoveryRxWindowTerminalPublishStatus_ != status) {
+        owner->nativeDiscoveryRxWindowTerminalPublishStatus_ = status;
+        owner->nativeDiscoveryRxWindowTerminalReceiptDirty_ = true;
+    }
+}
+
+static void publishDiscoveryRxTerminalReceipt(
+    ItlIwx *owner, IOEthernetController *controller)
+{
+    if (!owner || !controller || !owner->tahoeP2pOnMainGate() ||
+        owner->tahoeP2pController() != controller ||
+        !validDiscoveryRxTerminalEpochs(
+            owner->nativeDiscoveryRxWindowTerminalEpochs_) ||
+        owner->nativeDiscoveryRxWindowTerminalDriverGeneration_ == 0 ||
+        __atomic_load_n(&owner->nativeLifecycleTearingDown_,
+                        __ATOMIC_ACQUIRE) != 0)
+        return;
+    if (!owner->nativeDiscoveryRxWindowTerminalReceiptDirty_)
+        return;
+
+    bool ok = controller->setProperty(
+        "NativeAwdlDiscoveryRxWindowTerminalPublished", uint32_t(0), 32);
+    const auto set32 = [&ok, controller](const char *name, uint32_t value) {
+        if (ok)
+            ok = controller->setProperty(name, value, 32);
+    };
+    set32("NativeAwdlDiscoveryRxWindowTerminalContextGeneration",
+          owner->nativeDiscoveryRxWindowTerminalEpochs_.context);
+    set32("NativeAwdlDiscoveryRxWindowTerminalPowerGeneration",
+          owner->nativeDiscoveryRxWindowTerminalEpochs_.power);
+    set32("NativeAwdlDiscoveryRxWindowTerminalStationGeneration",
+          owner->nativeDiscoveryRxWindowTerminalEpochs_.station);
+    set32("NativeAwdlDiscoveryRxWindowTerminalRocGeneration",
+          owner->nativeDiscoveryRxWindowTerminalEpochs_.roc);
+    set32("NativeAwdlDiscoveryRxWindowTerminalDriverGeneration",
+          owner->nativeDiscoveryRxWindowTerminalDriverGeneration_);
+    set32("NativeAwdlDiscoveryRxWindowTerminalBeginResult",
+          owner->nativeDiscoveryRxWindowTerminalBeginResult_);
+    set32("NativeAwdlDiscoveryRxWindowTerminalCloseResult",
+          owner->nativeDiscoveryRxWindowTerminalCloseResult_);
+    set32("NativeAwdlDiscoveryRxWindowTerminalObserverState",
+          owner->nativeDiscoveryRxWindowTerminalObserverState_);
+    set32("NativeAwdlDiscoveryRxWindowTerminalPublishFirstStatus",
+          owner->nativeDiscoveryRxWindowTerminalPublishFirstStatus_);
+    set32("NativeAwdlDiscoveryRxWindowTerminalPublishStatus",
+          owner->nativeDiscoveryRxWindowTerminalPublishStatus_);
+    if (ok)
+        ok = controller->setProperty(
+            "NativeAwdlDiscoveryRxWindowTerminalPublished", uint32_t(1), 32);
+    if (ok)
+        owner->nativeDiscoveryRxWindowTerminalReceiptDirty_ = false;
+}
+#endif
+
 #if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
 static bool multicastAdmissionOwnLeasesAbsent(ItlIwx *owner);
 static bool multicastAdmissionOldLeaseAbsent(ItlIwx *owner);
@@ -12661,9 +12794,26 @@ void ItlIwx::tahoeP2pTapSessionEvent(struct iwx_softc *sc,
             epochs.contextGeneration, epochs.powerGeneration,
             epochs.stationGeneration, epochs.rocGeneration
         };
-        if (nativeDiscoveryRxWindow_.begin(windowEpochs,
-            uint32_t(sc->sc_generation), after.startObservedMonotonicUs,
-            tahoeDiscoveryRxBridgeCounters()))
+        const uint32_t driverGeneration = uint32_t(sc->sc_generation);
+        if (nativeDiscoveryRxWindow_.state() ==
+                NativeAwdlDiscoveryRxWindow::State::Idle)
+            resetDiscoveryRxTerminalForContext(
+                this, windowEpochs, driverGeneration);
+        const bool began = nativeDiscoveryRxWindow_.begin(windowEpochs,
+            driverGeneration, after.startObservedMonotonicUs,
+            tahoeDiscoveryRxBridgeCounters());
+        if (validDiscoveryRxTerminalEpochs(
+                nativeDiscoveryRxWindowTerminalEpochs_) &&
+            nativeDiscoveryRxWindowTerminalDriverGeneration_ ==
+                driverGeneration &&
+            sameDiscoveryRxTerminalEpochs(
+                nativeDiscoveryRxWindowTerminalEpochs_, windowEpochs)) {
+            nativeDiscoveryRxWindowTerminalBeginResult_ = began ? 1u : 2u;
+            nativeDiscoveryRxWindowTerminalObserverState_ =
+                static_cast<uint32_t>(nativeDiscoveryRxWindow_.state());
+            nativeDiscoveryRxWindowTerminalReceiptDirty_ = true;
+        }
+        if (began)
             nativeDiscoveryRxWindowConfiguration_ = after.configuration;
     }
     if (canonicalEnd) {
@@ -12674,13 +12824,36 @@ void ItlIwx::tahoeP2pTapSessionEvent(struct iwx_softc *sc,
         if (reducerReturnedTrue && after.endStatus == 1 &&
             after.configuration == nativeDiscoveryRxWindowConfiguration_ &&
             after.endObservedMonotonicUs != 0) {
-            (void)nativeDiscoveryRxWindow_.close(windowEpochs,
+            const bool closed = nativeDiscoveryRxWindow_.close(windowEpochs,
                 uint32_t(sc->sc_generation), after.endObservedMonotonicUs,
                 tahoeDiscoveryRxBridgeCounters());
+            if (validDiscoveryRxTerminalEpochs(
+                    nativeDiscoveryRxWindowTerminalEpochs_) &&
+                nativeDiscoveryRxWindowTerminalDriverGeneration_ ==
+                    uint32_t(sc->sc_generation) &&
+                sameDiscoveryRxTerminalEpochs(
+                    nativeDiscoveryRxWindowTerminalEpochs_, windowEpochs)) {
+                nativeDiscoveryRxWindowTerminalCloseResult_ =
+                    closed ? 1u : 2u;
+                nativeDiscoveryRxWindowTerminalObserverState_ =
+                    static_cast<uint32_t>(nativeDiscoveryRxWindow_.state());
+                nativeDiscoveryRxWindowTerminalReceiptDirty_ = true;
+            }
         } else {
             nativeDiscoveryRxWindow_.invalidate(
                 NativeAwdlDiscoveryRxWindow::CloseReason::InvalidTimeline,
                 hostUs);
+            if (validDiscoveryRxTerminalEpochs(
+                    nativeDiscoveryRxWindowTerminalEpochs_) &&
+                nativeDiscoveryRxWindowTerminalDriverGeneration_ ==
+                    uint32_t(sc->sc_generation) &&
+                sameDiscoveryRxTerminalEpochs(
+                    nativeDiscoveryRxWindowTerminalEpochs_, windowEpochs)) {
+                nativeDiscoveryRxWindowTerminalCloseResult_ = 2u;
+                nativeDiscoveryRxWindowTerminalObserverState_ =
+                    static_cast<uint32_t>(nativeDiscoveryRxWindow_.state());
+                nativeDiscoveryRxWindowTerminalReceiptDirty_ = true;
+            }
         }
     }
 #endif
@@ -12930,16 +13103,73 @@ void ItlIwx::tahoeDiscoveryRxWindowInvalidate(
 void ItlIwx::tahoeDiscoveryRxWindowPublish(
     IOEthernetController *controller)
 {
-    if (!controller || !tahoeP2pOnMainGate() ||
-        nativeP2PPublicationBusy(this) || nativeDiscoveryRxWindowPublishedOnce_ ||
-        !nativeDiscoveryRxWindow_.snapshot(
-            &nativeDiscoveryRxWindowSnapshot_))
+    if (!tahoeP2pOnMainGate())
         return;
+    if (!controller)
+        return;
+    if (__atomic_load_n(&nativeLifecycleTearingDown_, __ATOMIC_ACQUIRE) != 0) {
+        recordDiscoveryRxTerminalPublishStatus(
+            this, kDiscoveryRxTerminalTeardown);
+        return;
+    }
+    if (controller != tahoeP2pController()) {
+        recordDiscoveryRxTerminalPublishStatus(
+            this, kDiscoveryRxTerminalContextMismatch);
+        publishDiscoveryRxTerminalReceipt(this, controller);
+        return;
+    }
+    if (!validDiscoveryRxTerminalEpochs(
+            nativeDiscoveryRxWindowTerminalEpochs_) ||
+        nativeDiscoveryRxWindowTerminalDriverGeneration_ == 0)
+        return;
+    if (nativeP2PPublicationBusy(this)) {
+        recordDiscoveryRxTerminalPublishStatus(
+            this, kDiscoveryRxTerminalBusy);
+        publishDiscoveryRxTerminalReceipt(this, controller);
+        return;
+    }
+    if (nativeDiscoveryRxWindowPublishedOnce_) {
+        const bool samePublishedContext =
+            nativeDiscoveryRxWindowSnapshot_.driverGeneration ==
+                nativeDiscoveryRxWindowTerminalDriverGeneration_ &&
+            sameDiscoveryRxTerminalEpochs(
+                nativeDiscoveryRxWindowSnapshot_.epochs,
+                nativeDiscoveryRxWindowTerminalEpochs_);
+        const uint32_t status = samePublishedContext ?
+            kDiscoveryRxTerminalPublished :
+            kDiscoveryRxTerminalContextMismatch;
+        recordDiscoveryRxTerminalPublishStatus(this, status);
+        publishDiscoveryRxTerminalReceipt(this, controller);
+        return;
+    }
+    if (!nativeDiscoveryRxWindow_.snapshot(
+            &nativeDiscoveryRxWindowSnapshot_)) {
+        recordDiscoveryRxTerminalPublishStatus(
+            this, kDiscoveryRxTerminalSnapshotUnavailable);
+        publishDiscoveryRxTerminalReceipt(this, controller);
+        return;
+    }
+    if (nativeDiscoveryRxWindowSnapshot_.driverGeneration !=
+            nativeDiscoveryRxWindowTerminalDriverGeneration_ ||
+        !sameDiscoveryRxTerminalEpochs(
+            nativeDiscoveryRxWindowSnapshot_.epochs,
+            nativeDiscoveryRxWindowTerminalEpochs_)) {
+        recordDiscoveryRxTerminalPublishStatus(
+            this, kDiscoveryRxTerminalContextMismatch);
+        publishDiscoveryRxTerminalReceipt(this, controller);
+        return;
+    }
+    nativeDiscoveryRxWindowTerminalObserverState_ =
+        static_cast<uint32_t>(nativeDiscoveryRxWindowSnapshot_.state);
     const size_t wordCount = NativeAwdlDiscoveryRxWindow::encode(
         nativeDiscoveryRxWindowSnapshot_, nativeDiscoveryRxWindowWords_,
         NativeAwdlDiscoveryRxWindow::kMaxWireWordCount);
-    if (!wordCount)
+    if (!wordCount) {
+        recordDiscoveryRxTerminalPublishStatus(
+            this, kDiscoveryRxTerminalEncodeFailed);
+        publishDiscoveryRxTerminalReceipt(this, controller);
         return;
+    }
 
     if (nativeDiscoveryRxWindowSnapshotVersion_ > UINT32_MAX - 2)
         nativeDiscoveryRxWindowSnapshotVersion_ = 0;
@@ -12957,6 +13187,12 @@ void ItlIwx::tahoeDiscoveryRxWindowPublish(
     };
 
     set32("NativeAwdlDiscoveryRxWindowPublished", 0);
+    if (!ok) {
+        recordDiscoveryRxTerminalPublishStatus(
+            this, kDiscoveryRxTerminalFirstPropertyFailed);
+        publishDiscoveryRxTerminalReceipt(this, controller);
+        return;
+    }
     set32("NativeAwdlDiscoveryRxWindowSnapshotBegin", writingVersion);
     set32("NativeAwdlDiscoveryRxWindowRocConfiguration",
           nativeDiscoveryRxWindowConfiguration_);
@@ -13069,19 +13305,31 @@ void ItlIwx::tahoeDiscoveryRxWindowPublish(
                                  discoverySameWindowCommitted);
 #undef TAHOE_RX_WINDOW_BRIDGE_FIELD
 
-    OSData *events = nullptr;
-    if (ok) {
-        events = OSData::withBytes(nativeDiscoveryRxWindowWords_,
-                                   static_cast<unsigned>(wordCount * sizeof(uint64_t)));
-        ok = events != nullptr;
+    if (!ok) {
+        recordDiscoveryRxTerminalPublishStatus(
+            this, kDiscoveryRxTerminalBodyPropertyFailed);
+        publishDiscoveryRxTerminalReceipt(this, controller);
+        return;
     }
-    if (ok)
-        ok = controller->setProperty("NativeAwdlDiscoveryRxWindowEvents",
-                                     events);
+
+    OSData *events = nullptr;
+    events = OSData::withBytes(nativeDiscoveryRxWindowWords_,
+        static_cast<unsigned>(wordCount * sizeof(uint64_t)));
+    if (!events) {
+        recordDiscoveryRxTerminalPublishStatus(
+            this, kDiscoveryRxTerminalEventsAllocationFailed);
+        publishDiscoveryRxTerminalReceipt(this, controller);
+        return;
+    }
+    ok = controller->setProperty("NativeAwdlDiscoveryRxWindowEvents", events);
     if (events)
         events->release();
-    if (!ok)
+    if (!ok) {
+        recordDiscoveryRxTerminalPublishStatus(
+            this, kDiscoveryRxTerminalEventsPropertyFailed);
+        publishDiscoveryRxTerminalReceipt(this, controller);
         return;
+    }
     ok = controller->setProperty("NativeAwdlDiscoveryRxWindowSnapshotEnd",
                                  publishedVersion, 32);
     if (ok)
@@ -13090,11 +13338,18 @@ void ItlIwx::tahoeDiscoveryRxWindowPublish(
     if (ok)
         ok = controller->setProperty("NativeAwdlDiscoveryRxWindowPublished",
                                      uint32_t(1), 32);
-    if (!ok)
+    if (!ok) {
+        recordDiscoveryRxTerminalPublishStatus(
+            this, kDiscoveryRxTerminalCommitPropertyFailed);
+        publishDiscoveryRxTerminalReceipt(this, controller);
         return;
+    }
     nativeDiscoveryRxWindowSnapshotVersion_ = publishedVersion;
     nativeDiscoveryRxWindowPublishVersion_ = publishedVersion;
     nativeDiscoveryRxWindowPublishedOnce_ = true;
+    recordDiscoveryRxTerminalPublishStatus(
+        this, kDiscoveryRxTerminalPublished);
+    publishDiscoveryRxTerminalReceipt(this, controller);
 }
 #endif
 
@@ -14464,6 +14719,21 @@ IOReturn ItlIwx::tahoeP2pAdmitAction(OSObject *, void *contextArg,
     run->powerGeneration = admission.powerGeneration;
     run->stationGeneration = admission.stationGeneration;
     run->scGeneration = uint32_t(sc->sc_generation);
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+    // Seed the terminal receipt from the admitted run before any canonical
+    // START arrives. Do not replace an unpublished closed observer's identity;
+    // its watchdog retry must still be able to publish the matching window.
+    if (owner->nativeDiscoveryRxWindow_.state() ==
+            NativeAwdlDiscoveryRxWindow::State::Idle ||
+        owner->nativeDiscoveryRxWindowPublishedOnce_) {
+        const NativeAwdlDiscoveryRxWindow::Epochs runEpochs {
+            admission.contextGeneration, admission.powerGeneration,
+            admission.stationGeneration, admission.contextGeneration
+        };
+        resetDiscoveryRxTerminalForContext(
+            owner, runEpochs, run->scGeneration);
+    }
+#endif
     __atomic_store_n(&owner->nativeP2pProbeOwner_,
                      reinterpret_cast<void *>(run->workerThread),
                      __ATOMIC_RELEASE);
@@ -14811,6 +15081,23 @@ IOReturn ItlIwx::tahoeP2pFinishAction(OSObject *, void *contextArg,
         taskq_resume(owner->com.sc_nswq);
     __atomic_store_n(&owner->nativeP2pProbeQueued_, 0u, __ATOMIC_RELEASE);
     __atomic_store_n(&owner->nativeP2pCancelRequested_, 0u, __ATOMIC_RELEASE);
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+    // Publish only this nonzero run's terminal receipt after the publication
+    // gate is clear. Queued-only cancellation has zero epochs and cannot
+    // accidentally attach a previously closed observer to this run.
+    if (owner->tahoeP2pOnMainGate() &&
+        __atomic_load_n(&owner->nativeLifecycleTearingDown_,
+                        __ATOMIC_ACQUIRE) == 0 &&
+        discoveryRxTerminalMatchesRun(owner, run)) {
+        const uint32_t state = static_cast<uint32_t>(
+            owner->nativeDiscoveryRxWindow_.state());
+        if (owner->nativeDiscoveryRxWindowTerminalObserverState_ != state) {
+            owner->nativeDiscoveryRxWindowTerminalObserverState_ = state;
+            owner->nativeDiscoveryRxWindowTerminalReceiptDirty_ = true;
+        }
+        owner->tahoeDiscoveryRxWindowPublish(owner->tahoeP2pController());
+    }
+#endif
 #if defined(ITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332)
     if (owner->tahoeP2pOnMainGate()) {
         const bool resourcesQuiet = !owner->nativeP2pResourcesRetained();

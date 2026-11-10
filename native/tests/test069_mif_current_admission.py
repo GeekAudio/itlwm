@@ -85,7 +85,9 @@ assert lock_at < queue_at < ticket_at < ring_at < unlock_at
 # Real Tracker completion keeps armed=true as a tombstone; re-arming requires
 # the old ticket to be completed. No test-only mirrored state is substituted.
 arm = function_body(tracker, "Result CompletionTracker::arm(")
-complete = function_body(tracker, "Result CompletionTracker::complete(")
+complete_entry = function_body(tracker, "Result CompletionTracker::complete(")
+complete = function_body(tracker, "Result CompletionTracker::completeImpl(")
+assert "completeImpl(generation, p, length," in complete_entry
 cancel = function_body(tracker, "Result CompletionTracker::cancelUnsubmitted(")
 drain = function_body(tracker, "Result CompletionTracker::firmwareDrained(")
 assert "ticket_.armed && !ticket_.completed" in arm
@@ -121,7 +123,7 @@ assert "!finalTx.ticketArmed" not in final_gate
 
 # Candidate identity is committed only after the timing helper returns a real
 # candidate and the actual production OneShot locks that exact MIF/PSF/head.
-plan_at = mif.index("Test066MifCurrentPhase::plan(timingInput")
+plan_at = mif.index("planDiscoveryMifCurrentTarget(")
 lock_at = mif.index("run->discoveryBinding.lock(", plan_at)
 candidate_commit_at = mif.index("run->discoveryCandidateLocked = true;", lock_at)
 assert plan_at < lock_at < candidate_commit_at
@@ -156,7 +158,9 @@ assert "// The candidate has not reached a timing plan or OneShot lock." in mif
 assert "run->discoveryWindowClosed = true;" in mif
 assert "input.gates.ownMifTxSucceeded = run->mifResultCaptured &&\n            run->mifTxCompleted && run->mifTxSucceeded;" in mif
 assert "sameDiscoveryHead(head, run->discoveryHead)" in mif
-assert "finalTarget.mifRevision != target.mifRevision" in mif
+assert "sameDiscoveryMifCandidate(target, finalTarget)" in mif
+compare_target = function_body(source, "static bool sameDiscoveryMifCandidate(")
+assert "a.mifRevision == b.mifRevision" in compare_target
 
 # Only local, bounded prerequisites are waitable. The base gate separately
 # rejects stale/missing epochs, inactive/closing ROC, and a peer not received

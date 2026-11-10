@@ -192,6 +192,38 @@ class TestTest137Helper(unittest.TestCase):
         receipt["loaded_uuid_matches_after"] = False
         self.assertFalse(D.decode_test137_receipt(receipt)["test137_profile"]["profile_match"])
 
+    def test_late_terminal_commit_joins_frozen_cleanup_probe_identity(self):
+        final = {
+            "NativeAwdlDiscoveryRxWindowTerminalPublished": 1,
+            "NativeAwdlDiscoveryRxWindowTerminalContextGeneration": 4,
+            "NativeAwdlDiscoveryRxWindowTerminalPowerGeneration": 7,
+            "NativeAwdlDiscoveryRxWindowTerminalStationGeneration": 18,
+            "NativeAwdlDiscoveryRxWindowTerminalRocGeneration": 4,
+            "NativeP2PProbeContextGeneration": 4,
+            "NativeP2PProbePowerGeneration": 7,
+            "NativeP2PProbeStationGeneration": 18,
+            "NativeP2PRocGeneration": 4,
+        }
+        cleanup = {**final, "NativeAwdlDiscoveryRxWindowTerminalPublished": 0}
+        snapshots = {"terminal_cleanup_snapshot": cleanup, "final": final}
+        receipt = {
+            "terminal_identity_valid": True,
+            "context_changed_for_run": True,
+            "context_generation_before_arm": 3,
+            "terminal_context_generation": 4,
+        }
+
+        def current():
+            matches = {name: D.terminal_generation_match(snapshot)
+                       for name, snapshot in snapshots.items()}
+            return D.terminal_current_run_match(receipt, snapshots, matches)
+
+        self.assertEqual(current(), {"status": "exact_current_run_match",
+                                     "cleanup_status": "unknown_uncommitted"})
+        final["NativeP2PProbeStationGeneration"] = 19
+        final["NativeAwdlDiscoveryRxWindowTerminalStationGeneration"] = 19
+        self.assertEqual(current()["status"], "stale_baseline")
+
     def test_old_committed_terminal_tuple_is_not_current_run_evidence(self):
         old_snapshot = {
             "NativeAwdlDiscoveryRxWindowTerminalPublished": 1,

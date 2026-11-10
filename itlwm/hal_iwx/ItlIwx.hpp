@@ -598,6 +598,16 @@ public:
     NativeAwdlDiscoveryRxWindow::Snapshot nativeDiscoveryRxWindowSnapshot_ {};
     uint64_t nativeDiscoveryRxWindowWords_[
         NativeAwdlDiscoveryRxWindow::kMaxWireWordCount] {};
+    // Independent terminal receipt for one exact observer context. These
+    // scalars never alter the DiscoveryRxWindow wire/property ABI.
+    NativeAwdlDiscoveryRxWindow::Epochs nativeDiscoveryRxWindowTerminalEpochs_ {};
+    uint32_t nativeDiscoveryRxWindowTerminalDriverGeneration_ {0};
+    uint32_t nativeDiscoveryRxWindowTerminalBeginResult_ {0};
+    uint32_t nativeDiscoveryRxWindowTerminalCloseResult_ {0};
+    uint32_t nativeDiscoveryRxWindowTerminalObserverState_ {0};
+    uint32_t nativeDiscoveryRxWindowTerminalPublishFirstStatus_ {0};
+    uint32_t nativeDiscoveryRxWindowTerminalPublishStatus_ {0};
+    bool nativeDiscoveryRxWindowTerminalReceiptDirty_ {false};
     uint32_t nativeDiscoveryRxWindowConfiguration_ {0};
     uint32_t nativeDiscoveryRxWindowSnapshotVersion_ {0};
     uint32_t nativeDiscoveryRxWindowPublishVersion_ {0};

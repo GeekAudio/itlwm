@@ -150,16 +150,25 @@ def terminal_current_run_match(receipt: Any, snapshots: Mapping[str, Any],
     if (before_context == frozen_context or cleanup_context != frozen_context or
             final_context != frozen_context):
         return {"status": "stale_baseline"}
-    cleanup_match = snapshot_matches.get("terminal_cleanup_snapshot", {})
-    final_match = snapshot_matches.get("final", {})
-    if cleanup_match.get("status") != "exact_generation_match" or \
-            final_match.get("status") != "exact_generation_match":
-        return {
-            "status": cleanup_match.get("status")
-            if cleanup_match.get("status") != "exact_generation_match"
-            else final_match.get("status"),
-        }
-    return {"status": "exact_current_run_match"}
+    cleanup_status = snapshot_matches.get(
+        "terminal_cleanup_snapshot", {}).get("status", "unknown_snapshot_missing")
+    final_status = snapshot_matches.get(
+        "final", {}).get("status", "unknown_snapshot_missing")
+    # The cleanup probe tuple is frozen independently of the RX receipt.
+    # A later watchdog publication can join it even if cleanup had no receipt.
+    for key in ("NativeP2PProbePowerGeneration",
+                "NativeP2PProbeStationGeneration", "NativeP2PRocGeneration"):
+        frozen = _numeric(cleanup.get(key))
+        later = _numeric(final.get(key))
+        if frozen is None or frozen == 0 or later is None or later == 0:
+            return {"status": "unknown_run_identity", "cleanup_status": cleanup_status}
+        if later != frozen:
+            return {"status": "stale_baseline", "cleanup_status": cleanup_status}
+    return {
+        "status": "exact_current_run_match"
+        if final_status == "exact_generation_match" else final_status,
+        "cleanup_status": cleanup_status,
+    }
 
 
 def decode_test137_receipt(receipt: Any) -> dict[str, Any]:

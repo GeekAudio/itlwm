@@ -112,6 +112,49 @@ def production_contract() -> None:
     assert "IWX_SESSION_PROTECT_CONF_P2P_DEVICE_DISCOV" in rx149
     finish = function_body(probe, "IOReturn ItlIwx::tahoeP2pFinishAction(")
     assert "tahoeDiscoveryRxWindowInvalidate" in finish
+    cleared_cancel = finish.index(
+        "__atomic_store_n(&owner->nativeP2pCancelRequested_, 0u"
+    )
+    terminal_publish = finish.index(
+        "owner->tahoeDiscoveryRxWindowPublish(owner->tahoeP2pController())"
+    )
+    assert terminal_publish > cleared_cancel
+    terminal_gate = finish[cleared_cancel:terminal_publish]
+    assert "owner->tahoeP2pOnMainGate()" in terminal_gate
+    assert "nativeLifecycleTearingDown_" in terminal_gate
+    assert "discoveryRxTerminalMatchesRun(owner, run)" in terminal_gate
+    assert "nativeDiscoveryRxWindowTerminalReceiptDirty_ = true" in terminal_gate
+    assert "run->contextGeneration == 0" not in finish  # exact guard is helper
+    terminal_helper = function_body(
+        probe, "static bool discoveryRxTerminalMatchesRun("
+    )
+    assert "run->contextGeneration == 0" in terminal_helper
+    assert "run->powerGeneration == 0" in terminal_helper
+    assert "run->stationGeneration == 0" in terminal_helper
+    assert "run->scGeneration == 0" in terminal_helper
+
+    receipt = function_body(
+        probe, "static void publishDiscoveryRxTerminalReceipt("
+    )
+    assert "nativeDiscoveryRxWindowTerminalReceiptDirty_" in receipt
+    assert '"NativeAwdlDiscoveryRxWindowTerminalPublished", uint32_t(1), 32' in receipt
+    for terminal_field in (
+        "TerminalContextGeneration",
+        "TerminalPowerGeneration",
+        "TerminalStationGeneration",
+        "TerminalRocGeneration",
+        "TerminalDriverGeneration",
+        "TerminalBeginResult",
+        "TerminalCloseResult",
+        "TerminalObserverState",
+        "TerminalPublishFirstStatus",
+        "TerminalPublishStatus",
+    ):
+        assert terminal_field in receipt
+
+    begin_record = tap[tap.index("if (canonicalStart && reducerReturnedTrue"):]
+    assert "nativeDiscoveryRxWindowTerminalBeginResult_ = began ? 1u : 2u" in begin_record
+    assert "nativeDiscoveryRxWindow_.state() !=" not in begin_record
     assert "event.leaseState" in header
     assert "event.ownerReason" not in header
     assert "constexpr uint32_t kEventWordCount = 9;" in header
