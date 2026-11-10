@@ -20,27 +20,27 @@
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/assets/test-records.js",
       "snapshot_path": "dist/assets/test-records.js",
-      "sha256": "bee1abc3beb6f7669ae046d9df109585cbe57228ddd08192599919cf36025406"
+      "sha256": "81db25288f3b20d6b0a410dd24c5a28bd55fc6e35c53ee544e7417fda276eb25"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/data.js",
       "snapshot_path": "dist/data.js",
-      "sha256": "7492c1505dc5ddd37221e8536c23ac3914561b30242181640a2e344a3ec3365b"
+      "sha256": "a6eb864860cb4076d4b06ad1a4452a59c7922aee0527ca6b4cbe94df7bfe3dd6"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/index.html",
       "snapshot_path": "dist/index.html",
-      "sha256": "201312a9e776e2cfbc18ee490562e06d16647711cc95fda4e56b1834309e36fe"
+      "sha256": "ff4bd1acdbd94ae87b686cfe8665d732b35d90ae01770511fda6ed6e28103e96"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/milestones.html",
       "snapshot_path": "dist/milestones.html",
-      "sha256": "201312a9e776e2cfbc18ee490562e06d16647711cc95fda4e56b1834309e36fe"
+      "sha256": "ff4bd1acdbd94ae87b686cfe8665d732b35d90ae01770511fda6ed6e28103e96"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/dist/site-version.json",
       "snapshot_path": "dist/site-version.json",
-      "sha256": "96b6326377da035192cd06c6d1209baa5f0cc140f8d7f6854596b13d9a548d59"
+      "sha256": "35090371bb092b450d06db299bec265a8f01df51540cdbc04cd6cf71f45c302e"
     },
     {
       "source_relative_path": "IntelWirelessNative/progress-site/templates/index.html",
@@ -90,11 +90,11 @@
     "screenshots",
     "credentials"
   ],
-  "updated_at": "2026-11-10T09:18:03+08:00",
-  "runtime_scope": "Test136 当前实测 15 项通过、9 项部分、16 项未覆盖。真实 QM 在窗口规划停止，原生回包待验证。",
+  "updated_at": "2026-11-10T09:48:39+08:00",
+  "runtime_scope": "Test136 当前实测 15 项通过、9 项部分、16 项未覆盖。Test137 待重启实测。",
   "running_candidate": "25G416-Test136",
-  "next_candidate": null,
-  "website_delivery": "更新 Test136 本轮实测和总时间线。当前 AW 回放与实机验收分列。",
-  "deployment_state": "test136_runtime_qm_window_blocked",
-  "site_preparation": "Test136 loaded; one bounded system QM run reached legacy status 26. Production planner replay reproduced a 912 us gap and a counterfactual current-AW window with 4992 us remaining. RX-window publication missing. No actual QM firmware submission or peer reply shown."
+  "next_candidate": "25G416-Test137",
+  "website_delivery": "同步 Test137 部署和开发总时间线。实测仍对应 Test136。",
+  "deployment_state": "test137_deployed_waiting_reboot_disarmed",
+  "site_preparation": "Test137 signed, built and independently reviewed. Existing current-AW fallback enabled. Main-gate terminal RX publisher and receipt added. Only AirportItlwm replaced; previous driver and config backed up. Test137 runtime pending."
 }
