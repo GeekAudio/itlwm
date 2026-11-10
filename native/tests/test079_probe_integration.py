@@ -308,14 +308,36 @@ void prepareBootstrapRunForPairing(P2PProbeRun *run)
     run->mifBootstrapBinding.slot = 2;
 }
 
+P2PTxDiagnosticSnapshot beforeCompletion(P2PTxDiagnosticSnapshot snapshot)
+{
+    snapshot.nextSequenceNumber = snapshot.actionSequenceControl >> 4;
+    snapshot.ticketCompleted = false;
+    snapshot.actionState = static_cast<uint32_t>(TahoeP2PActionTxState::kInFlight);
+    snapshot.frameAttemptSucceeded = false;
+    snapshot.ticketStatus = 0;
+    return snapshot;
+}
+
 int main()
 {
     const P2PTxDiagnosticSnapshot bootstrap = validSnapshot();
+    const auto bootstrapSubmit = beforeCompletion(bootstrap);
     const P2PProbeTicketIdentity bootstrapIdentity =
-        ticketIdentityFromSnapshot(bootstrap);
+        ticketIdentityFromSnapshot(bootstrapSubmit);
     assert(bootstrapIdentity.valid);
     assert(ticketIdentityFieldsMatch(bootstrapIdentity, bootstrap));
     assert(ticketIdentityMatches(bootstrapIdentity, bootstrap));
+    assert(!ticketIdentityFieldsMatch(bootstrapIdentity, bootstrapSubmit));
+    auto unchangedSequence = bootstrap;
+    unchangedSequence.nextSequenceNumber = bootstrapSubmit.nextSequenceNumber;
+    assert(!ticketIdentityFieldsMatch(bootstrapIdentity, unchangedSequence));
+
+    auto wraps = bootstrap;
+    wraps.actionSequenceControl = 0xfff0;
+    wraps.ticketSequenceControl = 0xfff0;
+    wraps.nextSequenceNumber = 0;
+    const auto wrapIdentity = ticketIdentityFromSnapshot(beforeCompletion(wraps));
+    assert(ticketIdentityMatches(wrapIdentity, wraps));
     assert(!bootstrap.peerAcknowledged);
 
     const auto ordinaryCompletion = classifyMifCompletion(
@@ -341,7 +363,7 @@ int main()
     pairedTicket.actionSequenceControl = 0x1240;
     pairedTicket.ticketSequenceControl = 0x1240;
     pairedTicket.nextSequenceNumber = 0x125;
-    const auto pairedIdentity = ticketIdentityFromSnapshot(pairedTicket);
+    const auto pairedIdentity = ticketIdentityFromSnapshot(beforeCompletion(pairedTicket));
     const auto pairedCompletion = classifyMifCompletion(
         true, true, bootstrapIdentity, pairedIdentity, pairedTicket);
     assert(pairedCompletion.txSucceeded);

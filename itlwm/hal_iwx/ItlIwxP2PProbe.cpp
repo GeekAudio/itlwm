@@ -227,7 +227,6 @@ struct P2PProbeTicketIdentity {
     uint32_t sequenceControl;
     uint32_t frameControl;
     uint32_t byteCount;
-    uint16_t nextSequenceNumber;
     bool valid;
 };
 
@@ -1586,7 +1585,6 @@ static P2PProbeTicketIdentity ticketIdentityFromSnapshot(
     identity.sequenceControl = snapshot.actionSequenceControl;
     identity.frameControl = snapshot.actionFrameControl;
     identity.byteCount = snapshot.actionByteCount;
-    identity.nextSequenceNumber = snapshot.nextSequenceNumber;
     identity.valid = snapshot.queueGeneration != 0 &&
         snapshot.actionGeneration != 0 && snapshot.actionQueueId != 0xffffu &&
         snapshot.actionRocToken != 0 && snapshot.actionByteCount != 0;
@@ -1614,7 +1612,10 @@ static bool ticketIdentityFieldsMatch(
         snapshot.ticketSequenceControl == expected.sequenceControl &&
         snapshot.ticketFrameControl == expected.frameControl &&
         snapshot.ticketByteCount == expected.byteCount &&
-        snapshot.nextSequenceNumber == expected.nextSequenceNumber &&
+        // Completion advances the 12-bit sequence cursor when reclaiming
+        // this descriptor. The submit snapshot still has the old cursor.
+        snapshot.nextSequenceNumber ==
+            (((expected.sequenceControl >> 4) + 1u) & 0x0fffu) &&
         snapshot.ticketSequenceControl != 0xffffffffu &&
         (snapshot.ticketSequenceControl & 0x000fu) == 0 &&
         snapshot.ticketFrameControl == 0x00d0u;
