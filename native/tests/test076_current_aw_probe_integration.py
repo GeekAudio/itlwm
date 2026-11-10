@@ -104,6 +104,8 @@ def build_harness(source: str, fixture: str) -> str:
         braced_source(source, "struct __attribute__((packed)) CurrentAwAttemptOnlyPayload"),
         braced_source(source, "enum CurrentAwQuietBlocker : uint32_t"),
         braced_source(source, "struct CurrentAwPublishedPlan"),
+        braced_source(source, "enum class CurrentAwLeaseEvidenceClass") + ";",
+        braced_source(source, "static CurrentAwLeaseEvidenceClass classifyCurrentAwLeaseEvidence("),
         braced_source(source, "static Test066MifCurrentPhase::Status planDiscoveryMifCurrentTarget("),
         braced_source(source, "static bool sameDiscoveryMifCandidate("),
         braced_source(source, "static void recordDiscoveryCurrentAwPlan("),
@@ -262,6 +264,8 @@ struct P2PProbeRun {
     uint32_t contextGeneration;
     uint32_t powerGeneration;
     uint32_t stationGeneration;
+    struct { uint64_t hardDeadlineUs; } psfCandidate;
+    uint64_t mifPacingWindowEndUs;
 };
 
 __EXTRACTED_FUNCTIONS__

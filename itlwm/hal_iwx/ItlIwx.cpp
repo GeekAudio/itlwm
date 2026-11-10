@@ -182,6 +182,22 @@ enum : uint32_t {
     kFirstAliveRxRestocked = 1U << 2,
     kFirstAliveRxDrainReturned = 1U << 3,
 };
+
+static uint32_t firstAliveWorkloopState(IOWorkLoop *loop,
+                                       IOInterruptEventSource *source)
+{
+    return (loop && loop->onThread() ? 1U : 0U) |
+           (loop && loop->inGate() ? 2U : 0U) |
+           (source && source->isEnabled() ? 4U : 0U) |
+           (loop && source && source->getWorkLoop() == loop ? 8U : 0U);
+}
+
+static void recordFirstAliveTime(uint64_t *field)
+{
+    uint64_t unset = 0;
+    (void)__atomic_compare_exchange_n(field, &unset, iwxMonotonicNs(),
+        false, __ATOMIC_RELEASE, __ATOMIC_RELAXED);
+}
 static_assert(IWX_GROUP2_TX_RING_COUNT_MAX == IWX_MIN_256_BA_QUEUE_SIZE_GEN3,
               "Group2 observation must accept the largest allocated host TX ring");
 static_assert(__atomic_always_lock_free(sizeof(uint64_t), nullptr),
@@ -4242,6 +4258,8 @@ iwx_ctxt_info_gen3_init(struct iwx_softc *sc, const struct iwx_fw_sects *fws)
         return EBUSY;
 #ifdef AIRPORT_TAHOE
     if (sc->sc_generation == 1 && !sc->sc_msix) {
+        nativeFirstAliveTraceKickWorkloop_ = firstAliveWorkloopState(
+            rxInterruptWorkloop_, sc->sc_ih);
         nativeFirstAliveTraceKickNs_ = iwxMonotonicNs();
         __atomic_store_n(&nativeFirstAliveTraceActive_, 1U, __ATOMIC_RELEASE);
     }
@@ -8253,12 +8271,23 @@ iwx_load_firmware(struct iwx_softc *sc)
         iwxMonotonicNs, SEC_TO_NSEC(1), kIwxFirmwareInitWaitPollNs,
         EWOULDBLOCK, ENXIO);
 #ifdef AIRPORT_TAHOE
-    if (traceFirstAlive)
-        __atomic_store_n(&nativeFirstAliveTraceActive_, 0U, __ATOMIC_RELEASE);
     const bool captureFirstAlive = traceFirstAlive &&
         aliveWait.outcome == IwxInitWait::Outcome::TimedOut &&
         sc->sc_generation == initGeneration &&
         (sc->sc_flags & IWX_FLAG_SHUTDOWN) == 0;
+    // Keep observing a timed-out attempt until the init failure path
+    // starts cleanup. Its timeout snapshot and later action use one clock.
+    if (traceFirstAlive && !captureFirstAlive)
+        __atomic_store_n(&nativeFirstAliveTraceActive_, 0U, __ATOMIC_RELEASE);
+    const uint64_t timeoutNs = captureFirstAlive ? iwxMonotonicNs() : 0;
+    const uint64_t filterDoneNs = captureFirstAlive ? __atomic_load_n(
+        &nativeFirstAliveTraceFilterDoneNs_, __ATOMIC_ACQUIRE) : 0;
+    const uint64_t actionNs = captureFirstAlive ? __atomic_load_n(
+        &nativeFirstAliveTraceActionNs_, __ATOMIC_ACQUIRE) : 0;
+    const uint32_t interruptEvents = captureFirstAlive ? __atomic_load_n(
+        &nativeFirstAliveTraceEvents_, __ATOMIC_RELAXED) : 0;
+    const uint32_t timeoutWorkloop = captureFirstAlive ?
+        firstAliveWorkloopState(rxInterruptWorkloop_, sc->sc_ih) : 0;
     // Sample pending causes before cleanup acknowledges or masks them.
     // Gen3 RX status DMA contains a little-endian 16-bit device head.
     const uint32_t pendingCsr = captureFirstAlive
@@ -8367,8 +8396,7 @@ iwx_load_firmware(struct iwx_softc *sc)
                     lmacCurrentPc);
                 if (captureFirstAlive) {
                     published = published && set32(
-                        "NativeFirstAliveTraceEvents", __atomic_load_n(
-                            &nativeFirstAliveTraceEvents_, __ATOMIC_RELAXED));
+                        "NativeFirstAliveTraceEvents", interruptEvents);
                     published = published && set32(
                         "NativeFirstAliveTraceCsrSeen", __atomic_load_n(
                             &nativeFirstAliveTraceCsr_, __ATOMIC_RELAXED));
@@ -8390,8 +8418,18 @@ iwx_load_firmware(struct iwx_softc *sc)
                         "NativeFirstAliveTraceContextStartNs", contextStartNs);
                     published = published && set64(
                         "NativeFirstAliveTraceKickNs", nativeFirstAliveTraceKickNs_);
+                    published = published && set64(
+                        "NativeFirstAliveTraceTimeoutNs", timeoutNs);
+                    published = published && set64(
+                        "NativeFirstAliveTraceFilterDoneNs", filterDoneNs);
+                    published = published && set64(
+                        "NativeFirstAliveTraceActionNs", actionNs);
                     published = published && set32(
-                        "NativeFirstAliveTraceSchema", 1);
+                        "NativeFirstAliveTraceKickWorkloop", nativeFirstAliveTraceKickWorkloop_);
+                    published = published && set32(
+                        "NativeFirstAliveTraceTimeoutWorkloop", timeoutWorkloop);
+                    published = published && set32(
+                        "NativeFirstAliveTraceSchema", 2);
                 }
                 if (published)
                     (void)set32("NativeFirstAliveWaitFailureValid", 1);
@@ -20079,6 +20117,21 @@ iwx_init(struct _ifnet *ifp)
 #endif
     err = iwx_init_hw(sc);
     if (err) {
+#ifdef AIRPORT_TAHOE
+        if (generation == 1 && __atomic_exchange_n(
+                &nativeFirstAliveTraceActive_, 0U, __ATOMIC_ACQ_REL) &&
+            generation == sc->sc_generation) {
+            const uint64_t cutoffNs = iwxMonotonicNs();
+            const uint64_t actionNs = __atomic_load_n(
+                &nativeFirstAliveTraceActionNs_, __ATOMIC_ACQUIRE);
+            if (IOEthernetController *controller = getController()) {
+                (void)controller->setProperty("NativeFirstAliveTraceActionBeforeCleanupNs",
+                    actionNs <= cutoffNs ? actionNs : 0, 64);
+                (void)controller->setProperty("NativeFirstAliveTraceCleanupCutoffNs",
+                    cutoffNs, 64);
+            }
+        }
+#endif
         if (generation == sc->sc_generation) {
 #ifdef AIRPORT_TAHOE
             ic->ic_tahoe_init_error = err;
@@ -23498,9 +23551,11 @@ iwx_intr(OSObject *object, IOInterruptEventSource* sender, int count)
 #ifdef AIRPORT_TAHOE
     const bool traceFirstAlive = __atomic_load_n(
         &that->nativeFirstAliveTraceActive_, __ATOMIC_ACQUIRE) != 0;
-    if (traceFirstAlive)
+    if (traceFirstAlive) {
+        recordFirstAliveTime(&that->nativeFirstAliveTraceActionNs_);
         __atomic_fetch_or(&that->nativeFirstAliveTraceEvents_,
                           kFirstAliveHandlerEntered, __ATOMIC_RELAXED);
+    }
 #endif
     
 //    IWX_WRITE(&that->com, IWX_CSR_INT_MASK, 0);
@@ -25128,11 +25183,17 @@ intrFilter(OSObject *object, IOFilterInterruptEventSource *src)
 {
     ItlIwx *that = (ItlIwx*)object;
 #ifdef AIRPORT_TAHOE
-    if (__atomic_load_n(&that->nativeFirstAliveTraceActive_, __ATOMIC_ACQUIRE))
+    const bool traceFirstAlive = __atomic_load_n(
+        &that->nativeFirstAliveTraceActive_, __ATOMIC_ACQUIRE) != 0;
+    if (traceFirstAlive)
         __atomic_fetch_or(&that->nativeFirstAliveTraceEvents_,
                           kFirstAliveFilterEntered, __ATOMIC_RELAXED);
 #endif
     IWX_WRITE(&that->com, IWX_CSR_INT_MASK, 0);
+#ifdef AIRPORT_TAHOE
+    if (traceFirstAlive)
+        recordFirstAliveTime(&that->nativeFirstAliveTraceFilterDoneNs_);
+#endif
     return true;
 }
 

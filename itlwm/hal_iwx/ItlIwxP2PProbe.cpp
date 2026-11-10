@@ -143,6 +143,42 @@ struct CurrentAwTraceRecord {
     bool published;
 };
 
+// Diagnostic-only classification of the phase planner's two independent
+// boundaries. The advertised contiguous channel-6 window is not extended by
+// the later conservative physical ROC deadline; no class authorizes TX.
+enum class CurrentAwLeaseEvidenceClass : uint32_t {
+    kNoEvidence = 0,
+    kInsideAdvertisedChannel6Window = 1,
+    kMifAfterAdvertisedWindowButInsidePhysicalLease = 2,
+    kPlannerAfterAdvertisedWindowButMifInside = 3,
+    kMifAtOrAfterPhysicalDeadline = 4,
+    kPlannerAtOrAfterPhysicalDeadline = 5,
+    kInvalidBoundaryOrder = 6,
+    kInvalidTimestampOrder = 7,
+};
+
+static CurrentAwLeaseEvidenceClass classifyCurrentAwLeaseEvidence(
+    bool recorded, uint64_t mifRxUs, uint64_t plannerNowUs,
+    uint64_t advertisedEndUs, uint64_t physicalDeadlineUs)
+{
+    if (!recorded || !mifRxUs || !plannerNowUs || !advertisedEndUs ||
+        !physicalDeadlineUs)
+        return CurrentAwLeaseEvidenceClass::kNoEvidence;
+    if (plannerNowUs < mifRxUs)
+        return CurrentAwLeaseEvidenceClass::kInvalidTimestampOrder;
+    if (advertisedEndUs > physicalDeadlineUs)
+        return CurrentAwLeaseEvidenceClass::kInvalidBoundaryOrder;
+    if (mifRxUs >= physicalDeadlineUs)
+        return CurrentAwLeaseEvidenceClass::kMifAtOrAfterPhysicalDeadline;
+    if (plannerNowUs >= physicalDeadlineUs)
+        return CurrentAwLeaseEvidenceClass::kPlannerAtOrAfterPhysicalDeadline;
+    if (mifRxUs >= advertisedEndUs)
+        return CurrentAwLeaseEvidenceClass::kMifAfterAdvertisedWindowButInsidePhysicalLease;
+    if (plannerNowUs >= advertisedEndUs)
+        return CurrentAwLeaseEvidenceClass::kPlannerAfterAdvertisedWindowButMifInside;
+    return CurrentAwLeaseEvidenceClass::kInsideAdvertisedChannel6Window;
+}
+
 struct CurrentAwAttemptPlan {
     uint64_t plannerNowUs;
     uint64_t earliestSubmitUs;
@@ -3593,6 +3629,35 @@ static void publishDiscoveryCurrentAwTrace(P2PProbeRun *run, bool quiet)
     }
     setChecked("FinalNowUs", trace.final.recorded ?
         trace.final.input.timing.nowUs : 0);
+    const uint64_t advertisedChannel6EndUs = run->mifPacingWindowEndUs;
+    const uint64_t physicalPsfDeadlineUs =
+        run->psfCandidate.hardDeadlineUs;
+    const uint64_t initialMifRxUs = trace.initial.recorded ?
+        trace.initial.input.timing.mif.rxMonotonicUs : 0;
+    const uint64_t initialPlannerNowUs = trace.initial.recorded ?
+        trace.initial.input.timing.nowUs : 0;
+    setChecked("AdvertisedChannel6WindowEndUs", advertisedChannel6EndUs);
+    setChecked("PhysicalPsfDeadlineUs", physicalPsfDeadlineUs);
+    setChecked("InitialMifRxAfterAdvertisedEndUs",
+        initialMifRxUs && advertisedChannel6EndUs &&
+                initialMifRxUs > advertisedChannel6EndUs ?
+            initialMifRxUs - advertisedChannel6EndUs : 0);
+    setChecked("InitialPlannerAfterAdvertisedEndUs",
+        initialPlannerNowUs && advertisedChannel6EndUs &&
+                initialPlannerNowUs > advertisedChannel6EndUs ?
+            initialPlannerNowUs - advertisedChannel6EndUs : 0);
+    setChecked("InitialMifRxBeforePhysicalDeadlineUs",
+        physicalPsfDeadlineUs && initialMifRxUs &&
+                physicalPsfDeadlineUs > initialMifRxUs ?
+            physicalPsfDeadlineUs - initialMifRxUs : 0);
+    setChecked("InitialPlannerBeforePhysicalDeadlineUs",
+        physicalPsfDeadlineUs && initialPlannerNowUs &&
+                physicalPsfDeadlineUs > initialPlannerNowUs ?
+            physicalPsfDeadlineUs - initialPlannerNowUs : 0);
+    setChecked("InitialLeaseEvidenceClass",
+        static_cast<uint32_t>(classifyCurrentAwLeaseEvidence(
+            trace.initial.recorded, initialMifRxUs, initialPlannerNowUs,
+            advertisedChannel6EndUs, physicalPsfDeadlineUs)));
     if (writesOk)
         writesOk = publishDiscoveryCurrentAwPlan(controller, "Initial",
             trace.initial, quiet, initialDescription,
@@ -4844,9 +4909,21 @@ static mbuf_t takeDiscoveryPacketMifCurrent(P2PProbeRun *run,
     const auto timingStatus = planDiscoveryMifCurrentTarget(
         timingInput, run->currentAwTrace.fallbackEnabled, target,
         timingRejectReason);
+    // Preserve the selected same-entry identity for an expired-input result
+    // too. This is evidence only: it never opens a reservation or authorizes
+    // a dequeue. In particular, a late MIF remains rejected at the announced
+    // channel-6 boundary.
+    const bool verifiedMifIdentityForTrace =
+        timingInput.binding.sameEntryVerified &&
+        timingInput.binding.historicalPsfSameEntryPresent &&
+        timingInput.mif.peerIncarnation != 0 &&
+        timingInput.mif.mifRevision != 0 &&
+        timingInput.mif.rxMonotonicUs != 0;
     if (timingStatus == Test066MifCurrentPhase::Status::kCandidate ||
         timingStatus ==
-            Test066MifCurrentPhase::Status::kNoConservativeWindow) {
+            Test066MifCurrentPhase::Status::kNoConservativeWindow ||
+        (timingStatus == Test066MifCurrentPhase::Status::kInvalidInput &&
+         verifiedMifIdentityForTrace)) {
         bindDiscoveryCurrentAwTrace(run, timingInput, head,
                                     current.psfRevision);
     }
