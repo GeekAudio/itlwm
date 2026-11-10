@@ -2140,6 +2140,7 @@ void ItlIwx::tahoeP2pPublishRxStageCounters(IOEthernetController *controller)
     if (!changed)
         return;
 
+    // Descriptor counters append to the existing numeric schema.
     controller->setProperty("NativeP2PRxStageSchema", 2U, 32);
     controller->setProperty("NativeP2PRxStageOwnerGeneration",
                             current.ownerGeneration, 32);
@@ -2150,7 +2151,10 @@ void ItlIwx::tahoeP2pPublishRxStageCounters(IOEthernetController *controller)
         {"NativeP2PRxStageDecryptRejectedPsf", "NativeP2PRxStageDecryptRejectedMif"},
         {"NativeP2PRxStageAfterDuplicatePsf", "NativeP2PRxStageAfterDuplicateMif"},
         {"NativeP2PRxStageDuplicateRejectedPsf", "NativeP2PRxStageDuplicateRejectedMif"},
-        {"NativeP2PRxStageAtTapPsf", "NativeP2PRxStageAtTapMif"}
+        {"NativeP2PRxStageAtTapPsf", "NativeP2PRxStageAtTapMif"},
+        {"NativeP2PRxStageDescriptorPsf", "NativeP2PRxStageDescriptorMif"},
+        {"NativeP2PRxStageDescriptorCrcRejectedPsf", "NativeP2PRxStageDescriptorCrcRejectedMif"},
+        {"NativeP2PRxStageDescriptorOverrunRejectedPsf", "NativeP2PRxStageDescriptorOverrunRejectedMif"}
     };
     for (unsigned stage = 0; stage < TahoeAwdlRxStageCounters::kStageCount;
          ++stage) {

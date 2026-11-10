@@ -9659,6 +9659,23 @@ iwx_rx_mpdu_mq(struct iwx_softc *sc, mbuf_t m, void *pktdata,
                 static_cast<const uint8_t *>(pktdata) + desc_size,
                 inspection.mpduLength);
 #if defined(ITL_NATIVE_AWDL_DISCOVERY_RX_INPUT_25G332)
+        if (discoveryWindowActive && discoveryWindowLeaseQualified &&
+            rxStageOwnerGeneration == discoveryWindowEpochs.context &&
+            inspection.frameRangeValid && inspection.statusPresent) {
+            const auto kind = TahoeAwdlRxStageCounters::classify(
+                static_cast<const uint8_t *>(pktdata) + desc_size,
+                inspection.mpduLength, (desc->mac_flags2 & IWX_RX_MPDU_MFLG2_PAD) != 0);
+            if (kind != TahoeAwdlRxStageCounters::kNotAwdl) {
+                tahoe_awdl_rx_stage_counters_.record(rxStageOwnerGeneration,
+                    kind, TahoeAwdlRxStageCounters::kDescriptor);
+                if (!inspection.crcOk)
+                    tahoe_awdl_rx_stage_counters_.record(rxStageOwnerGeneration,
+                        kind, TahoeAwdlRxStageCounters::kDescriptorCrcRejected);
+                if (!inspection.overrunOk)
+                    tahoe_awdl_rx_stage_counters_.record(rxStageOwnerGeneration,
+                        kind, TahoeAwdlRxStageCounters::kDescriptorOverrunRejected);
+            }
+        }
         if (discoveryWindowActive) {
             NativeAwdlDiscoveryRxWindow::MpduEvent event{};
             event.monotonicUs = tahoeMonotonicNs() / 1000ULL;

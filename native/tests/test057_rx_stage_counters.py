@@ -15,10 +15,22 @@ end = header.index('\n};\n#endif', start) + len('\n};')
 counter_struct = header[start:end]
 
 # Keep the host test coupled to the production placement and numeric-only API.
-assert cpp.index('mbuf_adj(m, 2);', cpp.index('iwx_rx_mpdu_mq')) < cpp.index(
-    'TahoeAwdlRxStageCounters::classify(', cpp.index('iwx_rx_mpdu_mq'))
+mpdu_start = cpp.index('iwx_rx_mpdu_mq')
+normalization = cpp.index('mbuf_adj(m, 2);', mpdu_start)
+normalized_classifier = cpp.index('rxStageKind = static_cast<uint8_t>(', mpdu_start)
+assert normalization < normalized_classifier < cpp.index(
+    'TahoeAwdlRxStageCounters::kEarly', mpdu_start)
 assert cpp.index('TahoeAwdlRxStageCounters::kEarly', cpp.index('iwx_rx_mpdu_mq')) < cpp.index(
     'iwx_rx_hwdecrypt(sc, m', cpp.index('iwx_rx_mpdu_mq'))
+mpdu = cpp[cpp.index('iwx_rx_mpdu_mq'):]
+descriptor = mpdu.index('TahoeAwdlRxStageCounters::kDescriptor);')
+assert mpdu.index('inspection.frameRangeValid && inspection.statusPresent') < descriptor
+assert descriptor < mpdu.index('const size_t statusEnd')
+assert 'discoveryWindowActive && discoveryWindowLeaseQualified' in mpdu[:descriptor]
+assert 'NativeP2PRxStageSchema", 2U' in rx
+assert all(name in rx for name in (
+    'NativeP2PRxStageDescriptorMif', 'NativeP2PRxStageDescriptorCrcRejectedMif',
+    'NativeP2PRxStageDescriptorOverrunRejectedMif'))
 assert 'TahoeAwdlRxStageCounters::kDecryptRejected' in cpp
 assert 'TahoeAwdlRxStageCounters::kAfterDecrypt' in cpp
 assert 'TahoeAwdlRxStageCounters::kDuplicateRejected' in cpp
@@ -90,6 +102,19 @@ int main()
            TahoeAwdlRxStageCounters::kPsf);
     assert(TahoeAwdlRxStageCounters::classify(frame, 35) ==
            TahoeAwdlRxStageCounters::kNotAwdl);
+    for (unsigned ordered = 0; ordered < 2; ++ordered) {
+        makeFrame(frame, 3, ordered);
+        const size_t body = ordered ? 28u : 24u;
+        memmove(frame + body + 2, frame + body, 8);
+        frame[body] = 0;
+        frame[body + 1] = 0;
+        assert(TahoeAwdlRxStageCounters::classify(frame, body + 10, true) ==
+               TahoeAwdlRxStageCounters::kMif);
+        assert(TahoeAwdlRxStageCounters::classify(frame, body + 9, true) ==
+               TahoeAwdlRxStageCounters::kNotAwdl);
+        assert(TahoeAwdlRxStageCounters::classify(frame, body + 10) ==
+               TahoeAwdlRxStageCounters::kNotAwdl);
+    }
     makeFrame(frame, 0);
     frame[1] |= 0x01; // To-DS/From-DS shape is rejected, not misparsed.
     assert(TahoeAwdlRxStageCounters::classify(frame, 32) ==
@@ -111,6 +136,12 @@ int main()
                            TahoeAwdlRxStageCounters::kAfterDecrypt));
     assert(counters.record(41, TahoeAwdlRxStageCounters::kMif,
                            TahoeAwdlRxStageCounters::kTap));
+    assert(counters.record(41, TahoeAwdlRxStageCounters::kMif,
+                           TahoeAwdlRxStageCounters::kDescriptor));
+    assert(counters.record(41, TahoeAwdlRxStageCounters::kMif,
+                           TahoeAwdlRxStageCounters::kDescriptorCrcRejected));
+    assert(counters.record(41, TahoeAwdlRxStageCounters::kMif,
+                           TahoeAwdlRxStageCounters::kDescriptorOverrunRejected));
     // The probe ROC may end before the enclosing P2P lease is retired. A late
     // RX frame in the same still-active lease must not clear completed PSF/MIF
     // evidence by re-beginning the identical owner generation.
@@ -118,6 +149,9 @@ int main()
     auto snapshot = counters.snapshot();
     assert(snapshot.ownerGeneration == 41 && snapshot.active == 1);
     assert(snapshot.counts[TahoeAwdlRxStageCounters::kEarly][0] == 1);
+    assert(snapshot.counts[TahoeAwdlRxStageCounters::kDescriptor][1] == 1);
+    assert(snapshot.counts[TahoeAwdlRxStageCounters::kDescriptorCrcRejected][1] == 1);
+    assert(snapshot.counts[TahoeAwdlRxStageCounters::kDescriptorOverrunRejected][1] == 1);
     assert(snapshot.counts[TahoeAwdlRxStageCounters::kAfterDecrypt][1] == 1);
     assert(snapshot.counts[TahoeAwdlRxStageCounters::kTap][1] == 1);
     counters.endOwner(40); // Wrong owner cannot end the active generation.

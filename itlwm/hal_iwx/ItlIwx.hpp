@@ -211,7 +211,10 @@ struct TahoeAwdlRxStageCounters {
         kAfterDuplicate = 3,
         kDuplicateRejected = 4,
         kTap = 5,
-        kStageCount = 6
+        kDescriptor = 6,
+        kDescriptorCrcRejected = 7,
+        kDescriptorOverrunRejected = 8,
+        kStageCount = 9
     };
     enum { kKindCount = 2 };
     enum DataStage : uint8_t {
@@ -244,10 +247,11 @@ struct TahoeAwdlRxStageCounters {
         uint32_t dataCounts[kDataStageCount];
     };
 
-    static FrameKind classify(const uint8_t *frame, size_t length)
+    static FrameKind classify(const uint8_t *frame, size_t length,
+                              bool hasHardwarePadding = false)
     {
-        // Safe only after the MPDU descriptor and its declared length passed
-        // validation. Retain independent bounds checks for every byte read.
+        // The caller must bound the frame to the declared, readable MPDU.
+        // CRC/overrun observations are permitted before those status gates.
         if (!frame || length < 2)
             return kNotAwdl;
         const uint16_t fc = uint16_t(frame[0]) |
@@ -260,9 +264,11 @@ struct TahoeAwdlRxStageCounters {
             return kNotAwdl;
 
         const size_t macHeaderLength = 24u + ((fc & 0x8000u) ? 4u : 0u);
-        if (length < macHeaderLength + 8u)
+        const size_t actionOffset = macHeaderLength +
+            (hasHardwarePadding ? 2u : 0u);
+        if (length < actionOffset + 8u)
             return kNotAwdl;
-        const uint8_t *body = frame + macHeaderLength;
+        const uint8_t *body = frame + actionOffset;
         if (body[0] != 127 || body[1] != 0x00 || body[2] != 0x17 ||
             body[3] != 0xf2 || body[4] != 8 || body[5] != 0x10 ||
             body[7] != 0)
