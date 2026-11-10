@@ -97,6 +97,56 @@ void testFreshnessAndLeaseBoundaries()
     assert(evaluate(local, peer).status == Status::Ready);
 }
 
+void testTest143PsfPreferenceUsesOneReceiveAgeDeadline()
+{
+    constexpr uint64_t mifRxUs = 288475804;
+    constexpr uint64_t originalDoorbellUs = 288479270;
+    constexpr uint64_t peerPsfUs = 288479679;
+    constexpr uint64_t earliestQueryUs = 288481675;
+    const uint64_t deadlineUs = mifRxUs + kPsfPreferenceAgeUs;
+    auto local = replayLocal();
+    auto peer = replayPeer();
+    local.phaseOriginUs = 288429503;
+    local.windowEndUs = 289282000;
+    local.hardDeadlineUs = 289323172;
+    local.nowUs = originalDoorbellUs;
+    peer.rxMonotonicUs = mifRxUs;
+    assert(psfPreferenceDeadlineUs(evaluate(local, peer), local.nowUs, 0) ==
+           deadlineUs);
+
+    // Each read of the same MIF uses its original cutoff. A real PSF
+    // disqualifies bootstrap even if the MIF remains fresh.
+    local.nowUs = peerPsfUs;
+    assert(psfPreferenceDeadlineUs(evaluate(local, peer), local.nowUs,
+                                  deadlineUs) == deadlineUs);
+    peer.hasPsf = true;
+    assert(evaluate(local, peer).blockers == kPeerNotMifOnly);
+    assert(psfPreferenceDeadlineUs(evaluate(local, peer), local.nowUs,
+                                  deadlineUs) == 0);
+    assert(originalDoorbellUs < peerPsfUs && peerPsfUs < deadlineUs &&
+           deadlineUs < earliestQueryUs);
+
+    peer.hasPsf = false;
+    local.nowUs = deadlineUs;
+    assert(evaluate(local, peer).status == Status::Ready);
+    assert(psfPreferenceDeadlineUs(evaluate(local, peer), local.nowUs,
+                                  deadlineUs) == 0);
+    // A newer MIF cannot restart the run's single preference wait.
+    peer.rxMonotonicUs = local.nowUs;
+    ++peer.mifRevision;
+    assert(evaluate(local, peer).status == Status::Ready);
+    assert(psfPreferenceDeadlineUs(evaluate(local, peer), local.nowUs,
+                                  deadlineUs) == 0);
+    peer.rxMonotonicUs = mifRxUs;
+    local.nowUs = originalDoorbellUs;
+    local.hardDeadlineUs = deadlineUs + kMinimumLeaseReserveUs;
+    assert(evaluate(local, peer).status == Status::Ready);
+    assert(psfPreferenceDeadlineUs(evaluate(local, peer), local.nowUs, 0) == 0);
+    local.rocClosing = true;
+    assert(evaluate(local, peer).blockers & kRocClosing);
+    assert(psfPreferenceDeadlineUs(evaluate(local, peer), local.nowUs, 0) == 0);
+}
+
 void testRejectsUntrustedOrOutOfWindowPeer()
 {
     auto local = replayLocal();
@@ -197,6 +247,7 @@ int main()
 {
     testTest069NumericReplayUsesOnlyFreshMifPresence();
     testFreshnessAndLeaseBoundaries();
+    testTest143PsfPreferenceUsesOneReceiveAgeDeadline();
     testRejectsUntrustedOrOutOfWindowPeer();
     testRequiresLocalTicketQueueRocAndOneShot();
     testExactBindingRejectsReplacementAndNewEpoch();

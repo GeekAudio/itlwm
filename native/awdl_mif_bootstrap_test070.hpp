@@ -12,6 +12,7 @@
 namespace Test070MifBootstrap {
 
 constexpr uint64_t kMifFreshnessLimitUs = 16ULL * 1024ULL;
+constexpr uint64_t kPsfPreferenceAgeUs = 4ULL * 1024ULL;
 constexpr uint64_t kMinimumLeaseReserveUs = 20ULL * 1000ULL;
 constexpr uint8_t kPeerSlotCount =
     static_cast<uint8_t>(IntelAwdlPeerRuntime::kPeerCapacity);
@@ -121,6 +122,25 @@ struct Plan {
     uint64_t effectiveEndUs;
     Binding binding;
 };
+
+// Give a PSF arriving shortly after a MIF the normal first-MIF path. Use
+// receive age for the first cutoff, and keep that bound if a new MIF arrives.
+// A wait never extends freshness or consumes the ROC reserve.
+inline uint64_t psfPreferenceDeadlineUs(const Plan &plan, uint64_t nowUs,
+                                        uint64_t firstDeadlineUs)
+{
+    if (plan.status != Status::Ready ||
+        plan.mifAgeUs >= kPsfPreferenceAgeUs ||
+        plan.effectiveEndUs <= nowUs ||
+        (firstDeadlineUs && firstDeadlineUs <= nowUs))
+        return 0;
+    uint64_t waitUs = kPsfPreferenceAgeUs - plan.mifAgeUs;
+    if (firstDeadlineUs && firstDeadlineUs - nowUs < waitUs)
+        waitUs = firstDeadlineUs - nowUs;
+    if (plan.effectiveEndUs - nowUs <= waitUs + kMinimumLeaseReserveUs)
+        return 0;
+    return nowUs + waitUs;
+}
 
 inline bool sameEpochs(const LocalState &local, const PeerMif &peer)
 {

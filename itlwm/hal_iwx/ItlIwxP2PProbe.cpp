@@ -392,6 +392,7 @@ struct P2PProbeRun {
     uint64_t discoveryOwnFirstMifCompletionUs;
     CurrentAwTraceRecord currentAwTrace;
     CurrentAwAttemptObservation currentAwAttempt;
+    bool mifBootstrapWaitingForPsf;
     bool mifBootstrapSelected;
     bool mifBootstrapCandidatePrepared;
     bool mifBootstrapSubmitted;
@@ -407,6 +408,7 @@ struct P2PProbeRun {
     uint32_t mifBootstrapPairChecks;
     uint32_t mifBootstrapPairStatus;
     uint64_t mifBootstrapPairBlockers;
+    uint64_t mifBootstrapPsfWaitUntilUs;
     uint64_t mifBootstrapCompletedUs;
     uint64_t mifBootstrapPairPeerIncarnation;
     uint64_t mifBootstrapPairPsfRevision;
@@ -2962,6 +2964,20 @@ static bool tryPrepareMifBootstrapAtPacingPoint(
     if (plan.status != Status::Ready) {
         publishMifProbeDetails(probe->owner, probe);
         return false;
+    }
+
+    if (probe->discoveryModeSelected && probe->discoveryMode ==
+            NativeAwdlDiscoveryBinding::Mode::kMifCurrentSlot) {
+        const uint64_t waitUntilUs = psfPreferenceDeadlineUs(
+            plan, sampleUs, probe->mifBootstrapPsfWaitUntilUs);
+        if (waitUntilUs != 0) {
+            if (!probe->mifBootstrapPsfWaitUntilUs)
+                probe->mifBootstrapPsfWaitUntilUs = waitUntilUs;
+            probe->mifBootstrapWaitingForPsf = true;
+            probe->mifBootstrapStatus = static_cast<uint32_t>(Status::Waiting);
+            publishMifProbeDetails(probe->owner, probe);
+            return false;
+        }
     }
 
     // Once a same-entry MIF-only event is selected, later source replacement
@@ -5813,6 +5829,9 @@ static bool tryPrepareMifAtPacingPoint(
         return false;
     }
 
+#if defined(ITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332)
+    probe->mifBootstrapWaitingForPsf = false;
+#endif
     MifPacingPeerView peer{};
     if (!readMifPacingPeer(probe, &peer)) {
         const NativeAwdlProbe::MifPacingPlan plan{
@@ -8397,16 +8416,31 @@ static int runTxProbeSession(P2PProbeRun *probe, mbuf_t *frame,
         if (probe->mifBootstrapSelected)
             publishMifBootstrapPairDiagnostics(owner, probe);
 #endif
-        const uint32_t sleepMs = observationWindow.nextSleepMilliseconds(
-            p2pProbeMonotonicNanoseconds());
+        const uint64_t sleepSampleNs = p2pProbeMonotonicNanoseconds();
+        const uint32_t sleepMs =
+            observationWindow.nextSleepMilliseconds(sleepSampleNs);
         uint32_t boundedSleepMs = sleepMs;
 #if defined(ITL_NATIVE_AWDL_DISCOVERY_EXPERIMENT_25G332)
-        // The experimental current-MIF phase is only a 5.243-ms half-open
-        // window. Poll at scheduler sleep granularity after the first own MIF
-        // completes, but only during the explicitly selected one-shot run.
+        // The worker must see the PSF and first normal MIF completion in
+        // time to use the short current-MIF phase. Keep fine polling scoped
+        // to the explicit one-shot and to those two waits or its data window.
+        const uint64_t sleepSampleUs = sleepSampleNs / 1000ULL;
+        const bool waitingForPreferredPsf = !probe->mifBurstStopped &&
+            !probe->mifBootstrapSelected &&
+            probe->mifBurstSubmittedFrames == 0 &&
+            !probe->mifCandidatePrepared && probe->mifBootstrapWaitingForPsf;
+        const bool waitingForFirstNormalMif = !probe->mifBurstStopped &&
+            probe->mifFrameSubmitted && !probe->mifResultCaptured &&
+            probe->discoveryOwnFirstMifCompletionUs == 0 &&
+            (!probe->mifBootstrapSelected ||
+                probe->mifBootstrapPairMifAttempted) &&
+            sleepSampleUs >= probe->mifCandidate.sampleUs &&
+            sleepSampleUs - probe->mifCandidate.sampleUs <
+                Test070MifBootstrap::kMifFreshnessLimitUs;
         if (probe->discoveryModeSelected && probe->discoveryMode ==
                 NativeAwdlDiscoveryBinding::Mode::kMifCurrentSlot &&
-            probe->discoveryOwnFirstMifCompletionUs != 0 &&
+            (waitingForPreferredPsf || waitingForFirstNormalMif ||
+                probe->discoveryOwnFirstMifCompletionUs != 0) &&
             !probe->discoveryConsumed && !probe->discoveryWindowClosed &&
             boundedSleepMs > 1)
             boundedSleepMs = 1;
