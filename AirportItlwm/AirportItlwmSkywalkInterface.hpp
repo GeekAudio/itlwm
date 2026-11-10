@@ -15,6 +15,10 @@
 #include "../native/wcl_ingress.hpp"
 #include "../native/registration.hpp"
 #include "../native/scan_dispatch_trace.hpp"
+#if defined(ITL_NATIVE_AWDL_LIFECYCLE_25G332) && \
+    defined(ITL_NATIVE_AWDL_SYSTEM_25G332)
+#include "../native/awdl_native_lifecycle_25G332.hpp"
+#endif
 #define ITL_NATIVE_OVERRIDE
 #else
 #define ITL_NATIVE_OVERRIDE override
@@ -210,7 +214,18 @@ public:
     virtual IOReturn setIE(apple80211_ie_data *) ITL_NATIVE_OVERRIDE { return kIOReturnUnsupported; }
     virtual IOReturn setWOW_TEST(apple80211_wow_test_data *) ITL_NATIVE_OVERRIDE { return kIOReturnUnsupported; }
     virtual IOReturn setSCANCACHE_CLEAR(void *) ITL_NATIVE_OVERRIDE;
-    virtual IOReturn setVIRTUAL_IF_CREATE(apple80211_virt_if_create_data *) ITL_NATIVE_OVERRIDE { return kIOReturnUnsupported; }
+    virtual IOReturn setVIRTUAL_IF_CREATE(apple80211_virt_if_create_data *request) ITL_NATIVE_OVERRIDE {
+#if defined(ITL_NATIVE_AWDL_LIFECYCLE_25G332) && \
+    defined(ITL_NATIVE_AWDL_SYSTEM_25G332)
+        // The STA protocol receives the actual system request. Capture the
+        // role/address facts only; this candidate still fails closed until
+        // Intel firmware prepare and delete/teardown semantics are proven.
+        NativeAwdlLifecycle::observeSystemCreateRequest(getProvider(), request);
+#else
+        (void)request;
+#endif
+        return kIOReturnUnsupported;
+    }
     virtual IOReturn setBT_COEX_FLAGS(apple80211_state_data *) ITL_NATIVE_OVERRIDE { return kIOReturnUnsupported; }
     virtual IOReturn setROAM(apple80211_sta_roam_data *) ITL_NATIVE_OVERRIDE { return kIOReturnUnsupported; }
     virtual IOReturn setHT_CAPABILITY(apple80211_ht_capability *) ITL_NATIVE_OVERRIDE { return kIOReturnUnsupported; }

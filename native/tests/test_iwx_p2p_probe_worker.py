@@ -440,6 +440,10 @@ struct RocEventRun {
     IntelROCEvent::SessionSnapshot snapshot{};
     P2PTxDiagnosticSnapshot txSnapshot{};
     bool txSnapshotValid = false;
+    uint32_t directedDataRxLeaseRejectMask = 0;
+    bool directedDataReadyHandshakeRequested = false;
+    bool directedDataReadyPublished = false;
+    bool directedDataRocMirrorPublished = false;
 };
 struct P2PTxSubmitRun {
     P2PProbeRun *probe = nullptr;

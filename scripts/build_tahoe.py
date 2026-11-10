@@ -107,6 +107,8 @@ def resident_build_flags(args):
     flags = ('OTHER_CPLUSPLUSFLAGS=$(inherited) '
              '-DITL_NATIVE_AWDL_LIFECYCLE_25G332=1 '
              '-DITL_NATIVE_AWDL_RESIDENT_25G332=1')
+    if getattr(args, 'native_awdl_system', False):
+        flags += ' -DITL_NATIVE_AWDL_SYSTEM_25G332=1'
     # Keep the existing implementations compiled for compatibility checks;
     # their runtime switches are all disabled in this distinct receive profile.
     if args.native_awdl_tx_evidence or args.native_awdl_rx149_observation_only:
@@ -148,6 +150,7 @@ def apply_artifact_profile(personality, args):
         'NativeAwdlInitObservationOnly': bool(args.native_awdl_init_observation_only),
         'NativeAwdlLifecycleObservationOnly': bool(args.native_awdl_lifecycle_observation_only),
         'NativeAwdlResidentEnabled': bool(args.native_awdl_resident_data),
+        'NativeAwdlSystemEnabled': bool(getattr(args, 'native_awdl_system', False)),
         'NativeAwdlTxEvidenceEnabled': bool(args.native_awdl_tx_evidence),
         'NativeAwdlDiscoveryExperimentEnabled': bool(args.native_awdl_discovery_experiment),
         'NativeAwdlDiscoveryMifCurrentSlotEnabled': bool(args.native_awdl_discovery_mif_current_slot),
@@ -206,6 +209,8 @@ def main():
                         help='Manual native attach/start/register/stop transaction; no RF/data traffic')
     parser.add_argument('--native-awdl-resident-data', action='store_true',
                         help='Resident native awdl0 with BSD/Intel data bridge; RF remains one manual bounded session')
+    parser.add_argument('--native-awdl-system', action='store_true',
+                        help='Enable the system AWDL candidate without legacy diagnostic triggers')
     parser.add_argument('--native-awdl-tx-evidence', action='store_true',
                         help='Record bounded PSF/MIF host-time ticket evidence; never changes TX permission')
     parser.add_argument('--native-awdl-discovery-experiment', action='store_true',
@@ -235,6 +240,22 @@ def main():
     parser.add_argument('--native-awdl-multicast-admission', action='store_true',
                         help='Manual MULTICAST/TID0 allocation and acknowledged withdrawal only; no session or frame doorbell')
     args = parser.parse_args()
+    if args.native_awdl_system:
+        diagnostic_flags = (
+            'p2p_probe', 'p2p_roc_probe', 'p2p_tx_probe', 'p2p_manual_trigger',
+            'p2p_awdl_psf_observation_only', 'p2p_awdl_mif_followup',
+            'p2p_gp2_observation', 'native_awdl_init_observation_only',
+            'native_awdl_lifecycle_observation_only', 'native_awdl_tx_evidence',
+            'native_awdl_discovery_experiment', 'native_awdl_discovery_mif_current_slot',
+            'native_awdl_discovery_rx_input', 'native_awdl_qm_normal_priority',
+            'native_awdl_qm_no_known_answer', 'native_awdl_discovery_current_aw_fallback',
+            'native_awdl_rx149_observation_only', 'native_awdl_rx149_data_input',
+            'native_rx_preowner_observation', 'native_awdl_reply_shadow',
+            'native_awdl_directed_prepare', 'native_awdl_directed_data_tx',
+            'native_awdl_multicast_admission',
+        )
+        if not args.native_awdl_resident_data or any(getattr(args, name) for name in diagnostic_flags):
+            parser.error('System AWDL requires resident data and excludes legacy diagnostic profiles')
     for error in receive149_profile_errors(args):
         parser.error(error)
     if args.native_awdl_qm_no_known_answer and not (
@@ -255,7 +276,7 @@ def main():
             args.native_awdl_resident_data and args.p2p_manual_trigger and
             args.p2p_awdl_psf_observation_only and args.p2p_awdl_mif_followup):
         parser.error('TX time evidence requires resident data with manual PSF/MIF')
-    if args.native_awdl_resident_data and not (
+    if args.native_awdl_resident_data and not args.native_awdl_system and not (
             args.p2p_manual_trigger and
             (args.native_awdl_rx149_observation_only or args.native_awdl_multicast_admission or
              (args.p2p_tx_probe and args.p2p_awdl_mif_followup)) and
@@ -351,6 +372,7 @@ def main():
                           'native_awdl_init_observation_only': args.native_awdl_init_observation_only,
                           'native_awdl_lifecycle_observation_only': args.native_awdl_lifecycle_observation_only,
                           'native_awdl_resident_data': args.native_awdl_resident_data,
+                          'native_awdl_system': args.native_awdl_system,
                           'native_awdl_tx_evidence': args.native_awdl_tx_evidence,
                           'native_awdl_discovery_experiment': args.native_awdl_discovery_experiment,
                           'native_awdl_discovery_mif_current_slot': args.native_awdl_discovery_mif_current_slot,

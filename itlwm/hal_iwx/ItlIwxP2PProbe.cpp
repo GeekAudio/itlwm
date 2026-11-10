@@ -14579,6 +14579,19 @@ void ItlIwx::nativeP2pTick()
     tahoeRx149RecoverInput();
 
     IOEthernetController *controller = getController();
+#if defined(ITL_NATIVE_AWDL_SYSTEM_25G332)
+    if (NativeAwdlLifecycle::systemProfileEnabled(controller)) {
+        const auto control = NativeAwdlLifecycle::systemScheduleSnapshot(controller);
+        controller->setProperty("NativeAwdlSystemCreateRequests", control.createRequests, 32);
+        controller->setProperty("NativeAwdlSystemInterfaceEnableRequests", control.interfaceEnableRequests, 32);
+        controller->setProperty("NativeAwdlSystemSyncEnableRequests", control.syncEnabledRequests, 32);
+        controller->setProperty("NativeAwdlSystemSequenceRequests", control.channelSequenceRequests, 32);
+        NativeAwdlBSD::SystemDataTxDemandSnapshot demand{};
+        const bool pending = NativeAwdlBSD::peekSystemDataTxDemand(
+            uint32_t(com.sc_generation), &demand);
+        controller->setProperty("NativeAwdlSystemDataTxPending", uint32_t(pending), 32);
+    }
+#endif
 #if ITL_NATIVE_AWDL_MULTICAST_ADMISSION_25G332
     if (multicastAdmissionRequested(controller))
         publishMulticastAdmissionDefaults(controller);

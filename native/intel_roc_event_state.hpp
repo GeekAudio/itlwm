@@ -76,6 +76,10 @@ struct SessionSnapshot {
 class SessionTracker {
 public:
     SessionTracker();
+    // One-shot for this owner lifetime: Session Protection notifications carry
+    // no firmware transaction UID, so END cannot authorize rearm. Replacing
+    // this tracker and relabeling queued notifications with a new host epoch
+    // is not a safe drain proof.
     bool begin(uint32_t generation, uint32_t macId, uint32_t configuration);
     bool noteCommandResult(uint32_t generation, int result);
     bool noteNotification(uint32_t generation, const uint8_t *, size_t,

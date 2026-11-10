@@ -44,6 +44,27 @@ int main()
     assert(attach(&dev,own));
     poll(true,7);
 
+    // The passive system candidate may only observe a real packet already
+    // queued by the ifnet output filter. It never gets payload or dequeue
+    // authority, and a stale/expired generation must not remain eligible.
+    SystemDataTxDemandSnapshot demand{};
+    assert(!peekSystemDataTxDemand(7,&demand));
+    assert(acceptPacket());
+    assert(peekSystemDataTxDemand(7,&demand));
+    assert(demand.token!=0&&demand.queuedUs==fakeTime&&
+           demand.powerGeneration==7);
+    SystemDataTxDemandSnapshot wrongGeneration{};
+    assert(!peekSystemDataTxDemand(8,&wrongGeneration));
+    SystemDataTxDemandSnapshot currentDemand{};
+    assert(peekSystemDataTxDemand(7,&currentDemand));
+    assert(currentDemand.token==demand.token);
+    fakeTime+=2000001;
+    assert(!peekSystemDataTxDemand(7,&currentDemand));
+    poll(false,7); // normal generation loss cancels/frees the queued mbuf
+    assert(!peekSystemDataTxDemand(7,&currentDemand));
+    fakeTime=1;
+    poll(true,7);
+
     std::atomic<bool> start{false};
     std::thread generationWriter([&] {
         while(!start.load(std::memory_order_acquire)) {}

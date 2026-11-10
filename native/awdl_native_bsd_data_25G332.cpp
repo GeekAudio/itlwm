@@ -3683,6 +3683,45 @@ mbuf_t nextTxImpl(uint16_t sequence,uint64_t *token,
 mbuf_t nextTx(uint16_t sequence,uint64_t *token) {
     return nextTxImpl(sequence,token,nullptr,nullptr);
 }
+bool peekSystemDataTxDemand(uint32_t expectedPowerGeneration,
+                            SystemDataTxDemandSnapshot *out) {
+    if(out)*out=SystemDataTxDemandSnapshot{0,0,0};
+#if ITL_NATIVE_AWDL_DIRECTED_DATA_TX_25G332 || \
+    defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)
+    // These profiles deliberately do not use the ordinary FIFO TX path.
+    (void)expectedPowerGeneration;
+    return false;
+#else
+    if(!out||!expectedPowerGeneration||!bridgeLock())return false;
+    const uint64_t firstNow=nowUs();
+    SystemDataTxDemandSnapshot candidate{};
+    auto irq=IOSimpleLockLockDisableInterrupt(lock);
+    bool valid=interface&&!closing&&!detached&&radio&&
+        __atomic_load_n(&closingRequested,__ATOMIC_ACQUIRE)==0&&
+        __atomic_load_n(&counters[Attached],__ATOMIC_ACQUIRE)!=0&&
+        radioGeneration==expectedPowerGeneration&&!inFlightToken&&tx.count;
+    if(valid) {
+        const Tx &head=tx.values[tx.head];
+        valid=head.packet&&head.token&&
+            head.generation==expectedPowerGeneration&&
+            discoveryAgeCurrent(head.born,firstNow);
+        if(valid)candidate=SystemDataTxDemandSnapshot{
+            head.token,head.born,head.generation};
+    }
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+    // Do not return a witness that expired while copying the bounded metadata.
+    // A positive result remains only a momentary demand observation; callers
+    // must sample again at their own decision point and must not treat it as a
+    // firmware TX grant.
+    const uint64_t secondNow=nowUs();
+    if(!valid||candidate.powerGeneration!=expectedPowerGeneration||
+       !candidate.token||!discoveryAgeCurrent(candidate.queuedUs,secondNow)||
+       __atomic_load_n(&closingRequested,__ATOMIC_ACQUIRE)!=0)
+        return false;
+    *out=candidate;
+    return true;
+#endif
+}
 bool peekDiscoveryTx(uint32_t expectedPowerGeneration,
                      DiscoveryTxSnapshot *out) {
 #if defined(ITL_NATIVE_AWDL_RX149_DATA_INPUT_25G332)

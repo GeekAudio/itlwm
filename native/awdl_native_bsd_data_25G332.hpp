@@ -135,6 +135,14 @@ struct DiscoveryTxSnapshot {
     uint8_t queryClass;
     bool eligible;
 };
+// Payload-free witness that an ordinary system-origin IPv6 packet is at the
+// head of the resident TX FIFO. This is demand evidence only: it grants no
+// firmware ownership and does not dequeue or authorize a transmission.
+struct SystemDataTxDemandSnapshot {
+    uint64_t token;
+    uint64_t queuedUs;
+    uint32_t powerGeneration;
+};
 enum class CaptureResult : uint8_t {
     NotAwdlDataCandidate,
     Captured,
@@ -267,6 +275,10 @@ using Rx149TestHook = void (*)(Rx149TestHookPoint);
 void setRx149TestHookForTests(Rx149TestHook hook);
 #endif
 mbuf_t nextTx(uint16_t wifiSequence,uint64_t *token);
+// Observe only the current FIFO head. Receive-only and directed-origin
+// profiles return false because they do not use the ordinary system TX queue.
+bool peekSystemDataTxDemand(uint32_t expectedPowerGeneration,
+                            SystemDataTxDemandSnapshot *out);
 // Reads bounded immutable queue metadata and returns the earliest current
 // strict-QM item, which may be behind unrelated FIFO entries. A successful
 // peek grants no ownership; nextDiscoveryTx must match this exact token,

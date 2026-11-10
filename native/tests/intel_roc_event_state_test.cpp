@@ -118,6 +118,43 @@ int main()
     assert(session.snapshot().cleanupAllowed);
     assert(!session.snapshot().outcomeUnknown);
     assert(!session.noteCommandResult(9, 0));
+    // A successful ACK plus matching START/END proves this window completed;
+    // it does not prove that a later same-MAC/config notification belongs to
+    // a newly armed window. Keep the persistent tracker fenced after END.
+    assert(!session.begin(10, 1, 2));
+    assert(session.snapshot().generation == 9);
+    sessionEvent(1, 2, 0, 1);
+    assert(!session.noteNotification(10, e, 16, 902000));
+    assert(session.snapshot().endObservedMonotonicUs == 901000);
+
+    // END without START can establish cleanup for this one window, but it is
+    // not a rearm token. With no firmware UID, replacing the tracker and
+    // stamping an old same-MAC/config END with a new host generation is the
+    // unresolved stale-receipt hazard this fence avoids.
+    IntelROCEvent::SessionTracker endOnly;
+    assert(endOnly.begin(20, 1, 2));
+    assert(endOnly.noteCommandResult(20, 0));
+    sessionEvent(1, 2, 0, 1);
+    assert(endOnly.noteNotification(20, e, 16, 2000));
+    const auto endOnlySnapshot = endOnly.snapshot();
+    assert(endOnlySnapshot.endSeen && !endOnlySnapshot.startSeen);
+    assert(endOnlySnapshot.cleanupAllowed);
+    assert(!endOnlySnapshot.observedScheduledPair);
+    assert(!endOnly.begin(21, 1, 2));
+    assert(endOnly.snapshot().generation == 20);
+    assert(!endOnly.noteNotification(21, e, 16, 2100));
+    assert(endOnly.snapshot().endObservedMonotonicUs == 2000);
+
+    // Wire-level counterexample: a fresh tracker cannot tell those old END
+    // bytes from a new END if ingress relabels them as generation 21. This is
+    // why the owner must preserve the one-shot tracker across ROC attempts.
+    IntelROCEvent::SessionTracker replaced;
+    assert(replaced.begin(21, 1, 2));
+    assert(replaced.noteCommandResult(21, 0));
+    assert(replaced.noteNotification(21, e, 16, 2100));
+    assert(replaced.snapshot().endSeen && !replaced.snapshot().startSeen);
+    assert(replaced.snapshot().cleanupAllowed);
+    assert(!replaced.snapshot().observedScheduledPair);
 
     // MGMT_TX uses its own configuration, and notifications from the listen
     // configuration cannot satisfy or terminate this transaction.

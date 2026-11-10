@@ -7,12 +7,17 @@
 #include "awdl_lifecycle_transaction.hpp"
 #include "awdl_unpublished_cleanup.hpp"
 #include "runtime_guard.hpp"
+#include <Airport/apple80211_ioctl.h>
+#include <Airport/apple80211_var.h>
 #if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
 #include "awdl_native_bsd_data_25G332.hpp"
 #endif
 #include <IOKit/IOWorkLoop.h>
+#include <IOKit/IOLib.h>
+#include <IOKit/IORegistryEntry.h>
 #include <IOKit/pwr_mgt/IOPM.h>
 #include <libkern/c++/OSBoolean.h>
+#include <libkern/c++/OSNumber.h>
 #include <libkern/c++/OSString.h>
 #include <net/kpi_interface.h>
 #include <string.h>
@@ -53,6 +58,20 @@ OSObject *owned25; // Never a worker stack pointer; ambiguous teardown stays own
 NativeAwdlLifecycle::TransactionState residentState25{};
 bool resident25=false;
 uint32_t residentStarting25=0,residentClosing25=0;
+#if defined(ITL_NATIVE_AWDL_LIFECYCLE_25G332) && defined(ITL_NATIVE_AWDL_SYSTEM_25G332)
+uintptr_t systemControllerKey25=0;
+uint32_t systemRuntimeVerified25=0;
+uint32_t systemRevision25=0;
+uint32_t systemCreateRequests25=0,systemCreateValid25=0,systemCreateRole25=0,systemCreateLastValid25=0;
+uint32_t systemInterfaceEnableRequests25=0,systemInterfaceEnabledValid25=0,systemInterfaceEnabled25=0;
+uint32_t systemSyncEnableRequests25=0,systemSyncEnabledValid25=0,systemSyncEnabled25=0;
+uint32_t systemSequenceRequests25=0,systemSequenceValid25=0;
+uint32_t systemSequenceVersion25=0,systemSequenceLength25=0,systemSequenceEncoding25=0;
+uint32_t systemSequenceStepCount25=0,systemSequenceDuplicateCount25=0,systemSequenceFillChannel25=0;
+uint32_t systemSequenceFlagsHash25=0;
+uint64_t systemLastEventUptimeUs25=0;
+IOSimpleLock *systemSnapshotLock25=nullptr;
+#endif
 void note(uint32_t bit) { __atomic_fetch_or(&flags25,bit,__ATOMIC_RELEASE); }
 void phase(uint32_t p, IOReturn r=kIOReturnSuccess) {
     __atomic_store_n(&phase25,p,__ATOMIC_RELEASE);
@@ -67,6 +86,86 @@ template<typename T> T readAt(const void *p,size_t offset) {
 void releaseOpaque(void *p) { if(p) reinterpret_cast<OSObject *>(p)->release(); }
 uint32_t txUnavailable(OSObject *,IOSkywalkTxSubmissionQueue *,IOSkywalkPacket *const *,uint32_t,void *) { return 0; }
 uint32_t rxUnavailable(OSObject *,IOSkywalkRxCompletionQueue *,IOSkywalkPacket **,uint32_t,void *) { return 0; }
+
+#if defined(ITL_NATIVE_AWDL_LIFECYCLE_25G332) && defined(ITL_NATIVE_AWDL_SYSTEM_25G332)
+bool propertyTruthy(IOService *controller,const char *name) {
+    OSObject *value=controller?controller->copyProperty(name):nullptr;
+    bool truthy=true;
+    if(!value||value==kOSBooleanFalse)truthy=false;
+    else if(auto boolean=OSDynamicCast(OSBoolean,value))truthy=boolean->isTrue();
+    else if(auto number=OSDynamicCast(OSNumber,value))truthy=number->unsigned64BitValue()!=0;
+    // Unknown types fail closed instead of being treated as an off switch.
+    if(value)value->release();
+    return truthy;
+}
+bool diagnosticProfileClear(IOService *controller) {
+    static const char *const blocked[]={
+        "NativeP2PManualTrigger","NativeP2PManualArmed","NativeP2PProbe",
+        "NativeP2PRocProbe","NativeP2PTxProbe","NativeP2PAwdlPsfObservationOnly",
+        "NativeP2PAwdlMifFollowup","NativeP2PGp2Observation",
+        "NativeP2PRx149ObservationOnly","NativeP2PRx149DataInputExperiment",
+        "NativeP2PRx149DataInputProfileEnabled","NativeP2PRx149ProfileEnabled",
+        "NativeP2PDirectedPrepareEnabled","NativeP2PDirectedDataEnabled",
+        "NativeP2PMulticastAdmissionEnabled","NativeAwdlDiscoveryExperimentEnabled",
+        "NativeAwdlDiscoveryMifCurrentSlotEnabled",
+        "NativeAwdlDiscoveryCurrentAwFallbackEnabled","NativeAwdlDiscoveryRxInputEnabled"
+    };
+    for(const char *name:blocked)if(propertyTruthy(controller,name))return false;
+    return true;
+}
+bool systemControllerMatches(IOService *controller) {
+    const uintptr_t key=__atomic_load_n(&systemControllerKey25,__ATOMIC_ACQUIRE);
+    return controller&&key==reinterpret_cast<uintptr_t>(controller);
+}
+bool latchSystemController(IOService *controller) {
+    if(!controller)return false;
+    uintptr_t expected=0;
+    const uintptr_t candidate=reinterpret_cast<uintptr_t>(controller);
+    if(__atomic_compare_exchange_n(&systemControllerKey25,&expected,candidate,false,
+                                  __ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))return true;
+    return expected==candidate||__atomic_load_n(&systemControllerKey25,__ATOMIC_ACQUIRE)==candidate;
+}
+uint64_t systemUptimeUs() {
+    AbsoluteTime uptime=0;uint64_t nanoseconds=0;
+    clock_get_uptime(&uptime);absolutetime_to_nanoseconds(uptime,&nanoseconds);
+    return nanoseconds/1000ULL;
+}
+IOSimpleLock *systemSnapshotLock() {
+    IOSimpleLock *lock=__atomic_load_n(&systemSnapshotLock25,__ATOMIC_ACQUIRE);
+    if(lock)return lock;
+    IOSimpleLock *created=IOSimpleLockAlloc();
+    if(!created)return nullptr;
+    IOSimpleLock *expected=nullptr;
+    if(__atomic_compare_exchange_n(&systemSnapshotLock25,&expected,created,false,
+                                  __ATOMIC_ACQ_REL,__ATOMIC_ACQUIRE))return created;
+    IOSimpleLockFree(created);
+    return expected;
+}
+void systemEventFinished() {
+    __atomic_store_n(&systemLastEventUptimeUs25,systemUptimeUs(),__ATOMIC_RELEASE);
+    __atomic_add_fetch(&systemRevision25,1u,__ATOMIC_ACQ_REL);
+}
+bool unicastAddress(const uint8_t address[6]) {
+    uint8_t any=0;for(unsigned i=0;i<6;++i)any|=address[i];
+    return any&&(address[0]&1)==0;
+}
+bool verifySystemRuntime25G416() {
+    if(!NativeWifi::verifyTahoeAwdlRuntime())return false;
+    IORegistryEntry *root=IORegistryEntry::getRegistryRoot();
+    if(!root)return false;
+    OSObject *buildObject=root->copyProperty("OS Build Version");
+    OSObject *kernelObject=root->copyProperty("IOKitBuildVersion");
+    OSString *build=OSDynamicCast(OSString,buildObject);
+    OSString *kernel=OSDynamicCast(OSString,kernelObject);
+    const bool match=build&&kernel&&
+        build->isEqualTo("25G416")&&
+        kernel->isEqualTo("Darwin Kernel Version 25.6.0: Fri Oct 30 17:30:02 PDT 2026; "
+                          "root:xnu-12377.161.15.702.13~1/RELEASE_X86_64");
+    if(buildObject)buildObject->release();
+    if(kernelObject)kernelObject->release();
+    return match;
+}
+#endif
 }
 
 class ItlAwdlLifecycle25G332 final : public ItlAwdlNativeConcreteGate25G332 {
@@ -90,9 +189,27 @@ public:
     bool attach(IOService *p) override {attachAttempted_=true;return IO80211VirtualInterface::attach(p);}
     bool start(IOService *p) override {return IO80211VirtualInterface::start(p);}
     void stop(IOService *p) override;
-    // Administrative interface enable is status-only. Link/data and all AWDL
-    // protocol controls remain unavailable; queue callbacks accept no packets.
-    SInt32 setInterfaceEnable(bool) override {return kIOReturnSuccess;}
+    // The legacy resident probe keeps its previous status-only behavior. A
+    // system-profile callback is recorded but is not acknowledged as an RF
+    // operation until the firmware scheduler exists.
+    SInt32 setInterfaceEnable(bool enabled) override {
+        if(NativeAwdlLifecycle::systemProfileEnabled(controller_)) {
+            NativeAwdlLifecycle::observeSystemInterfaceEnable(controller_,enabled);
+            return kIOReturnUnsupported;
+        }
+        return kIOReturnSuccess;
+    }
+#if defined(ITL_NATIVE_AWDL_LIFECYCLE_25G332) && defined(ITL_NATIVE_AWDL_SYSTEM_25G332)
+    Status32 setAWDL_SYNC_ENABLED(apple80211_awdl_sync_enabled *data) override {
+        NativeAwdlLifecycle::observeSystemSyncEnabled(controller_,data);
+        return kIOReturnUnsupported;
+    }
+    Status32 setAWDL_SYNCHRONIZATION_CHANNEL_SEQUENCE(
+        apple80211_awdl_sync_channel_sequence *data) override {
+        NativeAwdlLifecycle::observeSystemChannelSequence(controller_,data);
+        return kIOReturnUnsupported;
+    }
+#endif
     IOReturn prepareBSDInterface(ifnet_t interface,unsigned int options) override {
         const IOReturn result=IO80211VirtualInterface::prepareBSDInterface(interface,options);
         if(result!=kIOReturnSuccess)return result;
@@ -250,6 +367,142 @@ IOReturn publishClosingAction(OSObject *target,void *,void *,void *,void *) {
         ?kIOReturnSuccess:kIOReturnNotReady;
 }
 }
+bool systemProfileEnabled(IOService *controller) {
+#if defined(ITL_NATIVE_AWDL_LIFECYCLE_25G332) && defined(ITL_NATIVE_AWDL_SYSTEM_25G332)
+    if(!controller||controller->getProperty("NativeAwdlSystemEnabled")!=kOSBooleanTrue||
+       controller->getProperty("NativeAwdlResidentEnabled")!=kOSBooleanTrue||
+       !diagnosticProfileClear(controller))return false;
+    if(!__atomic_load_n(&systemRuntimeVerified25,__ATOMIC_ACQUIRE)&&
+       verifySystemRuntime25G416())
+        __atomic_store_n(&systemRuntimeVerified25,1u,__ATOMIC_RELEASE);
+    return __atomic_load_n(&systemRuntimeVerified25,__ATOMIC_ACQUIRE)!=0;
+#else
+    (void)controller;
+    return false;
+#endif
+}
+void observeSystemCreateRequest(IOService *controller,
+                               const apple80211_virt_if_create_data *request) {
+#if defined(ITL_NATIVE_AWDL_LIFECYCLE_25G332) && defined(ITL_NATIVE_AWDL_SYSTEM_25G332)
+    if(!systemProfileEnabled(controller))return;
+    static_assert(sizeof(apple80211_virt_if_create_data)==32,"role-6 request ABI");
+    apple80211_virt_if_create_data copy{};
+    if(request)memcpy(&copy,request,sizeof(copy));
+    const bool valid=request&&copy.version==APPLE80211_VERSION&&
+        copy.role==APPLE80211_VIF_AWDL&&unicastAddress(copy.mac);
+    IOSimpleLock *lock=systemSnapshotLock();if(!lock)return;
+    const IOInterruptState irq=IOSimpleLockLockDisableInterrupt(lock);
+    if(!latchSystemController(controller)) {
+        IOSimpleLockUnlockEnableInterrupt(lock,irq);return;
+    }
+    ++systemCreateRequests25;systemCreateRole25=request?copy.role:0u;
+    systemCreateLastValid25=valid?1u:0u;if(valid)++systemCreateValid25;
+    systemEventFinished();
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+#else
+    (void)controller;(void)request;
+#endif
+}
+void observeSystemInterfaceEnable(IOService *controller,bool enabled) {
+#if defined(ITL_NATIVE_AWDL_LIFECYCLE_25G332) && defined(ITL_NATIVE_AWDL_SYSTEM_25G332)
+    if(!systemProfileEnabled(controller))return;
+    IOSimpleLock *lock=systemSnapshotLock();if(!lock)return;
+    const IOInterruptState irq=IOSimpleLockLockDisableInterrupt(lock);
+    if(!latchSystemController(controller)) {
+        IOSimpleLockUnlockEnableInterrupt(lock,irq);return;
+    }
+    ++systemInterfaceEnableRequests25;systemInterfaceEnabled25=enabled?1u:0u;
+    systemInterfaceEnabledValid25=1u;systemEventFinished();
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+#else
+    (void)controller;(void)enabled;
+#endif
+}
+void observeSystemSyncEnabled(IOService *controller,
+                             const apple80211_awdl_sync_enabled *request) {
+#if defined(ITL_NATIVE_AWDL_LIFECYCLE_25G332) && defined(ITL_NATIVE_AWDL_SYSTEM_25G332)
+    if(!systemProfileEnabled(controller))return;
+    apple80211_awdl_sync_enabled copy{};
+    if(request)memcpy(&copy,request,sizeof(copy));
+    const bool valid=request&&copy.version==APPLE80211_VERSION&&copy.enabled<=1;
+    IOSimpleLock *lock=systemSnapshotLock();if(!lock)return;
+    const IOInterruptState irq=IOSimpleLockLockDisableInterrupt(lock);
+    if(!latchSystemController(controller)) {
+        IOSimpleLockUnlockEnableInterrupt(lock,irq);return;
+    }
+    ++systemSyncEnableRequests25;systemSyncEnabled25=request?copy.enabled:0u;
+    systemSyncEnabledValid25=valid?1u:0u;systemEventFinished();
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+#else
+    (void)controller;(void)request;
+#endif
+}
+void observeSystemChannelSequence(IOService *controller,
+                                  const apple80211_awdl_sync_channel_sequence *request) {
+#if defined(ITL_NATIVE_AWDL_LIFECYCLE_25G332) && defined(ITL_NATIVE_AWDL_SYSTEM_25G332)
+    if(!systemProfileEnabled(controller))return;
+    apple80211_awdl_sync_channel_sequence copy{};
+    if(request)memcpy(&copy,request,sizeof(copy));
+    const bool valid=request&&copy.version==APPLE80211_VERSION&&
+        copy.length<=APPLE80211_MAX_CHANNELS;
+    uint32_t hash=2166136261u;
+    if(valid)for(uint32_t i=0;i<copy.length;++i) {
+        const auto &entry=copy.seqs[i];
+        hash=(hash^uint8_t(entry.flags))*16777619u;
+        hash=(hash^uint8_t(entry.flags>>8))*16777619u;
+        hash=(hash^entry.pad)*16777619u;
+    }
+    IOSimpleLock *lock=systemSnapshotLock();if(!lock)return;
+    const IOInterruptState irq=IOSimpleLockLockDisableInterrupt(lock);
+    if(!latchSystemController(controller)) {
+        IOSimpleLockUnlockEnableInterrupt(lock,irq);return;
+    }
+    ++systemSequenceRequests25;systemSequenceValid25=valid?1u:0u;
+    systemSequenceVersion25=request?copy.version:0u;
+    systemSequenceLength25=request?copy.length:0u;
+    systemSequenceEncoding25=request?copy.encoding:0u;
+    systemSequenceStepCount25=request?copy.step_count:0u;
+    systemSequenceDuplicateCount25=request?copy.duplicate_count:0u;
+    systemSequenceFillChannel25=request?copy.fill_channel:0u;
+    systemSequenceFlagsHash25=valid?hash:0u;
+    systemEventFinished();
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+#else
+    (void)controller;(void)request;
+#endif
+}
+SystemScheduleSnapshot systemScheduleSnapshot(IOService *controller) {
+    SystemScheduleSnapshot out{};
+#if defined(ITL_NATIVE_AWDL_LIFECYCLE_25G332) && defined(ITL_NATIVE_AWDL_SYSTEM_25G332)
+    if(!systemProfileEnabled(controller))return out;
+    IOSimpleLock *lock=systemSnapshotLock();if(!lock)return out;
+    const IOInterruptState irq=IOSimpleLockLockDisableInterrupt(lock);
+    if(!systemControllerMatches(controller)) {
+        IOSimpleLockUnlockEnableInterrupt(lock,irq);return out;
+    }
+    out.revision=systemRevision25;
+    out.createRequests=systemCreateRequests25;out.createValidRequests=systemCreateValid25;
+    out.lastCreateRole=systemCreateRole25;out.lastCreateValid=systemCreateLastValid25;
+    out.interfaceEnableRequests=systemInterfaceEnableRequests25;
+    out.interfaceEnabledValid=systemInterfaceEnabledValid25;
+    out.interfaceEnabled=systemInterfaceEnabled25;
+    out.syncEnabledRequests=systemSyncEnableRequests25;
+    out.syncEnabledValid=systemSyncEnabledValid25;out.syncEnabled=systemSyncEnabled25;
+    out.channelSequenceRequests=systemSequenceRequests25;
+    out.channelSequenceValid=systemSequenceValid25;
+    out.sequenceVersion=systemSequenceVersion25;out.sequenceLength=systemSequenceLength25;
+    out.sequenceEncoding=systemSequenceEncoding25;
+    out.sequenceStepCount=systemSequenceStepCount25;
+    out.sequenceDuplicateCount=systemSequenceDuplicateCount25;
+    out.sequenceFillChannel=systemSequenceFillChannel25;
+    out.sequenceFlagsHash=systemSequenceFlagsHash25;
+    out.lastEventUptimeUs=systemLastEventUptimeUs25;
+    IOSimpleLockUnlockEnableInterrupt(lock,irq);
+#else
+    (void)controller;
+#endif
+    return out;
+}
 bool publishClosingInGate(IOService *controller) {
 #if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
     if(!controller)return false;
@@ -273,8 +526,13 @@ bool publishClosing(IOService *controller) {
 }
 bool residentPending(IOService *controller) {
 #if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
-    return !__atomic_load_n(&residentClosing25,__ATOMIC_ACQUIRE)&&controller&&
-        controller->getProperty("NativeAwdlResidentEnabled")==kOSBooleanTrue&&snapshot().flags==0;
+    if(__atomic_load_n(&residentClosing25,__ATOMIC_ACQUIRE)||!controller||
+       controller->getProperty("NativeAwdlResidentEnabled")!=kOSBooleanTrue||
+       snapshot().flags!=0)return false;
+    // Test144 manual profiles remain independent. The new system profile is
+    // admitted only as resident software initialization, never as an RF probe.
+    return controller->getProperty("NativeP2PManualTrigger")==kOSBooleanTrue||
+        systemProfileEnabled(controller);
 #else
     return false;
 #endif
@@ -304,10 +562,13 @@ void observeOnce(IOService *controller,const uint8_t address[6]) {
 #if defined(ITL_NATIVE_AWDL_RESIDENT_25G332)
     resident=controller&&controller->getProperty("NativeAwdlResidentEnabled")==kOSBooleanTrue;
 #endif
+    const bool systemResident=resident&&systemProfileEnabled(controller);
+    if(systemResident)latchSystemController(controller);
     if(!controller||!address||!any||(address[0]&1)||!NativeWifi::verifyTahoeAwdlRuntime()||
        !controller->metaCast("IO80211Controller")||
        (!resident&&controller->getProperty("NativeAwdlLifecycleObservationOnly")!=kOSBooleanTrue)||
-       controller->getProperty("NativeP2PManualTrigger")!=kOSBooleanTrue||getAwdl25(controller)) {
+       (controller->getProperty("NativeP2PManualTrigger")!=kOSBooleanTrue&&!systemResident)||
+       getAwdl25(controller)) {
         phase(1,kIOReturnNotPermitted);note(Failed);return;
     }
     ifnet_t existing=nullptr;
