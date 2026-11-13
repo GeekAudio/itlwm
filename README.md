@@ -2,7 +2,7 @@
 
 让 Intel AX201 在 macOS Tahoe 使用系统原生 Wi-Fi，基于 [OpenIntelWireless/itlwm](https://github.com/OpenIntelWireless/itlwm) 开发。通过 OpenCore 加载，无需 HeliPort 或 OCLP，不修改系统卷。
 
-[下载驱动](https://github.com/GeekAudio/itlwm/releases/tag/tahoe-2.4.0) · [安装](#安装opencore) · [实测进度与开发时间线](https://geekaudio.github.io/itlwm/milestones.html) · [开发源码](https://github.com/GeekAudio/itlwm/tree/codex/tahoe-test095)
+[下载驱动](https://github.com/GeekAudio/itlwm/releases/tag/tahoe-2.4.0) · [安装](#安装opencore) · [开发源码](https://github.com/GeekAudio/itlwm/tree/codex/tahoe-test095)
 
 ## 版本
 
@@ -11,7 +11,7 @@
 | **2.4.0 / Test059** | 已发布的 Wi-Fi 驱动 | 下载文件为 `AirportItlwm-Tahoe.zip`，支持范围见下表 |
 | **Test120** | 开发与诊断 | 已加载并完成一轮受控接收诊断；未发布到 Release |
 
-开发进度更新于 **2026-11-03**。Test120 本轮接收窗口正常关闭、资源已释放，但未收到测试 UDP；新增的失败清理分支尚未触发。最新逐项结果以[里程碑页](https://geekaudio.github.io/itlwm/milestones.html)为准。
+开发进度更新于 **2026-11-03**。Test120 本轮接收窗口正常关闭、资源已释放，但未收到测试 UDP；新增的失败清理分支尚未触发。
 
 ## 适用范围
 
